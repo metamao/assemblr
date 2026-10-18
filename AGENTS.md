@@ -253,3 +253,27 @@ codebase is substantive. It is an aid, **not** a source of product authority.
 
 Tool names can differ between server versions. If a tool listed above is
 missing, use the closest available equivalent or plain inspection.
+
+## 12. Git workflow and integration
+
+`main` is the integration branch. It is always green and releasable. These
+rules apply whether or not the hosting platform enforces them.
+
+- **Never commit or push directly to `main`.** Never force-push, delete
+  remote branches, or rewrite history that has been pushed.
+- Do all work on a short-lived branch named by intent: `feat/…`, `fix/…`,
+  `docs/…`, `refactor/…`, `ci/…`, or `chore/…`. Keep each branch to one
+  cohesive change.
+- Run the checks in §8 locally before pushing, then push the branch and open
+  a pull request. The description states what changed and why, which checks
+  ran, and any change to `docs/domain/`, ADRs, or open contracts.
+- **The owner reviews and merges.** Agents never merge pull requests,
+  including their own. Changes to `docs/domain/` need the owner's explicit
+  approval.
+- Merge only when CI is green. Pull requests are squash-merged, so each lands
+  on `main` as one commit, and the branch is deleted after merging.
+- Commit messages have an imperative subject of about 72 characters or fewer,
+  and a body that explains why when that is not obvious.
+- **Releases** are `vX.Y.Z` tags of Assemblr itself on `main`, created by
+  the owner. Agents do not create or push release tags. They are unrelated to
+  the `v<version>` tags that units use for publication.
