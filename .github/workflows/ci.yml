@@ -20,7 +20,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Without arguments, rustup installs the toolchain pinned in rust-toolchain.toml.
       - run: rustup toolchain install
       - run: cargo fmt --all -- --check
@@ -33,7 +33,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo build --locked --all-targets
@@ -43,7 +43,7 @@ jobs:
     name: Minimum supported Rust version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Keep in sync with `rust-version` in Cargo.toml.
       - run: rustup toolchain install 1.85.0 --profile minimal
       - run: cargo +1.85.0 test --locked --all-targets --all-features

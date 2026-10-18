@@ -62,12 +62,10 @@ GitHub Actions on Linux and Windows run format, clippy, build, and test checks,
 plus an MSRV job on Linux. macOS is not in CI yet. Add it when there is a
 platform-specific concern or a user need.
 
-Known limitation at the time of this decision: the workflow had not yet run on
-a hosted runner. The same checks pass locally on Linux, including the MSRV
-check. Its first hosted run is the remaining validation, notably for the
-Windows job. The toolchain install step (`rustup toolchain install` with no
-arguments, which installs the toolchain pinned in `rust-toolchain.toml`)
-requires rustup 1.28 or later on the runner.
+The workflow has run successfully on GitHub-hosted Linux and Windows runners,
+including the MSRV job. The toolchain install step (`rustup toolchain install`
+with no arguments, which installs the toolchain pinned in
+`rust-toolchain.toml`) requires rustup 1.28 or later on the runner.
 
 ## Consequences
 
