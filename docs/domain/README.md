@@ -119,11 +119,13 @@ are not specified.
 | **Contribution** | What a unit adds beyond its dependencies: files, amendments, or meaningful configuration of dependencies. |
 | **Local registry** | The CLI-managed subsystem, global to the user's Assemblr installation, that records registered sources, their published versions, and discoverable metadata. |
 | **Registered source** | A unit repository or a catalog that has been explicitly registered and validated. |
-| **Catalog** | A Git repository, managed through the CLI, that declares a set of unit repositories by identity and Git source without containing them. |
-| **Catalog manifest** | The catalog's declarative manifest, provisionally `registry.jsonc`. |
-| **Registration** | Validating a source and adding it to the local registry. It never publishes. |
-| **Synchronization** | Explicitly refreshing the registry's knowledge of registered sources and their published versions. |
-| **Registry index** | The registry's discoverable, refreshable metadata about registered sources and versions. |
+| **Catalog** | A Git repository with an `@owner/name` identity, in a namespace separate from units, whose `registry.jsonc` maps unit identities to Git repository references. An inventory of sources: it contains no unit sources and no unit versions. |
+| **Catalog manifest** | `registry.jsonc`, the catalog's declarative manifest: a `name` and a `units` map of identities to plain-string Git references. |
+| **Source** | The Git repository reference from which a unit is obtained. Different references are never assumed to denote the same repository. |
+| **Registration** | Validating an untrusted source and adding it to the local registry, atomically. It never publishes. |
+| **Synchronization** | Explicitly refreshing registered catalogs and units, validating the complete result, and replacing the index only if it is valid. |
+| **Registry index** | The registry's validated, discoverable metadata about registered sources, units, and published versions. Read offline. |
+| **Integrity conflict** | Different content for the same unit identity and published version. |
 | **Snapshot** | A fixed, identifiable copy of a unit's content at a resolved version, with its Git provenance. |
 | **Lock state** | The record of the exact resolved versions (and their sources and content identity) used for a composition. |
 | **Build directory** | `build/`, the Assemblr-owned, disposable directory where `unit build` writes a composed result. |

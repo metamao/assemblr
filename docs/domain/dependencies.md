@@ -32,13 +32,20 @@ Within a single composition:
 - Existing lock state **takes precedence** over fresh resolution. A composition
   that is already resolved does not change just because a newer version
   appears in the registry.
-- A resolved published version is obtained from its tagged content, never from
-  a working tree.
+- Dependencies resolve **exclusively** from published, tagged versions
+  available through the managed registry. A resolved version is obtained from
+  its tagged content, never from a working tree.
+- There are **no unpublished dependency overrides** in Alpha. A unit under
+  development never consumes another unit's working tree as a dependency.
+- Resolution during `unit check`, `unit build`, and `unit update` never
+  fetches remote changes implicitly.
 
 These are errors:
 
 - **Dependency cycles.**
 - **Missing dependencies**: no registered source provides the identity.
+- **Unavailable versions**: a required published version is not available
+  locally. The diagnostic reports that synchronization is needed.
 - **Incompatible versions**: no single version satisfies every declared range
   for an identity.
 - **Source conflicts**: several sources claim the same identity (see
@@ -58,8 +65,6 @@ Open:
 - The SemVer range dialect, and pre-release and build metadata handling.
   **OC-15.**
 - The lock-state file format and location. **OC-8.**
-- Whether a unit under development may resolve a dependency to an unpublished
-  working tree. **OC-30.**
 
 ## Version selection — Recommended (provisional)
 

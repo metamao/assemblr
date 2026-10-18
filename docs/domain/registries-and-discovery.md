@@ -7,22 +7,30 @@ units. Remote registry services and marketplace functionality are **outside
 Alpha**.
 
 This model replaces the earlier Local Directory and Local Git registry
-modalities (see [Superseded model](#superseded-model-non-normative)). The engineering
-mechanisms behind it are recorded in
-[ADR 0003](../adr/0003-managed-local-registry.md).
+modalities (see [Superseded model](#superseded-model-non-normative)). The
+engineering mechanisms behind it are recorded in
+[ADR 0003](../adr/0003-managed-local-registry.md) and
+[ADR 0004](../adr/0004-registry-validation-and-synchronization.md).
 
 ## The local registry — Approved
 
-- Assemblr owns the registry's lifecycle and persistent state. Users work with
-  it through CLI commands. They do not create registry directories or edit the
-  registry's internal files.
-- Registry state is **global to the user's Assemblr installation**. It is not
-  recreated for each consumer project or unit.
-- Registration, inspection, synchronization, and removal are **explicit,
-  managed operations**.
-- Assemblr initializes registry state **lazily, on first use**. No setup
+- Assemblr manages **one local registry per user**, global to the user's
+  Assemblr installation. It is not recreated for each consumer project or unit.
+- Assemblr owns the registry's lifecycle and persistent state. Users register
+  and administer sources through CLI commands. They do not create registry
+  directories or edit the registry's internal files. (A catalog's
+  `registry.jsonc` is not an internal registry file: it belongs to the
+  catalog's own repository. See [Catalogs](#catalogs--approved).)
+- The registry maintains a **validated local index** of known units, their
+  published versions, and their sources.
+- Registration, inspection, synchronization, removal, and diagnosis are
+  **explicit, managed operations** (see
+  [Registry commands](#registry-commands--approved)).
+- Assemblr initializes registry state **lazily, when first needed**. No setup
   command or installation script is required, so installation through Cargo,
   standalone binaries, or any other method behaves the same.
+- Project lock state is **independent of registry synchronization** (see
+  [Integrity and snapshots](#integrity-and-snapshots--approved)).
 - The registry's internal configuration and storage formats are implementation
   details, not an authoring contract.
 
@@ -43,23 +51,34 @@ mechanisms behind it are recorded in
 
 - The tag version must match the exact SemVer `version` declared in the
   manifest **at the tagged commit**. A version tag whose manifest declares a
-  different version is **invalid**. That version fails validation. Other
-  versions of the unit are not affected.
+  different version is **invalid**.
 - Assemblr reads versioned content **without switching or modifying** the
   author's working tree.
 
-A published unit version is identified by:
+## Identity, versions, integrity, and sources — Approved
 
-- its canonical identity, `@owner/unit-name`;
-- its exact version;
-- its Git provenance: the repository and the tagged commit;
-- an immutable content identity.
+Four concepts are distinct:
+
+| Concept | Meaning |
+|---------|---------|
+| **Unit identity** | `@owner/unit-name`, declared by the unit's manifest. |
+| **Published version** | An exact SemVer version, associated with a `v<version>` Git tag. |
+| **Artifact integrity** | The verifiable content of a published version. |
+| **Source** | The Git repository reference from which the unit is obtained. |
+
+A published unit version is therefore identified by its identity, its exact
+version, its Git provenance (the source and the tagged commit), and an
+immutable content identity.
+
+Validation establishes **consistency and integrity**. It does **not**
+authenticate ownership of an `@owner` namespace. Publisher authentication and
+trust policy are not defined, and are not part of Alpha (see
+[units.md](units.md#identity--approved)).
 
 Open:
 
-- How invalid and moved tags are reported, what happens to a version after a
-  moved tag is detected, and how tags that are not of the form `v<version>` are
-  treated. **OC-25.**
+- How invalid and moved tags are reported, and how tags that are not of the
+  form `v<version>` are treated. **OC-25.**
 - Behavior when historical Git objects or registered sources are unavailable.
   **OC-9.**
 
@@ -82,114 +101,131 @@ Conceptual commands (grammar not final, **OC-7**):
 
 ```text
 assemblr registry add ./assemblr-cloudflare-worker
-assemblr registry add ./metamao-cloudflare
+assemblr registry add git@github.com:metamao/cloudflare-catalog.git
 ```
 
-Registration identifies the source as a unit repository or a catalog, validates
-it, and only then adds it to the registry.
+Every incoming unit repository or catalog is **untrusted until validated**.
+`registry add` identifies the source as a unit repository or a catalog and
+validates it **before** incorporating it into the active registry. The checks
+include:
 
-- A missing or invalid Git repository is an error.
-- A missing or invalid unit manifest is an error.
-- An invalid canonical identity is an error.
+- the catalog's schema and identity;
+- the declared source references;
+- Git repository validity and accessibility;
+- consistency of the unit identity with its historical manifests at published
+  tags, and with the identity a catalog declares for it;
+- agreement between published Git tags and manifest versions;
+- the integrity of published artifacts;
+- conflicts with sources that are already registered;
+- internal inconsistencies within a catalog.
+
+Rules:
+
+- Registration is **atomic**. If a required validation fails, the operation is
+  rejected and the active registry is left unchanged. It is never partially
+  altered.
+- Validation **never executes** unit application code or any other code
+  supplied by a source.
+- Registration does **not** assume that the dependencies of the units it
+  registers are already available. Dependency resolution is a separate
+  responsibility (see [dependencies.md](dependencies.md#resolution--approved)).
 - Registering a source that is already registered is **idempotent**.
-- A different repository claiming an identity that a registered source already
-  provides is an explicit **collision** error (see
-  [Source conflicts](#source-conflicts--approved)).
-- A version whose tag is inconsistent with its manifest fails validation. Only
-  the affected versions fail.
-- A unit with **no published tags** may still be registered, for development
-  and discovery. It has no published versions until it is published.
+- A unit with **no published tags** may still be registered, for discovery. It
+  has no published versions until it is published.
+- Registration **never publishes** a unit. It never turns uncommitted or
+  untagged working-tree content into a published version. A request for a
+  published version always obtains tagged content, never the current working
+  tree.
 
-Registration **never publishes** a unit. It never turns uncommitted or
-untagged working-tree content into a published version. A request for a
-published version always obtains tagged content, never the current working
-tree.
-
-Open:
-
-- How Assemblr decides that two references denote the same source, for
-  example a local path and a remote URL of the same repository. **OC-23.**
-- How a catalog's unit references are validated during registration. **OC-32.**
+The earlier contract stated that a version whose tag is inconsistent with its
+manifest fails validation, and that only the affected versions fail. That rule
+still stands. Which validation failures are "required", and so reject the whole
+operation, and which only exclude the affected versions, is not yet decided.
+**OC-33.**
 
 ## Source conflicts — Approved
 
 - A repository never becomes available just because it is located somewhere
   Assemblr can see. Every unit repository or catalog must be registered
   explicitly.
-- When competing sources claim the same canonical identity, Assemblr **never
-  silently selects one**, whether by registration order, configuration order,
-  or any other precedence. It reports an actionable diagnostic, and the
-  conflict requires an explicit resolution.
+- **Different** source references that declare the same unit identity are
+  **conflicting sources**.
+- **Identical** source references that declare the same unit identity may be
+  deduplicated.
+- Assemblr never infers that two different references denote the same
+  repository: no URL normalization, shared Git history, common commits, or
+  similar heuristics. No global repository identifier or other additional
+  identity mechanism exists.
+- Matching content for a version does **not** establish that two repositories
+  are the same source.
+- **Different content** for the same identity and published version is an
+  **integrity conflict**.
+- Changing the source reference of an identity that is already registered is a
+  conflict that requires user intervention. It is never accepted silently as a
+  source migration.
+- Assemblr never resolves a conflict automatically or by source priority,
+  whether registration order, configuration order, or any other precedence. It
+  reports an actionable diagnostic, and the user resolves the conflict
+  explicitly, for example by removing or correcting a source.
 - The unit's **manifest** supplies its identity. Neither a catalog nor a
   repository location does.
 
 Open:
 
-- The mechanism for explicitly resolving a conflict. The earlier contract
-  allowed an explicit source selection and owner-to-source mappings to
-  disambiguate. Whether those mechanisms remain part of this model needs owner
-  confirmation. **OC-23.**
+- Whether any explicit resolution mechanism exists beyond removing or
+  correcting a source. The earlier contract allowed an explicit source
+  selection and owner-to-source mappings. Whether those remain part of this
+  model needs owner confirmation. **OC-23.**
 
 ## Catalogs — Approved
 
-A catalog organizes references to independently maintained unit repositories.
-
-Conceptual commands (grammar not final, **OC-7**):
-
-```text
-assemblr registry create metamao-cloudflare
-assemblr registry unit add ../assemblr-cloudflare-worker
-assemblr registry add ./metamao-cloudflare
-```
-
-- A catalog is itself a **Git repository**, created and managed through the
-  Assemblr CLI.
-- A catalog has an explicit **catalog identity**. The catalog identity names
-  the catalog. It is not a unit owner, and it does not determine the identities
-  of the units it lists.
-- A catalog contains a formal, **declarative manifest** of its units: each
-  unit's identity and Git source.
-- A catalog does not contain the unit repositories or embed their source
-  trees, and it does not require Git submodules.
-- A catalog does not pin a single version of each unit. Each unit keeps its
-  independent SemVer history and publication lifecycle.
-- Unit repositories referenced by a catalog may be private.
-- A catalog can be shared or cloned onto other machines.
-- Assemblr validates a catalog's manifest and its unit references. A catalog
-  entry does not confer identity: the referenced unit's manifest remains
-  authoritative, and a catalog never overrides it.
-
-### Catalog manifest — Recommended (provisional)
-
-The catalog manifest is a declarative JSONC file, provisionally named
-`registry.jsonc`. Illustrative content (**Conceptual**, not a frozen schema):
+A catalog is a **Git repository** containing a declarative `registry.jsonc`
+that references independent unit repositories. It is an **inventory of
+sources**, not a package repository, and it has no authority over unit
+contents.
 
 ```jsonc
 {
-  "name": "metamao-cloudflare",
+  "name": "@metamao/cloudflare",
   "units": {
-    "@metamao/cloudflare-worker": {
-      "git": "git@github.com:metamao/assemblr-cloudflare-worker.git"
-    },
-    "@metamao/cloudflare-angular-ssr": {
-      "git": "git@github.com:metamao/assemblr-cloudflare-angular-ssr.git"
-    }
+    "@metamao/cloudflare-worker": "git@github.com:metamao/worker.git",
+    "@metamao/node": "../assemblr-node"
   }
 }
 ```
 
-The manifest identifies the catalog, declares its unit references, preserves
-their source provenance, permits portable Git references, and supports
-validation by the CLI. Catalog management through the CLI should avoid
-requiring manual edits of the manifest. Explicit local paths may be permitted
-for development, but they are not portable to other machines.
+- `name` is the **catalog identity**. It uses the same `@owner/name`
+  convention as units. Catalog identities and unit identities occupy
+  **separate namespaces**.
+- `units` maps each expected unit identity **directly** to a Git repository
+  reference. A reference is a **plain string**, not an object.
+- HTTPS, SSH, and local Git repository references are permitted.
+- A relative local reference resolves against the **catalog's root**, never
+  against the caller's working directory. Local references may not be
+  portable between environments.
+- A referenced unit's manifest must declare **exactly** the identity the
+  catalog declares for it. The manifest remains authoritative, and a catalog
+  never overrides it.
+- A catalog does **not** duplicate unit versions, dependencies, parameters, or
+  content hashes. It does not pin unit versions.
+- A catalog does not contain the unit repositories or embed their source
+  trees, and it does not require Git submodules.
+- Each unit keeps its own repository, manifest, Git tags, and publication
+  lifecycle. Unit repositories may be private.
+- A catalog needs no SemVer version and no unit-style release publication.
+- A catalog can be shared or cloned onto other machines.
+- `registry create` initializes a new catalog. Entries may be edited directly
+  in `registry.jsonc`, then validated through registration or synchronization.
 
 Open:
 
-- The catalog manifest's schema and file name, the syntax of catalog
-  identities, whether local paths are permitted, how a mismatch between a
-  catalog entry and the referenced manifest is reported, and whether a catalog
-  may reference other catalogs. **OC-32.**
+- Whether `registry.jsonc` may contain fields beyond `name` and `units`; how
+  conflicting catalog identities are handled; which revision synchronization
+  reads for a local catalog, and how uncommitted local catalog changes are
+  treated; and how identical references are recognized when relative
+  references come from different catalogs. **OC-32.**
+- The syntax rules for the `@owner/name` segments, shared with unit identities.
+  **OC-14.**
 
 ## Synchronization — Approved
 
@@ -199,48 +235,93 @@ Conceptual command (grammar not final, **OC-7**):
 assemblr registry sync
 ```
 
-- Synchronization updates the registry's knowledge of the registered sources
-  and their published versions.
-- Registration and synchronization are **distinct** operations.
-- Discovery commands (`registry list`, `search`, `info`) **never fetch** remote
-  changes implicitly.
-- Synchronization **validates** updated metadata before making it
-  authoritative.
-- A failed synchronization **preserves the previously valid registry state**.
-  It never leaves a partially updated index.
-- A source that has not changed causes no update.
+`registry sync` updates **both catalogs and units**. It:
+
+1. obtains changes from the registered Git sources;
+2. inspects catalog changes, including added, removed, or modified unit
+   references;
+3. discovers newly published unit versions through Git tags;
+4. validates identities, manifests, tags, content integrity, and source
+   conflicts;
+5. commits the resulting local registry index **atomically**, only after that
+   validation succeeds.
+
+A single synchronization discovers newly added catalog entries **and** the
+published versions of the units they reference.
+
+Rules:
+
+- The **complete** proposed index is validated before it replaces the active
+  index. If a required validation fails, the previous valid state is kept and
+  the problem is reported. A synchronization result is never partially
+  accepted.
+- A unit reference removed from a catalog is removed from the active discovery
+  state.
+- Changing the repository reference of an existing identity is a conflict that
+  requires user intervention (see
+  [Source conflicts](#source-conflicts--approved)).
+- For a remote catalog, synchronization reads the catalog's **Git default
+  branch**. The index records the **exact catalog commit** it was built from.
+- Historical snapshots required by existing project locks and for
+  reconciliation are preserved.
+- Synchronization **never modifies** consumer projects, dependency selections,
+  or lock files.
 - Synchronization never rewrites a version that has already been recorded (see
   [Integrity and snapshots](#integrity-and-snapshots--approved)).
+- Registration and synchronization are distinct operations.
+- `registry sync` discovers changes made **outside** the local publishing flow,
+  for example tags created or pushed elsewhere.
 
 Open:
 
-- The granularity of synchronization: whether it can target individual
-  sources, whether one failing source blocks the others, how per-source
-  failures are reported, and how a unit removed from a catalog is reflected.
-  **OC-33.**
-- Whether newly published tags of a registered local repository become
-  visible without synchronization, and whether resolution may fetch.
-  **OC-31.**
+- Which validation failures are required, and so keep the whole previous
+  state, and which only exclude the affected versions; and whether
+  synchronization can target individual sources. **OC-33.**
+- Which revision is read for a local catalog, and how uncommitted local
+  catalog changes are treated. **OC-32.**
+
+## Index freshness and fetching — Approved
+
+The registry index is read **offline**. Remote changes are obtained
+explicitly, through registration and synchronization.
+
+- `unit publish` updates the local registry index automatically when the unit
+  is **already registered**. It never registers a previously unknown unit, and
+  it never pushes commits or tags to a remote (see
+  [authoring-workflow.md](authoring-workflow.md#publication--approved)).
+- If publication succeeds but the index update fails, Assemblr reports that
+  partial outcome explicitly. `registry sync` recovers.
+- `search` and `info` operate on indexed metadata. They never fetch remote
+  changes implicitly.
+- `unit check`, `unit build`, and `unit update` never fetch remote changes
+  implicitly.
+- If a required published version is not available locally, Assemblr reports
+  that synchronization is needed.
 
 ## Integrity and snapshots — Approved
 
-Assemblr distinguishes five kinds of state, which serve different purposes:
+Assemblr distinguishes these kinds of state, which serve different purposes:
 
 | State | What it is | Character |
 |-------|------------|-----------|
 | **Working tree** | The author's editable checkout of a unit repository | Mutable. Used by authoring operations such as `unit build`. Never a published version. |
 | **Published version** | A `v<version>` tag in the unit repository | Immutable once published. |
-| **Registry index** | Discoverable metadata about registered sources and their published versions | Refreshed explicitly by synchronization. |
-| **Snapshot** | A fixed, identifiable copy of a unit's content at a resolved version, with its Git provenance | Immutable historical state, needed for composition and amendments. |
-| **Lock state** | The exact resolved versions, sources, and content identities of a composition | Preserves a resolution until it is changed explicitly. |
+| **Registry index** | Validated, discoverable metadata about registered sources, their units, and their published versions, including the exact catalog commit it was built from | Changed only by explicit registry operations and by the index update of `unit publish`. Never partially updated by a failed registration or synchronization. |
+| **Snapshot** | A fixed, identifiable copy of a unit's content at a resolved version, with its Git provenance | Immutable historical state, needed for composition, amendments, and reconciliation. |
+| **Lock state** | The exact resolved versions, sources, and content identities of a composition | Independent of registry synchronization. Preserves a resolution until it is changed explicitly. |
+
+**Catalog revision tracking** and **historical artifact preservation** are
+different things. The recorded catalog commit explains which inventory of
+sources the current index was built from. It pins no unit versions. Snapshots
+preserve the content of unit versions that locks and amendments depend on, and
+they are kept even when a catalog later drops or changes a reference.
 
 Rules:
 
 - A published version stays associated with **exactly** the content first
   recorded for it. Moving a tag to another commit is not a valid way to update
-  a version.
-- Assemblr **detects** historical identity or content mismatches, such as a
-  moved tag, and reports them. It never silently trusts a moved tag.
+  a version. Different content for the same identity and version is an
+  integrity conflict, never trusted silently.
 - A mutable working tree is never substituted for a published version.
 - The registry never silently replaces historical content.
 - Resolved versions and content are **identifiable and verifiable**.
@@ -262,16 +343,36 @@ Open:
 
 ## Removal — Approved
 
-- Unregistering a unit repository or a catalog removes its **registry
-  relationship** only.
+- `registry remove` removes a registered source's **registry relationship**
+  only.
 - It never deletes the user's Git repositories or working trees.
-- Historical artifacts that may still be needed for reconciliation are not
-  discarded arbitrarily.
+- It never modifies consumer projects or lock files. Historical snapshots
+  required by existing locks and for reconciliation are not discarded.
+
+## Registry commands — Approved
+
+The user-facing registry command surface is deliberately minimal:
+
+| Command | Responsibility |
+|---------|----------------|
+| `registry create` | Initialize a new Git catalog. |
+| `registry add` | Register and validate a source. |
+| `registry remove` | Remove a registered source. |
+| `registry list` | List registered sources. |
+| `registry info` | Inspect indexed information. |
+| `registry sync` | Synchronize registered catalogs and units. |
+| `registry doctor` | Diagnose registry inconsistencies. |
+
+The table fixes **responsibilities**, not arguments or flags. There are no
+commands solely for adding or removing individual catalog entries: entries are
+edited in `registry.jsonc` and validated through registration or
+synchronization.
 
 Open:
 
-- How removal affects existing lock state and compositions that reference the
-  removed source. **OC-33.**
+- Exact grammar, arguments, and flags; how `registry info` relates to the
+  top-level `info` command; and what `registry doctor` does beyond diagnosis.
+  **OC-7.**
 
 ## Discovery and information — Approved
 
@@ -279,8 +380,9 @@ Assemblr exposes unit metadata that is useful to both humans and coding
 agents. The registry makes this metadata discoverable, so a consumer does not
 have to inspect source repositories by hand.
 
-Discovery is **metadata-based**. `search` matches against declared unit
-metadata in the registry. It does not use semantic or AI-driven inference.
+Discovery is **metadata-based** and reads the local index **offline**.
+`search` matches against declared unit metadata in the index. It does not use
+semantic or AI-driven inference.
 
 Conceptual commands (grammar not final, **OC-7**):
 
@@ -334,9 +436,9 @@ engineering side.
   simpler approach is insufficient.
 - **Validation.** One common validation model across unit registration,
   catalog registration, version discovery, publication, and synchronization.
-  Registry mutations are validated before they are committed. Registry
-  operations are safely repeatable when their inputs and intended state are
-  unchanged. Expensive checks need a specific correctness or integrity reason.
+  Registry operations are safely repeatable when their inputs and intended
+  state are unchanged. Expensive checks need a specific correctness or
+  integrity reason.
 - **Git.** Use Git's existing object and tag infrastructure rather than a
   parallel versioning mechanism. Consider annotated release tags (**OC-26**).
   Authentication to private repositories is delegated to the user's existing
@@ -347,8 +449,6 @@ engineering side.
   automatically in Alpha.
 - **Version selection.** See
   [dependencies.md](dependencies.md#version-selection--recommended-provisional).
-- **Publication and push.** See
-  [authoring-workflow.md](authoring-workflow.md#publication--approved).
 
 ## Superseded model (non-normative)
 
@@ -365,5 +465,12 @@ several unit repositories, maintained by the user. That model is retired:
 - one Git repository per unit is mandatory, not preferred.
 
 The Local Directory registry let a unit under development resolve dependencies
-from other units' uncommitted working trees. This model does not carry that
-capability forward by default. Whether and how it is supported is **OC-30**.
+from other units' uncommitted working trees. That capability is **not**
+carried forward: in Alpha, dependencies resolve only from published versions
+(see [dependencies.md](dependencies.md#resolution--approved)). This settles
+**OC-30**.
+
+Earlier drafts of this model also used an object form for catalog entries (for
+example `{ "git": "…" }`), a non-owner catalog name, a `registry unit add`
+command, and a recommendation to avoid manual catalog edits. All four are
+superseded by the [catalog contract](#catalogs--approved) above.
