@@ -1,0 +1,6 @@
+# Development toolchain. The minimum supported Rust version is declared
+# separately as `rust-version` in Cargo.toml; see docs/adr/0002.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

@@ -1,0 +1,21 @@
+[package]
+name = "assemblr"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Compose and maintain opinionated, reusable software units"
+publish = false
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+
+[lints.clippy]
+dbg_macro = "warn"
+expect_used = "warn"
+todo = "warn"
+unimplemented = "warn"
+unwrap_used = "warn"
