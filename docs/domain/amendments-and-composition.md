@@ -32,6 +32,10 @@ The term **amendment** is approved and replaces the earlier term *fragment*.
   when the dependency is updated later.
 - An amendment's base must stay available. Updating a copied dependency file
   without its exact historical base can silently reverse upstream changes.
+- A base comes from the dependency's exact historical version, preserved
+  through immutable snapshots and Git provenance. It is never replaced by
+  whatever currently exists in the dependency author's working tree (see
+  [registries-and-discovery.md](registries-and-discovery.md#integrity-and-snapshots--approved)).
 - The engine may need **format-aware adapters** and **limited explicit
   metadata** where ambiguity cannot be resolved safely.
 

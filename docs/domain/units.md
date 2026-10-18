@@ -30,8 +30,8 @@ Rules:
 - Owner and unit name **together** determine identity.
   `@metamao/cloudflare-angular-ssr` and `@alice/cloudflare-angular-ssr` are
   different units. Neither is official or privileged.
-- The unit's own manifest supplies its identity. Registries and repository
-  locations do not.
+- The unit's own manifest supplies its identity. Registries, catalogs, and
+  repository locations do not.
 - Identity does **not** imply dependencies. A unit declares its dependencies
   explicitly (see [dependencies.md](dependencies.md)).
 - Do not infer repository layout, dependency structure, or relationships
@@ -53,6 +53,9 @@ Open:
 - The manifest declares the unit's **exact** version.
 - Dependency declarations may use SemVer **ranges**.
 - Resolution and lock state record **exact** versions.
+- Each published version is a Git tag, `v<version>`, whose manifest declares
+  exactly that version (see
+  [registries-and-discovery.md](registries-and-discovery.md#units-are-git-repositories--approved)).
 - Published versions are immutable (see
   [authoring-workflow.md](authoring-workflow.md#publication--approved)).
 
@@ -63,8 +66,15 @@ Open:
 
 ## Authoring repository convention — Approved
 
-The preferred convention is **one Git repository per unit**. The owner decides
-how unit repositories are grouped or organized locally.
+Every unit is maintained in **its own Git repository**. This is a requirement,
+not just an organizational convention: Git holds the history from which
+published versions are identified and historical content is recovered.
+
+- A repository holds exactly **one** unit, with `manifest.jsonc` at its root.
+  Several independently published units never share a repository.
+- Each unit has an independent publication lifecycle.
+- Repositories may be private. The owner decides how they are hosted and
+  organized.
 
 A unit repository has this conceptual structure:
 

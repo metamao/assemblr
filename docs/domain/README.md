@@ -43,6 +43,7 @@ Every contract in this directory carries one of these labels:
 | **Approved** | Decided by the owner. Implementations must conform. |
 | **Conceptual** | Illustrates approved intent. The syntax, serialization, or command grammar shown is *not* canonical. |
 | **Approved direction** | The intent is approved. The details are listed explicitly as Open items in the same section. |
+| **Recommended (provisional)** | A default mechanism or policy the owner has accepted for Alpha. It is not a verified guarantee and may be revised when technical evidence shows a better approach. A revision that affects approved user-visible semantics needs owner review. |
 | **Open (OC-n)** | A listed point that is not decided. Must not be implemented by assumption. Tracked in [open-contracts.md](open-contracts.md), which separates genuinely unresolved contracts from open details of approved semantics. |
 
 Statements in **Approved** sections are **normative**: "must", "must not",
@@ -60,7 +61,9 @@ it as an open contract instead.
 
 These documents cover the full lifecycle of **authoring, developing,
 maintaining, validating, and publishing units**, plus the local registry
-contracts needed to support that lifecycle.
+contracts needed to support that lifecycle: the CLI-managed registry,
+registration of unit repositories and catalogs, synchronization, and
+discovery.
 
 ### Reserved: the consumer-project lifecycle
 
@@ -69,6 +72,18 @@ added, removed, or updated in them, how consumer-specific configuration is
 handled, and the consumer CLI UX are **intentionally not specified**. That
 domain is reserved for a future owner-led design discussion. These documents
 mention consumers only where unit authoring needs to.
+
+Two points are already approved:
+
+- `assemblr init` is explicit, and it is required before a project consumes
+  units.
+- `init` prepares only minimal Assemblr project configuration, conceptually an
+  `assemblr.jsonc` file. It does not generate application code, resolve or
+  install units, or modify existing application files.
+
+Lock and historical state may be created lazily, when needed. The project
+manifest schema, the lockfile layout, and the rest of the consumer lifecycle
+are not specified.
 
 ## Documents
 
@@ -79,7 +94,7 @@ mention consumers only where unit authoring needs to.
 | [parameters-and-options.md](parameters-and-options.md) | `params` (a unit's public configuration) and `options` (requirements on dependencies) |
 | [dependencies.md](dependencies.md) | Dependency declarations and resolution |
 | [amendments-and-composition.md](amendments-and-composition.md) | Amendments, template contexts, merge semantics, and supporting evidence |
-| [registries-and-discovery.md](registries-and-discovery.md) | Local Directory and Local Git registries, source selection, `search` and `info` |
+| [registries-and-discovery.md](registries-and-discovery.md) | The CLI-managed local registry, Git-based units, catalogs, registration, synchronization, immutability, removal, `search` and `info` |
 | [authoring-workflow.md](authoring-workflow.md) | `unit init`, `amend`, `check`, `build`, `update`, `publish`, and author responsibilities |
 | [open-contracts.md](open-contracts.md) | Register of unresolved contracts |
 
@@ -91,7 +106,9 @@ mention consumers only where unit authoring needs to.
 | **Owner** | The individual or organization namespace in a unit identity (`@owner`). |
 | **Identity** | The pair `@owner/unit-name`. It uniquely identifies a logical unit and implies nothing about dependencies or repository location. |
 | **Manifest** | `manifest.jsonc`, the declaration of a unit's identity, version, description, dependencies, params, options, and amendments. |
-| **Unit repository** | The Git repository that holds one unit's authoring sources. |
+| **Unit repository** | The Git repository that holds exactly one unit's authoring sources and history. Every unit has one. |
+| **Working tree** | The author's editable checkout of a unit repository. Mutable, and never a published version. |
+| **Published version** | A unit version established by `unit publish` as a `v<version>` Git tag whose manifest declares exactly that version. Immutable. |
 | **Unit file** | A file in `src/`, introduced by the unit. |
 | **Amendment** | An editable full-file copy of a file provided by a dependency, modified by the amending unit. Replaces the earlier term *fragment*. |
 | **Base** | The exact historical version of a dependency file that an amendment was copied from. |
@@ -100,8 +117,14 @@ mention consumers only where unit authoring needs to.
 | **Option** (`options`) | A strict requirement that a unit imposes on a parameter of one of its dependencies. |
 | **Composition** | A unit together with its resolved dependency graph and their combined contributions. |
 | **Contribution** | What a unit adds beyond its dependencies: files, amendments, or meaningful configuration of dependencies. |
-| **Registry** (source) | A configured local location Assemblr reads units from. A registry name identifies a source, not an owner. |
-| **Snapshot** | A fixed, identifiable copy of a unit's content at a resolved version. |
+| **Local registry** | The CLI-managed subsystem, global to the user's Assemblr installation, that records registered sources, their published versions, and discoverable metadata. |
+| **Registered source** | A unit repository or a catalog that has been explicitly registered and validated. |
+| **Catalog** | A Git repository, managed through the CLI, that declares a set of unit repositories by identity and Git source without containing them. |
+| **Catalog manifest** | The catalog's declarative manifest, provisionally `registry.jsonc`. |
+| **Registration** | Validating a source and adding it to the local registry. It never publishes. |
+| **Synchronization** | Explicitly refreshing the registry's knowledge of registered sources and their published versions. |
+| **Registry index** | The registry's discoverable, refreshable metadata about registered sources and versions. |
+| **Snapshot** | A fixed, identifiable copy of a unit's content at a resolved version, with its Git provenance. |
 | **Lock state** | The record of the exact resolved versions (and their sources and content identity) used for a composition. |
 | **Build directory** | `build/`, the Assemblr-owned, disposable directory where `unit build` writes a composed result. |
 | **Options conflict** | Two incompatible explicit option requirements on the same dependency parameter. |
