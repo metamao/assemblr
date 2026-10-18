@@ -11,7 +11,8 @@ An author should be able to:
 2. compose and inspect it locally;
 3. validate its contracts;
 4. publish a reproducible, versioned unit;
-5. make it available through local registries.
+5. make it available through the local registry, by registering its
+   repository directly or through a catalog.
 
 Reusing and evolving units in consumer projects, without needlessly destroying
 consumer modifications, is the larger goal. That workflow is reserved
@@ -31,7 +32,9 @@ assemblr unit publish
 ```
 
 The **operations and their intent** are approved. The exact command grammar,
-flags, arguments, and edge-case behavior are **Open (OC-7)**.
+flags, arguments, and edge-case behavior are **Open (OC-7)**. Registry and
+catalog operations are described in
+[registries-and-discovery.md](registries-and-discovery.md).
 
 ## Typical flow — Conceptual
 
@@ -40,12 +43,18 @@ init ──> edit src/, manifest ──> amend (as needed) ──> check ──>
   ──> verify build/ with stack-specific tools ──> commit ──> publish
 
 later:  update <dependency> ──> check ──> build ──> verify ──> publish
+
+once:   registry add <unit repository>, directly or through a catalog
 ```
 
 ## Initialization — Approved
 
-`unit init` establishes a valid unit scaffold. It:
+A unit is a Git repository (see
+[units.md](units.md#authoring-repository-convention--approved)), so Git is a
+structural prerequisite of authoring. `unit init` establishes a valid unit
+scaffold on that Git-based foundation, consistently for every unit. It:
 
+- establishes the unit's Git repository;
 - creates `manifest.jsonc`;
 - provides a **local, offline JSON Schema** for manifest completion and
   diagnostics, and references it from the manifest through `$schema`;
@@ -55,8 +64,13 @@ later:  update <dependency> ──> check ──> build ──> verify ──> p
 
 Assemblr's own validation remains authoritative over the schema.
 
-Open: the schema's name, location, and tracking (**OC-17**), and whether
-`init` creates or requires a Git repository (part of **OC-7**).
+Open:
+
+- The schema's name, location, and tracking. **OC-17.**
+- How `init` establishes the Git repository: for example, whether it
+  initializes a new repository or adopts an existing one, how it treats a
+  target inside another repository, and whether it creates an initial commit.
+  Part of **OC-7.**
 
 ## Amend — Approved
 
@@ -110,6 +124,10 @@ build/
 
 Its purpose is to give the author a real, inspectable, consumer-like result.
 
+`unit build` is an **authoring** operation. It composes the author's editable
+working tree, so the author can develop and build without publishing every
+change. It is not consumption of a published version.
+
 Rules:
 
 - `unit build` performs the **applicable Assemblr-native validations before
@@ -137,6 +155,8 @@ Open:
 - Exactly which `check` validations apply to `build`, for example whether the
   effective-contribution check, which gates publication, also gates build.
   **OC-28.**
+- Whether a unit under development may resolve a dependency to another unit's
+  unpublished working tree. **OC-30.**
 
 ## Update — Approved
 
@@ -153,6 +173,8 @@ the newer dependency version.
 - Conflicts must not leave a **silent partial update**.
 - After updating, the author is responsible for rebuilding and checking the
   result.
+- A newly discovered Git tag, for example after a registry synchronization,
+  never updates a dependency automatically.
 
 Open:
 
@@ -180,7 +202,10 @@ For Alpha:
 
 ## Publication — Approved
 
-Publication always goes through Assemblr's CLI, for consistency.
+Publication always goes through Assemblr's CLI, for consistency. A published
+version is a Git tag, `v<manifest.version>`, in the unit's own repository. The
+tag version must match the manifest version at the tagged commit exactly (see
+[registries-and-discovery.md](registries-and-discovery.md#units-are-git-repositories--approved)).
 
 `unit publish`:
 
@@ -199,12 +224,19 @@ The author must verify the functional build before publishing. Assemblr does
 not infer or certify that verification. No approval token or extra
 functional-test declaration is required.
 
+Publication does not register the unit. Registration is a separate registry
+operation, and registering never publishes.
+
 Publishing locally is distinct from **pushing** to a remote Git server.
+**Recommended (provisional):** `unit publish` establishes the published
+version locally and never pushes tags or commits as a side effect. Pushing is
+an explicit, separate operation.
 
 Open:
 
-- Whether remote push is part of the Alpha publication workflow, and how.
+- Whether Alpha provides a push operation, and its command or flag.
   **OC-13.**
 - Edge cases, including untracked files, an existing tag that already points
-  at the validated commit, annotated vs lightweight tags, and whether a new
-  version must be greater than earlier published versions. **OC-26.**
+  at the validated commit, annotated vs lightweight tags (annotated tags are
+  recommended for consideration), and whether a new version must be greater
+  than earlier published versions. **OC-26.**

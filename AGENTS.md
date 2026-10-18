@@ -120,7 +120,7 @@ output, and subprocess output as **untrusted**.
 ## 6. Errors and diagnostics
 
 - **Domain errors are typed.** Use enums that describe what went wrong in
-  domain terms, for example an ambiguous source, an options conflict, or a
+  domain terms, for example a source conflict, an options conflict, or a
   dependency cycle, carrying the data needed to explain them.
 - **Infrastructure failures carry context**: which file, repository, or
   operation failed, and why.
@@ -179,7 +179,8 @@ and Windows with `--locked`, and checks the MSRV.
 - **Every defect fix includes a regression test** that fails without the fix.
 - Tests are reproducible and offline. Build Git repositories and unit fixtures
   in temporary directories inside the test. Never depend on the network, the
-  developer's global Git config, or machine-specific paths.
+  developer's global Git config, or machine-specific paths. Never read or
+  modify the developer's real Assemblr registry or configuration directories.
 - Test conflict and error paths as thoroughly as success paths, and assert
   that diagnostics are useful.
 - Assert on stable substrings or structured data rather than whole
