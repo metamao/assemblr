@@ -43,7 +43,7 @@ Every contract in this directory carries one of these labels:
 | **Approved** | Decided by the owner. Implementations must conform. |
 | **Conceptual** | Illustrates approved intent. The syntax, serialization, or command grammar shown is *not* canonical. |
 | **Approved direction** | The intent is approved. The details are listed explicitly as Open items in the same section. |
-| **Recommended (provisional)** | A default mechanism or policy the owner has accepted for Alpha. It is not a verified guarantee and may be revised when technical evidence shows a better approach. A revision that affects approved user-visible semantics needs owner review. |
+| **Recommended (provisional)** | A default mechanism or policy the owner has accepted for Alpha. Alpha implementations may follow it; doing so is not implementing by assumption. It is not a verified guarantee or a final decision: the contract that cites it stays open until the owner settles it, and the default may be revised when technical evidence shows a better approach. A revision that affects approved user-visible semantics needs owner review. |
 | **Open (OC-n)** | A listed point that is not decided. Must not be implemented by assumption. Tracked in [open-contracts.md](open-contracts.md), which separates genuinely unresolved contracts from open details of approved semantics. |
 
 Statements in **Approved** sections are **normative**: "must", "must not",
@@ -56,6 +56,11 @@ form, and the `build/` directory, are approved.
 If a behavior is not described here, it is unspecified. Do not infer it from
 examples, from earlier prototypes, or from what "seems natural". Raise
 it as an open contract instead.
+
+Only the owner's acceptance makes a recommendation binding or usable as a
+default. A recommendation the owner has not accepted, for example one made in
+research, an experiment, or a review, is not a requirement, even when it
+appears in an open contract's context.
 
 ## Scope
 
@@ -117,10 +122,11 @@ Details that are still open are listed in
 | **Registry index** | The registry's validated, discoverable metadata about registered sources, units, and published versions. Read offline. |
 | **Integrity conflict** | Different content for the same unit identity and published version. |
 | **Snapshot** | A fixed, identifiable copy of a unit's content at a resolved version, with its Git provenance. |
-| **Lock state** | The record of the exact resolved versions (and their sources and content identity) used for a composition. In a consumer project it is kept in a CLI-managed lockfile. |
+| **Lock state** | The record of the exact resolved versions (and their sources and content identity) used for a composition. A unit repository keeps it in its CLI-managed **unit lockfile**, and a consumer project in its own CLI-managed lockfile. The two are distinct. |
 | **Build directory** | `build/`, the Assemblr-owned, disposable directory where `unit build` writes a composed result. |
 | **Options conflict** | Two incompatible explicit option requirements on the same dependency parameter. |
 | **Merge conflict** | Incompatible changes from several contributors to the same file content. |
+| **Path collision** | Two units in one composition that provide a file at the same path through their `src/` directories. An error. |
 | **Consumer project** | A software project composed from units, initialized with `assemblr init`. The final consumer of units. |
 | **Project configuration** | `assemblr.jsonc`, the editable declaration of a consumer project's desired composition: its explicit `dependencies` and their `options`. |
 | **Explicit selection** | A unit declared in a consumer project's `dependencies`. |

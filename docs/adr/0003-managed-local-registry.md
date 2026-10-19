@@ -89,7 +89,11 @@ candidates when the registry is implemented, under ADR 0002's policy.
 - Tests need a seam that points the registry at a temporary directory, so they
   never read or modify the developer's real registry (AGENTS.md §8). Whether
   that seam is also a user-visible override, such as an environment variable
-  or flag, is a product question.
+  or flag, is a product question. The owner has since classified registry
+  isolation for tests as an engineering requirement, not a user-facing product
+  capability. The registry implementation must provide it. The mechanism,
+  including any override the binary needs, is an engineering decision,
+  recorded when the registry is implemented.
 - Registered repositories are untrusted input. Their repository-local Git
   configuration can name programs that `git` executes, so Git invocations on
   sources must not run commands configured by the source (AGENTS.md §5).

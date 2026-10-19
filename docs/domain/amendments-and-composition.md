@@ -51,6 +51,14 @@ Open:
 - Whether an amendment can delete an entire dependency file, or only change its
   content. **OC-19.**
 - Behavior when a base's historical Git objects are unavailable. **OC-9.**
+- Whether an amendment's base is a file of the dependency itself (amendments
+  from different units are then combined side by side against the original) or
+  the dependency's composed output (an amendment then builds on its
+  dependency's own amendments), and what provenance each model requires. This
+  determines whether a unit can refine a value that one of its dependencies
+  already amended. **OC-20.**
+- Whether conflicts between units' contributions in a consumer composition are
+  resolved like conflicts with consumer modifications. **OC-47.**
 
 ## Template contexts — Approved
 
@@ -66,8 +74,8 @@ kept distinct from values owned by the amending unit.
 Open:
 
 - The exact rendering protocol for originals and amendments, consistent with
-  the experimental findings, including exactly what the `own.*` context
-  contains. **OC-5.**
+  the requirements above, including exactly what the `own.*` context contains.
+  **OC-5.**
 
 ## Merge semantics — Approved
 
@@ -138,8 +146,10 @@ composition). The merge semantics above apply. See
 Research experiments on copying, textual merging, structural merging, and
 value-level merging informed the principle and requirements above. They are
 historical evidence, not contract. Their comparative scores are **not**
-evidence for any production merge or reconciliation algorithm: a later audit
-found the headline comparison misleading. The experimental implementations
+evidence for any production merge or reconciliation algorithm. They counted a
+conservative false conflict and a silent corruption as equally bad, whereas
+these contracts rank preventing silent loss above automating merges, so the
+scores measure automation rather than safety. The experimental implementations
 have not undergone production-quality engineering review, and the production
 strategy is not decided (**OC-10**).
 

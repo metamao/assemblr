@@ -49,7 +49,9 @@ Its API deliberately resembles a unit's [`manifest.jsonc`](manifest.md):
 | `dependencies` | The units the consumer **explicitly selects**, each with a SemVer requirement. |
 | `options` | Parameter values the consumer supplies to its explicitly selected units. |
 
-Conceptual example (**not** canonical serialization; versions are
+`dependencies` and `options` use the manifest's approved serialization (see
+[manifest.md](manifest.md#serialization-of-dependencies-options-and-params--approved)).
+`assemblr.jsonc` has **no** `params` field. Example (versions are
 illustrative):
 
 ```jsonc
@@ -90,8 +92,9 @@ Rules:
 
 Open:
 
-- The full schema and serialization of `assemblr.jsonc`, including whether it
-  has fields beyond `$schema`, `dependencies`, and `options`. **OC-36.**
+- The full schema of `assemblr.jsonc`, including its initial contents and
+  whether it has fields beyond `$schema`, `dependencies`, and `options`.
+  **OC-36.**
 
 ## Composition commands — Approved
 
@@ -287,11 +290,19 @@ Rules:
 - There are no file classes or ownership categories. Units declare none, and
   Assemblr neither determines nor records one for each file. The unit
   authoring contract is unchanged (see [units.md](units.md#src-unit-files)).
+- Two units that provide a file at the same path through their `src/`
+  directories make the composition fail with a **path collision** error,
+  reported before anything is applied (see
+  [units.md](units.md#src-unit-files)).
 
 Open:
 
 - How a composition treats a path that already holds content Assemblr did not
   materialize, for example in an existing project. **OC-44.**
+- File-system semantics of contributed files, including executable bits,
+  symbolic links, binary content, line endings, paths that differ only in
+  case, and paths reserved for Assemblr's own files such as `assemblr.jsonc`
+  and the lockfile. **OC-48.**
 
 ## Reconciliation — Approved
 
@@ -384,11 +395,19 @@ Open:
 
 - Conflict presentation and the mechanisms behind the pending-resolution
   state. **OC-37.**
+- Whether conflicts **between units' contributions**, for example an amendment
+  that cannot be applied to the dependency version the consumer resolved, are
+  resolved in the pending-resolution state like conflicts with consumer
+  modifications, or are composition errors; and, if they are resolved in
+  place, what the incoming composition and the next reconciliation base are.
+  **OC-47.**
 
 ## Lock and reconciliation state — Approved
 
 Assemblr maintains a **versioned, CLI-managed lockfile** for the consumer
-project, distinct from the editable `assemblr.jsonc`.
+project, distinct from the editable `assemblr.jsonc` and from the
+[unit lockfile](authoring-workflow.md#unit-lock-state--approved) of a unit
+repository.
 
 - It records the exact resolved unit versions and their provenance.
 - It includes a **verifiable identity of the reconciliation base**.
@@ -406,6 +425,10 @@ Open:
 - The lock schema, the representation and storage of historical bases, and
   how bases are reconstructed. **OC-8.**
 - The application journal and recovery mechanism. **OC-37.**
+- Portability of a lockfile between machines: what happens when the source a
+  lock records for a unit differs from the source registered for that identity
+  on another machine, and what a lock records for a unit obtained through a
+  relative catalog reference. Unavailable sources are **OC-9**. **OC-49.**
 
 ## Editing assistance — Approved direction, details Open
 

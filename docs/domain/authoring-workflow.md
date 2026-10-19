@@ -87,8 +87,11 @@ Open:
 
 Open:
 
-- Which file tree the lookup searches: the dependency's own files, or its
-  composed output including files from its own dependencies. **OC-20.**
+- Whether an amendment's base is a file of the dependency itself or the
+  dependency's composed output, including files and amendments from its own
+  dependencies. This decides how amendments stack across a dependency chain
+  and what their provenance records, as well as which file tree the lookup
+  searches. **OC-20.**
 - Amendment layout and declaration syntax. **OC-2**, **OC-3.**
 
 ## Check — Approved
@@ -98,7 +101,7 @@ Open:
 - manifest validity;
 - identity and version validity;
 - parameter and options consistency, including that the required parameters
-  of every dependency are satisfied (see
+  of every dependency are satisfied through the dependency chain (see
   [parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved));
 - dependency resolution;
 - amendment validity and availability of each historical base;
@@ -130,7 +133,8 @@ Its purpose is to give the author a real, inspectable, consumer-like result.
 working tree, so the author can develop and build without publishing every
 change. It is not consumption of a published version. The unit's
 **dependencies**, however, always resolve to **published versions** available
-through the registry, never to another unit's working tree (see
+through the registry, never to another unit's working tree, following the
+[unit lock state](#unit-lock-state--approved) (see
 [dependencies.md](dependencies.md#resolution--approved)).
 
 `unit check`, `unit build`, and `unit update` never fetch remote changes
@@ -166,13 +170,40 @@ Open:
   effective-contribution check, which gates publication, also gates build.
   **OC-28.**
 
+## Unit lock state — Approved
+
+A unit repository has its own **CLI-managed lockfile**, the **unit lockfile**.
+It is conceptually distinct from a consumer project's lockfile (see
+[consumer-projects.md](consumer-projects.md#lock-and-reconciliation-state--approved)).
+
+- It records the **exact resolved dependency versions** used while the unit is
+  developed.
+- `unit check`, `unit build`, and `unit update` use this state consistently.
+  Existing locked versions take precedence over fresh resolution (see
+  [dependencies.md](dependencies.md#resolution--approved)).
+- A new version appearing in the registry, for example after a
+  synchronization, never silently changes a locked version. Changing it is an
+  explicit [update](#update--approved).
+- It is intended to be **tracked** in the unit repository.
+- It does **not** determine which versions a consumer project resolves. A
+  consumer resolves the unit's dependencies within the ranges the unit
+  declares, under the consumer's own lock state.
+
+Open:
+
+- The unit lockfile's name, location, and serialization; when it is created
+  and which operations write it, for example after a dependency is added to
+  or removed from the manifest; and how it relates to the base provenance
+  that amendments record. **OC-46.**
+
 ## Update — Approved
 
 Updating a dependency is an **explicit** author action. It never happens just
 because a new version becomes available.
 
-`unit update` reconciles the unit's amendments from their historical base to
-the newer dependency version.
+`unit update` changes a dependency's resolved version in the
+[unit lock state](#unit-lock-state--approved), and reconciles the unit's
+amendments from their historical base to the newer dependency version.
 
 - Changing the **resolved version** of a dependency and changing its declared
   SemVer **range** are separate concerns.
@@ -219,9 +250,10 @@ tag version must match the manifest version at the tagged commit exactly (see
 
 1. validates the manifest and identity;
 2. resolves and verifies dependencies and amendments;
-3. verifies that the required parameters of its dependencies, including
-   transitive ones, are satisfied by defaults, its `options`, or mappings from
-   its own parameters (see
+3. verifies that the required parameters of its direct dependencies are
+   satisfied by defaults, its `options`, or mappings from its own parameters,
+   and that those of transitive dependencies are satisfied through the
+   dependency chain (see
    [parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved));
 4. runs **all** mandatory Assemblr-native checks;
 5. rejects effectively empty or redundant units;

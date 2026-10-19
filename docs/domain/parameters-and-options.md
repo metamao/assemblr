@@ -36,19 +36,27 @@ Each parameter has:
 - a **name**;
 - a **type**;
 - a **human-readable description**, which is required;
-- a **required/default contract**, as applicable;
+- an optional **default**;
 - **allowed values**, optional, for constrained strings.
 
-Values supplied for a parameter are validated against its type and allowed
-values.
+Values supplied for a parameter, and its default, are validated against its
+type and allowed values.
 
-Open:
+Requiredness follows from the default alone:
 
-- The exact required/default rules, for example whether a parameter without a
-  default is implicitly required, and whether "required with a default" is
-  meaningful. **OC-22.**
-- The serialization of parameter declarations (see
-  [manifest.md](manifest.md#vocabulary--approved)).
+- A parameter **without a default is required**.
+- A parameter **with a default is optional**. Its default applies when no
+  value is supplied.
+- There is no separate `required` property, and no "required with a default".
+- A required parameter that receives no value is an explicit **validation
+  error** naming the unit and the parameter. Assemblr never substitutes a
+  value. Who supplies it is described in
+  [Satisfying dependency parameters](#satisfying-dependency-parameters--approved)
+  and [Consumer values](#consumer-values--approved). For development builds,
+  see **OC-6**.
+
+The serialization of parameter declarations is described in
+[manifest.md](manifest.md#serialization-of-dependencies-options-and-params--approved).
 
 ### What parameters may do — Approved
 
@@ -80,23 +88,32 @@ Open:
 
 - The template engine, interpolation syntax, escaping, the handling of non-text
   files, and the detailed rendering rules. **OC-5.**
+- How a file is selected for template interpolation, so that files whose own
+  syntax resembles the template syntax, such as Angular templates
+  (`{{ value }}`) or GitHub Actions workflows (`${{ value }}`), are delivered
+  intact. Part of **OC-5.**
 
 ## Dependency options
 
 ### Purpose — Approved
 
 `options` declares **strict configuration requirements** that a unit imposes on
-a dependency's parameters.
+the parameters of its **direct** dependencies.
 
-Conceptual example (**not** canonical manifest serialization):
+Example (serialization as approved in
+[manifest.md](manifest.md#serialization-of-dependencies-options-and-params--approved)):
 
-```text
-dependencies:
-  @metamao/node: ^1.0.0
-
-options:
-  @metamao/node:
-    packageManager: pnpm
+```jsonc
+{
+  "dependencies": {
+    "@metamao/node": "^1.0.0"
+  },
+  "options": {
+    "@metamao/node": {
+      "packageManager": "pnpm"
+    }
+  }
+}
 ```
 
 Here the unit requires its `@metamao/node` dependency to be configured with
@@ -104,6 +121,9 @@ Here the unit requires its `@metamao/node` dependency to be configured with
 
 ### Rules — Approved
 
+- A unit's `options` may only target its **direct** dependencies: identities
+  it declares in its own `dependencies`. Targeting a transitive dependency, or
+  any other identity, is an error.
 - Options may only configure parameters that the dependency **exposes** in its
   `params`. Configuring an undeclared parameter is an error.
 - Option values are validated against the dependency parameter's type and
@@ -119,17 +139,17 @@ Here the unit requires its `@metamao/node` dependency to be configured with
 - Options conflicts and file merge conflicts are **distinct kinds of conflict**
   and are reported as such.
 
+A consumer's values likewise target only its explicit selections (see
+[Consumer values](#consumer-values--approved)).
+
 Open:
 
-- Whether a unit's `options` may target only direct dependencies or also
-  transitive ones. A consumer's values target only its explicit selections
-  (see [Consumer values](#consumer-values--approved)). **OC-21.**
 - How option requirements interact with development build inputs. **OC-6.**
 
 ### Satisfying dependency parameters — Approved
 
 A published unit is **responsible for satisfying the required parameters of
-its dependencies**. It does so through:
+its direct dependencies**. It does so through:
 
 1. valid defaults of the dependency's parameters;
 2. explicit values in its own `options`;
@@ -141,12 +161,19 @@ Rules:
   Assemblr validates that each referenced parameter exists, and that its type
   and allowed values are compatible with the dependency parameter it
   configures.
-- `unit publish` validates these obligations, including transitive
-  compatibility (see
+- The required configuration of **transitive** dependencies is satisfied
+  through the dependency chain: each unit satisfies its direct dependencies,
+  which in turn satisfy theirs. A unit never configures a transitive
+  dependency directly.
+- `unit publish` validates these obligations across the unit's resolved
+  dependency graph (see
   [authoring-workflow.md](authoring-workflow.md#publication--approved)).
 - A consumer that selects a unit is never asked for the required parameters of
   that unit's transitive dependencies. If such a value must be configurable,
   the depending unit exposes it through its own `params`.
+- Incompatible requirements on the same parameter of a shared dependency, for
+  example from two units that both depend on it, remain an **options
+  conflict**, with no implicit precedence (see [Rules](#rules--approved)).
 - Mappings configure file contents only, like any parameter value. They never
   alter the dependency graph or which files exist (see
   [What parameters must not do](#what-parameters-must-not-do--approved)).
@@ -155,8 +182,6 @@ Open:
 
 - The syntax of mappings, and how options conflicts are evaluated when an
   option value is mapped from a parameter. **OC-39.**
-- The required/default rules that decide when a parameter needs a value.
-  **OC-22.**
 
 ## Consumer values — Approved
 
