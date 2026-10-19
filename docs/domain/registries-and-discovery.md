@@ -50,9 +50,14 @@ engineering mechanisms behind it are recorded in
   v2.0.0
   ```
 
+- Published versions are recognized **only** through tags of the form
+  `v<version>`, where `<version>` is a valid SemVer version. Tags outside this
+  convention, such as `release-1` or `latest`, are not published versions.
 - The tag version must match the exact SemVer `version` declared in the
   manifest **at the tagged commit**. A version tag whose manifest declares a
   different version is **invalid**.
+- An invalid version never enters the usable version index, and it is reported
+  explicitly (see [Registration](#registration--approved)).
 - Assemblr reads versioned content **without switching or modifying** the
   author's working tree.
 
@@ -78,8 +83,9 @@ trust policy are not defined, and are not part of Alpha (see
 
 Open:
 
-- How invalid and moved tags are reported, and how tags that are not of the
-  form `v<version>` are treated. **OC-25.**
+- How invalid versions and moved tags are presented in diagnostics, including
+  whether tags that resemble the convention without matching it, such as
+  `v1.0`, are mentioned. **OC-25.**
 - Behavior when historical Git objects or registered sources are unavailable.
   **OC-9.**
 
@@ -143,11 +149,24 @@ Rules:
   published version always obtains tagged content, never the current working
   tree.
 
-The earlier contract stated that a version whose tag is inconsistent with its
-manifest fails validation, and that only the affected versions fail. That rule
-still stands. Which validation failures are "required", and so reject the whole
-operation, and which only exclude the affected versions, is not yet decided.
-**OC-33.**
+### Invalid versions and failed sources — Approved
+
+Validation distinguishes two kinds of failure:
+
+- **An invalid version** affects only that version. Example: a `v<version>`
+  tag whose manifest declares a different version. The version is excluded:
+  it never enters the usable version index, and it is reported explicitly.
+  The rest of the operation continues.
+- **A source-level failure** invalidates the source, and with it the
+  operation. Examples: a repository that is not a valid or accessible Git
+  repository, an invalid catalog manifest, and a source conflict. The
+  registration or synchronization is rejected under the atomicity guarantees
+  above, and the active registry is left unchanged.
+
+Open:
+
+- The classification of every individual validation check as a version-level
+  or a source-level failure, beyond the examples above. **OC-33.**
 
 ## Source conflicts — Approved
 
@@ -201,7 +220,8 @@ contents.
 ```
 
 - `name` is the **catalog identity**. It uses the same `@owner/name`
-  convention as units. Catalog identities and unit identities occupy
+  convention and syntax rules as units (see
+  [units.md](units.md#identity--approved)). Catalog identities and unit identities occupy
   **separate namespaces**.
 - `units` maps each expected unit identity **directly** to a Git repository
   reference. A reference is a **plain string**, not an object.
@@ -298,8 +318,6 @@ Open:
 - The index's file name, serialization format, storage location, and hash
   representation; whether a catalog without a published index can be
   registered; and how refresh reports partial failures. **OC-40.**
-- The syntax rules for the `@owner/name` segments, shared with unit identities.
-  **OC-14.**
 
 ## Synchronization — Approved
 
@@ -332,9 +350,11 @@ catalog's metadata index has been refreshed and published (see
 Rules:
 
 - The **complete** proposed index is validated before it replaces the active
-  index. If a required validation fails, the previous valid state is kept and
-  the problem is reported. A synchronization result is never partially
-  accepted.
+  index. If a source-level validation fails, the previous valid state is kept
+  and the problem is reported. A synchronization result is never partially
+  accepted. An invalid version is excluded and reported, and does not reject
+  the synchronization (see
+  [Invalid versions and failed sources](#invalid-versions-and-failed-sources--approved)).
 - A unit reference removed from a catalog is removed from the active discovery
   state.
 - Changing the repository reference of an existing identity is a conflict that
@@ -354,9 +374,9 @@ Rules:
 
 Open:
 
-- Which validation failures are required, and so keep the whole previous
-  state, and which only exclude the affected versions; and whether
-  synchronization can target individual sources. **OC-33.**
+- The classification of every individual validation check as a version-level
+  or a source-level failure; and whether synchronization can target individual
+  sources. **OC-33.**
 - Which revision is read for a local catalog, and how uncommitted local
   catalog changes are treated. **OC-32.**
 - How the index update of `unit publish` and the discovery of individually

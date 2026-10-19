@@ -54,7 +54,11 @@ No dependency is added by this ADR.
 
 - One failing validation can block a whole synchronization. Which failures do
   so, and which only exclude the affected versions, is still open (OC-33). The
-  implementation must not choose until it is decided.
+  implementation must not choose until it is decided. The owner has since
+  decided the principle: an invalid version is excluded and reported, and a
+  source-level failure rejects the operation (see
+  [invalid versions and failed sources](../domain/registries-and-discovery.md#invalid-versions-and-failed-sources--approved)).
+  The classification of the remaining individual checks is still open.
 - Every registry mutation produces a complete new index, so its cost grows
   with the registry. That is acceptable for a local, file-based Alpha store.
   Revisit it with evidence if it becomes a problem.

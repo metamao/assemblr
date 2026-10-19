@@ -31,6 +31,11 @@ Rules:
   For the latter, implement the approved part. A detail that affects
   user-visible behavior, syntax, or file formats still needs an owner
   decision.
+- Items marked **Recommended (provisional)** are defaults the owner has
+  accepted for Alpha. Implementations may follow them, and doing so is not
+  implementing by assumption. The related open contract stays open until the
+  owner settles it. A recommendation the owner has not accepted is not a
+  requirement.
 - Earlier prototypes and research experiments are historical evidence, not
   authority. Do not adopt their code, specifications, syntax (such as
   `extends`, `merges`, `fragments`, or `derived`/`scaffold` file classes), or

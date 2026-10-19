@@ -8,8 +8,8 @@
 - Dependencies are never inferred from owner names, unit names, repository
   layout, catalog membership, or registry structure.
 
-The serialization of `dependencies` is not final (see
-[manifest.md](manifest.md#vocabulary--approved)).
+`dependencies` is a map from identity to SemVer requirement (see
+[manifest.md](manifest.md#serialization-of-dependencies-options-and-params--approved)).
 
 ## Resolution — Approved
 
@@ -28,7 +28,11 @@ Within a single composition:
 - One logical unit identity resolves to **exactly one version**.
 - Resolution is **deterministic**: the same inputs and history give the same
   result.
-- Lock state records the **exact** resolved versions.
+- Lock state records the **exact** resolved versions. A unit repository keeps
+  it in a unit lockfile (see
+  [authoring-workflow.md](authoring-workflow.md#unit-lock-state--approved)), and
+  a consumer project in its own lockfile (see
+  [consumer-projects.md](consumer-projects.md#lock-and-reconciliation-state--approved)).
 - Existing lock state **takes precedence** over fresh resolution. A composition
   that is already resolved does not change just because a newer version
   appears in the registry.
@@ -64,7 +68,8 @@ Open:
   **OC-16.**
 - The SemVer range dialect, and pre-release and build metadata handling.
   **OC-15.**
-- The lock-state file format and location. **OC-8.**
+- The lock-state file formats and locations: the consumer lockfile (**OC-8**)
+  and the unit lockfile (**OC-46**).
 
 ## Version selection — Approved
 

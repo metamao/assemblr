@@ -28,18 +28,62 @@ These fields make up the accepted conceptual vocabulary:
 | `options` | Strict requirements imposed on dependency parameters. | [parameters-and-options.md](parameters-and-options.md#dependency-options) |
 | amendment declarations | Declare amendments and their provenance. | [amendments-and-composition.md](amendments-and-composition.md) |
 
-Established semantics vs pending syntax:
+The **meaning** of each field above is approved. The amendment declaration
+field name and syntax are **Open (OC-2)**. Do not treat earlier experimental
+syntax, such as `extends` or a `merges` field, as canonical.
 
-- The **meaning** of each field above is approved.
-- The **serialization** of `dependencies`, `params`, and `options` (key shapes,
-  nesting, value encodings) is not final. Examples in these documents are
-  **Conceptual**. Finalizing it is part of the manifest schema contract, which
-  includes **OC-2** (amendments), **OC-4** (list identity hints), **OC-22**
-  (parameter requiredness and default rules), and **OC-39** (mapping option
-  values from the unit's own parameters).
-- The **amendment declaration field name and syntax** are **Open (OC-2)**. Do
-  not treat earlier experimental syntax, such as `extends` or a `merges`
-  field, as canonical.
+## Serialization of `dependencies`, `options`, and `params` — Approved
+
+These three fields are **maps**:
+
+| Field | Keys | Values |
+|-------|------|--------|
+| `dependencies` | Unit identities (`@owner/unit-name`) | A SemVer requirement string |
+| `options` | Identities of the unit's **direct** dependencies | A map from parameter name to the value required for that parameter |
+| `params` | Parameter names | The parameter's typed definition: its type, its description, an optional default, and optional allowed values |
+
+- An option value or a default is written as the JSON value of the parameter's
+  type: a string or an enumerated string as a JSON string, an integer as a JSON
+  integer, and a boolean as a JSON boolean.
+- Every key of `options` must also be a key of `dependencies` (see
+  [parameters-and-options.md](parameters-and-options.md#rules--approved)).
+- A parameter definition has no `required` property. Requiredness follows from
+  the presence of a default (see
+  [parameters-and-options.md](parameters-and-options.md#declaration--approved)).
+- A consumer project's `assemblr.jsonc` reuses the `dependencies` and `options`
+  serialization. It has no `params` (see
+  [consumer-projects.md](consumer-projects.md#project-configuration--approved)).
+
+Example. The structure is canonical. Identities, versions, and parameter names
+are illustrative. The property names inside a parameter definition are not yet
+fixed (**OC-45**), so that definition is elided:
+
+```jsonc
+{
+  "name": "@metamao/cloudflare-angular-ssr",
+  "version": "1.0.0",
+  "description": "Angular SSR on Cloudflare Workers.",
+  "dependencies": {
+    "@metamao/cloudflare-worker": "^2.1.0"
+  },
+  "options": {
+    "@metamao/cloudflare-worker": {
+      "nodeCompat": true
+    }
+  },
+  "params": {
+    "appName": { /* type, description, optional default, optional allowed values */ }
+  }
+}
+```
+
+Open:
+
+- The property names and type spellings inside a parameter definition.
+  **OC-45.**
+- How an option value mapped from the unit's own parameter is written.
+  **OC-39.**
+- Amendment declarations (**OC-2**) and list identity hints (**OC-4**).
 
 ## Validation — Approved
 
