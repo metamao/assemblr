@@ -259,32 +259,39 @@ execution after composition. This rule concerns consumer composition. It does
 not change how unit authors verify their builds with stack-specific tools (see
 [authoring-workflow.md](authoring-workflow.md#testing-native-validation-vs-functional-correctness--approved)).
 
-## File ownership — Approved
+## File contributions — Approved
 
-Each file that units contribute to a consumer project has one of two
-ownership categories. Ownership determines what later operations do with it:
+The files of a consumer project result from four distinct things:
 
-| | **Derived file** | **Scaffold file** |
-|-|------------------|-------------------|
-| Owner | Assemblr keeps managing it. | Assemblr creates it. The consumer owns it afterward. |
-| Later compositions, including changes to units, versions, and `options` | Reconciled three-way (see [Reconciliation](#reconciliation--approved)). | Never regenerated or overwritten indiscriminately. |
-| Incoming changes to its content | Applied through reconciliation. | Not applied by ordinary composition. A separately requested scaffold update may reconcile them, including three-way (**OC-35**). |
-| Removal of the contributing unit | Retired according to [Removal](#removal--approved). | A consumer-modified file is never deleted. |
+| | Meaning |
+|-|---------|
+| **Initial delivery** | The files a unit introduces in its `src/`, rendered with its parameter values and materialized when the unit enters the composition. |
+| **Amendments** | Modifications that units make to files their dependencies provide (see [amendments-and-composition.md](amendments-and-composition.md#amendments--approved)). |
+| **Effective composition** | The deterministic result of composing every contribution for the current declaration. The previously materialized one is the **reconciliation base**, and the newly desired one is **incoming**. |
+| **Consumer modifications** | Changes the consumer makes to the project's files after they are materialized. |
 
-These are ownership categories of files **in a consumer project**. They are
-not author-facing file classes: every file in a unit's `src/` keeps the same
-authoring lifecycle, and the earlier `derived` and `scaffold` classes are not
-reintroduced into unit manifests (see [units.md](units.md#src-unit-files)).
+Rules:
+
+- A file delivered from a unit's `src/` is a starting point. The consumer may
+  modify it freely.
+- That file keeps receiving changes through the effective composition, for
+  example from the amendments of a unit added later, from a new version of a
+  unit, or from changed option values. Consumer modification does not make a
+  file immune to later contributions.
+- Every contributed file follows the **same lifecycle**. Whether a change is
+  applied depends only on whether it can be reconciled safely against the
+  reconciliation base and the consumer's current content (see
+  [Reconciliation](#reconciliation--approved)). A change that cannot be is a
+  conflict, resolved through
+  [conflict resolution](#conflict-resolution--approved).
+- There are no file classes or ownership categories. Units declare none, and
+  Assemblr neither determines nor records one for each file. The unit
+  authoring contract is unchanged (see [units.md](units.md#src-unit-files)).
 
 Open:
 
-- What determines whether a contributed file is derived or scaffold, without
-  reintroducing author-facing file classes or new manifest attributes unless
-  the owner decides they are justified; whether removal retires an unmodified
-  scaffold file; how a later contribution, such as another unit's amendment,
-  that targets an existing scaffold file is handled; and what happens when a
-  contribution's path is already occupied by a file no unit contributed.
-  **OC-34.**
+- How a composition treats a path that already holds content Assemblr did not
+  materialize, for example in an existing project. **OC-44.**
 
 ## Reconciliation — Approved
 
@@ -304,9 +311,8 @@ Composition reconciles three inputs:
 - The [merge semantics](amendments-and-composition.md#merge-semantics--approved)
   apply, including that downstream consumer edits are never arbitrarily
   overridden by incoming changes.
-- Changes to units, versions, and `options` all go through the same
-  reconciliation. It applies to derived files. Scaffold files follow
-  [File ownership](#file-ownership--approved).
+- Changes to units, versions, `options`, and amendments all go through the
+  same reconciliation, which applies to every contributed file alike.
 - Repeating `compose` without relevant changes does not rewrite the project.
 
 The production reconciliation strategy, including whether and how Git takes

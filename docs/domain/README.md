@@ -68,7 +68,7 @@ These documents cover:
   discovery;
 - the **consumer-project lifecycle**: initializing a project, declaring its
   composition in `assemblr.jsonc`, adding and removing units, composing, file
-  ownership, reconciliation, conflict resolution, and lock state.
+  contributions, reconciliation, conflict resolution, and lock state.
 
 Details that are still open are listed in
 [open-contracts.md](open-contracts.md).
@@ -84,7 +84,7 @@ Details that are still open are listed in
 | [amendments-and-composition.md](amendments-and-composition.md) | Amendments, template contexts, merge semantics, and supporting evidence |
 | [registries-and-discovery.md](registries-and-discovery.md) | The CLI-managed local registry, Git-based units, catalogs and their metadata indexes, registration, synchronization, immutability, removal, `search` and `info` |
 | [authoring-workflow.md](authoring-workflow.md) | `unit init`, `amend`, `check`, `build`, `update`, `publish`, and author responsibilities |
-| [consumer-projects.md](consumer-projects.md) | `init`, `assemblr.jsonc`, `add`, `remove`, `compose`, explicit and transitive dependencies, file ownership, reconciliation, conflict resolution, and the lockfile |
+| [consumer-projects.md](consumer-projects.md) | `init`, `assemblr.jsonc`, `add`, `remove`, `compose`, explicit and transitive dependencies, file contributions, reconciliation, conflict resolution, and the lockfile |
 | [open-contracts.md](open-contracts.md) | Register of unresolved contracts |
 
 ## Glossary
@@ -126,6 +126,4 @@ Details that are still open are listed in
 | **Explicit selection** | A unit declared in a consumer project's `dependencies`. |
 | **Transitive dependency** | A unit present in a composition only because another unit requires it. |
 | **Reconciliation base** | The previously materialized composition of a consumer project, used with the **current** files and the **incoming** composition for three-way reconciliation. Distinct from an amendment's base. |
-| **Derived file** | A file in a consumer project that Assemblr keeps managing and reconciling across compositions. |
-| **Scaffold file** | A file in a consumer project that composition creates and that the consumer owns afterward. |
 | **Pending-resolution state** | The explicit state of a consumer project whose composition stopped on unresolved conflicts, until it is continued or aborted. |
