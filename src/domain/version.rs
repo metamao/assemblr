@@ -1,0 +1,186 @@
+//! Exact unit versions and dependency version requirements.
+//!
+//! Both follow SemVer. Requirements use Cargo's requirement semantics, the
+//! provisional Alpha default while the range dialect is open (OC-15). The
+//! `semver` crate stays an implementation detail so the dialect can change
+//! without changing this API.
+
+use std::fmt;
+use std::str::FromStr;
+
+/// An exact SemVer version, such as `1.2.3` or `2.0.0-beta.1`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Version(semver::Version);
+
+impl Version {
+    /// Parses an exact SemVer version. Surrounding whitespace and a `v`
+    /// prefix are rejected, not stripped.
+    pub fn parse(input: &str) -> Result<Self, VersionError> {
+        semver::Version::parse(input)
+            .map(Self)
+            .map_err(|error| VersionError {
+                input: input.to_owned(),
+                reason: error.to_string(),
+            })
+    }
+}
+
+impl FromStr for Version {
+    type Err = VersionError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        Self::parse(input)
+    }
+}
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A string that is not an exact SemVer version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionError {
+    input: String,
+    reason: String,
+}
+
+impl VersionError {
+    /// The rejected input, exactly as given.
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+}
+
+impl fmt::Display for VersionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid version {:?}: {}; expected an exact SemVer version such as \"1.2.3\"",
+            self.input, self.reason
+        )
+    }
+}
+
+impl std::error::Error for VersionError {}
+
+/// A SemVer requirement on a dependency's version, such as `^2.1.0` or
+/// `>=1.2, <1.5`.
+///
+/// A bare version such as `1.2.3` means `^1.2.3`, as in Cargo.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VersionRequirement(semver::VersionReq);
+
+impl VersionRequirement {
+    /// Parses a requirement using Cargo's requirement syntax.
+    pub fn parse(input: &str) -> Result<Self, RequirementError> {
+        semver::VersionReq::parse(input)
+            .map(Self)
+            .map_err(|error| RequirementError {
+                input: input.to_owned(),
+                reason: error.to_string(),
+            })
+    }
+}
+
+impl FromStr for VersionRequirement {
+    type Err = RequirementError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        Self::parse(input)
+    }
+}
+
+impl fmt::Display for VersionRequirement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A string that is not a valid version requirement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequirementError {
+    input: String,
+    reason: String,
+}
+
+impl RequirementError {
+    /// The rejected input, exactly as given.
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+}
+
+impl fmt::Display for RequirementError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid version requirement {:?}: {}; expected a SemVer requirement such as \"^1.2.0\"",
+            self.input, self.reason
+        )
+    }
+}
+
+impl std::error::Error for RequirementError {}
+
+#[cfg(test)]
+mod tests {
+    use super::{Version, VersionRequirement};
+
+    #[test]
+    fn exact_versions_parse_and_round_trip() {
+        for input in ["0.1.0", "1.2.3", "2.0.0-beta.1", "1.0.0+build.5"] {
+            assert_eq!(Version::parse(input).unwrap().to_string(), input);
+        }
+    }
+
+    #[test]
+    fn versions_that_are_not_exact_semver_are_rejected() {
+        for input in [
+            "", "1", "1.0", "v1.0.0", " 1.0.0", "1.0.0 ", "01.0.0", "^1.0.0",
+        ] {
+            let error = Version::parse(input).unwrap_err();
+            assert_eq!(error.input(), input);
+            assert!(
+                error.to_string().contains("exact SemVer version"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn versions_order_by_semver_precedence() {
+        let mut versions: Vec<Version> = ["1.10.0", "1.2.0", "1.2.0-beta.1", "0.9.9"]
+            .iter()
+            .map(|input| input.parse().unwrap())
+            .collect();
+        versions.sort();
+        let ordered: Vec<String> = versions.iter().map(ToString::to_string).collect();
+        assert_eq!(ordered, ["0.9.9", "1.2.0-beta.1", "1.2.0", "1.10.0"]);
+    }
+
+    #[test]
+    fn requirements_use_cargo_syntax() {
+        for (input, canonical) in [
+            ("^2.1.0", "^2.1.0"),
+            ("1.2.3", "^1.2.3"),
+            ("~1", "~1"),
+            ("=1.0.0", "=1.0.0"),
+            (">=1.2, <1.5", ">=1.2, <1.5"),
+            ("*", "*"),
+        ] {
+            let requirement = VersionRequirement::parse(input).unwrap();
+            assert_eq!(requirement.to_string(), canonical, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_requirements_are_rejected() {
+        for input in ["", "v1.0.0", "^", "1.0.0.0", "latest"] {
+            let error = VersionRequirement::parse(input).unwrap_err();
+            assert_eq!(error.input(), input);
+            assert!(error.to_string().contains("SemVer requirement"), "{error}");
+        }
+    }
+}

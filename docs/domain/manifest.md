@@ -80,10 +80,56 @@ fixed (**OC-45**), so that definition is elided:
 Open:
 
 - The property names and type spellings inside a parameter definition.
-  **OC-45.**
+  **OC-45.** A provisional default is described below.
 - How an option value mapped from the unit's own parameter is written.
   **OC-39.**
 - Amendment declarations (**OC-2**) and list identity hints (**OC-4**).
+
+## Parameter definitions and manifest text — Recommended (provisional)
+
+The owner has accepted these defaults for Alpha. The related entries stay open
+until the owner settles them: **OC-45**, **OC-50**, and **OC-51**.
+
+A parameter definition has these properties:
+
+| Property | Required | Value |
+|----------|----------|-------|
+| `type` | Yes | `"string"`, `"integer"`, or `"boolean"` |
+| `description` | Yes | A string that is not empty or only whitespace |
+| `default` | No | A JSON value of the parameter's type. Its presence makes the parameter optional. |
+| `allowed` | No | Only with `"type": "string"`, which makes the parameter an enumerated string. A non-empty array of strings with no duplicates. |
+
+```jsonc
+{
+  "params": {
+    "appName": { "type": "string", "description": "The application name." },
+    "port": { "type": "integer", "description": "Local port.", "default": 8080 },
+    "packageManager": {
+      "type": "string",
+      "description": "The package manager.",
+      "allowed": ["npm", "pnpm", "bun"],
+      "default": "pnpm"
+    }
+  }
+}
+```
+
+Other provisional rules:
+
+- **Parameter names** start with an ASCII letter and continue with ASCII
+  letters, digits, or underscores, such as `appName` or `node_compat`. Names
+  stay usable in any template syntax chosen later (OC-5), and the rule can be
+  widened compatibly. **OC-50.**
+- **JSONC.** Comments (`//` and `/* */`) and trailing commas after a value are
+  accepted, as in common JSONC tooling. Other JSON5 extensions, such as
+  single-quoted strings, unquoted keys, and hexadecimal numbers, are rejected.
+  **OC-51.**
+- **Duplicate keys** in any object are rejected rather than silently resolved.
+  **OC-51.**
+- **Integers** are 64-bit signed. A fraction, an exponent, or an integer
+  outside that range is not an integer. **OC-51.**
+- **Descriptions**, of the unit and of each parameter, must not be empty or
+  only whitespace. **OC-51.**
 
 ## Validation — Approved
 
