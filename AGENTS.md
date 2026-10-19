@@ -284,3 +284,11 @@ rules apply whether or not the hosting platform enforces them.
 - **Releases** are `vX.Y.Z` tags of Assemblr itself on `main`, created by
   the owner. Agents do not create or push release tags. They are unrelated to
   the `v<version>` tags that units use for publication.
+- **Implementation progress is tracked on GitHub**, not in this repository.
+  The umbrella issue [#9](https://github.com/metamao/assemblr/issues/9) holds
+  the trajectory and links each increment's issue. To find the next task, run
+  `gh issue view 9` and take the first open sub-issue with no open blocker.
+  `gh pr list` shows work in progress. Name the branch after the issue, for
+  example `feat/6-unit-manifest`, and close the issue from the pull request
+  with `Closes #N`. GitHub tracks execution only: contracts stay in
+  `docs/domain/` and engineering decisions in `docs/adr/`.
