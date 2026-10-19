@@ -8,6 +8,10 @@ repository.
 - The manifest format is **JSONC**: JSON with comments.
 - The manifest is the source of the unit's identity, version, description,
   dependencies, parameters, dependency options, and amendment declarations.
+- A consumer project declares its composition in `assemblr.jsonc`, which
+  deliberately reuses the manifest's `dependencies` and `options` semantics but
+  is not a unit manifest (see
+  [consumer-projects.md](consumer-projects.md#project-configuration--approved)).
 
 ## Vocabulary — Approved
 
@@ -30,8 +34,9 @@ Established semantics vs pending syntax:
 - The **serialization** of `dependencies`, `params`, and `options` (key shapes,
   nesting, value encodings) is not final. Examples in these documents are
   **Conceptual**. Finalizing it is part of the manifest schema contract, which
-  includes **OC-2** (amendments), **OC-4** (list identity hints), and **OC-22**
-  (parameter requiredness and default rules).
+  includes **OC-2** (amendments), **OC-4** (list identity hints), **OC-22**
+  (parameter requiredness and default rules), and **OC-39** (mapping option
+  values from the unit's own parameters).
 - The **amendment declaration field name and syntax** are **Open (OC-2)**. Do
   not treat earlier experimental syntax, such as `extends` or a `merges`
   field, as canonical.

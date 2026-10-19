@@ -15,8 +15,8 @@ An author should be able to:
    repository directly or through a catalog.
 
 Reusing and evolving units in consumer projects, without needlessly destroying
-consumer modifications, is the larger goal. That workflow is reserved
-(**OC-1**).
+consumer modifications, is the larger goal. That workflow is described in
+[consumer-projects.md](consumer-projects.md).
 
 ## Commands — Conceptual
 
@@ -97,7 +97,9 @@ Open:
 
 - manifest validity;
 - identity and version validity;
-- parameter and options consistency;
+- parameter and options consistency, including that the required parameters
+  of every dependency are satisfied (see
+  [parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved));
 - dependency resolution;
 - amendment validity and availability of each historical base;
 - merge validity;
@@ -217,14 +219,18 @@ tag version must match the manifest version at the tagged commit exactly (see
 
 1. validates the manifest and identity;
 2. resolves and verifies dependencies and amendments;
-3. runs **all** mandatory Assemblr-native checks;
-4. rejects effectively empty or redundant units;
-5. requires a **committed, clean** Git state;
-6. verifies the declared SemVer version;
-7. rejects a version that is **already published**;
-8. creates or validates the corresponding Git tag, `v<manifest.version>`;
-9. ensures the tag references **exactly the validated content**;
-10. preserves the immutability and traceability of published versions.
+3. verifies that the required parameters of its dependencies, including
+   transitive ones, are satisfied by defaults, its `options`, or mappings from
+   its own parameters (see
+   [parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved));
+4. runs **all** mandatory Assemblr-native checks;
+5. rejects effectively empty or redundant units;
+6. requires a **committed, clean** Git state;
+7. verifies the declared SemVer version;
+8. rejects a version that is **already published**;
+9. creates or validates the corresponding Git tag, `v<manifest.version>`;
+10. ensures the tag references **exactly the validated content**;
+11. preserves the immutability and traceability of published versions.
 
 The author must verify the functional build before publishing. Assemblr does
 not infer or certify that verification. No approval token or extra

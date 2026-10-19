@@ -1,6 +1,7 @@
 # 0004: Registry validation, synchronization, and offline reads
 
-- **Status:** Accepted
+- **Status:** Accepted. Amended by
+  [0005](0005-catalog-metadata-index.md).
 - **Date:** 2026-10-18
 
 ## Context

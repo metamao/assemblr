@@ -59,17 +59,38 @@ as direct ones.
 
 Open:
 
-- The policy for choosing among several versions that satisfy all ranges (for
-  example, the highest compatible version). Whatever policy is chosen, it must
-  be deterministic. **OC-16.**
+- Which version is chosen for a newly incorporated unit when several satisfy
+  every requirement. Whatever policy is chosen, it must be deterministic.
+  **OC-16.**
 - The SemVer range dialect, and pre-release and build metadata handling.
   **OC-15.**
 - The lock-state file format and location. **OC-8.**
 
-## Version selection — Recommended (provisional)
+## Version selection — Approved
+
+In a consumer project, an operation that changes the composition's
+requirements, such as `add` (see
+[consumer-projects.md](consumer-projects.md#version-resolution--approved)),
+follows the policy of **minimal necessary updates**:
+
+- Locked versions that remain compatible are reused.
+- Newly incorporated units get compatible **stable** published versions.
+- A previously locked unit is upgraded only when the new constraints require
+  it.
+- Explicit requirements and pins are respected.
+- Each unit identity keeps a single effective version.
+- An unsatisfiable composition is rejected. A conflicting version is never
+  chosen silently.
+- Every dependency version changed as a consequence of the operation is
+  explained.
+
+Explicit update operations are distinct from these minimal changes (see
+[Explicit updates](#explicit-updates--approved)).
+
+### Recommended (provisional)
 
 Until the resolver contract is finalized (**OC-15**, **OC-16**), the owner has
-accepted this default policy for Alpha:
+accepted these defaults for Alpha:
 
 - When existing locked resolutions satisfy every requirement, they are
   preserved.
@@ -79,11 +100,10 @@ accepted this default policy for Alpha:
 - Cargo-like SemVer requirement semantics are the starting point for the range
   dialect.
 
-The approved rules above still apply: unsatisfiable constraints are reported,
-and an incompatible version is never chosen silently.
-
 ## Explicit updates — Approved
 
 A dependency is never updated just because a newer version becomes available.
 Updating is an explicit author action (see
-[authoring-workflow.md](authoring-workflow.md#update--approved)).
+[authoring-workflow.md](authoring-workflow.md#update--approved)). Consumer
+projects keep the same principle. Their explicit update operations are not yet
+defined (**OC-38**).

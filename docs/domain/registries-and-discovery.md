@@ -9,8 +9,9 @@ Alpha**.
 This model replaces the earlier Local Directory and Local Git registry
 modalities (see [Superseded model](#superseded-model-non-normative)). The
 engineering mechanisms behind it are recorded in
-[ADR 0003](../adr/0003-managed-local-registry.md) and
-[ADR 0004](../adr/0004-registry-validation-and-synchronization.md).
+[ADR 0003](../adr/0003-managed-local-registry.md),
+[ADR 0004](../adr/0004-registry-validation-and-synchronization.md), and
+[ADR 0005](../adr/0005-catalog-metadata-index.md).
 
 ## The local registry — Approved
 
@@ -117,7 +118,12 @@ include:
 - agreement between published Git tags and manifest versions;
 - the integrity of published artifacts;
 - conflicts with sources that are already registered;
-- internal inconsistencies within a catalog.
+- internal inconsistencies within a catalog, including its
+  [metadata index](#catalog-metadata-index--approved).
+
+For catalog-managed units, these checks apply to the catalog's generated
+metadata to the extent described in
+[Metadata ingestion and trust](#metadata-ingestion-and-trust--approved).
 
 Rules:
 
@@ -206,12 +212,19 @@ contents.
 - A referenced unit's manifest must declare **exactly** the identity the
   catalog declares for it. The manifest remains authoritative, and a catalog
   never overrides it.
-- A catalog does **not** duplicate unit versions, dependencies, parameters, or
-  content hashes. It does not pin unit versions.
+- `registry.jsonc` does **not** duplicate unit versions, dependencies,
+  parameters, or content hashes, and it does not pin unit versions. The
+  metadata consumers need is published separately, in a generated
+  [metadata index](#catalog-metadata-index--approved). Indexing adds no fields
+  to `registry.jsonc`, and its references stay plain strings.
 - A catalog does not contain the unit repositories or embed their source
   trees, and it does not require Git submodules.
 - Each unit keeps its own repository, manifest, Git tags, and publication
   lifecycle. Unit repositories may be private.
+- A unit does **not** need to belong to a catalog. It may be registered
+  individually, referenced by one catalog, or referenced by several. Catalogs
+  are an organization and discovery mechanism, not a prerequisite for
+  authoring or publishing a unit.
 - A catalog needs no SemVer version and no unit-style release publication.
 - A catalog can be shared or cloned onto other machines.
 - `registry create` initializes a new catalog. Entries may be edited directly
@@ -224,6 +237,67 @@ Open:
   reads for a local catalog, and how uncommitted local catalog changes are
   treated; and how identical references are recognized when relative
   references come from different catalogs. **OC-32.**
+
+## Catalog metadata index — Approved
+
+A catalog publishes an **Assemblr-generated metadata index**, derived from the
+units its `registry.jsonc` declares and from their published manifests. It
+gives consumers and tooling the information they need without the complete
+unit sources.
+
+For each published version of each declared unit, the index describes:
+
+- the unit identity and description;
+- the exact version;
+- its published Git provenance;
+- its dependency requirements;
+- its parameters, with types, descriptions, allowed values, and defaults;
+- the information required for version resolution, validation, and integrity
+  checks.
+
+Rules:
+
+- The unit's historical `manifest.jsonc` remains **authoritative**. The index is
+  a generated, derived artifact, and it is not edited by hand.
+- The index is regenerated **deterministically**: the same declared sources and
+  published history produce the same index.
+- Units outside any catalog need no index. Assemblr obtains their metadata
+  directly (see [Metadata ingestion and trust](#metadata-ingestion-and-trust--approved)).
+
+### Catalog refresh — Approved
+
+Conceptual command (grammar not final, **OC-7**):
+
+```text
+assemblr catalog refresh
+```
+
+Catalog refresh is a **catalog maintenance** operation, not part of consumer
+composition. It:
+
+1. inspects the Git sources the catalog declares;
+2. discovers their published unit versions;
+3. retrieves and validates their manifests;
+4. regenerates the catalog metadata index deterministically;
+5. reports invalid sources and inconsistent declarations.
+
+The catalog maintainer invokes refresh and publishes the refreshed index.
+Refresh is suitable for automation, but Assemblr operates **no** mandatory
+central service. A maintainer may refresh manually, from CI after changing
+`registry.jsonc`, on a schedule, or when notified by a unit's publication
+workflow. The maintainer chooses the mechanism.
+
+- Publishing a new unit version does not modify the catalogs that reference
+  the unit. Nothing runs in a catalog's repository merely because another
+  repository published a tag.
+- No webhooks, back-references from units to catalogs, or central coordination
+  service are required. No provider-specific workflow is required in Alpha.
+
+Open:
+
+- The index's file name, serialization format, storage location, and hash
+  representation; whether a catalog without a published index can be
+  registered; and how refresh reports partial failures. **OC-40.**
 - The syntax rules for the `@owner/name` segments, shared with unit identities.
   **OC-14.**
 
@@ -239,15 +313,21 @@ assemblr registry sync
 
 1. obtains changes from the registered Git sources;
 2. inspects catalog changes, including added, removed, or modified unit
-   references;
-3. discovers newly published unit versions through Git tags;
+   references, and the catalog's published metadata index;
+3. discovers newly published unit versions: through Git tags for
+   individually registered units, and through the catalog's metadata index for
+   catalog-managed units;
 4. validates identities, manifests, tags, content integrity, and source
-   conflicts;
+   conflicts (see
+   [Metadata ingestion and trust](#metadata-ingestion-and-trust--approved));
 5. commits the resulting local registry index **atomically**, only after that
    validation succeeds.
 
 A single synchronization discovers newly added catalog entries **and** the
-published versions of the units they reference.
+published versions of the units they reference. A newly published version of a
+catalog-managed unit becomes discoverable through the catalog once the
+catalog's metadata index has been refreshed and published (see
+[Catalog refresh](#catalog-refresh--approved)).
 
 Rules:
 
@@ -279,11 +359,63 @@ Open:
   synchronization can target individual sources. **OC-33.**
 - Which revision is read for a local catalog, and how uncommitted local
   catalog changes are treated. **OC-32.**
+- How the index update of `unit publish` and the discovery of individually
+  registered units interact with versions a catalog's index does not yet list.
+  **OC-33.**
+
+## Metadata ingestion and trust — Approved
+
+`registry add` and `registry sync` build the local index from:
+
+- the generated metadata indexes of registered catalogs; and
+- the metadata of individually registered units, which Assemblr obtains
+  directly from their repositories.
+
+Both produce the **same metadata model**, whichever way a unit was registered.
+
+Catalog-generated metadata is **untrusted input**. It is not trusted merely
+because it exists. Assemblr validates its structure, identities, provenance,
+internal consistency, and correspondence with the authoritative published unit
+data, to the extent the source-trust guarantees of this document require. The
+source-conflict and validation policies above apply unchanged.
+
+Efficient metadata-only ingestion and strong independent verification against
+remote Git sources are in tension. Neither extreme is acceptable: Assemblr
+neither trusts arbitrary catalog metadata without verification, nor downloads
+the full sources of every unit during each ordinary registry operation.
+
+Open:
+
+- The verification and caching strategy that meets these guarantees. **OC-41.**
+
+## Metadata and content — Approved
+
+Assemblr distinguishes three levels of information:
+
+1. **Source declarations**: catalog `registry.jsonc` entries and registered
+   unit references.
+2. **Validated unit metadata**: the local registry index.
+3. **Complete unit content**: the files of a published version.
+
+- Discovery and inspection work primarily from metadata.
+- Complete unit content is retrieved and cached when actual composition
+  requires it. It is not downloaded indiscriminately when a catalog is
+  registered.
+- Metadata is reused incrementally. Queries do not require repeatedly cloning
+  complete repositories.
+
+Open:
+
+- Which operations retrieve unit content on demand, and how that retrieval
+  relates to the rule that ordinary reads and authoring operations never fetch
+  implicitly; and the Git partial-fetch and caching mechanisms. **OC-42.**
 
 ## Index freshness and fetching — Approved
 
 The registry index is read **offline**. Remote changes are obtained
 explicitly, through registration and synchronization.
+[Catalog refresh](#catalog-refresh--approved) also reads remote sources, to
+regenerate a catalog's metadata index.
 
 - `unit publish` updates the local registry index automatically when the unit
   is **already registered**. It never registers a previously unknown unit, and
@@ -297,6 +429,9 @@ explicitly, through registration and synchronization.
   implicitly.
 - If a required published version is not available locally, Assemblr reports
   that synchronization is needed.
+- When the local index is missing or may be stale for a request, diagnostics
+  state that limitation and direct the user to synchronization where
+  appropriate.
 
 ## Integrity and snapshots — Approved
 
@@ -308,7 +443,7 @@ Assemblr distinguishes these kinds of state, which serve different purposes:
 | **Published version** | A `v<version>` tag in the unit repository | Immutable once published. |
 | **Registry index** | Validated, discoverable metadata about registered sources, their units, and their published versions, including the exact catalog commit it was built from | Changed only by explicit registry operations and by the index update of `unit publish`. Never partially updated by a failed registration or synchronization. |
 | **Snapshot** | A fixed, identifiable copy of a unit's content at a resolved version, with its Git provenance | Immutable historical state, needed for composition, amendments, and reconciliation. |
-| **Lock state** | The exact resolved versions, sources, and content identities of a composition | Independent of registry synchronization. Preserves a resolution until it is changed explicitly. |
+| **Lock state** | The exact resolved versions, sources, and content identities of a composition. For a consumer project, also the identity of its reconciliation base (see [consumer-projects.md](consumer-projects.md#lock-and-reconciliation-state--approved)). | Independent of registry synchronization. Preserves a resolution until it is changed explicitly. |
 
 **Catalog revision tracking** and **historical artifact preservation** are
 different things. The recorded catalog commit explains which inventory of
@@ -368,10 +503,14 @@ commands solely for adding or removing individual catalog entries: entries are
 edited in `registry.jsonc` and validated through registration or
 synchronization.
 
+Catalog maintenance adds one conceptual operation outside this table,
+[catalog refresh](#catalog-refresh--approved).
+
 Open:
 
 - Exact grammar, arguments, and flags; how `registry info` relates to the
-  top-level `info` command; and what `registry doctor` does beyond diagnosis.
+  top-level `info` command; what `registry doctor` does beyond diagnosis; and
+  how catalog operations (`registry create`, catalog refresh) are grouped.
   **OC-7.**
 
 ## Discovery and information — Approved
@@ -395,7 +534,7 @@ assemblr info @metamao/cloudflare-worker --json
 
 `info` describes:
 
-- identity and version;
+- identity and version, and the unit's published versions;
 - the unit description;
 - public parameters, with descriptions, types, requiredness, and defaults;
 - allowed values;
@@ -405,6 +544,12 @@ assemblr info @metamao/cloudflare-worker --json
 
 Human-readable and machine-readable output are derived from the **same domain
 information**. Neither is a separately maintained view.
+
+The same indexed metadata supports agent-facing validation and diagnostics,
+for example when a consumer composition is missing a required parameter (see
+[consumer-projects.md](consumer-projects.md#parameters-and-non-interactive-operation--approved)),
+and editing assistance for `assemblr.jsonc` (see
+[consumer-projects.md](consumer-projects.md#editing-assistance--approved-direction-details-open)).
 
 Not in Alpha:
 
@@ -448,7 +593,7 @@ engineering side.
   historical state. Historical snapshots are not garbage-collected
   automatically in Alpha.
 - **Version selection.** See
-  [dependencies.md](dependencies.md#version-selection--recommended-provisional).
+  [dependencies.md](dependencies.md#version-selection--approved).
 
 ## Superseded model (non-normative)
 

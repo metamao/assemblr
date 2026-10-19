@@ -127,37 +127,21 @@ For unit authoring, composition output goes to `build/`, which is rebuilt from
 scratch and needs no reconciliation history (see
 [authoring-workflow.md](authoring-workflow.md#build--approved)).
 
-The same conceptual mechanism could reconcile downstream modifications using
-three inputs: **base** (previous generated output), **current** (the current
-file), and **incoming** (the newly generated composition). This direction is
-supported by research. Its application to consumer projects belongs to the
-reserved consumer-project domain (**OC-1**).
+Consumer projects reconcile downstream modifications with three inputs: the
+**reconciliation base** (the previously materialized composition), **current**
+(the consumer's actual files), and **incoming** (the newly desired
+composition). The merge semantics above apply. See
+[consumer-projects.md](consumer-projects.md#reconciliation--approved).
 
 ## Evidence (non-normative)
 
-This section summarizes the research behind the direction above. It is
-evidence, not contract. The experimental implementations have **not**
-undergone production-quality engineering review and do not establish
-production readiness.
-
-### Experiments
-
-- An initial experiment investigated copying dependency files and merging them
-  textually.
-- A follow-up experiment compared textual, structural, and value-level merging.
-  It evaluated seven approaches on 56 representative scenarios drawn from real
-  catalog and template files, and on 800 randomized pairs.
-
-The strongest approach scored **53/56 acceptable outcomes** and
-**800/800 randomized pairs**. An *acceptable outcome* is a correct result, a
-correctly reported conflict, or explicitly reported unsupported residue. It
-does not necessarily mean the files were merged automatically.
-
-That approach used **full-file copies for authoring and value-level
-operations for composition and reconciliation**. It derived changes from a
-modified copy relative to its original, combined operations across
-contributors, checked expected previous values, and wrote results through
-format-aware adapters.
+Research experiments on copying, textual merging, structural merging, and
+value-level merging informed the principle and requirements above. They are
+historical evidence, not contract. Their comparative scores are **not**
+evidence for any production merge or reconciliation algorithm: a later audit
+found the headline comparison misleading. The experimental implementations
+have not undergone production-quality engineering review, and the production
+strategy is not decided (**OC-10**).
 
 ### Negative findings
 
