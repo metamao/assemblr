@@ -59,31 +59,19 @@ it as an open contract instead.
 
 ## Scope
 
-These documents cover the full lifecycle of **authoring, developing,
-maintaining, validating, and publishing units**, plus the local registry
-contracts needed to support that lifecycle: the CLI-managed registry,
-registration of unit repositories and catalogs, synchronization, and
-discovery.
+These documents cover:
 
-### Reserved: the consumer-project lifecycle
+- the full lifecycle of **authoring, developing, maintaining, validating, and
+  publishing units**;
+- the **local registry**: the CLI-managed registry, registration of unit
+  repositories and catalogs, catalog metadata indexes, synchronization, and
+  discovery;
+- the **consumer-project lifecycle**: initializing a project, declaring its
+  composition in `assemblr.jsonc`, adding and removing units, composing, file
+  ownership, reconciliation, conflict resolution, and lock state.
 
-How consumer projects are created, how they persist compositions, how units are
-added, removed, or updated in them, how consumer-specific configuration is
-handled, and the consumer CLI UX are **intentionally not specified**. That
-domain is reserved for a future owner-led design discussion. These documents
-mention consumers only where unit authoring needs to.
-
-Two points are already approved:
-
-- `assemblr init` is explicit, and it is required before a project consumes
-  units.
-- `init` prepares only minimal Assemblr project configuration, conceptually an
-  `assemblr.jsonc` file. It does not generate application code, resolve or
-  install units, or modify existing application files.
-
-Lock and historical state may be created lazily, when needed. The project
-manifest schema, the lockfile layout, and the rest of the consumer lifecycle
-are not specified.
+Details that are still open are listed in
+[open-contracts.md](open-contracts.md).
 
 ## Documents
 
@@ -94,8 +82,9 @@ are not specified.
 | [parameters-and-options.md](parameters-and-options.md) | `params` (a unit's public configuration) and `options` (requirements on dependencies) |
 | [dependencies.md](dependencies.md) | Dependency declarations and resolution |
 | [amendments-and-composition.md](amendments-and-composition.md) | Amendments, template contexts, merge semantics, and supporting evidence |
-| [registries-and-discovery.md](registries-and-discovery.md) | The CLI-managed local registry, Git-based units, catalogs, registration, synchronization, immutability, removal, `search` and `info` |
+| [registries-and-discovery.md](registries-and-discovery.md) | The CLI-managed local registry, Git-based units, catalogs and their metadata indexes, registration, synchronization, immutability, removal, `search` and `info` |
 | [authoring-workflow.md](authoring-workflow.md) | `unit init`, `amend`, `check`, `build`, `update`, `publish`, and author responsibilities |
+| [consumer-projects.md](consumer-projects.md) | `init`, `assemblr.jsonc`, `add`, `remove`, `compose`, explicit and transitive dependencies, file ownership, reconciliation, conflict resolution, and the lockfile |
 | [open-contracts.md](open-contracts.md) | Register of unresolved contracts |
 
 ## Glossary
@@ -115,17 +104,28 @@ are not specified.
 | **Provenance** | The recorded origin of an amendment: the dependency, its exact version, and the file it was copied from. |
 | **Parameter** (`params`) | A declared, public configuration input of a unit that customizes file contents. |
 | **Option** (`options`) | A strict requirement that a unit imposes on a parameter of one of its dependencies. |
-| **Composition** | A unit together with its resolved dependency graph and their combined contributions. |
+| **Composition** | A unit, or a consumer project's explicit selections, together with the resolved dependency graph and their combined contributions. |
 | **Contribution** | What a unit adds beyond its dependencies: files, amendments, or meaningful configuration of dependencies. |
 | **Local registry** | The CLI-managed subsystem, global to the user's Assemblr installation, that records registered sources, their published versions, and discoverable metadata. |
 | **Registered source** | A unit repository or a catalog that has been explicitly registered and validated. |
-| **Catalog** | A Git repository, managed through the CLI, that declares a set of unit repositories by identity and Git source without containing them. |
-| **Catalog manifest** | The catalog's declarative manifest, provisionally `registry.jsonc`. |
-| **Registration** | Validating a source and adding it to the local registry. It never publishes. |
-| **Synchronization** | Explicitly refreshing the registry's knowledge of registered sources and their published versions. |
-| **Registry index** | The registry's discoverable, refreshable metadata about registered sources and versions. |
+| **Catalog** | A Git repository with an `@owner/name` identity, in a namespace separate from units, whose `registry.jsonc` maps unit identities to Git repository references. An inventory of sources: it contains no unit sources, and its hand-maintained declaration lists no unit versions. |
+| **Catalog manifest** | `registry.jsonc`, the catalog's declarative manifest: a `name` and a `units` map of identities to plain-string Git references. |
+| **Catalog metadata index** | The Assemblr-generated, derived metadata a catalog publishes about the published versions of the units it declares. Never edited by hand. Unit manifests remain authoritative. |
+| **Source** | The Git repository reference from which a unit is obtained. Different references are never assumed to denote the same repository. |
+| **Registration** | Validating an untrusted source and adding it to the local registry, atomically. It never publishes. |
+| **Synchronization** | Explicitly refreshing registered catalogs and units, validating the complete result, and replacing the index only if it is valid. |
+| **Registry index** | The registry's validated, discoverable metadata about registered sources, units, and published versions. Read offline. |
+| **Integrity conflict** | Different content for the same unit identity and published version. |
 | **Snapshot** | A fixed, identifiable copy of a unit's content at a resolved version, with its Git provenance. |
-| **Lock state** | The record of the exact resolved versions (and their sources and content identity) used for a composition. |
+| **Lock state** | The record of the exact resolved versions (and their sources and content identity) used for a composition. In a consumer project it is kept in a CLI-managed lockfile. |
 | **Build directory** | `build/`, the Assemblr-owned, disposable directory where `unit build` writes a composed result. |
 | **Options conflict** | Two incompatible explicit option requirements on the same dependency parameter. |
 | **Merge conflict** | Incompatible changes from several contributors to the same file content. |
+| **Consumer project** | A software project composed from units, initialized with `assemblr init`. The final consumer of units. |
+| **Project configuration** | `assemblr.jsonc`, the editable declaration of a consumer project's desired composition: its explicit `dependencies` and their `options`. |
+| **Explicit selection** | A unit declared in a consumer project's `dependencies`. |
+| **Transitive dependency** | A unit present in a composition only because another unit requires it. |
+| **Reconciliation base** | The previously materialized composition of a consumer project, used with the **current** files and the **incoming** composition for three-way reconciliation. Distinct from an amendment's base. |
+| **Derived file** | A file in a consumer project that Assemblr keeps managing and reconciling across compositions. |
+| **Scaffold file** | A file in a consumer project that composition creates and that the consumer owns afterward. |
+| **Pending-resolution state** | The explicit state of a consumer project whose composition stopped on unresolved conflicts, until it is continued or aborted. |

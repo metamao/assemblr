@@ -111,10 +111,17 @@ Unit file contents may be customized by the unit's parameters through template
 interpolation. Parameters never change file paths or file existence (see
 [parameters-and-options.md](parameters-and-options.md#what-parameters-must-not-do--approved)).
 
+Consumer projects distinguish derived and scaffold files by **ownership in the
+consumer project** (see
+[consumer-projects.md](consumer-projects.md#file-ownership--approved)). That
+distinction is not an author-facing file class.
+
 Open:
 
 - What happens when a `src/` file has the same path as a file a dependency
   provides. **OC-18.**
+- What determines a contributed file's ownership category in a consumer
+  project. **OC-34.**
 
 ### `amendments/`: modified dependency files
 

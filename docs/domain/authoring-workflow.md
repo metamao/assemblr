@@ -15,8 +15,8 @@ An author should be able to:
    repository directly or through a catalog.
 
 Reusing and evolving units in consumer projects, without needlessly destroying
-consumer modifications, is the larger goal. That workflow is reserved
-(**OC-1**).
+consumer modifications, is the larger goal. That workflow is described in
+[consumer-projects.md](consumer-projects.md).
 
 ## Commands — Conceptual
 
@@ -97,7 +97,9 @@ Open:
 
 - manifest validity;
 - identity and version validity;
-- parameter and options consistency;
+- parameter and options consistency, including that the required parameters
+  of every dependency are satisfied (see
+  [parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved));
 - dependency resolution;
 - amendment validity and availability of each historical base;
 - merge validity;
@@ -126,7 +128,15 @@ Its purpose is to give the author a real, inspectable, consumer-like result.
 
 `unit build` is an **authoring** operation. It composes the author's editable
 working tree, so the author can develop and build without publishing every
-change. It is not consumption of a published version.
+change. It is not consumption of a published version. The unit's
+**dependencies**, however, always resolve to **published versions** available
+through the registry, never to another unit's working tree (see
+[dependencies.md](dependencies.md#resolution--approved)).
+
+`unit check`, `unit build`, and `unit update` never fetch remote changes
+implicitly. If a required published version is not available locally,
+Assemblr reports that synchronization is needed (see
+[registries-and-discovery.md](registries-and-discovery.md#index-freshness-and-fetching--approved)).
 
 Rules:
 
@@ -155,8 +165,6 @@ Open:
 - Exactly which `check` validations apply to `build`, for example whether the
   effective-contribution check, which gates publication, also gates build.
   **OC-28.**
-- Whether a unit under development may resolve a dependency to another unit's
-  unpublished working tree. **OC-30.**
 
 ## Update — Approved
 
@@ -211,26 +219,37 @@ tag version must match the manifest version at the tagged commit exactly (see
 
 1. validates the manifest and identity;
 2. resolves and verifies dependencies and amendments;
-3. runs **all** mandatory Assemblr-native checks;
-4. rejects effectively empty or redundant units;
-5. requires a **committed, clean** Git state;
-6. verifies the declared SemVer version;
-7. rejects a version that is **already published**;
-8. creates or validates the corresponding Git tag, `v<manifest.version>`;
-9. ensures the tag references **exactly the validated content**;
-10. preserves the immutability and traceability of published versions.
+3. verifies that the required parameters of its dependencies, including
+   transitive ones, are satisfied by defaults, its `options`, or mappings from
+   its own parameters (see
+   [parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved));
+4. runs **all** mandatory Assemblr-native checks;
+5. rejects effectively empty or redundant units;
+6. requires a **committed, clean** Git state;
+7. verifies the declared SemVer version;
+8. rejects a version that is **already published**;
+9. creates or validates the corresponding Git tag, `v<manifest.version>`;
+10. ensures the tag references **exactly the validated content**;
+11. preserves the immutability and traceability of published versions.
 
 The author must verify the functional build before publishing. Assemblr does
 not infer or certify that verification. No approval token or extra
 functional-test declaration is required.
 
-Publication does not register the unit. Registration is a separate registry
-operation, and registering never publishes.
+Publication and the registry:
+
+- If the unit is **already registered**, `unit publish` updates the local
+  registry index automatically, so the new version is discoverable without a
+  `registry sync`.
+- Publication never registers a previously unknown unit. Registration is a
+  separate registry operation, and registering never publishes.
+- If publication succeeds but the index update fails, Assemblr reports that
+  partial outcome explicitly. The published tag stands, and `registry sync`
+  recovers the index.
 
 Publishing locally is distinct from **pushing** to a remote Git server.
-**Recommended (provisional):** `unit publish` establishes the published
-version locally and never pushes tags or commits as a side effect. Pushing is
-an explicit, separate operation.
+`unit publish` establishes the published version locally and **never pushes**
+commits or tags as a side effect. Pushing is an explicit, separate operation.
 
 Open:
 

@@ -1,6 +1,7 @@
 # 0003: Managed local registry with Git-based units
 
 - **Status:** Accepted. The mechanisms below are provisional defaults.
+  Amended by [0004](0004-registry-validation-and-synchronization.md).
 - **Date:** 2026-10-18
 
 ## Context
@@ -94,8 +95,12 @@ candidates when the registry is implemented, under ADR 0002's policy.
   sources must not run commands configured by the source (AGENTS.md §5).
 - Without automatic cleanup, historical storage grows until a retention policy
   is decided, after the consumer reconciliation and lock contracts (OC-1,
-  OC-8).
+  OC-8). OC-1 has since been resolved by
+  [`consumer-projects.md`](../domain/consumer-projects.md). Retention remains
+  open under OC-8.
 - Several product details remain open, for example development dependencies
   on unpublished units (OC-30), freshness outside synchronization (OC-31), the
   catalog schema (OC-32), and synchronization granularity and removal effects
-  (OC-33). See [open-contracts.md](../domain/open-contracts.md).
+  (OC-33). See [open-contracts.md](../domain/open-contracts.md). OC-30 and
+  OC-31 have since been resolved, and OC-32 and OC-33 narrowed (see
+  [ADR 0004](0004-registry-validation-and-synchronization.md)).

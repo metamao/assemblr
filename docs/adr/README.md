@@ -19,4 +19,6 @@ belong in [`docs/domain/`](../domain/), not here.
 |-----|-------|--------|
 | [0001](0001-architecture.md) | Functional core, imperative shell in one Cargo package | Accepted |
 | [0002](0002-toolchain-and-dependencies.md) | Toolchain, MSRV, and dependency policy | Accepted |
-| [0003](0003-managed-local-registry.md) | Managed local registry with Git-based units | Accepted (provisional mechanisms) |
+| [0003](0003-managed-local-registry.md) | Managed local registry with Git-based units | Accepted (provisional mechanisms), amended by 0004 |
+| [0004](0004-registry-validation-and-synchronization.md) | Registry validation, synchronization, and offline reads | Accepted, amended by 0005 |
+| [0005](0005-catalog-metadata-index.md) | Catalog metadata index and metadata-first registry | Accepted |

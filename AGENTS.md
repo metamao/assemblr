@@ -35,8 +35,9 @@ Rules:
   authority. Do not adopt their code, specifications, syntax (such as
   `extends`, `merges`, `fragments`, or `derived`/`scaffold` file classes), or
   tests unless `docs/domain/` adopts them explicitly.
-- The consumer-project lifecycle is **reserved** (OC-1). Do not design or
-  implement it without an owner decision.
+- The consumer-project lifecycle is specified in
+  [`consumer-projects.md`](docs/domain/consumer-projects.md). Its open details
+  are tracked in the register and must not be implemented by assumption.
 - When approved semantics change, update `docs/domain/` in the same change as
   the code.
 
