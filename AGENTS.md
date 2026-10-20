@@ -277,6 +277,11 @@ rules apply whether or not the hosting platform enforces them.
 - **The owner reviews and merges.** Agents never merge pull requests,
   including their own. Changes to `docs/domain/` need the owner's explicit
   approval.
+- Automated review (`claude-review.yml`) is advisory. Fix valid findings,
+  reply with evidence to findings you believe are wrong, and escalate open
+  domain decisions to the owner. Never ignore a significant finding silently,
+  and do not repeat an argument without new evidence: when a disagreement does
+  not converge, leave it to the owner.
 - Merge only when CI is green. Pull requests are squash-merged, so each lands
   on `main` as one commit, and the branch is deleted after merging.
 - Commit messages have an imperative subject of about 72 characters or fewer,
@@ -284,3 +289,11 @@ rules apply whether or not the hosting platform enforces them.
 - **Releases** are `vX.Y.Z` tags of Assemblr itself on `main`, created by
   the owner. Agents do not create or push release tags. They are unrelated to
   the `v<version>` tags that units use for publication.
+- **Implementation progress is tracked on GitHub**, not in this repository.
+  The umbrella issue [#9](https://github.com/metamao/assemblr/issues/9) holds
+  the trajectory and links each increment's issue. To find the next task, run
+  `gh issue view 9` and take the first open sub-issue with no open blocker.
+  `gh pr list` shows work in progress. Name the branch after the issue, for
+  example `feat/6-unit-manifest`, and close the issue from the pull request
+  with `Closes #N`. GitHub tracks execution only: contracts stay in
+  `docs/domain/` and engineering decisions in `docs/adr/`.
