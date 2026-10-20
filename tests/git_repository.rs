@@ -961,3 +961,35 @@ fn oversized_commits_and_root_trees_are_invalid_versions() {
         "{message}"
     );
 }
+
+#[test]
+fn repositories_open_by_relative_path() {
+    let repo = Repo::new(&scratch("relative_path"));
+    let commit = repo.commit(&unit("1.0.0", None));
+    repo.tag("v1.0.0", &commit);
+    let relative = relative_to_current_dir(&repo.path);
+    assert!(relative.is_relative());
+
+    let opened = GitRepository::open(&relative).unwrap();
+
+    assert_eq!(opened.path(), relative);
+    let tags = opened.published_versions().unwrap();
+    assert_eq!(outcomes(&tags), [("v1.0.0", Ok(&version("1.0.0")))]);
+    let commit = tags[0].outcome().unwrap().provenance().commit();
+    assert_eq!(opened.read_src(commit).unwrap(), FileTree::new());
+}
+
+/// `path` relative to the current directory, which Cargo sets to the
+/// package root for tests.
+fn relative_to_current_dir(path: &Path) -> PathBuf {
+    let current = std::env::current_dir().unwrap();
+    let mut base = current.as_path();
+    let mut up = PathBuf::new();
+    loop {
+        if let Ok(rest) = path.strip_prefix(base) {
+            return up.join(rest);
+        }
+        base = base.parent().expect("the paths share a root");
+        up.push("..");
+    }
+}

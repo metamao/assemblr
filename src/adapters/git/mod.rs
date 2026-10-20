@@ -52,7 +52,8 @@ const SRC: &[u8] = b"src";
 pub struct GitRepository {
     /// The path the repository was opened at.
     path: PathBuf,
-    /// Its Git directory: `path/.git`, or `path` itself when it is bare.
+    /// Its Git directory, absolute: `path/.git`, or `path` itself when it is
+    /// bare.
     git_dir: PathBuf,
 }
 
@@ -63,20 +64,22 @@ impl GitRepository {
     /// Git does not search parent directories, so a directory inside another
     /// repository is not a repository.
     pub fn open(path: &Path) -> Result<Self, GitError> {
-        let dot_git = path.join(".git");
-        let git_dir = if dot_git.exists() {
-            dot_git
-        } else {
-            path.to_owned()
+        let not_a_directory = || GitError {
+            repository: path.to_owned(),
+            kind: GitErrorKind::NotARepository("it is not a directory".to_owned()),
         };
+        if !path.is_dir() {
+            return Err(not_a_directory());
+        }
+        // Git runs in `path`, so a relative `GIT_DIR` would be resolved from
+        // there a second time.
+        let absolute = std::path::absolute(path).map_err(|_| not_a_directory())?;
+        let dot_git = absolute.join(".git");
+        let git_dir = if dot_git.exists() { dot_git } else { absolute };
         let repository = Self {
             path: path.to_owned(),
             git_dir,
         };
-        if !path.is_dir() {
-            let reason = "it is not a directory".to_owned();
-            return Err(repository.error(GitErrorKind::NotARepository(reason)));
-        }
         match repository.output(&["rev-parse", "--git-dir"]) {
             Ok(_) => Ok(repository),
             Err(GitError {
