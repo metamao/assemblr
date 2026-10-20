@@ -290,10 +290,223 @@ rules apply whether or not the hosting platform enforces them.
   the owner. Agents do not create or push release tags. They are unrelated to
   the `v<version>` tags that units use for publication.
 - **Implementation progress is tracked on GitHub**, not in this repository.
-  The umbrella issue [#9](https://github.com/metamao/assemblr/issues/9) holds
-  the trajectory and links each increment's issue. To find the next task, run
-  `gh issue view 9` and take the first open sub-issue with no open blocker.
-  `gh pr list` shows work in progress. Name the branch after the issue, for
-  example `feat/6-unit-manifest`, and close the issue from the pull request
-  with `Closes #N`. GitHub tracks execution only: contracts stay in
-  `docs/domain/` and engineering decisions in `docs/adr/`.
+  Follow the workflow in §13 with the configuration in §14.
+
+## 13. Implementation workflow
+
+These rules apply to any repository that tracks implementation through a
+GitHub umbrella issue. The project configuration (§14) names the umbrella,
+the owner, and the conventions. Sections 1–12 still apply in full. GitHub
+tracks execution only: an issue, PR, or comment never outranks the approved
+contracts and never defines domain behavior.
+
+### 13.1 What a request authorizes
+
+| Request | Authorizes |
+|---|---|
+| Status: "where are we", "what's blocking" | Establishing state (§13.4) and reporting it. Nothing else. |
+| Continue: "next task", "resume" | Establishing state, then acting on the item that §13.5 selects, within its issue's scope. |
+| "Initialize tracking" | Establishing state, then §13.3. |
+
+When the request is ambiguous, inspect and report instead of acting.
+
+### 13.2 Readiness
+
+Before acting, confirm:
+
+1. The repository, its remote, and its integration branch are identified, and
+   its engineering instructions are loaded.
+2. `gh` is authenticated with the permissions the operation needs: read for
+   status, write for issues, branches, and PRs.
+3. The local state is understood: the current branch, uncommitted changes,
+   unpushed commits, and how each local branch relates to its remote. Never
+   discard or overwrite them. If they belong to other work, stop and report.
+4. **For tracking:** authoritative project documents (contracts,
+   architecture, an approved plan) describe the intended work.
+5. **For implementation**, in addition: the selected issue states its scope,
+   exclusions, and acceptance criteria, and every product behavior it needs is
+   approved. If not, it is blocked (§13.7).
+
+If essential context is missing, stop and say what is needed. Do not invent
+specifications, architecture, or tasks to fill the gap.
+
+### 13.3 Initializing tracking
+
+Only when explicitly requested.
+
+1. Look for an existing tracker: the umbrella in §14 if one is configured,
+   otherwise open and closed issues that act as umbrellas or roadmaps, issues
+   with sub-issues, and references in the repository's documentation.
+2. If exactly one valid tracker exists, reuse it. If several are plausible,
+   ask which one. If none exists, create one umbrella that records the
+   approved direction, plus issues for the first actionable increments only.
+   No speculative backlog.
+3. Record the umbrella in §14 through a pull request.
+
+Running initialization again finds and reports the existing tracker. It
+creates nothing.
+
+### 13.4 Establishing state
+
+No single command returns all of this; §14 lists the queries. Gather:
+
+- **Local:** as in §13.2, plus local branches named after tracked issues.
+- **Umbrella:** its body (trajectory, conventions, decisions) and its
+  sub-issues with their state and order.
+- **Each open increment:** its blocked-by relations, the intervention issues
+  that affect it (§13.7), and comments since the last agent activity.
+- **Open PRs:** draft status, linked issues (closing references and branch
+  name), head commit, check results, the automated review, and review and
+  owner comments.
+- **Recently closed increments and PRs:** whether each issue closed through a
+  merged PR. A closed issue or PR does not mean the work was completed.
+
+Then reconcile. Each open increment has at most one branch and one open PR,
+and each merged PR has closed its issue. Investigate any disagreement before
+creating anything (§13.8). State in the report when GitHub was read: agents
+inspect it when a session starts or when asked, and never monitor it
+continuously.
+
+### 13.5 Selecting work
+
+Take the first case that applies.
+
+1. An open PR has failed checks or actionable findings: fix them (§13.6).
+2. An open increment has unfinished work, in a draft PR, a PR with unmet
+   acceptance criteria, or a branch with no PR: resume it on that branch.
+3. An open PR's checks or review are pending: report that and stop.
+4. An open PR is waiting for the owner (approval, a decision, or the merge):
+   report that and stop.
+5. An intervention issue has a new response: process it (§13.7).
+6. Otherwise take the first open increment, in the umbrella's order, whose
+   blockers are closed and whose prerequisite PRs are merged.
+7. If every listed increment is done, draft the next one from the umbrella's
+   trajectory and the earlier PRs' findings. Create its issue, link it to the
+   umbrella, and ask the owner to approve its scope in the issue. Implement
+   it only after approval.
+
+Never start an increment while a prerequisite PR is unmerged. Work on an
+independent increment in parallel only when the owner authorizes it
+explicitly and it shares no files or unmerged code with the other work.
+
+### 13.6 Continuing an open pull request
+
+Never open a second branch or PR for an issue that already has one.
+
+| State | Recognized by | Action |
+|---|---|---|
+| In progress | Draft, or acceptance criteria unmet. | Resume on the existing branch. |
+| Pending | Checks queued or running, or no completed review of the head commit. | Report and stop. A cancelled, skipped, failed, or older-commit review is not a completed one. |
+| Actionable | Failed checks, unaddressed valid findings, or owner requests. | Fix within the issue's scope, reply with evidence to findings you believe are wrong, escalate domain decisions (§13.7), run §8, push, and re-check. Do not repeat an argument without new evidence. |
+| Awaiting owner | Checks pass on the head commit, the latest review covers it, findings are addressed, and acceptance criteria are met. | Stop. Report that the PR is awaiting the owner and what the owner must do. Do not start dependent work. |
+| Inconsistent | For example, a PR closed without merging, an issue closed without a merged PR, an open issue whose branch has no PR, or two PRs for one issue. | Investigate and report. Do not create replacement work. |
+
+A merge approves the merged change. It does not answer questions the PR asked
+separately. Carry unanswered ones into the next increment's issue or an
+intervention issue.
+
+### 13.7 Human intervention
+
+Escalate only for:
+
+- a consequential product or domain decision that is missing;
+- an external action that needs human access or authorization;
+- a permission or environment problem the agent cannot resolve;
+- a disagreement that the available evidence does not settle;
+- a next step that would violate approved constraints.
+
+Do not escalate ordinary engineering choices or speculative doubts.
+
+**Reuse first.** A request may already live in the increment's issue, its PR,
+an open intervention issue, the open-contract register, or another active
+discussion. If it does, keep it there. Create an intervention issue only when
+the blocker must be tracked across sessions, affects several increments, or
+does not fit the existing discussion.
+
+**Intervention issue.** An ordinary issue whose title uses a §14 prefix, linked
+as a blocker of each affected issue (natively where available, otherwise by
+reference). Its body states:
+
+- the decision or action required;
+- why it blocks, and which work it affects;
+- evidence and alternatives;
+- a recommendation, when one is justified;
+- what counts as resolution.
+
+Never ask for credentials or secrets on GitHub.
+
+**On every resume**, classify each open intervention issue:
+
+1. **Awaiting response:** no answer yet. Report it.
+2. **Response received:** check that it comes from the owner (§14) and
+   answers the question. If not, ask a precise follow-up.
+3. **Action required:** the decision is clear. Apply it: domain decisions
+   update `docs/domain/` through a PR under §1 and §12, and other decisions
+   update their documentation or configuration. For an external action,
+   verify it was done, or ask the owner to confirm.
+4. **Resolved:** the resolution criteria are met and verified. Close the
+   issue with a link to the evidence and re-evaluate the work it blocked.
+
+A comment alone does not resolve a blocker.
+
+### 13.8 Concurrency and recovery
+
+GitHub provides no locking for this workflow, so assume another session may
+be working at the same time.
+
+- Before creating an issue, branch, or PR, search for an existing one by
+  title, branch name, and closing reference, and reuse it.
+- Push a new branch and open a draft PR as soon as the first commit exists.
+  The draft PR is the visible claim on the increment.
+- If two sessions or duplicate resources target the same increment, continue
+  with the earlier one where that is safe, delete nothing, and report the
+  conflict to the owner.
+- If a remote branch moved, fetch and reconcile. Never force-push (§12).
+- Never discard uncommitted changes, overwrite another branch's work, rewrite
+  pushed history, merge pull requests, or create duplicates to get around an
+  inconsistent state.
+- Stop when authentication, permissions, or context are insufficient. An
+  explicit blocker is always preferable to an unsafe assumption.
+
+## 14. Assemblr tracking configuration
+
+- **Umbrella:** [#9](https://github.com/metamao/assemblr/issues/9). Its body
+  holds the trajectory, the per-increment workflow, the owner-decision table,
+  and the standing defaults. Read it there rather than copying it here.
+- **Owner:** `metamao`, who approves, decides, and merges.
+- **Increments:** sub-issues of #9, in trajectory order. Branches are named
+  `feat/<issue>-<slug>`, for example `feat/6-unit-manifest`. The PR says
+  `Closes #N`, lists the checks it ran and any changes to `docs/domain/`,
+  ADRs, or open contracts, and ends with "Findings for later increments".
+- **Interventions:** domain questions belong in
+  [`open-contracts.md`](docs/domain/open-contracts.md). A question that
+  blocks the next increment gets a `Decide OC-<n>: …` issue. Other
+  interventions use `[Owner decision] …` or `[Owner action] …`.
+- **Checks:** [`ci.yml`](.github/workflows/ci.yml) runs format, lint, build,
+  and test on Linux and Windows, and checks the MSRV.
+- **Automated review:** [`claude-review.yml`](.github/workflows/claude-review.yml)
+  reviews non-draft PRs when they are opened, pushed, or marked ready, and a
+  new push cancels the previous run. It posts as `claude`: inline findings
+  plus one top-level comment starting `Reviewed <7-character SHA>`. A review
+  counts only if that SHA matches the PR's head commit. On a non-draft PR, a
+  missing review means pending, cancelled, or failed, never clean. Its note
+  that changes to `AGENTS.md` or `docs/domain/` need the owner's approval is
+  expected and means the PR is awaiting the owner, not that it needs a fix.
+- **Who wrote it:** agents run with the owner's `gh` credentials, so GitHub
+  shows their issues, PRs, and comments as written by `metamao`. Agents end
+  everything they post with an attribution line such as
+  `🤖 Generated with Claude Code`. Owner approval is a merge or an owner
+  comment without an attribution line. Never treat agent-written text as
+  approval. If authorship is unclear, ask.
+- **Queries:**
+
+  ```sh
+  gh issue view 9
+  gh api 'repos/{owner}/{repo}/issues/9/sub_issues' --jq '.[] | {number, state, title}'
+  gh api 'repos/{owner}/{repo}/issues/<n>/dependencies/blocked_by' --jq '.[] | {number, state, title}'
+  gh issue list --state open --search 'in:title "Decide OC"'
+  gh issue list --state open --search 'in:title "[Owner"'
+  gh pr list --state all --json number,title,state,isDraft,headRefName,closingIssuesReferences
+  gh pr view <n> --json headRefOid,isDraft,statusCheckRollup,closingIssuesReferences,comments,reviews
+  gh api 'repos/{owner}/{repo}/pulls/<n>/comments' --paginate
+  ```
