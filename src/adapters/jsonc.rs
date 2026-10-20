@@ -35,9 +35,10 @@ pub(crate) fn parse(text: &str) -> Result<Json, SyntaxError> {
     serde_json::from_str(&json).map_err(|error| {
         let suffix = format!(" at line {} column {}", error.line(), error.column());
         let message = error.to_string();
+        let (line, column) = position(text, offset_of(text, error.line(), error.column()));
         SyntaxError {
-            line: error.line(),
-            column: error.column(),
+            line,
+            column,
             message: message.strip_suffix(&suffix).unwrap_or(&message).to_owned(),
         }
     })
@@ -57,7 +58,7 @@ impl SyntaxError {
         self.line
     }
 
-    /// The 1-based column of the error.
+    /// The 1-based column of the error, counted in characters.
     pub fn column(&self) -> usize {
         self.column
     }
@@ -176,7 +177,24 @@ fn blank(out: &mut String, c: char) {
     }
 }
 
-/// The 1-based line and column of a byte offset.
+/// The byte offset of a `serde_json` error position. Its column counts bytes,
+/// so the offset is moved back to the start of the character it falls in.
+fn offset_of(text: &str, line: usize, column: usize) -> usize {
+    let line_start = match line.checked_sub(2) {
+        Some(breaks) => text
+            .match_indices('\n')
+            .nth(breaks)
+            .map_or(text.len(), |(index, _)| index + 1),
+        None => 0,
+    };
+    let mut offset = (line_start + column.saturating_sub(1)).min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+/// The 1-based line and column, in characters, of a byte offset.
 fn position(text: &str, offset: usize) -> (usize, usize) {
     let before = &text[..offset];
     let line = before.matches('\n').count() + 1;
@@ -332,6 +350,20 @@ mod tests {
             assert_eq!(error.message(), "unterminated block comment");
         }
         assert!(parse("/**/ {}").is_ok());
+    }
+
+    #[test]
+    fn columns_count_characters_on_every_error_path() {
+        // `é` and `→` are one column each but two and three bytes.
+        for (text, position) in [
+            ("{\"é→\": x}", (1, 8)),
+            ("[\"é→\", /* open", (1, 8)),
+            ("[\"é\", é]", (1, 7)),
+            ("{\n  \"é\": [1,\n  →", (3, 3)),
+        ] {
+            let error = parse(text).unwrap_err();
+            assert_eq!((error.line(), error.column()), position, "{text}");
+        }
     }
 
     #[test]
