@@ -36,7 +36,7 @@ pub(super) enum EntryKind {
 }
 
 impl EntryKind {
-    fn from_mode(mode: &[u8]) -> Self {
+    pub(super) fn from_mode(mode: &[u8]) -> Self {
         match mode {
             b"100644" => Self::File { executable: false },
             b"100755" => Self::File { executable: true },

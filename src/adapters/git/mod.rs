@@ -7,9 +7,13 @@
 //! as they are, and content is read exactly as committed. Repositories are
 //! untrusted: nothing a repository configures is run, nothing is fetched, and
 //! malformed objects are reported as errors.
+//!
+//! A unit build also reads the unit's own `src/` from its working tree (see
+//! [`GitRepository::read_working_src`]).
 
 mod command;
 mod object;
+mod working_tree;
 
 use std::fmt;
 use std::io;
@@ -31,7 +35,7 @@ use crate::domain::{
 // a silent truncation.
 
 /// The largest `manifest.jsonc`, in bytes.
-const MANIFEST_LIMIT: u64 = 1024 * 1024;
+pub(super) const MANIFEST_LIMIT: u64 = 1024 * 1024;
 /// The largest commit object, in bytes.
 const COMMIT_LIMIT: u64 = 1024 * 1024;
 /// The largest directory listing (tree object), in bytes.
@@ -195,6 +199,39 @@ impl GitRepository {
             .1;
         objects.finish()?;
         Ok(manifest)
+    }
+
+    /// Reads the manifest at each of `commits`, in order, as the content of
+    /// a published version recorded at that commit.
+    ///
+    /// A commit is read by its id, never through a tag, so a tag moved since
+    /// the commit was recorded does not change what is read. A commit that
+    /// is not in the repository is an error, as is an object that is not a
+    /// commit.
+    pub fn read_published(
+        &self,
+        commits: &[&ObjectId],
+    ) -> Result<Vec<Result<PublishedVersion, InvalidVersion>>, GitError> {
+        let mut objects = self.objects()?;
+        let mut versions = Vec::with_capacity(commits.len());
+        for &commit in commits {
+            let header = self.require(&mut objects, commit.as_str(), 0)?.header;
+            if header.kind != "commit" {
+                versions.push(Err(InvalidVersion::NotACommit {
+                    object_type: header.kind,
+                }));
+                continue;
+            }
+            versions.push(
+                self.read_manifest(&mut objects, commit)?
+                    .map(|(tree, manifest)| PublishedVersion {
+                        manifest,
+                        provenance: Provenance::new(commit.clone(), tree),
+                    }),
+            );
+        }
+        objects.finish()?;
+        Ok(versions)
     }
 
     /// The root tree of `commit` and the manifest in it, or why it has no
@@ -671,6 +708,10 @@ impl fmt::Display for SrcEntryError {
             }
             SrcEntryErrorReason::NotUtf8 => f.write_str("the path is not UTF-8"),
             SrcEntryErrorReason::InvalidPath(error) => error.fmt(f),
+            SrcEntryErrorReason::NotARegularFile => {
+                f.write_str("not a regular file, which `src/` may hold only")
+            }
+            SrcEntryErrorReason::Unreadable(reason) => write!(f, "could not be read: {reason}"),
         }
     }
 }
@@ -695,6 +736,11 @@ pub enum SrcEntryErrorReason {
     NotUtf8,
     /// Its path breaks the portable path rules.
     InvalidPath(RelativePathError),
+    /// In a working tree, it is not a regular file, for example a directory
+    /// holding a nested repository.
+    NotARegularFile,
+    /// In a working tree, it could not be read. Holds the reason.
+    Unreadable(String),
 }
 
 /// An object larger than Assemblr reads from a repository.

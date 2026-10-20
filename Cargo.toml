@@ -13,6 +13,7 @@ fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
 semver = "1.0.28"
 serde = { version = "1.0.229", default-features = false, features = ["std"] }
 serde_json = "1.0.154"
+unicode-normalization = "0.1.26"
 
 [lints.rust]
 unsafe_code = "forbid"

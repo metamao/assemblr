@@ -24,16 +24,19 @@
 //! recording the unit that contributed it. File contents are opaque bytes
 //! with an executable bit, delivered unchanged: nothing is interpolated until
 //! a template syntax exists (OC-5). Two files collide when their paths are
-//! equal or differ only in case, which a case-insensitive file system cannot
-//! keep apart, or when one file's path is a directory of another's. Case is
-//! compared by Unicode lowercasing, without Unicode normalization. Every
-//! collision is reported, whether the units are independent or one depends
-//! on the other, and no unit wins.
+//! equal or differ only in case or in Unicode normalization, which some file
+//! systems cannot keep apart, or when one file's path is a directory of
+//! another's under the same comparison. Paths are compared by their
+//! [collision key](collision_key): canonical caseless matching, with Unicode
+//! lowercasing as the case mapping. Every collision is reported, whether the
+//! units are independent or one depends on the other, and no unit wins.
 //!
 //! Every problem is reported, in the order [`compose`] documents.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+
+use unicode_normalization::UnicodeNormalization;
 
 use super::identity::UnitIdentity;
 use super::manifest::{Manifest, OptionValues};
@@ -311,13 +314,14 @@ pub enum CompositionError {
         /// directly, and the root when it may configure this unit.
         responsible: Vec<Requirer>,
     },
-    /// Files whose paths are equal or differ only in case.
+    /// Files whose paths are equal or differ only in case or in Unicode
+    /// normalization.
     PathCollision {
         /// Every colliding file, ordered by path and then unit.
         files: Vec<ContributedPath>,
     },
     /// A file's path is a directory of other files' paths, compared
-    /// ignoring case.
+    /// ignoring case and Unicode normalization.
     NestedPathCollision {
         /// The file whose path the others need as a directory.
         file: ContributedPath,
@@ -419,8 +423,8 @@ impl fmt::Display for CompositionError {
                     )
                 } else {
                     f.write_str(
-                        "; these paths differ only in case, which a case-insensitive file \
-                         system cannot keep apart",
+                        "; these paths differ only in case or in Unicode normalization, which \
+                         some file systems cannot keep apart",
                     )
                 }
             }
@@ -723,13 +727,13 @@ fn compose_files<'a>(
     BTreeMap<RelativePath, ComposedFile<'a>>,
     Vec<CompositionError>,
 ) {
-    // Files by their path ignoring case.
+    // Files by their collision key.
     let mut folded: BTreeMap<String, Vec<ContributedPath>> = BTreeMap::new();
     let mut files = BTreeMap::new();
     for member in members.values() {
         for (path, file) in member.files {
             folded
-                .entry(path.as_str().to_lowercase())
+                .entry(collision_key(path))
                 .or_default()
                 .push(ContributedPath {
                     path: path.clone(),
@@ -776,6 +780,22 @@ fn compose_files<'a>(
     }));
 
     (files, collisions)
+}
+
+/// The key under which paths collide: `NFD(lowercase(NFD(path)))`.
+///
+/// This is canonical caseless matching (Unicode, section 3.13), with Unicode
+/// lowercasing in place of full case folding, so the case comparison stays
+/// the one collisions have always used. Two paths with the same key differ
+/// only in case or in canonically equivalent spellings, such as a precomposed
+/// `é` and an `e` followed by a combining acute accent, which file systems
+/// such as APFS, NTFS, and FAT may not keep apart. Compatibility equivalents,
+/// such as `ﬁ` and `fi`, stay distinct, as file systems keep them apart.
+/// Neither normalization nor lowercasing introduces a `/`, so a key's
+/// directories are the keys of the path's directories.
+fn collision_key(path: &RelativePath) -> String {
+    let decomposed: String = path.as_str().nfd().collect();
+    decomposed.to_lowercase().nfd().collect()
 }
 
 #[cfg(test)]
@@ -1733,6 +1753,86 @@ mod tests {
                 nested: vec![contributed("Guide/intro.md", "@metamao/docs")],
             }]
         );
+    }
+
+    #[test]
+    fn paths_that_differ_only_in_unicode_normalization_collide() {
+        // A precomposed `é` and an `e` with a combining acute accent.
+        let units = [
+            Spec::new("@metamao/api", "1.0.0").file("caf\u{e9}.md"),
+            Spec::new("@metamao/web", "1.0.0").file("cafe\u{301}.md"),
+        ];
+        let errors = run(
+            &project(&[("@metamao/api", "^1"), ("@metamao/web", "^1")]),
+            &units,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            [CompositionError::PathCollision {
+                files: vec![
+                    contributed("cafe\u{301}.md", "@metamao/web"),
+                    contributed("caf\u{e9}.md", "@metamao/api"),
+                ],
+            }]
+        );
+        assert!(errors[0].to_string().contains("Unicode normalization"));
+    }
+
+    #[test]
+    fn case_and_normalization_differences_combine() {
+        // An uppercase precomposed `É`, a lowercase decomposed `é`, and
+        // combining marks in another canonical order.
+        let units = [Spec::new("@metamao/docs", "1.0.0")
+            .file("\u{c9}t\u{e9}.md")
+            .file("e\u{301}te\u{301}.md")
+            .file("a\u{301}\u{323}.md")
+            .file("a\u{323}\u{301}.md")];
+        let errors = run(&project(&[("@metamao/docs", "^1")]), &units, &[]).unwrap_err();
+        assert_eq!(
+            errors,
+            [
+                CompositionError::PathCollision {
+                    files: vec![
+                        contributed("a\u{301}\u{323}.md", "@metamao/docs"),
+                        contributed("a\u{323}\u{301}.md", "@metamao/docs"),
+                    ],
+                },
+                CompositionError::PathCollision {
+                    files: vec![
+                        contributed("e\u{301}te\u{301}.md", "@metamao/docs"),
+                        contributed("\u{c9}t\u{e9}.md", "@metamao/docs"),
+                    ],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_file_where_a_normalization_variant_needs_a_directory_collides() {
+        let units = [Spec::new("@metamao/docs", "1.0.0")
+            .file("caf\u{e9}")
+            .file("CAFE\u{301}/menu.md")];
+        let errors = run(&project(&[("@metamao/docs", "^1")]), &units, &[]).unwrap_err();
+        assert_eq!(
+            errors,
+            [CompositionError::NestedPathCollision {
+                file: contributed("caf\u{e9}", "@metamao/docs"),
+                nested: vec![contributed("CAFE\u{301}/menu.md", "@metamao/docs")],
+            }]
+        );
+    }
+
+    #[test]
+    fn compatibility_equivalent_paths_do_not_collide() {
+        // The `ﬁ` ligature is only compatibility-equivalent to `fi`, and file
+        // systems keep the two apart.
+        let units = [Spec::new("@metamao/docs", "1.0.0")
+            .file("\u{fb01}le.md")
+            .file("file.md")];
+        let composed = run(&project(&[("@metamao/docs", "^1")]), &units, &[]).unwrap();
+        assert_eq!(composed.files.len(), 2);
     }
 
     #[test]

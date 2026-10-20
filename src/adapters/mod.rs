@@ -1,15 +1,20 @@
 //! Adapters: serialization and integrations with external systems, such as
-//! Git and the local registry.
+//! Git, the local registry, and unit builds.
 //!
 //! Adapters translate between external representations and domain values.
 //! They may depend on the domain, never the other way around (see
 //! `docs/adr/0001-architecture.md`).
 
+mod build;
 mod git;
 mod jsonc;
 mod manifest;
 mod registry;
 
+pub use build::{
+    BuildFailure, BuildProblem, Built, LockfileError, LockfileOutcome, ManifestFileError,
+    OutputProblem, PublishError, PublishState, PublishedProblem, build_unit,
+};
 pub use git::{
     GitError, GitErrorKind, GitRepository, HeadManifestError, InvalidVersion, ObjectTooLarge,
     PublishedVersion, ReadSrcError, SrcEntryError, SrcEntryErrorReason, VersionTag,

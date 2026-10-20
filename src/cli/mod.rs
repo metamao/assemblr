@@ -1,6 +1,7 @@
 //! Argument parsing and dispatch.
 
 mod registry;
+mod unit;
 
 use std::process::ExitCode;
 
@@ -19,12 +20,16 @@ enum Command {
     /// Manage the local registry of unit repositories.
     #[command(subcommand)]
     Registry(registry::RegistryCommand),
+    /// Author the unit in the current directory.
+    #[command(subcommand)]
+    Unit(unit::UnitCommand),
 }
 
 /// Parses the arguments and runs the command.
 pub(crate) fn run() -> ExitCode {
     match Cli::parse().command {
         Command::Registry(command) => registry::run(command),
+        Command::Unit(command) => unit::run(command),
     }
 }
 
