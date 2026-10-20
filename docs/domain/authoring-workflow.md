@@ -207,7 +207,8 @@ everything would publish, with their current working-tree contents:
 The ignore rules are those of the `.gitignore` files in the working tree,
 and only those. Rules specific to one clone (`.git/info/exclude`) or to a
 machine or user (`core.excludesFile`, the global Git configuration) never
-apply, so the same working tree builds the same way everywhere.
+apply. Patterns match as Git matches them in that clone, which follows its
+`core.ignoreCase` setting, usually set on case-insensitive file systems.
 
 Symbolic links, including tracked ones checked out as plain files,
 submodules, nested repositories, and other entries a unit file cannot be are

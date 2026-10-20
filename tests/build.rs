@@ -760,6 +760,26 @@ fn a_directory_without_a_manifest_is_not_a_unit() {
 }
 
 #[test]
+fn a_unit_outside_its_own_git_repository_is_rejected() {
+    let fixture = Fixture::new("no-repository");
+    let dir = fixture.dir.join("plain");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("manifest.jsonc"),
+        manifest("@acme/app", "0.1.0", &[], ""),
+    )
+    .unwrap();
+    fs::write(dir.join("src/app.txt"), "app").unwrap();
+    let stderr = stderr(&fails(fixture.assemblr(&dir, &["unit", "build"])));
+    assert!(stderr.contains("is not a Git repository"), "{stderr}");
+    assert!(
+        stderr.contains("build/ and assemblr-lock.json were not changed"),
+        "{stderr}"
+    );
+    assert!(!dir.join("build").exists());
+}
+
+#[test]
 fn a_missing_dependency_suggests_registering_it() {
     let fixture = Fixture::new("missing");
     let app = fixture.repo("app");
