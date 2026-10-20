@@ -11,9 +11,11 @@ technology-agnostic and built for both humans and coding agents.
 
 ## Status
 
-**Foundation only.** This repository holds the canonical domain contracts and
-the engineering foundation. No domain functionality is implemented yet. The
-CLI currently responds only to `--help` and `--version`.
+**Early implementation.** This repository holds the canonical domain
+contracts and the production implementation, which is built in increments
+tracked in GitHub [issue #9](https://github.com/metamao/assemblr/issues/9).
+The library reads and validates unit manifests. The CLI currently responds
+only to `--help` and `--version`.
 
 ## Documentation
 

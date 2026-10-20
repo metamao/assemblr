@@ -48,6 +48,15 @@ implemented functionality. Current dependencies:
 | Crate | Purpose |
 |-------|---------|
 | `clap` (derive) | CLI argument parsing, `--help`, `--version` |
+| `semver` | Exact versions and version requirements, with Cargo's requirement semantics, the provisional range dialect (OC-15). Wrapped in domain newtypes, so it stays out of the public API. |
+| `serde` (no default features except `std`), `serde_json` | Parsing manifest JSON: a recursion limit, syntax errors with line and column, and a hand-written visitor that keeps duplicate keys so they can be reported. |
+
+Manifests are JSONC. `jsonc-parser` was evaluated first. Its releases from
+0.28 on need Rust newer than 1.85, and 0.26.2, which builds on 1.85, has no
+nesting limit and lacks most of the switches that turn off non-JSON syntax.
+Raising the MSRV for one parser was not justified. Instead, a small adapter
+blanks out comments and trailing commas while preserving every byte offset,
+and passes the result to `serde_json`.
 
 No async runtime, dependency-injection framework, plugin system, merge library,
 or Git library is added in anticipation of future work. Integration tests use
