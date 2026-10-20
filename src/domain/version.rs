@@ -31,6 +31,13 @@ impl Version {
     pub fn cmp_precedence(&self, other: &Self) -> Ordering {
         self.0.cmp_precedence(&other.0)
     }
+
+    /// The version a Git tag publishes. Only tags of the form `v<version>`,
+    /// with an exact SemVer version, publish one: `v1.2.3` publishes `1.2.3`,
+    /// while `1.2.3`, `v1.0`, and `latest` publish nothing.
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::parse(tag.strip_prefix('v')?).ok()
+    }
 }
 
 impl FromStr for Version {
@@ -164,6 +171,40 @@ mod tests {
                 error.to_string().contains("exact SemVer version"),
                 "{error}"
             );
+        }
+    }
+
+    #[test]
+    fn version_tags_publish_their_exact_version() {
+        for (tag, version) in [
+            ("v1.2.3", "1.2.3"),
+            ("v2.0.0-beta.1", "2.0.0-beta.1"),
+            ("v1.0.0+build.5", "1.0.0+build.5"),
+        ] {
+            assert_eq!(
+                Version::from_tag(tag),
+                Some(Version::parse(version).unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn other_tags_publish_no_version() {
+        for tag in [
+            "",
+            "v",
+            "1.2.3",
+            "v1.0",
+            "V1.0.0",
+            "vv1.0.0",
+            "v 1.0.0",
+            "v1.0.0 ",
+            "v01.0.0",
+            "release-1",
+            "latest",
+            "nested/v1.0.0",
+        ] {
+            assert_eq!(Version::from_tag(tag), None, "{tag:?}");
         }
     }
 
