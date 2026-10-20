@@ -4,7 +4,7 @@
 //! [`resolve`] works on plain data: the root requirements, the published
 //! versions available locally with each version's dependencies, and any
 //! existing lock state. It either returns the resolved graph and how it
-//! differs from the lock, or every problem it found.
+//! differs from the lock, or the errors that explain why it failed.
 //!
 //! # Policy
 //!
@@ -14,29 +14,38 @@
 //!   version never changes it.
 //! - Otherwise candidates are tried from the highest matching version down,
 //!   the provisional Alpha default (OC-16).
-//! - Requirements match with Cargo's semantics (OC-15, provisional). A
-//!   pre-release matches only a requirement that names a pre-release of the
-//!   same `major.minor.patch`, so it is never selected implicitly. Build
-//!   metadata is part of a version's identity: `1.0.0+a` and `1.0.0+b` are
-//!   distinct versions, ordered by [`Version`]'s ordering.
+//! - Requirements match with Cargo's semantics. A pre-release matches only a
+//!   requirement that names a pre-release of the same `major.minor.patch`,
+//!   so it is never selected implicitly.
+//! - An identity whose published versions include two that differ only in
+//!   build metadata is ambiguous and is never selected, because SemVer gives
+//!   such versions equal precedence.
 //! - Identities are decided in dependency order: a unit is decided before
 //!   the units any of its published versions depend on, so each decision
 //!   sees every requirement on it. Ties, and identities that could depend on
 //!   each other, are decided in identity order. When raising one unit's
-//!   version forces another's down, the unit decided first keeps the higher
-//!   version.
+//!   version would force another's down, the unit decided first keeps the
+//!   higher version. This is a deterministic tie-breaking rule, not a claim
+//!   that the result is optimal by any measure.
 //!
 //! # Errors
 //!
-//! Only incompatible requirements make the search try other versions.
-//! A missing identity or an unavailable locked version needs the user to act
-//! on the registry, so it fails resolution instead of being avoided by
-//! quietly choosing an older version of the unit that requires it. Cycles are
-//! checked in the chosen graph.
+//! A candidate is abandoned for another when it conflicts with other
+//! requirements, depends on an identity no source provides or whose versions
+//! are ambiguous, or closes a dependency cycle. A resolution exists exactly
+//! when some combination of available versions satisfies every requirement
+//! without such problems, and within its step limit the search finds one
+//! whenever it exists.
 //!
-//! When resolution fails, the errors describe the preferred resolution: each
-//! identity takes its first candidate, and every problem along the way is
-//! reported, not only the first.
+//! The one exception is a locked version that satisfies every requirement
+//! but is not available locally. It was part of the previous resolution, so
+//! replacing it quietly would let fresh resolution override the lock.
+//! Resolution fails instead and reports that synchronization may be needed.
+//!
+//! When resolution fails, the errors describe the **preferred** candidates:
+//! each identity takes its locked or highest satisfying version, and every
+//! problem on that path is reported. Other candidates were tried too, but the
+//! errors do not enumerate why each of them failed.
 //!
 //! # Search and its worst case
 //!
@@ -81,7 +90,13 @@ const STEP_LIMIT: usize = 100_000;
 /// older published versions of it are listed there, and a dependency on it
 /// is a cycle.
 ///
-/// On failure every error is returned, in a deterministic order.
+/// A candidate is passed over when it conflicts with other requirements,
+/// depends on an identity that no source provides or whose versions are
+/// ambiguous, or closes a cycle. Resolution fails when no combination of
+/// available versions avoids all of these, or when a locked version that
+/// satisfies every requirement is not available locally. On failure the
+/// errors explain why the preferred candidates, the locked or highest
+/// versions, fail, in a deterministic order (see [`ResolutionError`]).
 pub fn resolve(
     root_identity: Option<&UnitIdentity>,
     requirements: &Dependencies,
@@ -213,9 +228,13 @@ impl fmt::Display for Requirement {
     }
 }
 
-/// Why a set of requirements cannot be resolved.
+/// A problem that prevents resolution.
 ///
-/// Requirements inside an error are ordered by requirer, the root first.
+/// Except for [`Unavailable`](Self::Unavailable) and
+/// [`StepLimitExceeded`](Self::StepLimitExceeded), an error describes the
+/// preferred candidates after the search found that no combination of
+/// available versions works. Requirements inside an error are ordered by
+/// requirer, the root first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolutionError {
     /// No registered source provides a required identity.
@@ -223,6 +242,17 @@ pub enum ResolutionError {
         /// The identity no source provides.
         identity: UnitIdentity,
         /// The requirements on it.
+        requirements: Vec<Requirement>,
+    },
+    /// A required identity has published versions that differ only in build
+    /// metadata, so none of them can be chosen.
+    Ambiguous {
+        /// The identity with ambiguous versions.
+        identity: UnitIdentity,
+        /// Every version that shares its precedence with another, lowest
+        /// first.
+        versions: Vec<Version>,
+        /// The requirements on the identity.
         requirements: Vec<Requirement>,
     },
     /// A locked version that satisfies every requirement is not available
@@ -244,7 +274,17 @@ pub enum ResolutionError {
         /// Every version of the identity available locally, lowest first.
         available: Vec<Version>,
     },
-    /// The chosen versions depend on each other in a cycle.
+    /// Some available version satisfies every requirement on an identity,
+    /// but no combination of versions satisfies them together with the
+    /// rest of the graph. Reported only when the preferred candidates show
+    /// no more specific problem.
+    Unresolved {
+        /// The identity the preferred candidates could not settle.
+        identity: UnitIdentity,
+        /// The requirements on it.
+        requirements: Vec<Requirement>,
+    },
+    /// The preferred versions depend on each other in a cycle.
     Cycle {
         /// The cycle, starting and ending with the same requirer.
         path: Vec<Requirer>,
@@ -261,18 +301,22 @@ impl ResolutionError {
     fn kind_rank(&self) -> u8 {
         match self {
             Self::Missing { .. } => 0,
-            Self::Unavailable { .. } => 1,
-            Self::Incompatible { .. } => 2,
-            Self::Cycle { .. } => 3,
-            Self::StepLimitExceeded { .. } => 4,
+            Self::Ambiguous { .. } => 1,
+            Self::Unavailable { .. } => 2,
+            Self::Incompatible { .. } => 3,
+            Self::Unresolved { .. } => 4,
+            Self::Cycle { .. } => 5,
+            Self::StepLimitExceeded { .. } => 6,
         }
     }
 
     fn identity(&self) -> Option<&UnitIdentity> {
         match self {
             Self::Missing { identity, .. }
+            | Self::Ambiguous { identity, .. }
             | Self::Unavailable { identity, .. }
-            | Self::Incompatible { identity, .. } => Some(identity),
+            | Self::Incompatible { identity, .. }
+            | Self::Unresolved { identity, .. } => Some(identity),
             Self::Cycle { .. } | Self::StepLimitExceeded { .. } => None,
         }
     }
@@ -295,10 +339,14 @@ impl ResolutionError {
     }
 }
 
-fn write_list<T: fmt::Display>(f: &mut fmt::Formatter<'_>, items: &[T]) -> fmt::Result {
+fn write_list<T: fmt::Display>(
+    f: &mut fmt::Formatter<'_>,
+    items: &[T],
+    separator: &str,
+) -> fmt::Result {
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
-            f.write_str(", ")?;
+            f.write_str(separator)?;
         }
         write!(f, "{item}")?;
     }
@@ -312,8 +360,23 @@ impl fmt::Display for ResolutionError {
                 identity,
                 requirements,
             } => {
-                write!(f, "no registered source provides {identity}, required as ")?;
-                write_list(f, requirements)
+                write!(f, "no registered source provides {identity} (required as ")?;
+                write_list(f, requirements, ", ")?;
+                f.write_str("); register a unit repository that provides it")
+            }
+            Self::Ambiguous {
+                identity,
+                versions,
+                requirements,
+            } => {
+                write!(f, "the published versions of {identity} are ambiguous: ")?;
+                write_list(f, versions, ", ")?;
+                f.write_str(
+                    " differ only in build metadata, which SemVer ignores when ordering \
+                     versions, so none of them is selected (required as ",
+                )?;
+                write_list(f, requirements, ", ")?;
+                f.write_str(")")
             }
             Self::Unavailable {
                 identity,
@@ -322,11 +385,11 @@ impl fmt::Display for ResolutionError {
             } => {
                 write!(
                     f,
-                    "{identity} is locked to {version}, which is not available locally; \
-                     synchronizing the registry may be needed (required as "
+                    "{identity} is locked to {version}, which is not available locally \
+                     (required as "
                 )?;
-                write_list(f, requirements)?;
-                f.write_str(")")
+                write_list(f, requirements, ", ")?;
+                f.write_str("); synchronizing the registry may make it available")
             }
             Self::Incompatible {
                 identity,
@@ -337,23 +400,33 @@ impl fmt::Display for ResolutionError {
                     f,
                     "no available version of {identity} satisfies every requirement: "
                 )?;
-                write_list(f, requirements)?;
+                write_list(f, requirements, ", ")?;
                 if available.is_empty() {
-                    f.write_str("; no versions are available locally")
+                    f.write_str("; no versions are available locally")?;
                 } else {
                     f.write_str("; available versions: ")?;
-                    write_list(f, available)
+                    write_list(f, available, ", ")?;
                 }
+                f.write_str(
+                    "; if a matching version has been published, synchronizing the \
+                     registry may make it available",
+                )
+            }
+            Self::Unresolved {
+                identity,
+                requirements,
+            } => {
+                write!(
+                    f,
+                    "no combination of available versions satisfies every requirement; \
+                     the preferred versions could not settle {identity} (required as "
+                )?;
+                write_list(f, requirements, ", ")?;
+                f.write_str(")")
             }
             Self::Cycle { path } => {
                 f.write_str("dependency cycle: ")?;
-                for (index, requirer) in path.iter().enumerate() {
-                    if index > 0 {
-                        f.write_str(" -> ")?;
-                    }
-                    write!(f, "{requirer}")?;
-                }
-                Ok(())
+                write_list(f, path, " -> ")
             }
             Self::StepLimitExceeded { steps } => write!(
                 f,
@@ -380,6 +453,9 @@ struct Demand<'a> {
 /// Every requirement on each identity, given an assignment.
 type Demands<'a> = BTreeMap<&'a UnitIdentity, Vec<Demand<'a>>>;
 
+/// A node of the dependency graph: `None` is the root.
+type Node<'a> = Option<&'a UnitIdentity>;
+
 /// What the search must do next, given an assignment.
 enum Step<'a> {
     /// Every required identity is decided and satisfied.
@@ -388,10 +464,15 @@ enum Step<'a> {
     Decide(&'a UnitIdentity, Vec<&'a Version>),
     /// The version chosen for this identity fails a requirement on it.
     Violated(&'a UnitIdentity),
+    /// The chosen versions form this cycle, which starts and ends at the
+    /// same node.
+    Cycle(Vec<Node<'a>>),
     /// No available version satisfies every requirement on this identity.
     NoCandidate(&'a UnitIdentity),
     /// No source provides this identity.
     Missing(&'a UnitIdentity),
+    /// This identity's published versions are ambiguous.
+    Ambiguous(&'a UnitIdentity),
     /// This locked version satisfies every requirement but is not available.
     Unavailable(&'a UnitIdentity, &'a Version),
 }
@@ -443,13 +524,7 @@ impl<'a> Resolver<'a> {
 
     fn run(&self, step_limit: usize) -> Result<Resolution, Vec<ResolutionError>> {
         let mut errors = match self.search(step_limit) {
-            Ok(assignment) => {
-                let cycles = self.cycles(&assignment);
-                if cycles.is_empty() {
-                    return Ok(self.resolution(&assignment));
-                }
-                cycles
-            }
+            Ok(assignment) => return Ok(self.resolution(&assignment)),
             Err(Failure::StepLimit(steps)) => {
                 return Err(vec![ResolutionError::StepLimitExceeded { steps }]);
             }
@@ -467,14 +542,15 @@ impl<'a> Resolver<'a> {
         Err(errors)
     }
 
-    /// Searches for an assignment that satisfies every requirement.
+    /// Searches for an assignment that satisfies every requirement without
+    /// a cycle.
     fn search(&self, step_limit: usize) -> Result<Assignment<'a>, Failure> {
         let mut frames: Vec<Frame<'a>> = Vec::new();
         let mut assignment = Assignment::new();
         let nothing_skipped = BTreeSet::new();
         for _ in 0..step_limit {
             let demands = self.demands(&assignment);
-            let conflict = match self.next_step(&assignment, &demands, &nothing_skipped) {
+            let conflict = match self.next_step(&assignment, &demands, &nothing_skipped, true) {
                 Step::Complete => return Ok(assignment),
                 Step::Decide(identity, candidates) => {
                     if let Some(&first) = candidates.first() {
@@ -499,10 +575,12 @@ impl<'a> Resolver<'a> {
                     conflict.insert(identity);
                     conflict
                 }
-                Step::NoCandidate(identity) => requirers(&demands, identity, |_| true),
-                Step::Missing(identity) => {
-                    return Err(Failure::Aborted(self.missing(identity, &demands)));
-                }
+                // The versions on the cycle create its edges, whatever is
+                // decided later.
+                Step::Cycle(path) => path.into_iter().flatten().collect(),
+                Step::NoCandidate(identity)
+                | Step::Missing(identity)
+                | Step::Ambiguous(identity) => requirers(&demands, identity, |_| true),
                 Step::Unavailable(identity, version) => {
                     return Err(Failure::Aborted(
                         self.unavailable(identity, version, &demands),
@@ -516,7 +594,7 @@ impl<'a> Resolver<'a> {
         Err(Failure::StepLimit(step_limit))
     }
 
-    /// Follows the preferred resolution without backtracking, reporting
+    /// Follows the preferred candidates without backtracking, reporting
     /// every problem on the way.
     fn explain(&self) -> Vec<ResolutionError> {
         let mut assignment = Assignment::new();
@@ -526,7 +604,7 @@ impl<'a> Resolver<'a> {
         let mut unsettled = None;
         loop {
             let demands = self.demands(&assignment);
-            let identity = match self.next_step(&assignment, &demands, &skipped) {
+            let identity = match self.next_step(&assignment, &demands, &skipped, false) {
                 Step::Complete => break,
                 Step::Decide(identity, candidates) => {
                     if let Some(&first) = candidates.first() {
@@ -566,20 +644,34 @@ impl<'a> Resolver<'a> {
                     errors.push(self.missing(identity, &demands));
                     identity
                 }
+                Step::Ambiguous(identity) => {
+                    errors.push(self.ambiguous(identity, &demands));
+                    identity
+                }
                 Step::Unavailable(identity, version) => {
                     errors.push(self.unavailable(identity, version, &demands));
                     identity
                 }
+                // Cycles are collected once the walk is over.
+                Step::Cycle(_) => break,
             };
             skipped.insert(identity);
         }
-        errors.extend(self.cycles(&assignment));
-        // The search proved that no resolution exists, so the preferred one
-        // has a problem. If it still settled on versions for every identity,
-        // the identity it could not settle is the best explanation left.
+        errors.extend(
+            self.cycles(&assignment)
+                .into_iter()
+                .map(|path| self.cycle(&path, &assignment)),
+        );
+        // The search proved that no combination works, so the preferred
+        // candidates have a problem. If they still settled on a version for
+        // every identity but one, that identity is the explanation left.
         if errors.is_empty() {
             if let Some(identity) = unsettled {
-                errors.push(self.incompatible(identity, &self.demands(&assignment)));
+                let demands = self.demands(&assignment);
+                errors.push(ResolutionError::Unresolved {
+                    identity: identity.clone(),
+                    requirements: requirements(&demands, identity),
+                });
             }
         }
         errors
@@ -636,11 +728,14 @@ impl<'a> Resolver<'a> {
             .flatten()
     }
 
+    /// The next step: a violated requirement first, then a cycle when
+    /// `detect_cycles` is set, then the next identity to decide.
     fn next_step(
         &self,
         assignment: &Assignment<'a>,
         demands: &Demands<'a>,
         skipped: &BTreeSet<&'a UnitIdentity>,
+        detect_cycles: bool,
     ) -> Step<'a> {
         for (&identity, identity_demands) in demands {
             if skipped.contains(identity) {
@@ -653,6 +748,11 @@ impl<'a> Resolver<'a> {
                 {
                     return Step::Violated(identity);
                 }
+            }
+        }
+        if detect_cycles {
+            if let Some(path) = self.cycles(assignment).into_iter().next() {
+                return Step::Cycle(path);
             }
         }
 
@@ -683,6 +783,9 @@ impl<'a> Resolver<'a> {
         let Some(versions) = self.available.get(identity) else {
             return Step::Missing(identity);
         };
+        if !ambiguous_versions(versions).is_empty() {
+            return Step::Ambiguous(identity);
+        }
         let identity_demands = demands.get(identity).map_or(&[][..], Vec::as_slice);
         let satisfies = |version: &Version| {
             identity_demands
@@ -722,6 +825,18 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    fn ambiguous(&self, identity: &UnitIdentity, demands: &Demands<'a>) -> ResolutionError {
+        ResolutionError::Ambiguous {
+            identity: identity.clone(),
+            versions: self
+                .available
+                .get(identity)
+                .map(|versions| ambiguous_versions(versions).into_iter().cloned().collect())
+                .unwrap_or_default(),
+            requirements: requirements(demands, identity),
+        }
+    }
+
     fn unavailable(
         &self,
         identity: &UnitIdentity,
@@ -747,13 +862,27 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    fn cycle(&self, path: &[Node<'a>], assignment: &Assignment<'a>) -> ResolutionError {
+        let path = path
+            .iter()
+            .map(
+                |node| match node.and_then(|identity| assignment.get_key_value(identity)) {
+                    Some((&identity, &version)) => {
+                        Requirer::Unit(identity.clone(), version.clone())
+                    }
+                    None => Requirer::Root,
+                },
+            )
+            .collect();
+        ResolutionError::Cycle { path }
+    }
+
     /// Every cycle in the graph of the root and the assigned versions, found
     /// by a depth-first walk from the root in identity order. An edge counts
-    /// only when the assigned version satisfies its requirement, so a
-    /// failed resolution reports only cycles that its versions really form.
-    fn cycles(&self, assignment: &Assignment<'a>) -> Vec<ResolutionError> {
-        // `None` is the root.
-        let successors = |node: Option<&'a UnitIdentity>| -> Vec<Option<&'a UnitIdentity>> {
+    /// only when the assigned version satisfies its requirement, so only
+    /// cycles that the versions really form are found.
+    fn cycles(&self, assignment: &Assignment<'a>) -> Vec<Vec<Node<'a>>> {
+        let successors = |node: Node<'a>| -> Vec<Node<'a>> {
             let dependencies: Vec<(&'a UnitIdentity, &'a VersionRequirement)> = match node {
                 None => self.root.iter().collect(),
                 Some(identity) => match assignment.get(identity) {
@@ -761,7 +890,7 @@ impl<'a> Resolver<'a> {
                     None => Vec::new(),
                 },
             };
-            let mut nodes: Vec<Option<&'a UnitIdentity>> = dependencies
+            let mut nodes: Vec<Node<'a>> = dependencies
                 .into_iter()
                 .filter_map(|(dependency, range)| {
                     if Some(dependency) == self.root_identity {
@@ -775,13 +904,6 @@ impl<'a> Resolver<'a> {
             nodes.sort();
             nodes
         };
-        let requirer = |node: Option<&UnitIdentity>| match node {
-            None => Requirer::Root,
-            Some(identity) => match assignment.get(identity) {
-                Some(&version) => Requirer::Unit(identity.clone(), version.clone()),
-                None => Requirer::Root,
-            },
-        };
 
         let mut finished = BTreeSet::new();
         let mut stack = vec![(None, successors(None), 0)];
@@ -794,12 +916,12 @@ impl<'a> Resolver<'a> {
             };
             *position += 1;
             if let Some(start) = stack.iter().position(|(on_stack, _, _)| *on_stack == next) {
-                let mut path: Vec<Requirer> = stack[start..]
+                let mut path: Vec<Node<'a>> = stack[start..]
                     .iter()
-                    .map(|(on_stack, _, _)| requirer(*on_stack))
+                    .map(|(on_stack, _, _)| *on_stack)
                     .collect();
-                path.push(requirer(next));
-                cycles.push(ResolutionError::Cycle { path });
+                path.push(next);
+                cycles.push(path);
             } else if !finished.contains(&next) {
                 stack.push((next, successors(next), 0));
             }
@@ -857,6 +979,26 @@ impl<'a> Resolver<'a> {
             changes,
         }
     }
+}
+
+/// The versions that share their SemVer precedence with another version in
+/// `versions`, lowest first. Empty when the set is unambiguous.
+fn ambiguous_versions(versions: &BTreeMap<Version, Dependencies>) -> Vec<&Version> {
+    let ordered: Vec<&Version> = versions.keys().collect();
+    // Versions of equal precedence are adjacent, because `Version` orders by
+    // precedence first and build metadata last.
+    ordered
+        .iter()
+        .enumerate()
+        .filter(|(index, version)| {
+            let equal = |other: Option<&&Version>| {
+                other.is_some_and(|other| other.cmp_precedence(version) == Ordering::Equal)
+            };
+            equal(index.checked_sub(1).and_then(|before| ordered.get(before)))
+                || equal(ordered.get(index + 1))
+        })
+        .map(|(_, version)| *version)
+        .collect()
 }
 
 /// Returns to the most recent decision in `conflict` and moves it to its
@@ -1000,7 +1142,7 @@ fn decision_order<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::{
         AvailableVersions, Dependencies, Lock, LockChange, Requirer, Resolution, ResolutionError,
@@ -1529,6 +1671,24 @@ mod tests {
         assert!(message.contains("locked to 1.0.0"), "{message}");
         assert!(message.contains("synchronizing the registry"), "{message}");
 
+        // A locked transitive dependency is not replaced by another version.
+        let errors = resolve_root(
+            &[("@a/app", "^1")],
+            &[
+                ("@a/app", "1.0.0", &[("@a/lib", "^1")]),
+                ("@a/lib", "1.1.0", &[]),
+            ],
+            &[("@a/app", "1.0.0"), ("@a/lib", "1.0.0")],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &errors[..],
+                [ResolutionError::Unavailable { identity: name, .. }] if *name == identity("@a/lib")
+            ),
+            "{errors:?}"
+        );
+
         // A lock the requirements no longer allow is replaced instead.
         let resolution =
             resolve_root(&[("@a/x", "^1.1")], published, &[("@a/x", "1.0.0")]).unwrap();
@@ -1542,9 +1702,23 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_dependency_is_not_avoided_by_an_older_requirer() {
+    fn an_older_version_avoids_a_missing_dependency() {
+        let resolution = resolve_root(
+            &[("@n/app", "^1")],
+            &[
+                ("@n/app", "1.1.0", &[]),
+                ("@n/app", "1.2.0", &[("@n/gone", "^1")]),
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(versions(&resolution), pairs(&[("@n/app", "1.1.0")]));
+    }
+
+    #[test]
+    fn failures_are_explained_by_the_preferred_candidates() {
         // @n/app 1.1.0 conflicts on @n/lib, and @n/app 1.0.0 needs a unit no
-        // source provides. Both problems are reported.
+        // source provides. The errors describe the preferred @n/app 1.1.0.
         let errors = resolve_root(
             &[("@n/app", "^1"), ("@n/lib", "^1")],
             &[
@@ -1555,16 +1729,47 @@ mod tests {
             &[],
         )
         .unwrap_err();
-        assert!(
-            matches!(
-                &errors[..],
-                [
-                    ResolutionError::Missing { identity: missing, .. },
-                    ResolutionError::Incompatible { identity: incompatible, .. },
-                ] if *missing == identity("@n/gone") && *incompatible == identity("@n/lib")
-            ),
-            "{errors:?}"
-        );
+        let [
+            ResolutionError::Incompatible {
+                identity: name,
+                requirements,
+                ..
+            },
+        ] = &errors[..]
+        else {
+            panic!("expected one incompatibility, got {errors:?}");
+        };
+        assert_eq!(name, &identity("@n/lib"));
+        assert_eq!(requirements[1].requirer(), &unit("@n/app", "1.1.0"));
+    }
+
+    #[test]
+    fn an_older_version_avoids_a_cycle() {
+        let resolution = resolve_root(
+            &[("@c/app", "^1")],
+            &[
+                ("@c/app", "1.0.0", &[]),
+                ("@c/app", "1.1.0", &[("@c/lib", "^1")]),
+                ("@c/lib", "1.0.0", &[("@c/app", "^1")]),
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(versions(&resolution), pairs(&[("@c/app", "1.0.0")]));
+
+        let root_identity = identity("@c/root");
+        let view = available(&[
+            ("@c/lib", "1.0.0", &[]),
+            ("@c/lib", "1.1.0", &[("@c/root", "*")]),
+        ]);
+        let resolution = resolve(
+            Some(&root_identity),
+            &dependencies(&[("@c/lib", "^1")]),
+            &view,
+            &Lock::new(),
+        )
+        .unwrap();
+        assert_eq!(versions(&resolution), pairs(&[("@c/lib", "1.0.0")]));
     }
 
     #[test]
@@ -1723,14 +1928,57 @@ mod tests {
     }
 
     #[test]
-    fn versions_differing_only_in_build_metadata_are_distinct() {
-        let published: &[Published<'_>] = &[("@p/x", "1.0.0+a", &[]), ("@p/x", "1.0.0+b", &[])];
-        let fresh = resolve_root(&[("@p/x", "^1")], published, &[]).unwrap();
-        assert_eq!(versions(&fresh), pairs(&[("@p/x", "1.0.0+b")]));
+    fn versions_differing_only_in_build_metadata_are_never_chosen_between() {
+        let published: &[Published<'_>] = &[
+            ("@p/x", "1.0.0+a", &[]),
+            ("@p/x", "1.0.0+b", &[]),
+            ("@p/x", "1.1.0", &[]),
+        ];
+        for locked in [&[][..], &[("@p/x", "1.0.0+a")]] {
+            let errors = resolve_root(&[("@p/x", "^1")], published, locked).unwrap_err();
+            assert_eq!(
+                errors,
+                [ResolutionError::Ambiguous {
+                    identity: identity("@p/x"),
+                    versions: vec![version("1.0.0+a"), version("1.0.0+b")],
+                    requirements: vec![super::Requirement {
+                        requirer: Requirer::Root,
+                        range: "^1".parse().unwrap(),
+                    }],
+                }]
+            );
+            let message = errors[0].to_string();
+            assert!(
+                message.contains("1.0.0+a, 1.0.0+b differ only in build metadata"),
+                "{message}"
+            );
+        }
 
-        let locked = resolve_root(&[("@p/x", "^1")], published, &[("@p/x", "1.0.0+a")]).unwrap();
-        assert_eq!(versions(&locked), pairs(&[("@p/x", "1.0.0+a")]));
-        assert!(locked.changes().is_empty());
+        // A version that differs from every other in more than build
+        // metadata is not ambiguous.
+        let resolution = resolve_root(
+            &[("@p/x", "^1")],
+            &[("@p/x", "1.0.0+a", &[]), ("@p/x", "1.1.0+a", &[])],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(versions(&resolution), pairs(&[("@p/x", "1.1.0+a")]));
+    }
+
+    #[test]
+    fn an_older_version_avoids_an_ambiguous_dependency() {
+        let resolution = resolve_root(
+            &[("@p/app", "^1")],
+            &[
+                ("@p/app", "1.0.0", &[]),
+                ("@p/app", "1.1.0", &[("@p/x", "^1")]),
+                ("@p/x", "1.0.0+a", &[]),
+                ("@p/x", "1.0.0+b", &[]),
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(versions(&resolution), pairs(&[("@p/app", "1.0.0")]));
     }
 
     #[test]
@@ -1779,6 +2027,8 @@ mod tests {
         ("@e/loop-a", "1.0.0", &[("@e/loop-b", "^1")]),
         ("@e/loop-b", "1.0.0", &[("@e/loop-a", "^1")]),
         ("@e/locked", "1.1.0", &[]),
+        ("@e/twin", "1.0.0+a", &[]),
+        ("@e/twin", "1.0.0+b", &[]),
     ];
 
     const EVERY_PROBLEM_ROOT: &[(&str, &str)] = &[
@@ -1786,6 +2036,7 @@ mod tests {
         ("@e/app-b", "^1"),
         ("@e/ghost", "^1"),
         ("@e/locked", "^1"),
+        ("@e/twin", "^1"),
     ];
 
     const EVERY_PROBLEM_LOCK: &[(&str, &str)] = &[("@e/locked", "1.0.0")];
@@ -1798,6 +2049,8 @@ mod tests {
             .iter()
             .map(|error| match error {
                 ResolutionError::Missing { identity, .. } => format!("missing {identity}"),
+                ResolutionError::Ambiguous { identity, .. } => format!("ambiguous {identity}"),
+                ResolutionError::Unresolved { identity, .. } => format!("unresolved {identity}"),
                 ResolutionError::Unavailable { identity, .. } => {
                     format!("unavailable {identity}")
                 }
@@ -1812,6 +2065,7 @@ mod tests {
             kinds,
             [
                 "missing @e/ghost",
+                "ambiguous @e/twin",
                 "unavailable @e/locked",
                 "incompatible @e/shared",
                 "cycle of 3",
@@ -1819,64 +2073,399 @@ mod tests {
         );
     }
 
-    /// Rebuilds `published` in a different order: reversed or rotated, with
-    /// each version's dependencies reversed.
-    fn reorder<'s>(published: &[Published<'s>], rotation: usize) -> AvailableVersions {
-        let mut entries: Vec<(&str, &str, Dependencies)> = published
-            .iter()
-            .map(|(name, published_version, published_dependencies)| {
-                let mut reversed = published_dependencies.to_vec();
-                reversed.reverse();
-                (*name, *published_version, dependencies(&reversed))
-            })
-            .collect();
-        if rotation == 0 {
-            entries.reverse();
-        } else {
-            let len = entries.len();
-            entries.rotate_left(rotation % len);
+    /// Root requirements, published versions, and a lock.
+    type OrderingCase = (
+        &'static [(&'static str, &'static str)],
+        &'static [Published<'static>],
+        &'static [(&'static str, &'static str)],
+    );
+
+    /// Every ordering of `items`, by repeated insertion.
+    fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+        let Some((first, rest)) = items.split_first() else {
+            return vec![Vec::new()];
+        };
+        let mut all = Vec::new();
+        for permutation in permutations(rest) {
+            for position in 0..=permutation.len() {
+                let mut ordering = permutation.clone();
+                ordering.insert(position, first.clone());
+                all.push(ordering);
+            }
         }
+        all
+    }
+
+    /// Builds the available versions by inserting `published` in the order
+    /// given, with each version's dependencies inserted in reverse.
+    fn insert_in_order(published: &[Published<'_>]) -> AvailableVersions {
         let mut available = AvailableVersions::new();
-        for (name, published_version, published_dependencies) in entries {
+        for (name, published_version, published_dependencies) in published {
+            let mut reversed = published_dependencies.to_vec();
+            reversed.reverse();
             available
                 .entry(identity(name))
                 .or_default()
-                .insert(version(published_version), published_dependencies);
+                .insert(version(published_version), dependencies(&reversed));
         }
         available
     }
 
-    fn reordered_root(root: &[(&str, &str)], rotation: usize) -> Dependencies {
-        let mut entries = root.to_vec();
-        let len = entries.len();
-        entries.rotate_left(rotation % len);
-        entries.reverse();
-        dependencies(&entries)
+    #[test]
+    fn declaration_and_enumeration_order_never_change_the_outcome() {
+        let cases: [OrderingCase; 2] = [
+            (
+                SEVEN_UNIT_ROOT,
+                SEVEN_UNITS,
+                &[("@metamao/docker", "1.0.0")],
+            ),
+            (EVERY_PROBLEM_ROOT, EVERY_PROBLEM, EVERY_PROBLEM_LOCK),
+        ];
+        for (root, published, locked) in cases {
+            let expected = resolve_root(root, published, locked);
+            let mut enumerations = vec![published.to_vec()];
+            for rotation in 1..published.len() {
+                let mut rotated = published.to_vec();
+                rotated.rotate_left(rotation);
+                enumerations.push(rotated);
+            }
+            let mut reversed = published.to_vec();
+            reversed.reverse();
+            enumerations.push(reversed);
+
+            for declared in permutations(root) {
+                for enumeration in &enumerations {
+                    let mut lock_order = locked.to_vec();
+                    lock_order.reverse();
+                    let outcome = resolve(
+                        None,
+                        &dependencies(&declared),
+                        &insert_in_order(enumeration),
+                        &lock(&lock_order),
+                    );
+                    assert_eq!(outcome, expected, "declared {declared:?}");
+                }
+            }
+        }
+    }
+
+    /// A deterministic xorshift generator, so the oracle cases are
+    /// reproducible without a random-number dependency.
+    struct Generator(u64);
+
+    impl Generator {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            (self.next() % bound as u64) as usize
+        }
+
+        fn chance(&mut self, percent: u64) -> bool {
+            self.next() % 100 < percent
+        }
+    }
+
+    const ORACLE_UNITS: [&str; 4] = ["@o/a", "@o/b", "@o/c", "@o/d"];
+    const ORACLE_VERSIONS: [&str; 3] = ["1.0.0", "1.1.0", "2.0.0"];
+    const ORACLE_RANGES: [&str; 7] = ["^1", "^2", "=1.1.0", ">=1.1.0", "<1.1.0", "*", "~1.0"];
+    const ORACLE_MISSING: &str = "@o/missing";
+    const ORACLE_ROOT: &str = "@o/root";
+
+    /// A bounded resolution problem for the oracle.
+    struct Case {
+        root_identity: Option<UnitIdentity>,
+        root: Dependencies,
+        available: AvailableVersions,
+    }
+
+    fn generate(generator: &mut Generator) -> Case {
+        let root_identity = generator.chance(30).then(|| identity(ORACLE_ROOT));
+        let mut targets: Vec<&str> = ORACLE_UNITS.to_vec();
+        targets.push(ORACLE_MISSING);
+        if root_identity.is_some() {
+            targets.push(ORACLE_ROOT);
+        }
+        let range = |generator: &mut Generator| {
+            ORACLE_RANGES[generator.below(ORACLE_RANGES.len())]
+                .parse()
+                .unwrap()
+        };
+
+        let mut available = AvailableVersions::new();
+        for name in ORACLE_UNITS {
+            // Some identities have no registered source, and some have a
+            // source with no versions.
+            if generator.chance(8) {
+                continue;
+            }
+            let versions = available.entry(identity(name)).or_default();
+            for published_version in ORACLE_VERSIONS {
+                if !generator.chance(65) {
+                    continue;
+                }
+                let mut published_dependencies = Dependencies::new();
+                for target in &targets {
+                    if generator.chance(14) {
+                        published_dependencies.insert(identity(target), range(generator));
+                    }
+                }
+                versions.insert(version(published_version), published_dependencies);
+            }
+        }
+        if root_identity.is_some() && generator.chance(50) {
+            available
+                .entry(identity(ORACLE_ROOT))
+                .or_default()
+                .insert(version("1.0.0"), Dependencies::new());
+        }
+
+        let mut root = Dependencies::new();
+        for _ in 0..=generator.below(3) {
+            let target = if generator.chance(8) {
+                ORACLE_MISSING
+            } else {
+                ORACLE_UNITS[generator.below(ORACLE_UNITS.len())]
+            };
+            root.insert(identity(target), range(generator));
+        }
+        Case {
+            root_identity,
+            root,
+            available,
+        }
+    }
+
+    /// Whether `chosen` is a valid resolution of `case`, checked directly
+    /// from the definition: every requirement is chosen and satisfied,
+    /// nothing depends on the root, everything chosen is reachable, and the
+    /// graph has no cycle.
+    fn is_valid(case: &Case, chosen: &BTreeMap<UnitIdentity, Version>) -> bool {
+        let satisfied = |requirements: &Dependencies| {
+            requirements.iter().all(|(dependency, range)| {
+                Some(dependency) != case.root_identity.as_ref()
+                    && chosen
+                        .get(dependency)
+                        .is_some_and(|chosen_version| range.matches(chosen_version))
+            })
+        };
+        let declared = |name: &UnitIdentity, chosen_version: &Version| {
+            case.available
+                .get(name)
+                .and_then(|versions| versions.get(chosen_version))
+        };
+        if !satisfied(&case.root) {
+            return false;
+        }
+        for (name, chosen_version) in chosen {
+            match declared(name, chosen_version) {
+                Some(requirements) if Some(name) != case.root_identity.as_ref() => {
+                    if !satisfied(requirements) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+
+        let mut reached = BTreeSet::new();
+        let mut pending: Vec<&UnitIdentity> = case.root.keys().collect();
+        while let Some(name) = pending.pop() {
+            if reached.insert(name) {
+                if let Some(requirements) = chosen.get(name).and_then(|v| declared(name, v)) {
+                    pending.extend(requirements.keys());
+                }
+            }
+        }
+        if chosen.keys().any(|name| !reached.contains(name)) {
+            return false;
+        }
+
+        // Kahn's algorithm consumes every node exactly when there is no
+        // cycle.
+        let mut in_degree: BTreeMap<&UnitIdentity, usize> =
+            chosen.keys().map(|name| (name, 0)).collect();
+        for (name, chosen_version) in chosen {
+            for dependency in declared(name, chosen_version)
+                .into_iter()
+                .flat_map(|d| d.keys())
+            {
+                if let Some(degree) = in_degree.get_mut(dependency) {
+                    *degree += 1;
+                }
+            }
+        }
+        let mut ready: Vec<&UnitIdentity> = in_degree
+            .iter()
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(name, _)| *name)
+            .collect();
+        let mut consumed = 0;
+        while let Some(name) = ready.pop() {
+            consumed += 1;
+            let requirements = chosen.get(name).and_then(|v| declared(name, v));
+            for dependency in requirements.into_iter().flat_map(|d| d.keys()) {
+                if let Some(degree) = in_degree.get_mut(dependency) {
+                    *degree -= 1;
+                    if *degree == 0 {
+                        ready.push(dependency);
+                    }
+                }
+            }
+        }
+        consumed == chosen.len()
+    }
+
+    /// Whether any valid resolution exists, by trying every assignment of
+    /// "absent" or one available version to every identity.
+    fn exhaustively_resolvable(case: &Case) -> bool {
+        let options: Vec<(&UnitIdentity, Vec<Option<&Version>>)> = case
+            .available
+            .iter()
+            .filter(|(name, _)| Some(*name) != case.root_identity.as_ref())
+            .map(|(name, versions)| {
+                let mut choices = vec![None];
+                choices.extend(versions.keys().map(Some));
+                (name, choices)
+            })
+            .collect();
+        let combinations: usize = options.iter().map(|(_, choices)| choices.len()).product();
+        (0..combinations).any(|mut index| {
+            let mut chosen = BTreeMap::new();
+            for (name, choices) in &options {
+                if let Some(chosen_version) = choices[index % choices.len()] {
+                    chosen.insert((*name).clone(), chosen_version.clone());
+                }
+                index /= choices.len();
+            }
+            is_valid(case, &chosen)
+        })
+    }
+
+    /// Checks that an error states something true about `case`.
+    fn assert_truthful(case: &Case, error: &ResolutionError) {
+        let jointly_satisfiable = |name: &UnitIdentity, requirements: &[super::Requirement]| {
+            case.available.get(name).is_some_and(|versions| {
+                versions.keys().any(|candidate| {
+                    requirements
+                        .iter()
+                        .all(|requirement| requirement.range().matches(candidate))
+                })
+            })
+        };
+        match error {
+            ResolutionError::Missing { identity: name, .. } => {
+                assert!(!case.available.contains_key(name), "{error}");
+            }
+            ResolutionError::Incompatible {
+                identity: name,
+                requirements,
+                ..
+            } => assert!(!jointly_satisfiable(name, requirements), "{error}"),
+            ResolutionError::Unresolved {
+                identity: name,
+                requirements,
+            } => assert!(jointly_satisfiable(name, requirements), "{error}"),
+            ResolutionError::Cycle { path } => {
+                assert!(path.len() >= 2 && path.first() == path.last(), "{error}");
+            }
+            ResolutionError::Ambiguous { .. }
+            | ResolutionError::Unavailable { .. }
+            | ResolutionError::StepLimitExceeded { .. } => {
+                panic!("generated cases cannot produce {error}")
+            }
+        }
     }
 
     #[test]
-    fn reordered_inputs_give_identical_results_and_errors() {
-        let expected_resolution = resolve_root(SEVEN_UNIT_ROOT, SEVEN_UNITS, &[]);
-        let expected_errors = resolve_root(EVERY_PROBLEM_ROOT, EVERY_PROBLEM, EVERY_PROBLEM_LOCK);
-        assert!(expected_resolution.is_ok() && expected_errors.is_err());
-        for rotation in 0..8 {
-            let resolution = resolve(
-                None,
-                &reordered_root(SEVEN_UNIT_ROOT, rotation),
-                &reorder(SEVEN_UNITS, rotation),
+    fn the_resolver_agrees_with_exhaustive_search_on_bounded_graphs() {
+        let mut generator = Generator(0x9e37_79b9_7f4a_7c15);
+        let (mut resolved, mut failed) = (0, 0);
+        // Solvable cases whose preferred candidates hit each kind of problem,
+        // so the search had to find an alternative.
+        let (mut avoided_missing, mut avoided_cycle, mut avoided_conflict) = (0, 0, 0);
+        for case_number in 0..3000 {
+            let case = generate(&mut generator);
+            let outcome = resolve(
+                case.root_identity.as_ref(),
+                &case.root,
+                &case.available,
                 &Lock::new(),
             );
-            assert_eq!(resolution, expected_resolution, "rotation {rotation}");
-
-            let mut locked = EVERY_PROBLEM_LOCK.to_vec();
-            locked.reverse();
-            let errors = resolve(
-                None,
-                &reordered_root(EVERY_PROBLEM_ROOT, rotation),
-                &reorder(EVERY_PROBLEM, rotation),
-                &lock(&locked),
+            let expected = exhaustively_resolvable(&case);
+            assert_eq!(
+                outcome.is_ok(),
+                expected,
+                "case {case_number}: root {:?}, root identity {:?}, available {:?}, outcome {outcome:?}",
+                case.root,
+                case.root_identity,
+                case.available
             );
-            assert_eq!(errors, expected_errors, "rotation {rotation}");
+            match &outcome {
+                Ok(resolution) => {
+                    resolved += 1;
+                    let preferred = Resolver::new(
+                        case.root_identity.as_ref(),
+                        &case.root,
+                        &case.available,
+                        &Lock::new(),
+                    )
+                    .explain();
+                    for problem in &preferred {
+                        match problem {
+                            ResolutionError::Missing { .. } => avoided_missing += 1,
+                            ResolutionError::Cycle { .. } => avoided_cycle += 1,
+                            _ => avoided_conflict += 1,
+                        }
+                    }
+                    let chosen: BTreeMap<UnitIdentity, Version> = resolution
+                        .graph()
+                        .units()
+                        .iter()
+                        .map(|(name, unit)| (name.clone(), unit.version().clone()))
+                        .collect();
+                    assert!(is_valid(&case, &chosen), "case {case_number}");
+                    for (name, unit) in resolution.graph().units() {
+                        assert_eq!(
+                            Some(unit.dependencies()),
+                            case.available[name].get(unit.version()),
+                            "case {case_number}"
+                        );
+                    }
+                    // The result, used as the lock, is kept exactly.
+                    let relocked = resolve(
+                        case.root_identity.as_ref(),
+                        &case.root,
+                        &case.available,
+                        &chosen,
+                    )
+                    .unwrap();
+                    assert_eq!(relocked.graph(), resolution.graph(), "case {case_number}");
+                    assert!(relocked.changes().is_empty(), "case {case_number}");
+                }
+                Err(errors) => {
+                    failed += 1;
+                    assert!(!errors.is_empty(), "case {case_number}");
+                    for error in errors {
+                        assert_truthful(&case, error);
+                    }
+                }
+            }
         }
+        // Both outcomes, and every kind of avoided problem, are well
+        // represented.
+        let counts = format!(
+            "{resolved} resolved, {failed} failed; avoided {avoided_missing} missing, \
+             {avoided_cycle} cycles, {avoided_conflict} conflicts"
+        );
+        assert!(resolved > 500 && failed > 500, "{counts}");
+        assert!(
+            avoided_missing > 20 && avoided_cycle > 20 && avoided_conflict > 20,
+            "{counts}"
+        );
     }
 }

@@ -5,6 +5,7 @@
 //! `semver` crate stays an implementation detail so the dialect can change
 //! without changing this API.
 
+use std::cmp::Ordering;
 use std::fmt;
 use std::str::FromStr;
 
@@ -22,6 +23,13 @@ impl Version {
                 input: input.to_owned(),
                 reason: error.to_string(),
             })
+    }
+
+    /// Compares SemVer precedence, which ignores build metadata:
+    /// `1.0.0+a` and `1.0.0+b` have equal precedence although they are
+    /// different versions.
+    pub fn cmp_precedence(&self, other: &Self) -> Ordering {
+        self.0.cmp_precedence(&other.0)
     }
 }
 
@@ -168,6 +176,16 @@ mod tests {
         versions.sort();
         let ordered: Vec<String> = versions.iter().map(ToString::to_string).collect();
         assert_eq!(ordered, ["0.9.9", "1.2.0-beta.1", "1.2.0", "1.10.0"]);
+    }
+
+    #[test]
+    fn precedence_ignores_build_metadata() {
+        let a = Version::parse("1.0.0+a").unwrap();
+        let b = Version::parse("1.0.0+b").unwrap();
+        assert_ne!(a, b);
+        assert_eq!(a.cmp_precedence(&b), std::cmp::Ordering::Equal);
+        let beta = Version::parse("1.0.0-beta.1").unwrap();
+        assert_eq!(beta.cmp_precedence(&a), std::cmp::Ordering::Less);
     }
 
     #[test]

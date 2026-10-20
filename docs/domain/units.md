@@ -64,11 +64,17 @@ Catalog identities use the same rules (see
   [registries-and-discovery.md](registries-and-discovery.md#units-are-git-repositories--approved)).
 - Published versions are immutable (see
   [authoring-workflow.md](authoring-workflow.md#publication--approved)).
+- A unit's published versions are unique ignoring build metadata. Two versions
+  that differ only in build metadata, such as `1.0.0+a` and `1.0.0+b`, are
+  ambiguous, and Assemblr never prefers one of them because of its metadata
+  (see
+  [dependencies.md](dependencies.md#pre-releases-and-build-metadata--approved)).
 
 Open:
 
-- The SemVer range dialect and how pre-release and build metadata are treated.
-  **OC-15.**
+- The SemVer range dialect. **OC-15.**
+- Whether publication, registration, or synchronization reject versions that
+  differ only in build metadata before resolution reports them. **OC-25.**
 
 ## Authoring repository convention — Approved
 
