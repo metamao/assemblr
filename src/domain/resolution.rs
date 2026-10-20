@@ -2014,6 +2014,44 @@ mod tests {
         assert_eq!(requirers, [&Requirer::Root, &unit("@q/x", "1.0.0")]);
     }
 
+    #[test]
+    fn a_failure_no_single_conflict_explains_is_unresolved() {
+        // Each version of @u/c requires a version of @u/c other than
+        // itself. The requirements on @u/c at any one moment can be met,
+        // but no choice of version satisfies the requirements it creates.
+        let errors = resolve_root(
+            &[("@u/c", "^1")],
+            &[
+                ("@u/c", "1.0.0", &[("@u/c", ">=1.1.0")]),
+                ("@u/c", "1.1.0", &[("@u/c", "<1.1.0")]),
+            ],
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            [ResolutionError::Unresolved {
+                identity: identity("@u/c"),
+                requirements: vec![
+                    super::Requirement {
+                        requirer: Requirer::Root,
+                        range: "^1".parse().unwrap(),
+                    },
+                    super::Requirement {
+                        requirer: unit("@u/c", "1.0.0"),
+                        range: ">=1.1.0".parse().unwrap(),
+                    },
+                ],
+            }]
+        );
+        let message = errors[0].to_string();
+        assert!(
+            message.contains("no combination of available versions satisfies every requirement"),
+            "{message}"
+        );
+        assert!(message.contains("could not settle @u/c"), "{message}");
+    }
+
     /// Published versions with every kind of problem at once.
     const EVERY_PROBLEM: &[Published<'static>] = &[
         (
