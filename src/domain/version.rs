@@ -5,6 +5,7 @@
 //! `semver` crate stays an implementation detail so the dialect can change
 //! without changing this API.
 
+use std::cmp::Ordering;
 use std::fmt;
 use std::str::FromStr;
 
@@ -22,6 +23,13 @@ impl Version {
                 input: input.to_owned(),
                 reason: error.to_string(),
             })
+    }
+
+    /// Compares SemVer precedence, which ignores build metadata:
+    /// `1.0.0+a` and `1.0.0+b` have equal precedence although they are
+    /// different versions.
+    pub fn cmp_precedence(&self, other: &Self) -> Ordering {
+        self.0.cmp_precedence(&other.0)
     }
 }
 
@@ -81,6 +89,16 @@ impl VersionRequirement {
                 input: input.to_owned(),
                 reason: error.to_string(),
             })
+    }
+
+    /// Whether `version` satisfies this requirement.
+    ///
+    /// As in Cargo, a pre-release satisfies a requirement only when one of
+    /// its comparators names a pre-release of the same `major.minor.patch`,
+    /// so `^1.0.0` and `*` never match `1.1.0-beta.1`. Build metadata is
+    /// ignored when matching.
+    pub fn matches(&self, version: &Version) -> bool {
+        self.0.matches(&version.0)
     }
 }
 
@@ -161,6 +179,16 @@ mod tests {
     }
 
     #[test]
+    fn precedence_ignores_build_metadata() {
+        let a = Version::parse("1.0.0+a").unwrap();
+        let b = Version::parse("1.0.0+b").unwrap();
+        assert_ne!(a, b);
+        assert_eq!(a.cmp_precedence(&b), std::cmp::Ordering::Equal);
+        let beta = Version::parse("1.0.0-beta.1").unwrap();
+        assert_eq!(beta.cmp_precedence(&a), std::cmp::Ordering::Less);
+    }
+
+    #[test]
     fn requirements_use_cargo_syntax() {
         for (input, canonical) in [
             ("^2.1.0", "^2.1.0"),
@@ -173,6 +201,23 @@ mod tests {
             let requirement = VersionRequirement::parse(input).unwrap();
             assert_eq!(requirement.to_string(), canonical, "input {input:?}");
         }
+    }
+
+    #[test]
+    fn pre_releases_match_only_requirements_that_name_them() {
+        let matches = |requirement: &str, version: &str| {
+            VersionRequirement::parse(requirement)
+                .unwrap()
+                .matches(&Version::parse(version).unwrap())
+        };
+        assert!(matches("^1.0.0", "1.2.0"));
+        assert!(!matches("^1.0.0", "1.1.0-beta.1"));
+        assert!(!matches("*", "1.1.0-beta.1"));
+        assert!(matches("^1.1.0-beta", "1.1.0-beta.2"));
+        assert!(matches("^1.1.0-beta", "1.2.0"));
+        assert!(!matches("^1.1.0-beta", "1.2.0-beta.1"));
+        assert!(matches("=1.1.0-beta.1", "1.1.0-beta.1"));
+        assert!(matches("^1.0.0", "1.0.0+build.5"));
     }
 
     #[test]

@@ -66,10 +66,29 @@ Open:
 - Which version is chosen for a newly incorporated unit when several satisfy
   every requirement. Whatever policy is chosen, it must be deterministic.
   **OC-16.**
-- The SemVer range dialect, and pre-release and build metadata handling.
-  **OC-15.**
+- The SemVer range dialect. **OC-15.**
 - The lock-state file formats and locations: the consumer lockfile (**OC-8**)
   and the unit lockfile (**OC-46**).
+
+## Pre-releases and build metadata — Approved
+
+Version requirements follow Cargo's matching rules for pre-releases:
+
+- A pre-release version matches only a requirement that names a pre-release
+  of the same `major.minor.patch`. A pre-release is therefore never selected
+  implicitly: `^1.0.0` and `*` never match `1.1.0-beta.1`.
+- A requirement that names a pre-release, such as `^1.1.0-beta.1`, may select
+  that pre-release, a later pre-release of `1.1.0`, or a higher release. The
+  highest of them is preferred.
+
+Build metadata never orders versions, as in SemVer:
+
+- Build metadata is ignored when matching a requirement.
+- A unit's published versions must be unique ignoring build metadata (see
+  [versioning](units.md#versioning--approved)). When an identity's published
+  versions include two that differ only in build metadata, such as `1.0.0+a`
+  and `1.0.0+b`, resolution never selects a version of that identity. It
+  reports the versions as ambiguous.
 
 ## Version selection — Approved
 
@@ -104,6 +123,38 @@ accepted these defaults for Alpha:
   published version** is preferred.
 - Cargo-like SemVer requirement semantics are the starting point for the range
   dialect.
+
+The owner has also accepted these details for Alpha. The related entry stays
+open until the owner settles it: **OC-16**.
+
+- A **locked version is kept** when it satisfies every requirement and the
+  dependencies of the locked versions can still be resolved. Otherwise it is
+  replaced by the highest compatible version, as in a new resolution. A
+  locked pre-release that no requirement names any more is therefore
+  replaced.
+- A candidate version is **passed over**, and the next one tried, when it
+  conflicts with other requirements, depends on an identity that no
+  registered source provides or whose published versions are ambiguous, or
+  closes a dependency cycle. Resolution fails only when no combination of
+  available versions avoids all of these.
+- A locked version that still satisfies every requirement but is **not
+  available locally** is never passed over. Resolution fails and reports that
+  synchronization may be needed, because the lock takes precedence over fresh
+  resolution.
+- **Selection order.** Resolution is deterministic, but its result is not
+  promised to be optimal by any measure. When raising one unit's version
+  would force another's down, the unit decided first keeps the higher
+  version. A unit is decided before the units its published versions depend
+  on, and otherwise in identity order. Declaration order and the order in
+  which the registry lists versions never affect the result. This rule may
+  change while OC-16 is open.
+- **Diagnostics** distinguish an identity that no registered source provides,
+  a range that no locally available version satisfies (listing the available
+  versions), an identity whose published versions are ambiguous, and a locked
+  version that is not available locally. When resolution fails, the
+  diagnostics explain why the **preferred** versions fail: the locked
+  versions, or else the highest. Other versions were tried too, but the
+  diagnostics do not list every reason each of them failed.
 
 ## Explicit updates — Approved
 

@@ -7,6 +7,7 @@
 mod identity;
 mod manifest;
 mod parameter;
+mod resolution;
 mod version;
 
 pub use identity::{IdentityError, IdentityErrorReason, Segment, UnitIdentity};
@@ -15,6 +16,10 @@ pub use parameter::{
     AllowedValues, AllowedValuesError, BlankDescription, Description, ParameterDefinition,
     ParameterName, ParameterNameError, ParameterNameErrorReason, ParameterType, ParameterValue,
     ParameterValueError, ValueKind,
+};
+pub use resolution::{
+    AvailableVersions, Dependencies, Lock, LockChange, Requirement, Requirer, Resolution,
+    ResolutionError, ResolvedGraph, ResolvedUnit, resolve,
 };
 pub use version::{RequirementError, Version, VersionError, VersionRequirement};
 
