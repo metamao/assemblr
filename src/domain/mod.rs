@@ -9,6 +9,8 @@ mod identity;
 mod manifest;
 mod parameter;
 mod path;
+mod provenance;
+mod registry;
 mod resolution;
 mod version;
 
@@ -24,6 +26,11 @@ pub use parameter::{
     ParameterValueError, ValueKind,
 };
 pub use path::{RelativePath, RelativePathError, RelativePathErrorReason};
+pub use provenance::{ObjectId, Provenance};
+pub use registry::{
+    Change, Excluded, IntegrityChange, InvalidIndex, ObservedTag, ObservedVersion, RegisteredUnit,
+    RegistryError, RegistryIndex, SourceReference, declared_identity,
+};
 pub use resolution::{
     AvailableVersions, Dependencies, Lock, LockChange, Requirement, Requirer, Resolution,
     ResolutionError, ResolvedGraph, ResolvedUnit, resolve,

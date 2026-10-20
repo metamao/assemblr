@@ -2,6 +2,8 @@
 
 - **Status:** Accepted. The mechanisms below are provisional defaults.
   Amended by [0004](0004-registry-validation-and-synchronization.md).
+  Locations, persistence, and the test seam are implemented by
+  [0007](0007-local-registry-storage.md).
 - **Date:** 2026-10-18
 
 ## Context

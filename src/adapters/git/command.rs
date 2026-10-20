@@ -8,8 +8,8 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::thread::{self, JoinHandle};
 
-use super::object::ObjectId;
 use super::{GitError, GitErrorKind, GitRepository};
+use crate::domain::ObjectId;
 
 #[cfg(windows)]
 const NULL_DEVICE: &str = "NUL";
