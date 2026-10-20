@@ -157,9 +157,11 @@ Rules:
   taken from `manifest.jsonc` **as committed at `HEAD`**. This does not make
   `HEAD` a published version, and uncommitted or staged working-tree content is
   never read. If `HEAD` has no commit, or the committed manifest is missing or
-  invalid, the registration fails explicitly and changes nothing. Once
-  registered, the unit's identity is fixed: every version found later must
-  declare it.
+  invalid, the registration fails explicitly and changes nothing.
+- Once registered, a source's identity is **fixed**. Every version found later
+  must declare it, and synchronization never changes it, silently or
+  otherwise. Renaming a unit requires removing its registration and
+  registering it again.
 - Registration **never publishes** a unit. It never turns uncommitted or
   untagged working-tree content into a published version. A request for a
   published version always obtains tagged content, never the current working
@@ -181,7 +183,10 @@ reference:
   [source conflict](#source-conflicts--approved).
 - Portability: a local reference is meaningful only on the machine and in the
   directory layout where it was registered. Moving or renaming the repository
-  makes the source unreadable until it is removed and registered again. Where
+  makes the source unreadable until it is removed and registered again.
+  Assemblr does not relocate a registered source automatically; whether an
+  explicit mechanism exists beyond removing and correcting a source is
+  **OC-23**. Where
   `..` crosses a symbolic link, the lexical result can differ from the path the
   operating system would resolve. How lock state records local sources across
   machines is **OC-49**.
@@ -215,6 +220,10 @@ For unit repositories, the checks are classified as follows:
   of **equal SemVer precedence**, including versions that differ only in build
   metadata, which no metadata-based preference resolves; and any integrity
   violation of a version already indexed (below).
+- An excluded tag is not recorded. If it later publishes a valid version, for
+  example after it is moved to a valid commit, a later synchronization indexes
+  it as newly discovered. Integrity protection applies to versions that have
+  been indexed.
 - A version **already indexed** is never dropped silently. If its tag
   disappears, moves to another commit, or no longer publishes a valid version,
   that is an **integrity conflict**: the synchronization is rejected, across
@@ -572,6 +581,12 @@ Open:
 - It never deletes the user's Git repositories or working trees.
 - It never modifies consumer projects or lock files. Historical snapshots
   required by existing locks and for reconciliation are not discarded.
+- It intentionally discards the registration's recorded provenance.
+  Registering the source again establishes a new baseline, so changes made in
+  between, such as a moved tag, cannot be detected from the discarded record.
+  This never makes changing a published tag valid: published versions stay
+  immutable, and lock state verifies its own recorded content identity
+  independently of the registry (**OC-8**).
 
 ## Registry commands — Approved
 
@@ -634,7 +649,12 @@ assemblr registry sync
   stored [reference](#local-repository-references--approved). `commit` is the
   version's provenance and `tree` its content identity, as lowercase
   hexadecimal Git object ids. The order of keys within an object is not
-  significant. Fields may be added; existing ones keep their meaning.
+  significant. Fields may be added, and existing fields keep their meaning. A
+  backward-incompatible change needs a versioned output format or an explicit
+  compatibility decision.
+- Diagnostics keep excluded tags apart from indexed versions: each excluded
+  tag is reported with its reason on stderr, and the result names the indexed
+  versions and, separately, the tags excluded and not indexed.
 
 Open:
 

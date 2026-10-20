@@ -92,8 +92,9 @@ impl fmt::Display for ReferenceError {
             Self::Empty => f.write_str("the repository path is empty"),
             Self::Remote(reference) => write!(
                 f,
-                "{reference} is a remote repository; only local repositories can be \
-                 registered for now, so give the path of a local clone"
+                "{reference} is a remote repository reference, as Git reads it; only local \
+                 repositories can be registered for now. Give the path of a local clone, \
+                 starting with `./` if a directory name before its first `/` contains `:`"
             ),
             Self::WorkingDirectory(error) => {
                 write!(f, "could not read the working directory: {error}")
@@ -145,6 +146,42 @@ mod tests {
         ] {
             assert!(!is_remote(local), "{local}");
         }
+    }
+
+    #[test]
+    fn windows_drive_and_share_paths_are_local() {
+        for local in [
+            "C:\\projects\\unit",
+            "C:/projects/unit",
+            "c:\\projects\\unit",
+            "C:projects\\unit",
+            "\\\\server\\share\\unit",
+            "//server/share/unit",
+        ] {
+            assert!(!is_remote(local), "{local}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_are_stored_absolute_with_backslashes() {
+        for given in [
+            "C:\\projects\\unit",
+            "C:/projects/unit",
+            "C:\\projects\\.\\old\\..\\unit\\",
+        ] {
+            let reference = local_reference(Path::new(given)).unwrap();
+            assert_eq!(reference.as_str(), "C:\\projects\\unit", "{given}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_colon_after_a_leading_dot_slash_is_part_of_a_local_path() {
+        let reference = local_reference(Path::new("./host:repo")).unwrap();
+        let expected = std::env::current_dir().unwrap().join("host:repo");
+
+        assert_eq!(Path::new(reference.as_str()), expected);
     }
 
     #[test]

@@ -206,6 +206,18 @@ fn registration_indexes_valid_versions_and_reports_excluded_tags() {
         warnings[0].contains("the manifest declares version 1.2.0"),
         "{stderr}"
     );
+    assert!(warnings[0].contains("not indexed"), "{stderr}");
+    let stdout = stdout(&output);
+    assert!(
+        stdout.contains("with published versions 1.0.0, 1.2.0."),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Excluded 1 invalid version tag(s), which are not indexed: @acme/node v1.1.0."
+        ),
+        "{stdout}"
+    );
 
     let listing = list_json(&data, &dir);
     let unit = &listing["units"][0];
@@ -398,6 +410,31 @@ fn invalid_paths_and_remote_references_are_rejected_without_creating_state() {
     assert!(!data.exists());
 }
 
+/// Windows file names cannot contain `:`.
+#[cfg(unix)]
+#[test]
+fn a_local_directory_with_a_colon_is_registered_through_dot_slash() {
+    let dir = scratch("colon_path");
+    let data = dir.join("data");
+    let repo = Repo::new(&dir, "host:repo");
+    repo.publish("@acme/node", "1.0.0");
+
+    let output = fails(assemblr(&data, &dir, &["registry", "add", "host:repo"]));
+    assert!(
+        stderr(&output).contains("starting with `./`"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!data.exists());
+
+    succeeds(assemblr(&data, &dir, &["registry", "add", "./host:repo"]));
+    let listing = list_json(&data, &dir);
+    assert_eq!(
+        Path::new(listing["units"][0]["source"].as_str().unwrap()),
+        repo.path
+    );
+}
+
 #[test]
 fn listing_an_empty_registry_creates_no_state() {
     let dir = scratch("empty_listing");
@@ -474,6 +511,11 @@ fn sync_indexes_new_versions_and_excludes_new_invalid_tags() {
         stdout(&output)
     );
     assert!(stderr(&output).contains("excluded tag v1.1.0"));
+    assert!(
+        stdout(&output).contains("which are not indexed: @acme/node v1.1.0."),
+        "{}",
+        stdout(&output)
+    );
     assert_eq!(versions(&list_json(&data, &dir), 0), ["1.0.0"]);
 
     let before = fs::read(index_file(&data)).unwrap();

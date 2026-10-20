@@ -67,6 +67,7 @@ fn add(registry: &Registry, path: &std::path::Path) -> ExitCode {
                     join(&versions)
                 );
             }
+            report_excluded(&excluded);
             ExitCode::SUCCESS
         }
         Ok(Added::AlreadyRegistered { identity, source }) => {
@@ -166,6 +167,7 @@ fn sync(registry: &Registry) -> ExitCode {
             println!("{identity}: indexed {}", join(versions));
         }
     }
+    report_excluded(synced.excluded());
     ExitCode::SUCCESS
 }
 
@@ -214,15 +216,32 @@ fn rejection_hint(operation: &str, problems: &[Problem]) -> Option<String> {
     })
 }
 
+/// Explains on stderr why each excluded tag is invalid.
 fn warn_excluded(excluded: &[Excluded<TagProblem>]) {
     for excluded in excluded {
         eprintln!(
-            "warning: {}: excluded tag {}: {}",
+            "warning: {}: excluded tag {}, which is not indexed as a published version: {}",
             excluded.identity(),
             excluded.tag(),
             excluded.reason()
         );
     }
+}
+
+/// Lists the excluded tags in the result, apart from the indexed versions.
+fn report_excluded(excluded: &[Excluded<TagProblem>]) {
+    if excluded.is_empty() {
+        return;
+    }
+    let tags: Vec<String> = excluded
+        .iter()
+        .map(|excluded| format!("{} {}", excluded.identity(), excluded.tag()))
+        .collect();
+    println!(
+        "Excluded {} invalid version tag(s), which are not indexed: {}.",
+        excluded.len(),
+        tags.join(", ")
+    );
 }
 
 fn fail(message: &str, hint: Option<&str>) -> ExitCode {
