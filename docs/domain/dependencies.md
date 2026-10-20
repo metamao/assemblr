@@ -105,6 +105,35 @@ accepted these defaults for Alpha:
 - Cargo-like SemVer requirement semantics are the starting point for the range
   dialect.
 
+The owner has also accepted these details for Alpha. The related entries stay
+open until the owner settles them: **OC-15** and **OC-16**.
+
+- **Pre-releases** follow Cargo's matching rules. A pre-release matches only a
+  requirement that names a pre-release of the same `major.minor.patch`, so it
+  is never selected implicitly: `^1.0.0` and `*` never match `1.1.0-beta.1`.
+  A requirement that names one, such as `^1.1.0-beta.1`, may select that
+  pre-release, a later pre-release of `1.1.0`, or a higher release, and the
+  highest of them is preferred. **OC-15.**
+- **Build metadata** is part of a published version's identity: `1.0.0+a`
+  and `1.0.0+b` are distinct versions. It is ignored when matching a
+  requirement. When both satisfy every requirement, the one whose metadata
+  sorts higher is preferred. **OC-15.**
+- A **locked version is kept** when it satisfies every requirement under these
+  rules and the dependencies of the locked versions can still be resolved.
+  Otherwise it is replaced by the highest compatible version, as in a new
+  resolution. A locked pre-release that no requirement names any more is
+  therefore replaced.
+- When raising one unit's version would force another unit's version down,
+  the unit decided **first** keeps the higher version. A unit is decided
+  before the units its published versions depend on, and otherwise in
+  identity order. **OC-16.**
+- **Diagnostics.** A requirement that no locally available version satisfies
+  is reported as incompatible, with the versions that are available. An
+  *unavailable version* is a locked version that still satisfies every
+  requirement but is not available locally. A missing dependency or an
+  unavailable locked version is always reported. Resolution never avoids one
+  by choosing an older version of the unit that requires it.
+
 ## Explicit updates — Approved
 
 A dependency is never updated just because a newer version becomes available.

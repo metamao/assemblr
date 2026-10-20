@@ -82,6 +82,16 @@ impl VersionRequirement {
                 reason: error.to_string(),
             })
     }
+
+    /// Whether `version` satisfies this requirement.
+    ///
+    /// As in Cargo, a pre-release satisfies a requirement only when one of
+    /// its comparators names a pre-release of the same `major.minor.patch`,
+    /// so `^1.0.0` and `*` never match `1.1.0-beta.1`. Build metadata is
+    /// ignored when matching.
+    pub fn matches(&self, version: &Version) -> bool {
+        self.0.matches(&version.0)
+    }
 }
 
 impl FromStr for VersionRequirement {
@@ -173,6 +183,23 @@ mod tests {
             let requirement = VersionRequirement::parse(input).unwrap();
             assert_eq!(requirement.to_string(), canonical, "input {input:?}");
         }
+    }
+
+    #[test]
+    fn pre_releases_match_only_requirements_that_name_them() {
+        let matches = |requirement: &str, version: &str| {
+            VersionRequirement::parse(requirement)
+                .unwrap()
+                .matches(&Version::parse(version).unwrap())
+        };
+        assert!(matches("^1.0.0", "1.2.0"));
+        assert!(!matches("^1.0.0", "1.1.0-beta.1"));
+        assert!(!matches("*", "1.1.0-beta.1"));
+        assert!(matches("^1.1.0-beta", "1.1.0-beta.2"));
+        assert!(matches("^1.1.0-beta", "1.2.0"));
+        assert!(!matches("^1.1.0-beta", "1.2.0-beta.1"));
+        assert!(matches("=1.1.0-beta.1", "1.1.0-beta.1"));
+        assert!(matches("^1.0.0", "1.0.0+build.5"));
     }
 
     #[test]
