@@ -277,6 +277,11 @@ rules apply whether or not the hosting platform enforces them.
 - **The owner reviews and merges.** Agents never merge pull requests,
   including their own. Changes to `docs/domain/` need the owner's explicit
   approval.
+- Automated review (`claude-review.yml`) is advisory. Fix valid findings,
+  reply with evidence to findings you believe are wrong, and escalate open
+  domain decisions to the owner. Never ignore a significant finding silently,
+  and do not repeat an argument without new evidence: when a disagreement does
+  not converge, leave it to the owner.
 - Merge only when CI is green. Pull requests are squash-merged, so each lands
   on `main` as one commit, and the branch is deleted after merging.
 - Commit messages have an imperative subject of about 72 characters or fewer,
