@@ -381,9 +381,9 @@ Take the first case that applies.
 6. Otherwise take the first open increment, in the umbrella's order, whose
    blockers are closed and whose prerequisite PRs are merged.
 7. If every listed increment is done, draft the next one from the umbrella's
-   trajectory and the earlier PRs' findings. Create its issue, link it to the
-   umbrella, and ask the owner to approve its scope in the issue. Implement
-   it only after approval.
+   trajectory and the earlier PRs' findings, create its issue, and link it to
+   the umbrella. If its actionable scope still needs confirmation, ask the
+   owner to approve it and implement only after approval.
 
 Never start an increment while a prerequisite PR is unmerged. Work on an
 independent increment in parallel only when the owner authorizes it
@@ -401,9 +401,11 @@ Never open a second branch or PR for an issue that already has one.
 | Awaiting owner | Checks pass on the head commit, the latest review covers it, findings are addressed, and acceptance criteria are met. | Stop. Report that the PR is awaiting the owner and what the owner must do. Do not start dependent work. |
 | Inconsistent | For example, a PR closed without merging, an issue closed without a merged PR, an open issue whose branch has no PR, or two PRs for one issue. | Investigate and report. Do not create replacement work. |
 
-A merge approves the merged change. It does not answer questions the PR asked
-separately. Carry unanswered ones into the next increment's issue or an
-intervention issue.
+A merge accepts the merged change and any decision the owner explicitly
+approved as part of the PR. It does not answer questions the PR asked
+separately. Keep each unanswered question visible, in the next increment's
+issue, an intervention issue, or the open-question register. Assess whether
+it blocks a future increment, and never resolve it by assumption.
 
 ### 13.7 Human intervention
 
@@ -423,9 +425,9 @@ active discussion. If it does, keep it there. Create an intervention issue only 
 the blocker must be tracked across sessions, affects several increments, or
 does not fit the existing discussion.
 
-**Intervention issue.** An ordinary issue whose title uses a §14 prefix, linked
-as a blocker of each affected issue (natively where available, otherwise by
-reference). Its body states:
+**Intervention issue.** An ordinary issue titled `[Owner decision] …` or
+`[Owner action] …`, linked as a blocker of each affected issue (natively where
+available, otherwise by reference). Its body states:
 
 - the decision or action required;
 - why it blocks, and which work it affects;
@@ -438,8 +440,9 @@ Never ask for credentials or secrets on GitHub.
 **On every resume**, classify each open intervention issue:
 
 1. **Awaiting response:** no answer yet. Report it.
-2. **Response received:** check that it comes from the owner (§14) and
-   answers the question. If not, ask a precise follow-up.
+2. **Response received:** check that it answers the question and that the
+   owner made it (see "Owner decisions" below). If not, ask a precise
+   follow-up.
 3. **Action required:** the decision is clear. Apply it: domain decisions
    update the approved contracts (§14) through a PR under §1 and §12, and
    other decisions update their documentation or configuration. For an
@@ -448,6 +451,15 @@ Never ask for credentials or secrets on GitHub.
    issue with a link to the evidence and re-evaluate the work it blocked.
 
 A comment alone does not resolve a blocker.
+
+**Owner decisions.** When agents and the owner share a GitHub account, neither
+the author of a post nor the absence of an attribution line shows who wrote
+it. Agents mark what they post with an attribution line, but that is an
+operational convention, not authentication. Act on a consequential decision
+only when the owner has given it unambiguously, for example directly in the
+session or by merging the change that records it. Never infer approval from
+an ambiguous comment: ask the owner to confirm it explicitly, and treat it as
+"response received" until then.
 
 ### 13.8 Concurrency and recovery
 
@@ -482,8 +494,7 @@ be working at the same time.
   and open questions in the register
   [`open-contracts.md`](docs/domain/open-contracts.md).
 - **Interventions:** domain questions belong in the register. A question that
-  blocks the next increment gets a `Decide OC-<n>: …` issue. Other
-  interventions use `[Owner decision] …` or `[Owner action] …`.
+  blocks the next increment gets an `[Owner decision] Decide OC-<n>: …` issue.
 - **Checks:** [`ci.yml`](.github/workflows/ci.yml) runs format, lint, build,
   and test on Linux and Windows, and checks the MSRV.
 - **Automated review:** [`claude-review.yml`](.github/workflows/claude-review.yml)
@@ -494,21 +505,17 @@ be working at the same time.
   missing review means pending, cancelled, or failed, never clean. Its note
   that changes to `AGENTS.md` or `docs/domain/` need the owner's approval is
   expected and means the PR is awaiting the owner, not that it needs a fix.
-- **Who wrote it:** agents run with the owner's `gh` credentials, so GitHub
+- **Shared account:** agents run with the owner's `gh` credentials, so GitHub
   shows their issues, PRs, and comments as written by `metamao`. Agents end
-  everything they post with an attribution line such as
-  `🤖 Generated with Claude Code`. Owner approval is a merge or an owner
-  comment without an attribution line. Posts made before this rule carry no
-  line, so an unmarked `metamao` comment that reads like an agent report
-  (for example, one asking the owner to confirm decisions) is agent-written.
-  Never treat agent-written text as approval. If authorship is unclear, ask.
+  what they post with an attribution line such as
+  `🤖 Generated with Claude Code`. Earlier posts carry none. Owner decisions
+  follow §13.7.
 - **Queries:**
 
   ```sh
   gh issue view 9
   gh api 'repos/{owner}/{repo}/issues/9/sub_issues' --jq '.[] | {number, state, title}'
   gh api 'repos/{owner}/{repo}/issues/<n>/dependencies/blocked_by' --jq '.[] | {number, state, title}'
-  gh issue list --state open --search 'in:title "Decide OC"'
   gh issue list --state open --search 'in:title "[Owner"'
   gh pr list --state all --json number,title,state,isDraft,headRefName,closingIssuesReferences
   gh pr view <n> --json headRefOid,isDraft,statusCheckRollup,closingIssuesReferences,comments,reviews
