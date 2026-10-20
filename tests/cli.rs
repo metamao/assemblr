@@ -51,7 +51,7 @@ fn missing_arguments_print_help_and_fail() {
 
 #[test]
 fn unknown_commands_and_arguments_are_rejected() {
-    let output = assemblr(&["unit"]);
+    let output = assemblr(&["unit", "check"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("unrecognized subcommand"));
 
@@ -66,5 +66,16 @@ fn help_offers_only_implemented_commands() {
 
     let stdout = stdout(&output);
     assert!(stdout.contains("  registry "), "{stdout}");
-    assert!(!stdout.contains("  unit "), "{stdout}");
+    assert!(stdout.contains("  unit "), "{stdout}");
+
+    let output = assemblr(&["unit", "--help"]);
+    let help = self::stdout(&output);
+    let commands: Vec<&str> = help
+        .lines()
+        .skip_while(|line| *line != "Commands:")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert_eq!(commands, ["build", "help"], "{help}");
 }

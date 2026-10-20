@@ -5,6 +5,7 @@
 //! each setting is needed.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::thread::{self, JoinHandle};
 
@@ -84,8 +85,26 @@ impl GitRepository {
 
     /// Runs a command to completion and returns its standard output.
     pub(super) fn output(&self, args: &[&str]) -> Result<Vec<u8>, GitError> {
-        let output = self
-            .command(args)
+        self.run(self.command(args), args)
+    }
+
+    /// Runs a command that reads the working tree at `work_tree`, the
+    /// repository's top level, and returns its standard output. Only
+    /// commands that read are run this way.
+    pub(super) fn work_tree_output(
+        &self,
+        work_tree: &Path,
+        args: &[&str],
+    ) -> Result<Vec<u8>, GitError> {
+        let mut command = self.command(args);
+        // Explicit, so the repository's `core.worktree` cannot point the
+        // read at another directory.
+        command.env("GIT_WORK_TREE", work_tree);
+        self.run(command, args)
+    }
+
+    fn run(&self, mut command: Command, args: &[&str]) -> Result<Vec<u8>, GitError> {
+        let output = command
             .stdin(Stdio::null())
             .output()
             .map_err(|error| self.error(GitErrorKind::Unavailable(error)))?;

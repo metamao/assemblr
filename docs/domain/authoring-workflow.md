@@ -165,13 +165,93 @@ Rules:
   dependencies receive configuration only through the unit's own `options`;
   a build has no other way to configure them.
 
+### Build details — Approved
+
+These were decided by the owner for the first `unit build`.
+
+**Command.** `assemblr unit build`, with no arguments. It builds the unit
+whose repository's top level is the current directory, which must hold
+`manifest.jsonc`; parent directories are not searched. The result goes to
+stdout. Diagnostics, and changes to the unit lockfile, go to stderr.
+
+**Validations that gate a build** (OC-28):
+
+- manifest validity, identity, and version;
+- parameter and options consistency, including that the required
+  parameters of every dependency are satisfied through the dependency chain;
+- dependency resolution, under the [unit lock state](#unit-lock-state--approved);
+- `src/` path validity and path collisions (see
+  [units.md](units.md#src-unit-files)).
+
+The effective-contribution check (OC-11) does not gate a build; it gates
+publication. Neither does a clean or committed working tree. A failed build
+reports every problem it can discover independently. A problem in a later
+step that cannot run after an earlier failure, such as composition after a
+failed resolution, is not reported.
+
+**Development values** (OC-6 stays open). Until a mechanism for supplying
+development values exists, a unit that declares required parameters without
+defaults cannot be built: the build fails, names each such parameter, and
+says that supplying development values is not supported yet. This concerns
+only the unit being built. Its dependencies' required parameters satisfied
+through its `options` build as usual.
+
+**The working tree's `src/`.** A build reads the files that committing
+everything would publish, with their current working-tree contents:
+
+- every tracked file, with its working-tree contents, not the staged ones;
+  this includes a tracked file that an ignore rule matches;
+- every untracked file that no ignore rule matches;
+- not a tracked file deleted from the working tree.
+
+The ignore rules are those of the `.gitignore` files in the working tree,
+and only those. Rules specific to one clone (`.git/info/exclude`) or to a
+machine or user (`core.excludesFile`, the global Git configuration) never
+apply. Patterns match as Git matches them in that clone, which follows its
+`core.ignoreCase` setting, usually set on case-insensitive file systems.
+
+Symbolic links, including tracked ones checked out as plain files,
+submodules, nested repositories, and other entries a unit file cannot be are
+rejected and reported. On Unix a file is executable when its owner may
+execute it. Windows file systems record no such bit, so there a tracked
+file is executable when the Git index records it as executable, and an
+untracked file is not.
+
+**Amendments.** A build cannot apply amendments yet. It fails when
+`amendments/` has content, selected by the same rules as `src/`, and lists
+it. An empty `amendments/`, or one holding only ignored files, does not
+prevent a build.
+
+**`build/`.**
+
+- When validation fails, the previous `build/` is preserved, and the error
+  says that `build/` and the unit lockfile were not changed.
+- Only a real directory at `build/` is treated as disposable output. A
+  symbolic link or a regular file there is rejected and left unmodified.
+- A build publishes `build/` and the unit lockfile so that an interrupted or
+  failed build never leaves a `build/` that looks complete but does not
+  match the lockfile: there is either the previous build with the previous
+  lockfile, no `build/`, or the new build with the new lockfile. A failure
+  says which state remains.
+- While it publishes, a build uses `.assemblr-build.new/`,
+  `.assemblr-build.old/`, and `.assemblr-lock.json.new` beside `build/`.
+  These names are reserved. Before writing there, a build records that it
+  has started, and it clears the record once nothing it wrote there
+  remains. The next build deletes what is at those paths only when that
+  record shows an earlier build was interrupted. Otherwise anything there
+  is someone else's content: it is reported and left unmodified.
+- Builds of the same unit repository run one at a time. A build waits for
+  any other build of the same repository to finish before it reads the
+  unit's files, its lockfile, or what an interrupted build left, and keeps
+  the others waiting until it has published. Concurrent builds therefore
+  keep the guarantee above.
+
+The mechanisms and their limits are in [ADR 0008](../adr/0008-unit-build.md).
+
 Open:
 
 - How development input values are supplied for required parameters without
   defaults. The values must be supplied explicitly. **OC-6.**
-- Exactly which `check` validations apply to `build`, for example whether the
-  effective-contribution check, which gates publication, also gates build.
-  **OC-28.**
 
 ## Unit lock state — Approved
 
@@ -192,12 +272,33 @@ It is conceptually distinct from a consumer project's lockfile (see
   consumer resolves the unit's dependencies within the ranges the unit
   declares, under the consumer's own lock state.
 
+Decided by the owner for the first `unit build` (OC-46):
+
+- The unit lockfile is `assemblr-lock.json`, at the unit repository's top
+  level.
+- It is versioned JSON, written by the CLI with sorted keys, so that it
+  diffs cleanly. It is not JSONC: it is rewritten whole, which would lose
+  comments.
+- It records every resolved unit, direct and transitive, with its exact
+  version, and the commit and root tree it was published with (see
+  [registries-and-discovery.md](registries-and-discovery.md#identity-versions-integrity-and-sources--approved)).
+  It records no source references (see OC-49).
+- `unit build` creates it, and rewrites it when resolution changes it, for
+  example when a dependency is added to or removed from the manifest, or a
+  range is changed so that a locked version no longer satisfies it. Each
+  change is reported. When nothing changes, the file is not touched.
+- A locked version that the registry now records with other content than
+  the lockfile does is rejected, never used or silently relocked.
+- Deleting the lockfile is not an integrity-preserving repair. It discards
+  every locked version, and the next build resolves every dependency
+  afresh, possibly to other versions.
+- A lockfile that is not one Assemblr wrote, for example one with
+  unresolved merge conflicts, is reported and left as it is.
+
 Open:
 
-- The unit lockfile's name, location, and serialization; when it is created
-  and which operations write it, for example after a dependency is added to
-  or removed from the manifest; and how it relates to the base provenance
-  that amendments record. **OC-46.**
+- How the unit lockfile relates to the base provenance that amendments
+  record. **OC-46**, with **OC-20.**
 
 ## Update — Approved
 

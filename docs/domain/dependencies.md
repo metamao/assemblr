@@ -67,8 +67,10 @@ Open:
   every requirement. Whatever policy is chosen, it must be deterministic.
   **OC-16.**
 - The SemVer range dialect. **OC-15.**
-- The lock-state file formats and locations: the consumer lockfile (**OC-8**)
-  and the unit lockfile (**OC-46**).
+- The consumer lockfile's format and location (**OC-8**). The unit
+  lockfile is `assemblr-lock.json` (see
+  [unit lock state](authoring-workflow.md#unit-lock-state--approved)); how it
+  relates to amendment provenance is still open (**OC-46**).
 
 ## Pre-releases and build metadata — Approved
 

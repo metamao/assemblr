@@ -6,6 +6,7 @@
 
 mod composition;
 mod identity;
+mod lock;
 mod manifest;
 mod parameter;
 mod path;
@@ -19,6 +20,7 @@ pub use composition::{
     ParameterValues, Root, RootTargetReason, UnitContent, UnitFile, compose,
 };
 pub use identity::{IdentityError, IdentityErrorReason, Segment, UnitIdentity};
+pub use lock::{LockError, LockedUnit, UnitLock, relock};
 pub use manifest::{Manifest, ManifestError, OptionValues};
 pub use parameter::{
     AllowedValues, AllowedValuesError, BlankDescription, Description, ParameterDefinition,
