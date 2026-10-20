@@ -22,5 +22,6 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0003](0003-managed-local-registry.md) | Managed local registry with Git-based units | Accepted (provisional mechanisms), amended by 0004 |
 | [0004](0004-registry-validation-and-synchronization.md) | Registry validation, synchronization, and offline reads | Accepted, amended by 0005 |
 | [0005](0005-catalog-metadata-index.md) | Catalog metadata index and metadata-first registry | Accepted |
-| [0006](0006-reading-git-repositories.md) | Reading Git repositories through the `git` executable | Accepted |
+| [0006](0006-reading-git-repositories.md) | Reading Git repositories through the `git` executable | Accepted, extended by 0008 |
 | [0007](0007-local-registry-storage.md) | Local registry storage, replacement, and locking | Accepted |
+| [0008](0008-unit-build.md) | Unit builds: working-tree reading, the unit lockfile, and publishing `build/` | Accepted |

@@ -26,9 +26,8 @@
 //! a template syntax exists (OC-5). Two files collide when their paths are
 //! equal or differ only in case or in Unicode normalization, which some file
 //! systems cannot keep apart, or when one file's path is a directory of
-//! another's under the same comparison. Paths are compared by their
-//! [collision key](collision_key): canonical caseless matching, with Unicode
-//! lowercasing as the case mapping. Every collision is reported, whether the
+//! another's under the same comparison. Paths are compared by canonical
+//! caseless matching, with Unicode lowercasing as the case mapping. Every collision is reported, whether the
 //! units are independent or one depends on the other, and no unit wins.
 //!
 //! Every problem is reported, in the order [`compose`] documents.
