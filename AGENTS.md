@@ -326,6 +326,14 @@ Before acting, confirm:
 5. **For implementation**, in addition: the selected issue states its scope,
    exclusions, and acceptance criteria, and every product behavior it needs is
    approved. If not, it is blocked (§13.7).
+6. **Before implementation work**, the checkout is synchronized. Fetch first
+   and never assume the local checkout is current. For a new increment,
+   fast-forward the integration branch (`--ff-only`) and create the feature
+   branch from it. For an existing PR, inspect how its branch diverges from
+   its remote and from the integration branch, without merging or rebasing it
+   automatically. If synchronizing would overwrite uncommitted changes or need
+   a forced update, stop and report the blocker rather than work from a
+   possibly stale base.
 
 If essential context is missing, stop and say what is needed. Do not invent
 specifications, architecture, or tasks to fill the gap.
@@ -473,7 +481,8 @@ be working at the same time.
 - If two sessions or duplicate resources target the same increment, continue
   with the earlier one where that is safe, delete nothing, and report the
   conflict to the owner.
-- If a remote branch moved, fetch and reconcile. Never force-push (§12).
+- If a remote branch moved, fetch and inspect the divergence (§13.2) before
+  continuing. Never force-push (§12).
 - Never discard uncommitted changes, overwrite another branch's work, rewrite
   pushed history, merge pull requests, or create duplicates to get around an
   inconsistent state.
