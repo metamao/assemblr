@@ -38,8 +38,10 @@ const ARGUMENTS: [&str; 4] = [
     // A replace ref would substitute other content for an object, so what
     // is read would no longer be what the tag published.
     "--no-replace-objects",
+    // Empty disables fsmonitor in every Git version. Before 2.36 the value
+    // is a hook to run, so `false` would name a program.
     "-c",
-    "core.fsmonitor=false",
+    "core.fsmonitor=",
 ];
 
 impl GitRepository {
@@ -93,15 +95,108 @@ impl GitRepository {
         Ok(output.stdout)
     }
 
-    /// Starts a session that reads objects one at a time.
-    pub(super) fn cat_file(&self) -> Result<CatFile<'_>, GitError> {
-        let mut child = self
-            .command(CatFile::ARGS)
+    /// Starts reading objects one at a time.
+    pub(super) fn objects(&self) -> Result<Objects<'_>, GitError> {
+        Ok(Objects {
+            headers: CatFile::start(self, false)?,
+            contents: CatFile::start(self, true)?,
+        })
+    }
+}
+
+fn describe(args: &[&str]) -> String {
+    format!("git {}", args.join(" "))
+}
+
+/// What Git reports about an object before its contents.
+#[derive(Debug)]
+pub(super) struct Header {
+    pub(super) id: ObjectId,
+    pub(super) kind: String,
+    pub(super) size: u64,
+}
+
+/// An object read from the object database.
+#[derive(Debug)]
+pub(super) struct Object {
+    pub(super) header: Header,
+    /// The object's contents, or `None` when it is larger than the limit
+    /// the read allowed.
+    pub(super) contents: Option<Vec<u8>>,
+}
+
+/// Reads objects one at a time. Every object's size is known before its
+/// contents are requested, so contents over a limit are never read at all.
+/// Git stores objects compressed, and a small object can expand to far more
+/// than Assemblr should hold or even stream.
+pub(super) struct Objects<'r> {
+    headers: CatFile<'r>,
+    contents: CatFile<'r>,
+}
+
+impl Objects<'_> {
+    /// The header of the object `name` names, or `None` if there is no such
+    /// object.
+    pub(super) fn header(&mut self, name: &str) -> Result<Option<Header>, GitError> {
+        Ok(self.headers.read(name)?.map(|object| object.header))
+    }
+
+    /// Reads the object `name` names, or `None` if there is no such object.
+    /// Contents larger than `limit` bytes are not read.
+    pub(super) fn read(&mut self, name: &str, limit: u64) -> Result<Option<Object>, GitError> {
+        let Some(header) = self.header(name)? else {
+            return Ok(None);
+        };
+        if header.size > limit {
+            return Ok(Some(Object {
+                header,
+                contents: None,
+            }));
+        }
+        match self.contents.read(header.id.as_str())? {
+            Some(object) if object.header.id == header.id && object.header.size == header.size => {
+                Ok(Some(object))
+            }
+            _ => Err(self
+                .contents
+                .failure(format!("object {} changed while it was read", header.id))),
+        }
+    }
+
+    /// Ends reading, reporting whether Git succeeded.
+    pub(super) fn finish(self) -> Result<(), GitError> {
+        self.headers.finish()?;
+        self.contents.finish()
+    }
+}
+
+/// A running `git cat-file --batch-check`, which answers each object name
+/// written to it with the object's header, or `git cat-file --batch`, which
+/// also sends the contents.
+struct CatFile<'r> {
+    repository: &'r GitRepository,
+    args: &'static [&'static str],
+    with_contents: bool,
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+    stderr: Option<JoinHandle<Vec<u8>>>,
+}
+
+impl<'r> CatFile<'r> {
+    fn start(repository: &'r GitRepository, with_contents: bool) -> Result<Self, GitError> {
+        let args: &'static [&'static str] = if with_contents {
+            &["cat-file", "--batch"]
+        } else {
+            &["cat-file", "--batch-check"]
+        };
+        let mut child = repository
+            .command(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| self.error(GitErrorKind::Unavailable(error)))?;
+            .map_err(|error| repository.error(GitErrorKind::Unavailable(error)))?;
         let (Some(stdin), Some(stdout), Some(mut stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
@@ -114,8 +209,10 @@ impl GitRepository {
             let _ = stderr.read_to_end(&mut text);
             text
         });
-        Ok(CatFile {
-            repository: self,
+        Ok(Self {
+            repository,
+            args,
+            with_contents,
             child,
             stdin: Some(stdin),
             stdout: BufReader::new(stdout),
@@ -124,42 +221,14 @@ impl GitRepository {
     }
 }
 
-fn describe(args: &[&str]) -> String {
-    format!("git {}", args.join(" "))
-}
-
-/// An object read from the object database.
-#[derive(Debug)]
-pub(super) struct Object {
-    pub(super) id: ObjectId,
-    pub(super) kind: String,
-    pub(super) size: u64,
-    /// The object's contents, or `None` when it is larger than the limit
-    /// the read allowed.
-    pub(super) contents: Option<Vec<u8>>,
-}
-
-/// A running `git cat-file --batch`, which answers each object name written
-/// to it with the object.
-pub(super) struct CatFile<'r> {
-    repository: &'r GitRepository,
-    child: Child,
-    stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
-    stderr: Option<JoinHandle<Vec<u8>>>,
-}
-
 impl CatFile<'_> {
-    const ARGS: &'static [&'static str] = &["cat-file", "--batch"];
-
-    /// Reads the object `name` names, or `None` if there is no such object.
-    /// Contents larger than `limit` bytes are skipped, not held in memory.
-    pub(super) fn read(&mut self, name: &str, limit: u64) -> Result<Option<Object>, GitError> {
-        self.exchange(name, limit)
-            .map_err(|detail| self.failure(detail))
+    /// Asks for the object `name` names: its header and, in a session with
+    /// contents, its contents. `None` if there is no such object.
+    fn read(&mut self, name: &str) -> Result<Option<Object>, GitError> {
+        self.exchange(name).map_err(|detail| self.failure(detail))
     }
 
-    fn exchange(&mut self, name: &str, limit: u64) -> Result<Option<Object>, String> {
+    fn exchange(&mut self, name: &str) -> Result<Option<Object>, String> {
         let stdin = self.stdin.as_mut().ok_or("the session has ended")?;
         writeln!(stdin, "{name}")
             .and_then(|()| stdin.flush())
@@ -179,37 +248,42 @@ impl CatFile<'_> {
             _ => return Err(format!("unexpected answer {header:?} for {name}")),
         };
         let unexpected = || format!("unexpected answer {header:?} for {name}");
-        let id = ObjectId::parse(id).ok_or_else(unexpected)?;
-        let size: u64 = size.parse().map_err(|_| unexpected())?;
-
-        let mut body = (&mut self.stdout).take(size);
-        let (contents, read) = if size <= limit {
-            let mut contents = Vec::new();
-            let read = body.read_to_end(&mut contents).map(|read| read as u64);
-            (Some(contents), read)
-        } else {
-            (None, io::copy(&mut body, &mut io::sink()))
+        let header = Header {
+            id: ObjectId::parse(id).ok_or_else(unexpected)?,
+            kind: kind.to_owned(),
+            size: size.parse().map_err(|_| unexpected())?,
         };
+        if !self.with_contents {
+            return Ok(Some(Object {
+                header,
+                contents: None,
+            }));
+        }
+
+        // The caller has checked the size against its limit.
+        let mut contents = Vec::new();
+        let read = (&mut self.stdout)
+            .take(header.size)
+            .read_to_end(&mut contents)
+            .map_err(|error| error.to_string())?;
         let mut newline = [0];
-        let complete = read.map_err(|error| error.to_string())? == size
+        let complete = read as u64 == header.size
             && self.stdout.read_exact(&mut newline).is_ok()
             && newline == *b"\n";
         if !complete {
             return Err(format!("the contents of {name} are incomplete"));
         }
         Ok(Some(Object {
-            id,
-            kind: kind.to_owned(),
-            size,
-            contents,
+            header,
+            contents: Some(contents),
         }))
     }
 
     /// Ends the session, reporting whether Git succeeded.
-    pub(super) fn finish(mut self) -> Result<(), GitError> {
+    fn finish(mut self) -> Result<(), GitError> {
         let (status, stderr) = self.wait()?;
         if !status.success() {
-            return Err(self.repository.failed(Self::ARGS, status, &stderr));
+            return Err(self.repository.failed(self.args, status, &stderr));
         }
         Ok(())
     }
@@ -219,10 +293,10 @@ impl CatFile<'_> {
     fn failure(&mut self, detail: String) -> GitError {
         match self.wait() {
             Ok((status, stderr)) if !status.success() => {
-                self.repository.failed(Self::ARGS, status, &stderr)
+                self.repository.failed(self.args, status, &stderr)
             }
             Ok(_) => self.repository.error(GitErrorKind::UnexpectedOutput {
-                command: describe(Self::ARGS),
+                command: describe(self.args),
                 detail,
             }),
             Err(error) => error,

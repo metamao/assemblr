@@ -480,6 +480,12 @@ Rules:
 - A mutable working tree is never substituted for a published version.
 - The registry never silently replaces historical content.
 - Resolved versions and content are **identifiable and verifiable**.
+- A published version's **content identity** is the Git tree of its tagged
+  commit, and the commit is its provenance. The tree covers the entire
+  repository snapshot at that commit, not only the files that contribute to a
+  composition, so a change to any file in the repository, such as a README,
+  gives a different identity (see
+  [ADR 0006](../adr/0006-reading-git-repositories.md)).
 - Snapshots and provenance preserve what is needed to reconstruct the exact
   historical files that amendments are based on (see
   [amendments-and-composition.md](amendments-and-composition.md#amendments--approved)).
@@ -493,8 +499,8 @@ Rules:
 Open:
 
 - Packaging, cache, snapshot, and lock-state formats and locations, including
-  how content identity is computed and how long historical snapshots are
-  retained. **OC-8.**
+  how lock state and snapshots record and verify content identity and how
+  long historical snapshots are retained. **OC-8.**
 
 ## Removal — Approved
 

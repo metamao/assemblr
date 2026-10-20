@@ -16,7 +16,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
-use command::CatFile;
+use command::{Object, Objects};
 use object::{EntryKind, TreeEntry, commit_tree, parse_tree};
 
 pub use object::ObjectId;
@@ -24,13 +24,25 @@ pub use object::ObjectId;
 use super::manifest::{ReadManifestError, read_manifest};
 use crate::domain::{FileTree, Manifest, RelativePath, RelativePathError, UnitFile, Version};
 
-/// The largest `manifest.jsonc` that is read, in bytes. Manifests are small,
-/// and the bound keeps a repository from making Assemblr load an arbitrarily
-/// large file.
-const MANIFEST_SIZE_LIMIT: u64 = 1024 * 1024;
+// Bounds on what is read from a repository, which is untrusted. Git stores
+// objects compressed, and trees can share subtrees, so a small repository can
+// describe files far larger, or far more numerous, than it occupies. Every
+// bound is far above what a unit needs, and exceeding one is an error, never
+// a silent truncation.
 
-/// Read the whole object.
-const NO_LIMIT: u64 = u64::MAX;
+/// The largest `manifest.jsonc`, in bytes.
+const MANIFEST_LIMIT: u64 = 1024 * 1024;
+/// The largest commit object, in bytes.
+const COMMIT_LIMIT: u64 = 1024 * 1024;
+/// The largest directory listing (tree object), in bytes.
+const TREE_LIMIT: u64 = 4 * 1024 * 1024;
+/// The largest `src/` file, in bytes.
+const FILE_LIMIT: u64 = 16 * 1024 * 1024;
+/// The largest total size of a unit's `src/` files, in bytes.
+const SRC_SIZE_LIMIT: u64 = 128 * 1024 * 1024;
+/// The most files and directories `src/` may hold, counting each path a
+/// shared subtree appears at.
+const SRC_ENTRY_LIMIT: usize = 10_000;
 
 const MANIFEST: &[u8] = b"manifest.jsonc";
 const SRC: &[u8] = b"src";
@@ -94,7 +106,7 @@ impl GitRepository {
             "refs/tags/",
         ];
         let refs = self.output(&args)?;
-        let mut cat_file = self.cat_file()?;
+        let mut objects = self.objects()?;
         let mut tags = Vec::new();
         for line in refs
             .split(|&byte| byte == b'\n')
@@ -124,46 +136,52 @@ impl GitRepository {
             let Some(version) = Version::from_tag(name) else {
                 continue;
             };
-            let outcome = self.read_version(&mut cat_file, &object, &version)?;
+            let outcome = self.read_version(&mut objects, &object, &version)?;
             tags.push(VersionTag {
                 name: name.to_owned(),
                 version,
                 outcome,
             });
         }
-        cat_file.finish()?;
+        objects.finish()?;
         tags.sort_by(|a, b| (&a.version, &a.name).cmp(&(&b.version, &b.name)));
         Ok(tags)
     }
 
     fn read_version(
         &self,
-        cat_file: &mut CatFile<'_>,
+        objects: &mut Objects<'_>,
         tag: &ObjectId,
         version: &Version,
     ) -> Result<Result<PublishedVersion, InvalidVersion>, GitError> {
         // `^{}` peels annotated tags, including tags of tags, to the object
         // they finally point at.
-        let target = self.require(cat_file, &format!("{tag}^{{}}"), NO_LIMIT)?;
-        if target.kind != "commit" {
+        let target = self.require(objects, &format!("{tag}^{{}}"), 0)?;
+        if target.header.kind != "commit" {
             return Ok(Err(InvalidVersion::NotACommit {
-                object_type: target.kind,
+                object_type: target.header.kind,
             }));
         }
-        let commit = target.id.clone();
-        let tree = commit_tree(&contents(target)).ok_or_else(|| self.malformed(&commit))?;
-        let root = self.read_tree(cat_file, &tree)?;
+        let commit = target.header.id;
+        let tree = match self.commit_tree(objects, &commit)? {
+            Ok(tree) => tree,
+            Err(too_large) => return Ok(Err(InvalidVersion::ObjectTooLarge(too_large))),
+        };
+        let root = match self.read_tree(objects, &tree)? {
+            Ok(root) => root,
+            Err(too_large) => return Ok(Err(InvalidVersion::ObjectTooLarge(too_large))),
+        };
         let Some(entry) = root.into_iter().find(|entry| entry.name == MANIFEST) else {
             return Ok(Err(InvalidVersion::MissingManifest));
         };
         if !matches!(entry.kind, EntryKind::File { .. }) {
             return Ok(Err(InvalidVersion::ManifestNotAFile));
         }
-        let blob = self.require(cat_file, entry.id.as_str(), MANIFEST_SIZE_LIMIT)?;
+        let blob = self.require(objects, entry.id.as_str(), MANIFEST_LIMIT)?;
         let Some(bytes) = blob.contents else {
             return Ok(Err(InvalidVersion::ManifestTooLarge {
-                size: blob.size,
-                limit: MANIFEST_SIZE_LIMIT,
+                size: blob.header.size,
+                limit: MANIFEST_LIMIT,
             }));
         };
         let Ok(text) = String::from_utf8(bytes) else {
@@ -188,20 +206,28 @@ impl GitRepository {
     /// without `src/` has no files.
     ///
     /// Entries a unit file cannot be are rejected: symbolic links,
-    /// submodules, and invalid paths. Every one is reported, sorted by path.
+    /// submodules, invalid paths, and files or directories larger than
+    /// Assemblr reads. Every one is reported, sorted by path. `src/` as a
+    /// whole is bounded too, in its number of entries and its total size.
     pub fn read_src(&self, commit: &ObjectId) -> Result<FileTree, ReadSrcError> {
-        let mut cat_file = self.cat_file()?;
-        let object = self.require(&mut cat_file, commit.as_str(), NO_LIMIT)?;
-        if object.kind != "commit" {
+        let mut objects = self.objects()?;
+        let header = objects
+            .header(commit.as_str())?
+            .ok_or_else(|| self.error(GitErrorKind::MissingObject(commit.to_string())))?;
+        if header.kind != "commit" {
             return Err(ReadSrcError::NotACommit {
                 commit: commit.clone(),
-                object_type: object.kind,
+                object_type: header.kind,
             });
         }
-        let tree = commit_tree(&contents(object)).ok_or_else(|| self.malformed(commit))?;
-        let root = self.read_tree(&mut cat_file, &tree)?;
+        let tree = self
+            .commit_tree(&mut objects, commit)?
+            .map_err(ReadSrcError::ObjectTooLarge)?;
+        let root = self
+            .read_tree(&mut objects, &tree)?
+            .map_err(ReadSrcError::ObjectTooLarge)?;
         let Some(src) = root.into_iter().find(|entry| entry.name == SRC) else {
-            cat_file.finish()?;
+            objects.finish()?;
             return Ok(FileTree::new());
         };
         if src.kind != EntryKind::Directory {
@@ -210,9 +236,30 @@ impl GitRepository {
 
         let mut files = Vec::new();
         let mut errors = Vec::new();
+        let mut entries = 0;
         let mut directories = vec![(Vec::new(), src.id)];
         while let Some((prefix, id)) = directories.pop() {
-            for entry in self.read_tree(&mut cat_file, &id)? {
+            let listing = match self.read_tree(&mut objects, &id)? {
+                Ok(listing) => listing,
+                Err(too_large) => {
+                    errors.push(SrcEntryError {
+                        path: String::from_utf8_lossy(prefix.strip_suffix(b"/").unwrap_or(&prefix))
+                            .into_owned(),
+                        reason: SrcEntryErrorReason::TooLarge {
+                            size: too_large.size,
+                            limit: too_large.limit,
+                        },
+                    });
+                    continue;
+                }
+            };
+            entries += listing.len();
+            if entries > SRC_ENTRY_LIMIT {
+                return Err(ReadSrcError::TooManyEntries {
+                    limit: SRC_ENTRY_LIMIT,
+                });
+            }
+            for entry in listing {
                 let path = [prefix.as_slice(), &entry.name].concat();
                 let reason = match entry.kind {
                     EntryKind::Directory => {
@@ -236,55 +283,95 @@ impl GitRepository {
                 });
             }
         }
+
+        // Sizes first, so nothing is read unless all of `src/` fits.
+        let mut total: u64 = 0;
+        for (path, id, _) in &files {
+            let header = self.require(&mut objects, id.as_str(), 0)?.header;
+            if header.kind != "blob" {
+                return Err(self.malformed(id).into());
+            }
+            if header.size > FILE_LIMIT {
+                errors.push(SrcEntryError {
+                    path: path.to_string(),
+                    reason: SrcEntryErrorReason::TooLarge {
+                        size: header.size,
+                        limit: FILE_LIMIT,
+                    },
+                });
+            }
+            total = total.saturating_add(header.size);
+        }
         if !errors.is_empty() {
             errors.sort_by(|a, b| a.path.cmp(&b.path));
             return Err(ReadSrcError::Entries(errors));
         }
+        if total > SRC_SIZE_LIMIT {
+            return Err(ReadSrcError::TooLarge {
+                size: total,
+                limit: SRC_SIZE_LIMIT,
+            });
+        }
 
         let mut tree = FileTree::new();
         for (path, id, executable) in files {
-            let blob = self.require(&mut cat_file, id.as_str(), NO_LIMIT)?;
-            if blob.kind != "blob" {
-                return Err(self.malformed(&id).into());
-            }
-            tree.insert(path, UnitFile::new(contents(blob), executable));
+            let blob = self.require(&mut objects, id.as_str(), FILE_LIMIT)?;
+            let contents = blob.contents.ok_or_else(|| self.malformed(&id))?;
+            tree.insert(path, UnitFile::new(contents, executable));
         }
-        cat_file.finish()?;
+        objects.finish()?;
         Ok(tree)
     }
 
-    /// Reads an object that must exist.
+    /// Reads an object that must exist, with its contents if they are at
+    /// most `limit` bytes.
     fn require(
         &self,
-        cat_file: &mut CatFile<'_>,
+        objects: &mut Objects<'_>,
         name: &str,
         limit: u64,
-    ) -> Result<command::Object, GitError> {
-        cat_file
+    ) -> Result<Object, GitError> {
+        objects
             .read(name, limit)?
             .ok_or_else(|| self.error(GitErrorKind::MissingObject(name.to_owned())))
     }
 
+    /// The tree of `commit`, or the commit's size if it is too large to read.
+    fn commit_tree(
+        &self,
+        objects: &mut Objects<'_>,
+        commit: &ObjectId,
+    ) -> Result<Result<ObjectId, ObjectTooLarge>, GitError> {
+        let object = self.require(objects, commit.as_str(), COMMIT_LIMIT)?;
+        let Some(contents) = object.contents else {
+            return Ok(Err(ObjectTooLarge::new(object, COMMIT_LIMIT)));
+        };
+        commit_tree(&contents)
+            .map(Ok)
+            .ok_or_else(|| self.malformed(commit))
+    }
+
+    /// The entries of tree `id`, or its size if it is too large to read.
     fn read_tree(
         &self,
-        cat_file: &mut CatFile<'_>,
+        objects: &mut Objects<'_>,
         id: &ObjectId,
-    ) -> Result<Vec<TreeEntry>, GitError> {
-        let object = self.require(cat_file, id.as_str(), NO_LIMIT)?;
-        if object.kind != "tree" {
+    ) -> Result<Result<Vec<TreeEntry>, ObjectTooLarge>, GitError> {
+        let object = self.require(objects, id.as_str(), TREE_LIMIT)?;
+        if object.header.kind != "tree" {
             return Err(self.malformed(id));
         }
-        parse_tree(id, &contents(object)).ok_or_else(|| self.malformed(id))
+        let Some(contents) = object.contents else {
+            return Ok(Err(ObjectTooLarge::new(object, TREE_LIMIT)));
+        };
+        parse_tree(id, &contents)
+            .map(Ok)
+            .ok_or_else(|| self.malformed(id))
     }
 
     fn malformed(&self, id: &ObjectId) -> GitError {
         self.error(GitErrorKind::MalformedObject(id.clone()))
     }
-}
-
-/// The contents of an object read without a limit.
-fn contents(object: command::Object) -> Vec<u8> {
-    object.contents.unwrap_or_default()
 }
 
 /// The path of a `src/` file, from its path relative to `src/`.
@@ -352,8 +439,9 @@ impl Provenance {
         &self.commit
     }
 
-    /// The commit's tree, which identifies the version's content: commits
-    /// with the same tree publish the same files.
+    /// The commit's root tree, which identifies the version's content. It
+    /// covers the entire repository snapshot, not only the files a
+    /// composition uses, so a change to any file gives a different tree.
     pub fn tree(&self) -> &ObjectId {
         &self.tree
     }
@@ -367,6 +455,9 @@ pub enum InvalidVersion {
         /// The type of object it points at.
         object_type: String,
     },
+    /// The tagged commit, or its root directory listing, is larger than
+    /// Assemblr reads.
+    ObjectTooLarge(ObjectTooLarge),
     /// The tagged commit has no `manifest.jsonc` at its root.
     MissingManifest,
     /// `manifest.jsonc` is a directory, a symbolic link, or a submodule.
@@ -395,6 +486,7 @@ impl fmt::Display for InvalidVersion {
             Self::NotACommit { object_type } => {
                 write!(f, "the tag points at a {object_type}, not a commit")
             }
+            Self::ObjectTooLarge(too_large) => too_large.fmt(f),
             Self::MissingManifest => f.write_str("the tagged commit has no `manifest.jsonc`"),
             Self::ManifestNotAFile => f.write_str("`manifest.jsonc` is not a regular file"),
             Self::ManifestTooLarge { size, limit } => write!(
@@ -422,11 +514,26 @@ pub enum ReadSrcError {
         /// Its type.
         object_type: String,
     },
+    /// The commit, or its root directory listing, is larger than Assemblr
+    /// reads.
+    ObjectTooLarge(ObjectTooLarge),
     /// `src` is not a directory.
     SrcNotADirectory,
     /// Entries that cannot be unit files, sorted by path. Every one is
     /// reported.
     Entries(Vec<SrcEntryError>),
+    /// `src/` holds more files and directories than Assemblr reads.
+    TooManyEntries {
+        /// The most entries read.
+        limit: usize,
+    },
+    /// `src/` files total more bytes than Assemblr reads.
+    TooLarge {
+        /// Their total size, in bytes.
+        size: u64,
+        /// The largest total read, in bytes.
+        limit: u64,
+    },
 }
 
 impl From<GitError> for ReadSrcError {
@@ -443,7 +550,16 @@ impl fmt::Display for ReadSrcError {
                 commit,
                 object_type,
             } => write!(f, "{commit} is a {object_type}, not a commit"),
+            Self::ObjectTooLarge(too_large) => too_large.fmt(f),
             Self::SrcNotADirectory => f.write_str("`src` is not a directory"),
+            Self::TooManyEntries { limit } => write!(
+                f,
+                "`src/` has more than {limit} files and directories, the most Assemblr reads"
+            ),
+            Self::TooLarge { size, limit } => write!(
+                f,
+                "`src/` files total {size} bytes, more than the {limit} Assemblr reads"
+            ),
             Self::Entries(errors) => {
                 let plural = if errors.len() == 1 { "y" } else { "ies" };
                 write!(f, "`src/` has {} unsupported entr{plural}:", errors.len())?;
@@ -496,6 +612,9 @@ impl fmt::Display for SrcEntryError {
             SrcEntryErrorReason::UnsupportedMode(mode) => {
                 write!(f, "Git file mode {mode} is not supported")
             }
+            SrcEntryErrorReason::TooLarge { size, limit } => {
+                write!(f, "{size} bytes, more than the {limit} Assemblr reads")
+            }
             SrcEntryErrorReason::NotUtf8 => f.write_str("the path is not UTF-8"),
             SrcEntryErrorReason::InvalidPath(error) => error.fmt(f),
         }
@@ -511,10 +630,67 @@ pub enum SrcEntryErrorReason {
     Submodule,
     /// Its Git file mode is neither a regular nor an executable file's.
     UnsupportedMode(String),
+    /// The file, or the directory's listing, is larger than Assemblr reads.
+    TooLarge {
+        /// Its size, in bytes.
+        size: u64,
+        /// The largest size read, in bytes.
+        limit: u64,
+    },
     /// Its path is not UTF-8.
     NotUtf8,
     /// Its path breaks the portable path rules.
     InvalidPath(RelativePathError),
+}
+
+/// An object larger than Assemblr reads from a repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectTooLarge {
+    id: ObjectId,
+    object_type: String,
+    size: u64,
+    limit: u64,
+}
+
+impl ObjectTooLarge {
+    fn new(object: Object, limit: u64) -> Self {
+        Self {
+            id: object.header.id,
+            object_type: object.header.kind,
+            size: object.header.size,
+            limit,
+        }
+    }
+
+    /// The object.
+    pub fn id(&self) -> &ObjectId {
+        &self.id
+    }
+
+    /// Its type, such as `commit` or `tree`.
+    pub fn object_type(&self) -> &str {
+        &self.object_type
+    }
+
+    /// Its size, in bytes.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// The largest size read for an object of its type, in bytes.
+    pub fn limit(&self) -> u64 {
+        self.limit
+    }
+}
+
+impl fmt::Display for ObjectTooLarge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} has {} bytes, more than the {} Assemblr reads",
+            self.object_type, self.id, self.size, self.limit
+        )
+    }
 }
 
 /// A failure to read a Git repository.

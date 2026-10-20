@@ -770,3 +770,194 @@ fn missing_objects_are_never_fetched() {
         .unwrap();
     assert!(!present.success(), "the blob was fetched");
 }
+
+/// A directory whose `width` entries all share one subtree, `depth` levels
+/// down to `width` files. A few objects describe `width^depth` files.
+fn shared_subtrees(repo: &Repo, width: usize, depth: usize) -> String {
+    let (_, blob) = repo.write(&file("shared"));
+    let mut level = ("100644", blob);
+    for _ in 0..depth {
+        let raw: Vec<u8> = (0..width)
+            .flat_map(|index| {
+                let name = format!("e{index:03}");
+                [
+                    level.0.as_bytes(),
+                    b" ",
+                    name.as_bytes(),
+                    b"\0",
+                    &decode_hex(&level.1),
+                ]
+                .concat()
+            })
+            .collect();
+        let args = ["hash-object", "-w", "-t", "tree", "--literally", "--stdin"];
+        level = ("40000", git_in(&repo.path, &args, &raw));
+    }
+    level.1
+}
+
+/// Commits a unit whose `src/` is the tree `src`.
+fn commit_with_src_tree(repo: &Repo, version: &str, src: &str) -> String {
+    let (_, manifest_blob) = repo.write(&file(manifest(version)));
+    let raw = [
+        b"100644 manifest.jsonc\0".as_slice(),
+        &decode_hex(&manifest_blob),
+        b"40000 src\0",
+        &decode_hex(src),
+    ]
+    .concat();
+    let args = ["hash-object", "-w", "-t", "tree", "--literally", "--stdin"];
+    let root = git_in(&repo.path, &args, &raw);
+    repo.git(&["commit-tree", &root, "-m", "Publish"])
+}
+
+#[test]
+fn shared_subtrees_cannot_expand_src_without_bound() {
+    let repo = Repo::new(&scratch("shared_subtrees"));
+    // 25 + 625 + 15,625 entries from four objects.
+    let src = shared_subtrees(&repo, 25, 3);
+    let commit = commit_with_src_tree(&repo, "1.0.0", &src);
+    repo.tag("v1.0.0", &commit);
+
+    let error = read_src(&repo, &commit).unwrap_err();
+
+    assert!(
+        matches!(error, ReadSrcError::TooManyEntries { limit: 10_000 }),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("more than 10000 files"),
+        "{error}"
+    );
+}
+
+#[test]
+fn src_files_are_bounded_one_by_one_and_in_total() {
+    const MIB: usize = 1024 * 1024;
+    let repo = Repo::new(&scratch("src_sizes"));
+    // Git compresses these to a few kilobytes, but they expand when read.
+    let at_limit = vec![0; 16 * MIB];
+    let nine_at_limit = dir((0..9).map(|index| (format!("f{index}"), file(&at_limit))));
+    let total = repo.commit(&unit("1.0.0", Some(nine_at_limit)));
+    repo.tag("v1.0.0", &total);
+    let oversized = repo.commit(&unit(
+        "1.1.0",
+        Some(dir([
+            ("big.bin", file(vec![0; 16 * MIB + 1])),
+            ("ok.txt", file("ok")),
+        ])),
+    ));
+    repo.tag("v1.1.0", &oversized);
+
+    let error = read_src(&repo, &total).unwrap_err();
+    assert!(
+        matches!(error, ReadSrcError::TooLarge { size, limit } if size == 9 * 16 * MIB as u64 && limit == 128 * MIB as u64),
+        "{error}"
+    );
+
+    let Err(ReadSrcError::Entries(errors)) = read_src(&repo, &oversized) else {
+        panic!("the oversized file is rejected");
+    };
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].path(), "big.bin");
+    assert_eq!(
+        errors[0].reason(),
+        &SrcEntryErrorReason::TooLarge {
+            size: 16 * MIB as u64 + 1,
+            limit: 16 * MIB as u64
+        }
+    );
+    assert!(
+        errors[0].to_string().starts_with("src/big.bin: "),
+        "{}",
+        errors[0]
+    );
+}
+
+/// A tree whose single entry has a name long enough to make the tree
+/// larger than any directory listing Assemblr reads.
+fn oversized_tree(repo: &Repo) -> String {
+    let (_, blob) = repo.write(&file("x"));
+    let name = "n".repeat(5 * 1024 * 1024);
+    let raw = [
+        b"100644 ".as_slice(),
+        name.as_bytes(),
+        b"\0",
+        &decode_hex(&blob),
+    ]
+    .concat();
+    let args = ["hash-object", "-w", "-t", "tree", "--literally", "--stdin"];
+    git_in(&repo.path, &args, &raw)
+}
+
+#[test]
+fn oversized_src_directories_are_reported_by_path() {
+    let repo = Repo::new(&scratch("oversized_directory"));
+    let big = oversized_tree(&repo);
+    let (_, fine) = repo.write(&file("fine"));
+    let raw = [
+        b"40000 big\0".as_slice(),
+        &decode_hex(&big),
+        b"100644 fine.txt\0",
+        &decode_hex(&fine),
+    ]
+    .concat();
+    let args = ["hash-object", "-w", "-t", "tree", "--literally", "--stdin"];
+    let src = git_in(&repo.path, &args, &raw);
+    let commit = commit_with_src_tree(&repo, "1.0.0", &src);
+    repo.tag("v1.0.0", &commit);
+
+    let Err(ReadSrcError::Entries(errors)) = read_src(&repo, &commit) else {
+        panic!("the oversized directory is rejected");
+    };
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].path(), "big");
+    assert!(matches!(
+        errors[0].reason(),
+        SrcEntryErrorReason::TooLarge {
+            limit: 4_194_304,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn oversized_commits_and_root_trees_are_invalid_versions() {
+    let repo = Repo::new(&scratch("oversized_objects"));
+    let (_, tree) = repo.write(&unit("1.0.0", None));
+    let message = "m".repeat(1024 * 1024 + 1);
+    let long_commit = git_in(
+        &repo.path,
+        &["commit-tree", &tree, "-F", "-"],
+        message.as_bytes(),
+    );
+    repo.tag("v1.0.0", &long_commit);
+    let big_root = oversized_tree(&repo);
+    repo.tag(
+        "v1.1.0",
+        &repo.git(&["commit-tree", &big_root, "-m", "Publish"]),
+    );
+    repo.tag("v2.0.0", &repo.commit(&unit("2.0.0", None)));
+
+    let tags = repo.versions();
+    let too_large: Vec<_> = tags
+        .iter()
+        .map(|tag| match tag.outcome() {
+            Err(InvalidVersion::ObjectTooLarge(too_large)) => {
+                Some((too_large.object_type(), too_large.limit()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        too_large,
+        [Some(("commit", 1_048_576)), Some(("tree", 4_194_304)), None]
+    );
+    assert_eq!(outcomes(&tags)[2], ("v2.0.0", Ok(&version("2.0.0"))));
+    let message = tags[0].outcome().unwrap_err().to_string();
+    assert!(
+        message.starts_with(&format!("commit {long_commit} has ")),
+        "{message}"
+    );
+}

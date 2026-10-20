@@ -55,8 +55,9 @@ The options considered:
      an error, never a fetch. A fetch would reach the network and run the
      transport the repository configures. The second setting also covers Git
      before 2.45, which ignores the first.
-   - `-c core.fsmonitor=false`, `--no-pager`, `GIT_TERMINAL_PROMPT=0`, and
-     `GIT_OPTIONAL_LOCKS=0`.
+   - `-c core.fsmonitor=` (empty, which disables it in every version; before
+     Git 2.36 the value names a hook, so `false` would name a program),
+     `--no-pager`, `GIT_TERMINAL_PROMPT=0`, and `GIT_OPTIONAL_LOCKS=0`.
 
    The repository's own configuration still applies, because it records the
    object format and extensions. This is why only plumbing that runs no
@@ -64,19 +65,49 @@ The options considered:
 5. **Treat objects as untrusted.** Assemblr parses raw commits and trees
    itself. Malformed objects are errors, as are tree entries whose names
    contain `/` or repeat another entry's name, because either would give two
-   entries the same path. A manifest is read only if the object header shows
-   it is at most 1 MiB.
-6. **Provenance and content identity.** A published version's provenance is
-   its tagged commit and that commit's root tree. The tree id identifies the
-   version's content: it covers every file the version publishes, and commits
-   with the same tree publish the same content. Object ids are hexadecimal,
-   with 40 digits for SHA-1 or 64 for SHA-256, depending on the repository's
-   format. How lock state and snapshots record and verify this identity is
-   part of OC-8 and is not decided here.
-7. **Git version.** The settings above assume Git 2.32 or later, the first
-   release to honor `GIT_CONFIG_GLOBAL`. Older versions still keep the
-   settings that prevent fetching and replacement. The version is not
-   checked at runtime.
+   entries the same path.
+6. **Bound what is read.** Git stores objects compressed, so a small object
+   can expand to gigabytes. Trees can also share subtrees, so a few objects
+   can describe billions of paths. A `cat-file --batch-check` session
+   reports each object's size before its contents are requested, so contents
+   over a bound are never read or streamed. The bounds are fixed constants,
+   far above what a unit needs:
+
+   | What | Bound |
+   |------|-------|
+   | `manifest.jsonc` | 1 MiB |
+   | A commit | 1 MiB |
+   | A directory listing (tree object) | 4 MiB |
+   | A `src/` file | 16 MiB |
+   | All `src/` files together | 128 MiB |
+   | Files and directories in `src/`, counted at every path a shared subtree appears | 10,000 |
+
+   Exceeding a bound is an explicit error that names the bound, and the
+   file or directory when there is one. Nothing is truncated. A version tag
+   whose commit, root tree, or manifest exceeds a bound is an invalid
+   version.
+7. **Provenance and content identity**, approved by the owner. The tagged
+   commit is a published version's provenance, and the commit's root tree id
+   is its content identity.
+   - The root tree identifies the **entire repository snapshot** at that
+     commit, not only the files that contribute to a composition, such as
+     the manifest and `src/`.
+   - A change to any file in the repository, such as a README, therefore
+     gives a different identity. Commits with the same tree have the same
+     content.
+   - Object ids are hexadecimal, with 40 digits for SHA-1 or 64 for SHA-256,
+     depending on the repository's format.
+   - How lock state and snapshots record and verify this identity remains
+     open under OC-8.
+8. **Git version: 2.32 or later**, the first release to honor
+   `GIT_CONFIG_GLOBAL`. The version is not checked at runtime. The test suite
+   passes against Git 2.32.0 built from source, as well as the version CI
+   provides.
+   - `GIT_NO_LAZY_FETCH` exists only from Git 2.45. Before that,
+     `GIT_ALLOW_PROTOCOL=none` alone prevents lazy fetching. With it removed,
+     Git 2.32 fetches the missing blobs of a partial clone, and with it in
+     place, it does not.
+   - The other settings date from well before 2.32.
 
 ## Consequences
 
@@ -90,5 +121,9 @@ The options considered:
 - Tests need Git, which the CI runners provide. Fixtures are written with
   Git's plumbing, so trees holding symbolic links, submodules, or names a
   file system rejects can be tested on every platform.
-- Reading `src/` trees is not bounded in size yet. Bounds become practical
-  when the content cache exists (OC-42).
+- A unit that needs more than the bounds in decision 6 cannot be read. The
+  bounds can be raised when a real unit needs it, in a new ADR rather than
+  through configuration.
+- CI tests only the Git version its runners provide. The 2.32 minimum was
+  verified once, by hand. A CI job that builds an old Git is possible if
+  that evidence needs to stay current.

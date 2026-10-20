@@ -10,8 +10,8 @@ mod jsonc;
 mod manifest;
 
 pub use git::{
-    GitError, GitErrorKind, GitRepository, InvalidVersion, ObjectId, Provenance, PublishedVersion,
-    ReadSrcError, SrcEntryError, SrcEntryErrorReason, VersionTag,
+    GitError, GitErrorKind, GitRepository, InvalidVersion, ObjectId, ObjectTooLarge, Provenance,
+    PublishedVersion, ReadSrcError, SrcEntryError, SrcEntryErrorReason, VersionTag,
 };
 pub use jsonc::SyntaxError;
 pub use manifest::{
