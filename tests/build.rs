@@ -704,7 +704,7 @@ fn a_locked_version_whose_content_changed_is_rejected() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("delete assemblr-lock.json to resolve every dependency again"),
+        stderr.contains("restore the tag in the unit's repository; deleting assemblr-lock.json is not a repair: it discards every locked version"),
         "{stderr}"
     );
 }
@@ -717,7 +717,7 @@ fn an_invalid_lockfile_is_reported_and_kept() {
     let stderr = stderr(&fails(fixture.build(&app)));
     assert!(stderr.contains("is not a valid lockfile"), "{stderr}");
     assert!(
-        stderr.contains("fix assemblr-lock.json, or delete it"),
+        stderr.contains("fix assemblr-lock.json; deleting assemblr-lock.json is not a repair"),
         "{stderr}"
     );
     assert_eq!(app.read("assemblr-lock.json"), "<<<<<<< HEAD\n");
@@ -727,10 +727,12 @@ fn an_invalid_lockfile_is_reported_and_kept() {
 fn what_an_interrupted_build_left_is_cleaned_up() {
     let fixture = Fixture::new("interrupted");
     let (_node, app) = app_on_node(&fixture, "^1");
-    // A build interrupted after replacing the lockfile leaves no `build/`.
+    // A build interrupted after replacing the lockfile leaves no `build/`,
+    // and the record that it started writing.
     app.write(".assemblr-build.new/node.txt", "half written");
     app.write(".assemblr-build.old/app.txt", "previous");
     app.write(".assemblr-lock.json.new", "{");
+    app.write(".git/assemblr-build.pending", "");
     succeeds(fixture.build(&app));
     assert_eq!(
         app.build_files(),
@@ -743,6 +745,118 @@ fn what_an_interrupted_build_left_is_cleaned_up() {
     ] {
         assert!(!app.path.join(leftover).exists(), "{leftover}");
     }
+    assert!(!app.path.join(".git/assemblr-build.pending").exists());
+}
+
+#[test]
+fn content_at_reserved_paths_that_no_build_left_is_kept() {
+    let fixture = Fixture::new("unrecorded");
+    let (_node, app) = app_on_node(&fixture, "^1");
+    app.write(".assemblr-build.old/notes.txt", "the author's");
+    let stderr = stderr(&fails(fixture.build(&app)));
+    assert!(
+        stderr.contains("exists, but no interrupted build was recorded"),
+        "{stderr}"
+    );
+    assert_eq!(app.read(".assemblr-build.old/notes.txt"), "the author's");
+    assert!(!app.path.join("build").exists());
+}
+
+/// Builds the app concurrently, half the builds against a registry whose
+/// `@acme/node` has 1.0.0 only, and half against one that also has 1.1.0
+/// from a clone with the same history. Which build runs first decides the
+/// lock: 1.0.0, which every build can then keep, or 1.1.0, which builds
+/// against the first registry cannot find. Whatever the order, `build/`
+/// must match the lockfile, and nothing may be left beside it.
+#[test]
+fn concurrent_builds_of_one_unit_run_one_at_a_time() {
+    let fixture = Fixture::new("concurrent");
+    let older = fixture.repo("node-older");
+    older.write("manifest.jsonc", &manifest("@acme/node", "1.0.0", &[], ""));
+    older.write("src/node.txt", "node 1.0.0");
+    older.publish("1.0.0");
+    git(&fixture.dir, &["clone", "-q", "node-older", "node-newer"]);
+    let newer = Repo {
+        path: fixture.dir.join("node-newer"),
+    };
+    newer.write("manifest.jsonc", &manifest("@acme/node", "1.1.0", &[], ""));
+    newer.write("src/node.txt", "node 1.1.0");
+    newer.publish("1.1.0");
+    let registries = [
+        fixture.dir.join("data-older"),
+        fixture.dir.join("data-newer"),
+    ];
+    for (registry, repo) in registries.iter().zip(["node-older", "node-newer"]) {
+        let output = Command::new(env!("CARGO_BIN_EXE_assemblr"))
+            .current_dir(&fixture.dir)
+            .env("ASSEMBLR_DATA_DIR", registry)
+            .args(["registry", "add", repo])
+            .output()
+            .unwrap();
+        succeeds(output);
+    }
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest("@acme/app", "0.1.0", &[("@acme/node", "^1")], ""),
+    );
+    app.write("src/app.txt", "app");
+
+    let mut locked = Vec::new();
+    for _ in 0..6 {
+        let _ = fs::remove_dir_all(app.path.join("build"));
+        let _ = fs::remove_file(app.path.join("assemblr-lock.json"));
+        let builds: Vec<_> = (0..8)
+            .map(|index| {
+                Command::new(env!("CARGO_BIN_EXE_assemblr"))
+                    .current_dir(&app.path)
+                    .env("ASSEMBLR_DATA_DIR", &registries[index % 2])
+                    .env("HOME", &fixture.home)
+                    .args(["unit", "build"])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        let outputs: Vec<Output> = builds
+            .into_iter()
+            .map(|build| build.wait_with_output().unwrap())
+            .collect();
+        assert!(outputs.iter().any(|output| output.status.success()));
+        for output in outputs.iter().filter(|output| !output.status.success()) {
+            // The only failure: the lock another build wrote names a version
+            // this build's registry does not have.
+            let stderr = stderr(output);
+            assert!(
+                stderr.contains("@acme/node is locked to 1.1.0, which is not available locally")
+                    && stderr
+                        .lines()
+                        .filter(|line| line.starts_with("error:"))
+                        .count()
+                        == 1,
+                "{stderr}"
+            );
+        }
+        let version = app.lockfile()["units"]["@acme/node"]["version"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            app.build_files(),
+            pairs(&[("app.txt", "app"), ("node.txt", &format!("node {version}"))])
+        );
+        for leftover in [
+            ".assemblr-build.new",
+            ".assemblr-build.old",
+            ".assemblr-lock.json.new",
+            ".git/assemblr-build.pending",
+        ] {
+            assert!(!app.path.join(leftover).exists(), "{leftover}");
+        }
+        locked.push(version);
+    }
+    eprintln!("locked versions by round: {locked:?}");
 }
 
 #[test]
@@ -810,6 +924,42 @@ fn a_removed_dependency_repository_fails_explicitly() {
         stderr.contains("`assemblr registry remove <identity>`"),
         "{stderr}"
     );
+}
+
+/// A source that only a version outside every requirement depends on still
+/// decides the order in which resolution chooses versions, so a build that
+/// cannot read it fails rather than risk choosing differently.
+#[test]
+fn an_unreadable_source_reachable_only_through_an_unselectable_version_fails() {
+    let fixture = Fixture::new("unselectable");
+    let extra = fixture.repo("extra");
+    extra.write("manifest.jsonc", &manifest("@acme/extra", "1.0.0", &[], ""));
+    extra.publish("1.0.0");
+    fixture.register(&extra);
+    let node = fixture.repo("node");
+    node.write("manifest.jsonc", &manifest("@acme/node", "1.0.0", &[], ""));
+    node.publish("1.0.0");
+    node.write(
+        "manifest.jsonc",
+        &manifest("@acme/node", "2.0.0", &[("@acme/extra", "^1")], ""),
+    );
+    node.publish("2.0.0");
+    fixture.register(&node);
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest("@acme/app", "0.1.0", &[("@acme/node", "^1")], ""),
+    );
+    succeeds(fixture.build(&app));
+
+    fs::remove_dir_all(&extra.path).unwrap();
+    let lockfile = app.read("assemblr-lock.json");
+    let stderr = stderr(&fails(fixture.build(&app)));
+    assert!(
+        stderr.contains("could not read the registered source of @acme/extra"),
+        "{stderr}"
+    );
+    assert_eq!(app.read("assemblr-lock.json"), lockfile);
 }
 
 #[test]

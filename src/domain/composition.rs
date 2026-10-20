@@ -26,8 +26,9 @@
 //! a template syntax exists (OC-5). Two files collide when their paths are
 //! equal or differ only in case or in Unicode normalization, which some file
 //! systems cannot keep apart, or when one file's path is a directory of
-//! another's under the same comparison. Paths are compared by canonical
-//! caseless matching, with Unicode lowercasing as the case mapping. Every collision is reported, whether the
+//! another's under the same comparison. Case is compared one character at a
+//! time, by simple (one-to-one) case mappings, as case-insensitive file
+//! systems compare it (see `collision_key`). Every collision is reported, whether the
 //! units are independent or one depends on the other, and no unit wins.
 //!
 //! Every problem is reported, in the order [`compose`] documents.
@@ -781,20 +782,37 @@ fn compose_files<'a>(
     (files, collisions)
 }
 
-/// The key under which paths collide: `NFD(lowercase(NFD(path)))`.
+/// The key under which paths collide: `NFD(case(NFD(path)))`, where `case`
+/// maps each character to its lowercase and then to its uppercase, each only
+/// when that mapping is a single character.
 ///
-/// This is canonical caseless matching (Unicode, section 3.13), with Unicode
-/// lowercasing in place of full case folding, so the case comparison stays
-/// the one collisions have always used. Two paths with the same key differ
-/// only in case or in canonically equivalent spellings, such as a precomposed
-/// `é` and an `e` followed by a combining acute accent, which file systems
-/// such as APFS, NTFS, and FAT may not keep apart. Compatibility equivalents,
-/// such as `ﬁ` and `fi`, stay distinct, as file systems keep them apart.
-/// Neither normalization nor lowercasing introduces a `/`, so a key's
+/// Two paths with the same key differ only in canonically equivalent
+/// spellings, such as a precomposed `é` and an `e` followed by a combining
+/// acute accent, or only in case. This is not Unicode's canonical caseless
+/// matching, which uses full case folding: a mapping to several characters,
+/// such as `ß` to `SS` or `ﬁ` to `FI`, is not applied, because file systems
+/// compare names by one-to-one mappings and keep `ß` and `ss` apart. Mapping
+/// to lowercase and then uppercase also equates the characters that NTFS
+/// equates through their uppercase, such as `ς` and `σ`, `µ` and `μ`, `ſ` and
+/// `s`, or `ı` and `i`, which lowercasing alone keeps apart. Compatibility
+/// equivalents stay distinct, as file systems keep them apart. Each character
+/// is mapped on its own, never by context, and none maps to `/`, so a key's
 /// directories are the keys of the path's directories.
 fn collision_key(path: &RelativePath) -> String {
-    let decomposed: String = path.as_str().nfd().collect();
-    decomposed.to_lowercase().nfd().collect()
+    let cased: String = path.as_str().nfd().map(simple_case).collect();
+    cased.nfd().collect()
+}
+
+/// `c`'s uppercase after its lowercase, each only when it is one character.
+fn simple_case(c: char) -> char {
+    let lower = single(c.to_lowercase()).unwrap_or(c);
+    single(lower.to_uppercase()).unwrap_or(lower)
+}
+
+/// The only item of `chars`, if it has exactly one.
+fn single(mut chars: impl Iterator<Item = char>) -> Option<char> {
+    let first = chars.next()?;
+    chars.next().is_none().then_some(first)
 }
 
 #[cfg(test)]
@@ -1821,6 +1839,42 @@ mod tests {
                 nested: vec![contributed("CAFE\u{301}/menu.md", "@metamao/docs")],
             }]
         );
+    }
+
+    #[test]
+    fn characters_a_case_insensitive_file_system_equates_collide() {
+        // NTFS compares names by uppercase, which equates each pair, though
+        // lowercasing alone keeps them apart.
+        for (first, second) in [
+            ("\u{3c2}.md", "\u{3c3}.md"),
+            ("\u{b5}.md", "\u{3bc}.md"),
+            ("\u{17f}.md", "s.md"),
+            ("\u{131}.md", "i.md"),
+            ("\u{1e9e}.md", "\u{df}.md"),
+            ("\u{212a}.md", "k.md"),
+        ] {
+            let units = [Spec::new("@metamao/docs", "1.0.0").file(first).file(second)];
+            let errors = run(&project(&[("@metamao/docs", "^1")]), &units, &[]).unwrap_err();
+            assert!(
+                matches!(errors.as_slice(), [CompositionError::PathCollision { .. }]),
+                "{first} {second}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mappings_to_several_characters_are_not_applied() {
+        // `ß` uppercases to `SS`, `ﬁ` to `FI`, and `İ` lowercases to `i` and
+        // a combining dot; file systems keep each pair apart.
+        for (first, second) in [
+            ("\u{df}.md", "ss.md"),
+            ("\u{fb01}le.md", "file.md"),
+            ("\u{130}.md", "i.md"),
+        ] {
+            let units = [Spec::new("@metamao/docs", "1.0.0").file(first).file(second)];
+            let composed = run(&project(&[("@metamao/docs", "^1")]), &units, &[]).unwrap();
+            assert_eq!(composed.files.len(), 2, "{first} {second}");
+        }
     }
 
     #[test]

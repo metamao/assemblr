@@ -99,6 +99,24 @@ impl GitRepository {
         &self.path
     }
 
+    /// The repository's Git directory, absolute. For a linked worktree or a
+    /// submodule, whose `.git` is a file, this is the directory it names.
+    pub fn git_directory(&self) -> Result<PathBuf, GitError> {
+        let args = ["rev-parse", "--absolute-git-dir"];
+        let output = self.output(&args)?;
+        let path = std::str::from_utf8(&output)
+            .ok()
+            .map(|path| path.trim_end_matches(['\r', '\n']))
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| {
+                self.error(GitErrorKind::UnexpectedOutput {
+                    command: format!("git {}", args.join(" ")),
+                    detail: format!("unexpected path {:?}", String::from_utf8_lossy(&output)),
+                })
+            })?;
+        Ok(PathBuf::from(path))
+    }
+
     /// Reads every version tag and the manifest it publishes, ordered by
     /// version and then by tag name.
     ///

@@ -167,13 +167,22 @@ Path collisions:
   `README.md` and `readme.md`, also collide, and the file-or-directory check
   ignores case too, because a case-insensitive file system would otherwise
   lose one of the files silently (**OC-48**).
-- Paths that differ only in Unicode normalization also collide, with the
-  same comparison as case, because some file systems do not keep them
-  apart either. Two paths collide when `NFD(lowercase(NFD(path)))` is equal
-  for both: canonical caseless matching, with Unicode lowercasing as the
-  case mapping. A precomposed `é` and an `e` followed by a combining acute
-  accent therefore collide, as do `É` and `é`. Compatibility equivalents,
-  such as the ligature `ﬁ` and `fi`, do not.
+- Paths that differ only in Unicode normalization also collide, alone or
+  combined with differences in case, because some file systems do not keep
+  them apart either. A precomposed `é` and an `e` followed by a combining
+  acute accent therefore collide, as do `É` and `é`.
+- Precisely, two paths collide when they are equal after this comparison
+  key: decompose the path canonically (NFD); map each character to its
+  lowercase and then to its uppercase, each step only when the mapping is a
+  single character; and decompose canonically again. This is not Unicode's
+  canonical caseless matching, which uses full case folding and maps some
+  characters to several, such as `ß` to `ss`. Case-insensitive file systems
+  compare one character to one character, so:
+  - `ß` and `ss`, `ﬁ` and `fi`, and `İ` and `i` do not collide;
+  - `ς` and `σ`, `µ` and `μ`, `ſ` and `s`, and `ı` and `i` collide, as NTFS
+    equates them, although lowercasing alone keeps them apart;
+  - compatibility equivalents, such as the ligature `ﬁ` and `fi`, do not
+    collide, as file systems keep them apart.
 
 Open:
 

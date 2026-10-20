@@ -12,8 +12,8 @@ mod manifest;
 mod registry;
 
 pub use build::{
-    BuildFailure, BuildProblem, Built, LockfileError, LockfileOutcome, ManifestFileError,
-    OutputProblem, PublishError, PublishState, PublishedProblem, build_unit,
+    BuildFailure, BuildLockError, BuildProblem, Built, LockfileError, LockfileOutcome,
+    ManifestFileError, OutputProblem, PublishError, PublishState, PublishedProblem, build_unit,
 };
 pub use git::{
     GitError, GitErrorKind, GitRepository, HeadManifestError, InvalidVersion, ObjectTooLarge,

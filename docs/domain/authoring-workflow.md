@@ -235,10 +235,18 @@ prevent a build.
   says which state remains.
 - While it publishes, a build uses `.assemblr-build.new/`,
   `.assemblr-build.old/`, and `.assemblr-lock.json.new` beside `build/`.
-  The next build deletes whatever an interrupted one left there. Each must
-  be absent, or what Assemblr writes there; anything else is reported and
-  left unmodified. The mechanism and its limits are in
-  [ADR 0008](../adr/0008-unit-build.md).
+  These names are reserved. Before writing there, a build records that it
+  has started, and it clears the record once nothing it wrote there
+  remains. The next build deletes what is at those paths only when that
+  record shows an earlier build was interrupted. Otherwise anything there
+  is someone else's content: it is reported and left unmodified.
+- Builds of the same unit repository run one at a time. A build waits for
+  any other build of the same repository to finish before it reads the
+  unit's files, its lockfile, or what an interrupted build left, and keeps
+  the others waiting until it has published. Concurrent builds therefore
+  keep the guarantee above.
+
+The mechanisms and their limits are in [ADR 0008](../adr/0008-unit-build.md).
 
 Open:
 
@@ -281,6 +289,9 @@ Decided by the owner for the first `unit build` (OC-46):
   change is reported. When nothing changes, the file is not touched.
 - A locked version that the registry now records with other content than
   the lockfile does is rejected, never used or silently relocked.
+- Deleting the lockfile is not an integrity-preserving repair. It discards
+  every locked version, and the next build resolves every dependency
+  afresh, possibly to other versions.
 - A lockfile that is not one Assemblr wrote, for example one with
   unresolved merge conflicts, is reported and left as it is.
 

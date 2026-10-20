@@ -16,8 +16,14 @@
 //! lockfile, and after step 3, holding the new build with the new lockfile.
 //! In between there is no `build/` at all, so an interrupted build leaves
 //! none, rather than one that looks complete. A failure is undone where
-//! renaming back can undo it, and the error says what state remains. The
-//! next build deletes whatever an interrupted one left beside `build/`.
+//! renaming back can undo it, and the error says what state remains.
+//!
+//! The paths beside `build/` are reserved for builds, but someone else may
+//! still have put something there. A build records that it is about to
+//! write there before it does (see [`BuildLock`]), and clears the record
+//! once nothing it wrote remains. The next build deletes what is at those
+//! paths only when the record says an earlier build was interrupted.
+//! Otherwise it reports what it finds and leaves it alone.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -25,6 +31,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use super::exclusive::BuildLock;
 use super::lockfile::{LOCKFILE, serialize};
 use crate::domain::{RelativePath, UnitFile, UnitLock};
 
@@ -40,8 +47,10 @@ const LOCK_STAGING: &str = ".assemblr-lock.json.new";
 /// Checks, before anything is written, that each path a build replaces or
 /// deletes is absent or what Assemblr writes there: a real directory, or a
 /// regular file for the new lockfile. A symbolic link or any other entry is
-/// left alone and reported.
-pub(super) fn check(root: &Path) -> Vec<OutputProblem> {
+/// left alone and reported. Unless an earlier build was `interrupted`,
+/// anything at the reserved paths beside `build/` is someone else's, and is
+/// reported too.
+pub(super) fn check(root: &Path, interrupted: bool) -> Vec<OutputProblem> {
     let mut problems = Vec::new();
     for (name, directory) in [
         (BUILD, true),
@@ -50,9 +59,11 @@ pub(super) fn check(root: &Path) -> Vec<OutputProblem> {
         (LOCK_STAGING, false),
     ] {
         let path = root.join(name);
+        let reserved = name != BUILD;
         let found = match fs::symlink_metadata(&path) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => Found::Unreadable(error),
+            Ok(_) if reserved && !interrupted => Found::Unrecorded,
             Ok(metadata) if metadata.file_type().is_symlink() => Found::SymbolicLink,
             Ok(metadata) if metadata.is_dir() && directory => continue,
             Ok(metadata) if metadata.is_file() && !directory => continue,
@@ -74,19 +85,22 @@ pub(super) fn check(root: &Path) -> Vec<OutputProblem> {
 }
 
 /// Publishes `files` as `build/` and, when `lock` is given, writes it as the
-/// lockfile. [`check`] must have found nothing.
+/// lockfile. `guard` proves this is the only build of the unit running.
+/// [`check`] must have found nothing.
 pub(super) fn publish(
     root: &Path,
     files: &[(&RelativePath, &UnitFile)],
     lock: Option<&UnitLock>,
+    guard: &BuildLock,
 ) -> Result<Published, PublishError> {
-    publish_with(root, files, lock, &mut |_| Ok(()))
+    publish_with(root, files, lock, guard, &mut |_| Ok(()))
 }
 
 /// The steps of publishing, so that tests can make each one fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
     ClearLeftovers,
+    Begin,
     Stage,
     StageLock,
     RetireBuild,
@@ -100,6 +114,7 @@ fn publish_with(
     root: &Path,
     files: &[(&RelativePath, &UnitFile)],
     lock: Option<&UnitLock>,
+    guard: &BuildLock,
     fault: &mut dyn FnMut(Step) -> io::Result<()>,
 ) -> Result<Published, PublishError> {
     let build = root.join(BUILD);
@@ -113,20 +128,31 @@ fn publish_with(
         error,
         state,
     };
+    let reserved = [&staging, &retired, &lock_staging];
     let discard = || {
-        // Only tidiness: the next build deletes these anyway.
+        // Only tidiness: the record of this build stays until nothing it
+        // wrote remains, so the next build deletes whatever is left.
         let _ = fs::remove_dir_all(&staging);
         let _ = fs::remove_file(&lock_staging);
+        settle(guard, &reserved);
     };
 
     // What an interrupted build left. `check` found real directories and a
     // regular file here, or nothing.
-    for (leftover, directory) in [(&staging, true), (&retired, true), (&lock_staging, false)] {
-        let removed =
-            fault(Step::ClearLeftovers).and_then(|()| remove_leftover(leftover, directory));
-        if let Err(error) = removed {
-            return Err(failed("delete", leftover, error, State::Unchanged));
+    let interrupted = guard
+        .interrupted()
+        .map_err(|error| failed("inspect", root, error, State::Unchanged))?;
+    if interrupted {
+        for (leftover, directory) in [(&staging, true), (&retired, true), (&lock_staging, false)] {
+            let removed =
+                fault(Step::ClearLeftovers).and_then(|()| remove_leftover(leftover, directory));
+            if let Err(error) = removed {
+                return Err(failed("delete", leftover, error, State::Unchanged));
+            }
         }
+    }
+    if let Err(error) = fault(Step::Begin).and_then(|()| guard.begin()) {
+        return Err(failed("record the build in", root, error, State::Unchanged));
     }
 
     if let Err(error) = fault(Step::Stage).and_then(|()| stage(&staging, files)) {
@@ -191,11 +217,26 @@ fn publish_with(
         fault(Step::RemoveRetired)
             .and_then(|()| fs::remove_dir_all(&retired))
             .err()
-            .map(|error| (retired, error))
+            .map(|error| (retired.clone(), error))
     } else {
         None
     };
+    settle(guard, &reserved);
     Ok(Published { leftover })
+}
+
+/// Clears the record of this build once nothing it wrote beside `build/`
+/// remains. While anything does, the record stays, so that the next build
+/// recognizes it as a leftover and deletes it.
+fn settle(guard: &BuildLock, reserved: &[&PathBuf]) {
+    if reserved
+        .iter()
+        .all(|path| fs::symlink_metadata(path).is_err())
+    {
+        // If this fails, the next build finds a record but nothing to
+        // delete, which is harmless.
+        let _ = guard.finish();
+    }
 }
 
 /// Deletes `path` if it exists: a directory with everything in it, or a
@@ -308,6 +349,8 @@ enum Expected {
 
 #[derive(Debug)]
 enum Found {
+    /// Something at a reserved path that no interrupted build left.
+    Unrecorded,
     SymbolicLink,
     Directory,
     File,
@@ -328,6 +371,13 @@ impl fmt::Display for OutputProblem {
         let found = match &self.found {
             Found::Unreadable(error) => {
                 return write!(f, "could not inspect {path}: {error}");
+            }
+            Found::Unrecorded => {
+                return write!(
+                    f,
+                    "{path} exists, but no interrupted build was recorded, so it is not a \
+                     build's leftover; builds reserve this name, so move or delete it"
+                );
             }
             Found::SymbolicLink => "a symbolic link",
             Found::Directory => "a directory",
@@ -413,6 +463,7 @@ mod tests {
         BUILD, LOCK_STAGING, PublishError, Published, RETIRED, STAGING, State, Step, check,
         publish_with,
     };
+    use crate::adapters::build::exclusive::BuildLock;
     use crate::adapters::build::lockfile::{LOCKFILE, read};
     use crate::domain::{
         FileTree, LockedUnit, ObjectId, Provenance, RelativePath, UnitFile, UnitLock,
@@ -428,6 +479,23 @@ mod tests {
         }
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The Git directory of the repository at `root`, beside it so that
+    /// the top level holds only what a build writes.
+    fn git_dir(root: &Path) -> PathBuf {
+        let dir = root.with_extension("git");
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn guard(root: &Path) -> BuildLock {
+        BuildLock::acquire(&git_dir(root)).unwrap()
+    }
+
+    /// Whether the record of an unfinished build is present.
+    fn recorded(root: &Path) -> bool {
+        git_dir(root).join("assemblr-build.pending").exists()
     }
 
     fn lock(version: &str) -> UnitLock {
@@ -459,7 +527,7 @@ mod tests {
     ) -> Result<Published, PublishError> {
         let tree = tree(files);
         let files: Vec<_> = tree.iter().collect();
-        publish_with(root, &files, lock, &mut |step| {
+        publish_with(root, &files, lock, &guard(root), &mut |step| {
             if failing.contains(&step) {
                 Err(io::Error::other(format!("injected failure at {step:?}")))
             } else {
@@ -527,6 +595,7 @@ mod tests {
         assert_eq!(contents(&root.join(BUILD)), new_build());
         assert_eq!(read(&root).unwrap(), Some(lock("1.1.0")));
         assert_eq!(top_level(&root), [LOCKFILE, BUILD]);
+        assert!(!recorded(&root));
     }
 
     #[test]
@@ -542,7 +611,7 @@ mod tests {
     #[test]
     fn a_failure_before_the_lockfile_is_replaced_changes_nothing() {
         for step in [
-            Step::ClearLeftovers,
+            Step::Begin,
             Step::Stage,
             Step::StageLock,
             Step::RetireBuild,
@@ -558,6 +627,8 @@ mod tests {
             assert_eq!(contents(&root.join(BUILD)), old_build(), "{step:?}");
             assert_eq!(read(&root).unwrap(), Some(lock("1.0.0")), "{step:?}");
             assert_eq!(top_level(&root), [LOCKFILE, BUILD], "{step:?}");
+            // Nothing it wrote remains, so no leftover is recorded.
+            assert!(!recorded(&root), "{step:?}");
         }
     }
 
@@ -607,8 +678,11 @@ mod tests {
         let published = publish(&root, NEW, Some(&lock("1.1.0")), &[Step::RemoveRetired]).unwrap();
         assert_eq!(published.leftover.unwrap().0, root.join(RETIRED));
         assert_eq!(contents(&root.join(BUILD)), new_build());
+        assert!(recorded(&root));
+        assert!(check(&root, true).is_empty());
         publish(&root, NEW, None, &[]).unwrap();
         assert_eq!(top_level(&root), [LOCKFILE, BUILD]);
+        assert!(!recorded(&root));
     }
 
     #[test]
@@ -621,10 +695,44 @@ mod tests {
             fs::write(root.join(leftover).join("nested/file.txt"), "partial").unwrap();
         }
         fs::write(root.join(LOCK_STAGING), "{").unwrap();
-        assert!(check(&root).is_empty());
+        fs::write(git_dir(&root).join("assemblr-build.pending"), "").unwrap();
+        assert!(check(&root, true).is_empty());
         publish(&root, NEW, Some(&lock("1.1.0")), &[]).unwrap();
         assert_eq!(contents(&root.join(BUILD)), new_build());
         assert_eq!(top_level(&root), [LOCKFILE, BUILD]);
+        assert!(!recorded(&root));
+    }
+
+    #[test]
+    fn a_leftover_that_cannot_be_deleted_changes_nothing() {
+        let root = previous("undeletable");
+        fs::create_dir(root.join(STAGING)).unwrap();
+        fs::write(git_dir(&root).join("assemblr-build.pending"), "").unwrap();
+        let error = publish(&root, NEW, None, &[Step::ClearLeftovers]).unwrap_err();
+        assert_eq!(error.state(), State::Unchanged);
+        assert_eq!(contents(&root.join(BUILD)), old_build());
+    }
+
+    #[test]
+    fn reserved_paths_no_build_left_are_someone_else_s() {
+        let root = scratch("unrecorded");
+        for name in [STAGING, RETIRED] {
+            fs::create_dir(root.join(name)).unwrap();
+            fs::write(root.join(name).join("notes.txt"), "mine").unwrap();
+        }
+        fs::write(root.join(LOCK_STAGING), "mine").unwrap();
+        let problems = check(&root, false);
+        assert_eq!(problems.len(), 3);
+        for problem in &problems {
+            assert!(
+                problem
+                    .to_string()
+                    .contains("exists, but no interrupted build was recorded"),
+                "{problem}"
+            );
+        }
+        // The same paths, recorded as an interrupted build's, are leftovers.
+        assert!(check(&root, true).is_empty());
     }
 
     #[test]
@@ -632,7 +740,7 @@ mod tests {
         let root = scratch("check");
         fs::write(root.join(BUILD), "a file").unwrap();
         fs::create_dir(root.join(LOCK_STAGING)).unwrap();
-        let problems = check(&root);
+        let problems = check(&root, true);
         let messages: Vec<String> = problems.iter().map(ToString::to_string).collect();
         assert_eq!(problems.len(), 2, "{messages:?}");
         assert!(messages[0].contains("is a regular file"), "{}", messages[0]);
@@ -647,7 +755,7 @@ mod tests {
         let elsewhere = scratch("symlink-target");
         fs::write(elsewhere.join("keep.txt"), "keep").unwrap();
         std::os::unix::fs::symlink(&elsewhere, root.join(BUILD)).unwrap();
-        let problems = check(&root);
+        let problems = check(&root, false);
         assert_eq!(problems.len(), 1);
         assert!(problems[0].to_string().contains("symbolic link"));
         assert_eq!(problems[0].path(), root.join(BUILD));
@@ -665,7 +773,13 @@ mod tests {
         let script = UnitFile::new(b"#!/bin/sh\n".to_vec(), true);
         let plain = UnitFile::new(b"text".to_vec(), false);
         let (run, readme) = ("run.sh".parse().unwrap(), "README".parse().unwrap());
-        super::publish(&root, &[(&run, &script), (&readme, &plain)], None).unwrap();
+        super::publish(
+            &root,
+            &[(&run, &script), (&readme, &plain)],
+            None,
+            &guard(&root),
+        )
+        .unwrap();
         let mode = |name: &str| {
             fs::metadata(root.join(BUILD).join(name))
                 .unwrap()

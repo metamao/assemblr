@@ -10,6 +10,7 @@
 //! then nothing is written. Only a build without problems is published,
 //! together with its lockfile (see [`output`]).
 
+mod exclusive;
 mod lockfile;
 mod output;
 
@@ -19,6 +20,8 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use exclusive::BuildLock;
+pub use exclusive::BuildLockError;
 pub use lockfile::LockfileError;
 pub use output::{OutputProblem, PublishError, State as PublishState};
 
@@ -39,45 +42,73 @@ const AMENDMENTS: &str = "amendments";
 /// Builds the unit whose repository's top level is `root`, resolving its
 /// dependencies from `registry`.
 pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailure> {
+    let manifest_path = root.join(MANIFEST);
+    if let Err(error) = fs::symlink_metadata(&manifest_path) {
+        if error.kind() == io::ErrorKind::NotFound {
+            // Not a unit's directory, so nothing else here is worth reporting.
+            return Err(BuildFailure::Rejected(vec![BuildProblem::Manifest(
+                ManifestFileError::Missing {
+                    path: manifest_path,
+                },
+            )]));
+        }
+    }
     let mut problems = Vec::new();
+    let repository = match GitRepository::open(root) {
+        Ok(repository) => repository,
+        Err(error) => {
+            problems.push(BuildProblem::Repository(error));
+            if let Err(error) = read_working_manifest(root) {
+                problems.push(BuildProblem::Manifest(error));
+            }
+            return Err(BuildFailure::Rejected(problems));
+        }
+    };
+    // Everything from here on reads or writes what another build of this
+    // unit may change: its manifest and files, its lockfile, `build/`, and
+    // what an interrupted build left. Builds of the unit therefore run one
+    // at a time, from here until the build is published.
+    let guard = match repository.git_directory() {
+        Ok(git_dir) => BuildLock::acquire(&git_dir)
+            .map_err(|error| BuildFailure::Rejected(vec![BuildProblem::BuildLock(error)]))?,
+        Err(error) => {
+            return Err(BuildFailure::Rejected(vec![BuildProblem::Repository(
+                error,
+            )]));
+        }
+    };
+
     let manifest = match read_working_manifest(root) {
         Ok(manifest) => Some(manifest),
-        // Not a unit's directory, so nothing else here is worth reporting.
-        Err(error @ ManifestFileError::Missing { .. }) => {
-            return Err(BuildFailure::Rejected(vec![BuildProblem::Manifest(error)]));
-        }
         Err(error) => {
             problems.push(BuildProblem::Manifest(error));
             None
         }
     };
-
-    let src = match GitRepository::open(root) {
-        Ok(repository) => {
-            let src = match repository.read_working_src() {
-                Ok(src) => Some(src),
-                Err(ReadSrcError::Git(error)) => {
-                    problems.push(BuildProblem::Repository(error));
-                    None
-                }
-                Err(error) => {
-                    problems.push(BuildProblem::Src(error));
-                    None
-                }
-            };
-            match repository.working_paths(AMENDMENTS) {
-                Ok(paths) if paths.is_empty() => {}
-                Ok(paths) => problems.push(BuildProblem::Amendments(paths)),
-                Err(error) => problems.push(BuildProblem::Repository(error)),
-            }
-            src
-        }
-        Err(error) => {
+    let src = match repository.read_working_src() {
+        Ok(src) => Some(src),
+        Err(ReadSrcError::Git(error)) => {
             problems.push(BuildProblem::Repository(error));
             None
         }
+        Err(error) => {
+            problems.push(BuildProblem::Src(error));
+            None
+        }
     };
-    problems.extend(output::check(root).into_iter().map(BuildProblem::Output));
+    match repository.working_paths(AMENDMENTS) {
+        Ok(paths) if paths.is_empty() => {}
+        Ok(paths) => problems.push(BuildProblem::Amendments(paths)),
+        Err(error) => problems.push(BuildProblem::Repository(error)),
+    }
+    // If the record cannot be read, nothing at the reserved paths is taken
+    // for a leftover, so nothing there is deleted.
+    let interrupted = guard.interrupted().unwrap_or(false);
+    problems.extend(
+        output::check(root, interrupted)
+            .into_iter()
+            .map(BuildProblem::Output),
+    );
     let previous = lockfile::read(root)
         .map_err(|error| problems.push(BuildProblem::Lockfile(error)))
         .ok();
@@ -189,7 +220,8 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
         .map(|(path, composed)| (path, composed.file()))
         .collect();
     let new_lock = (lockfile != LockfileOutcome::Unchanged).then_some(&lock);
-    let published = output::publish(root, &files, new_lock).map_err(BuildFailure::Publish)?;
+    let published =
+        output::publish(root, &files, new_lock, &guard).map_err(BuildFailure::Publish)?;
     Ok(Built {
         unit: manifest.name().clone(),
         version: manifest.version().clone(),
@@ -471,6 +503,9 @@ pub enum BuildProblem {
     Manifest(ManifestFileError),
     /// The unit's repository or its working tree could not be read.
     Repository(GitError),
+    /// The lock that keeps builds of the unit from running at the same time
+    /// could not be taken.
+    BuildLock(BuildLockError),
     /// The working tree's `src/` holds something a unit file cannot be.
     Src(ReadSrcError),
     /// The working tree holds amendments, which a build cannot apply yet.
@@ -520,6 +555,7 @@ impl fmt::Display for BuildProblem {
         match self {
             Self::Manifest(error) => error.fmt(f),
             Self::Repository(error) => error.fmt(f),
+            Self::BuildLock(error) => error.fmt(f),
             Self::Src(error) => error.fmt(f),
             Self::Amendments(paths) => {
                 write!(

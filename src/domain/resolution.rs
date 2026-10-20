@@ -1219,6 +1219,51 @@ mod tests {
         Requirer::Unit(identity(name), version(resolved))
     }
 
+    /// The decision order follows the dependencies of every published
+    /// version, including versions no requirement allows. Here only
+    /// `@t/y` 2.0.0, outside `^1`, depends on `@t/x`, and `@t/x` depends on
+    /// `@t/a`. That puts `@t/a` after `@t/b`, so `@t/b` keeps its higher
+    /// version. Without `@t/x`'s dependencies, as when its source cannot be
+    /// read, `@t/a` comes first and keeps its higher version instead. A
+    /// build therefore needs every reachable source, not only those of the
+    /// versions it selects.
+    #[test]
+    fn a_dependency_of_a_version_never_selected_still_orders_decisions() {
+        let mut published: Vec<Published<'_>> = vec![
+            ("@t/a", "1.0.0", &[("@t/c", "=1.0.0")]),
+            ("@t/a", "2.0.0", &[("@t/c", "=2.0.0")]),
+            ("@t/b", "1.0.0", &[("@t/c", "=2.0.0")]),
+            ("@t/b", "2.0.0", &[("@t/c", "=1.0.0")]),
+            ("@t/c", "1.0.0", &[]),
+            ("@t/c", "2.0.0", &[]),
+            ("@t/y", "1.0.0", &[]),
+            ("@t/y", "2.0.0", &[("@t/x", "^1")]),
+            ("@t/x", "1.0.0", &[("@t/a", ">=1")]),
+        ];
+        let root = [("@t/a", ">=1"), ("@t/b", ">=1"), ("@t/y", "^1")];
+        let read = resolve_root(&root, &published, &[]).unwrap();
+        assert_eq!(
+            versions(&read),
+            pairs(&[
+                ("@t/a", "1.0.0"),
+                ("@t/b", "2.0.0"),
+                ("@t/c", "1.0.0"),
+                ("@t/y", "1.0.0")
+            ])
+        );
+        published.retain(|(name, _, _)| *name != "@t/x");
+        let unread = resolve_root(&root, &published, &[]).unwrap();
+        assert_eq!(
+            versions(&unread),
+            pairs(&[
+                ("@t/a", "2.0.0"),
+                ("@t/b", "1.0.0"),
+                ("@t/c", "2.0.0"),
+                ("@t/y", "1.0.0")
+            ])
+        );
+    }
+
     const SEVEN_UNITS: &[Published<'static>] = &[
         ("@metamao/docker", "1.0.0", &[]),
         ("@metamao/docker", "1.1.0", &[]),

@@ -126,6 +126,11 @@ fn hint(failure: &BuildFailure, root: &Path) -> String {
     hint
 }
 
+/// What deleting the lockfile does, which is not a repair.
+const DELETING_THE_LOCKFILE: &str = "deleting assemblr-lock.json is not a repair: it discards \
+     every locked version, and the next build resolves every dependency again, possibly to \
+     other versions";
+
 /// Advice for the first problem that has one.
 fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
     Some(match problem {
@@ -134,14 +139,11 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
              directory that holds `manifest.jsonc`",
             root.display()
         ),
-        BuildProblem::Lockfile(_) => {
-            "fix assemblr-lock.json, or delete it to resolve every dependency again".to_owned()
-        }
-        BuildProblem::Lock(LockError::ContentChanged { .. }) => {
-            "published versions never change: restore the tag in the unit's repository, or \
-             delete assemblr-lock.json to resolve every dependency again"
-                .to_owned()
-        }
+        BuildProblem::Lockfile(_) => format!("fix assemblr-lock.json; {DELETING_THE_LOCKFILE}"),
+        BuildProblem::Lock(LockError::ContentChanged { .. }) => format!(
+            "published versions never change: restore the tag in the unit's repository; \
+             {DELETING_THE_LOCKFILE}"
+        ),
         BuildProblem::Resolution(ResolutionError::Unavailable { .. }) => {
             "run `assemblr registry sync` to index newly published versions".to_owned()
         }
