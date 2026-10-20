@@ -7,6 +7,7 @@
 mod identity;
 mod manifest;
 mod parameter;
+mod path;
 mod resolution;
 mod version;
 
@@ -17,6 +18,7 @@ pub use parameter::{
     ParameterName, ParameterNameError, ParameterNameErrorReason, ParameterType, ParameterValue,
     ParameterValueError, ValueKind,
 };
+pub use path::{RelativePath, RelativePathError, RelativePathErrorReason};
 pub use resolution::{
     AvailableVersions, Dependencies, Lock, LockChange, Requirement, Requirer, Resolution,
     ResolutionError, ResolvedGraph, ResolvedUnit, resolve,
