@@ -418,8 +418,8 @@ Escalate only for:
 Do not escalate ordinary engineering choices or speculative doubts.
 
 **Reuse first.** A request may already live in the increment's issue, its PR,
-an open intervention issue, the open-contract register, or another active
-discussion. If it does, keep it there. Create an intervention issue only when
+an open intervention issue, the open-question register (§14), or another
+active discussion. If it does, keep it there. Create an intervention issue only when
 the blocker must be tracked across sessions, affects several increments, or
 does not fit the existing discussion.
 
@@ -441,9 +441,9 @@ Never ask for credentials or secrets on GitHub.
 2. **Response received:** check that it comes from the owner (§14) and
    answers the question. If not, ask a precise follow-up.
 3. **Action required:** the decision is clear. Apply it: domain decisions
-   update `docs/domain/` through a PR under §1 and §12, and other decisions
-   update their documentation or configuration. For an external action,
-   verify it was done, or ask the owner to confirm.
+   update the approved contracts (§14) through a PR under §1 and §12, and
+   other decisions update their documentation or configuration. For an
+   external action, verify it was done, or ask the owner to confirm.
 4. **Resolved:** the resolution criteria are met and verified. Close the
    issue with a link to the evidence and re-evaluate the work it blocked.
 
@@ -478,8 +478,10 @@ be working at the same time.
   `feat/<issue>-<slug>`, for example `feat/6-unit-manifest`. The PR says
   `Closes #N`, lists the checks it ran and any changes to `docs/domain/`,
   ADRs, or open contracts, and ends with "Findings for later increments".
-- **Interventions:** domain questions belong in
-  [`open-contracts.md`](docs/domain/open-contracts.md). A question that
+- **Contracts:** approved contracts live in [`docs/domain/`](docs/domain/),
+  and open questions in the register
+  [`open-contracts.md`](docs/domain/open-contracts.md).
+- **Interventions:** domain questions belong in the register. A question that
   blocks the next increment gets a `Decide OC-<n>: …` issue. Other
   interventions use `[Owner decision] …` or `[Owner action] …`.
 - **Checks:** [`ci.yml`](.github/workflows/ci.yml) runs format, lint, build,
@@ -496,8 +498,10 @@ be working at the same time.
   shows their issues, PRs, and comments as written by `metamao`. Agents end
   everything they post with an attribution line such as
   `🤖 Generated with Claude Code`. Owner approval is a merge or an owner
-  comment without an attribution line. Never treat agent-written text as
-  approval. If authorship is unclear, ask.
+  comment without an attribution line. Posts made before this rule carry no
+  line, so an unmarked `metamao` comment that reads like an agent report
+  (for example, one asking the owner to confirm decisions) is agent-written.
+  Never treat agent-written text as approval. If authorship is unclear, ask.
 - **Queries:**
 
   ```sh
