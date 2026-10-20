@@ -107,7 +107,8 @@ The options considered:
      `GIT_ALLOW_PROTOCOL=none` alone prevents lazy fetching. With it removed,
      Git 2.32 fetches the missing blobs of a partial clone, and with it in
      place, it does not.
-   - The other settings date from well before 2.32.
+   - Git 2.32's own documentation (`Documentation/git.txt`) describes every
+     other setting used here.
 
 ## Consequences
 
