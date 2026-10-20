@@ -1,44 +1,17 @@
-//! Git object ids and the raw formats of the objects Assemblr reads: commits,
-//! for their tree, and trees, for their entries.
+//! The raw formats of the objects Assemblr reads: commits, for their tree,
+//! and trees, for their entries.
 //!
 //! Parsing is pure. Git's output is untrusted like any other input, so a
 //! malformed object is reported as `None`, never a panic.
 
 use std::collections::BTreeSet;
-use std::fmt;
 
-/// A Git object id in lowercase hexadecimal: 40 digits in a SHA-1
-/// repository, 64 in a SHA-256 one.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ObjectId(String);
+use crate::domain::ObjectId;
 
-impl ObjectId {
-    pub(super) fn parse(text: &str) -> Option<Self> {
-        let hexadecimal = text
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
-        (matches!(text.len(), 40 | 64) && hexadecimal).then(|| Self(text.to_owned()))
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Self {
-        Self(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-    }
-
-    /// The id in hexadecimal.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// The length of the id in a tree entry, where it is stored as raw bytes.
-    fn byte_len(&self) -> usize {
-        self.0.len() / 2
-    }
-}
-
-impl fmt::Display for ObjectId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
+/// The id stored as raw bytes in a tree entry, in hexadecimal.
+fn id_from_bytes(bytes: &[u8]) -> Option<ObjectId> {
+    let hexadecimal: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    ObjectId::parse(&hexadecimal)
 }
 
 /// The tree a raw commit object records, from its first line, `tree <id>`.
@@ -97,43 +70,32 @@ pub(super) fn parse_tree(tree: &ObjectId, mut contents: &[u8]) -> Option<Vec<Tre
         let (mode, rest) = (&contents[..space], &contents[space + 1..]);
         let nul = rest.iter().position(|&byte| byte == 0)?;
         let (name, rest) = (&rest[..nul], &rest[nul + 1..]);
-        let id = rest.get(..tree.byte_len())?;
+        // A tree's entries hold ids as raw bytes, half as many as the tree's
+        // own hexadecimal digits.
+        let id_len = tree.as_str().len() / 2;
+        let id = rest.get(..id_len)?;
         if mode.is_empty() || name.is_empty() || name.contains(&b'/') || !names.insert(name) {
             return None;
         }
         entries.push(TreeEntry {
             name: name.to_vec(),
             kind: EntryKind::from_mode(mode),
-            id: ObjectId::from_bytes(id),
+            id: id_from_bytes(id)?,
         });
-        contents = &rest[tree.byte_len()..];
+        contents = &rest[id_len..];
     }
     Some(entries)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EntryKind, ObjectId, TreeEntry, commit_tree, parse_tree};
+    use super::{EntryKind, TreeEntry, commit_tree, parse_tree};
+    use crate::domain::ObjectId;
 
     const SHA1: &str = "0123456789abcdef0123456789abcdef01234567";
 
     fn sha256() -> String {
         SHA1.repeat(2)[..64].to_owned()
-    }
-
-    #[test]
-    fn object_ids_are_sha1_or_sha256_lowercase_hexadecimal() {
-        assert!(ObjectId::parse(SHA1).is_some());
-        assert!(ObjectId::parse(&sha256()).is_some());
-        for invalid in [
-            "",
-            &SHA1[..39],
-            &format!("{SHA1}0"),
-            &SHA1.to_uppercase(),
-            &SHA1.replace('a', "g"),
-        ] {
-            assert_eq!(ObjectId::parse(invalid), None, "{invalid:?}");
-        }
     }
 
     #[test]

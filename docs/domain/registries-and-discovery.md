@@ -81,11 +81,17 @@ authenticate ownership of an `@owner` namespace. Publisher authentication and
 trust policy are not defined, and are not part of Alpha (see
 [units.md](units.md#identity--approved)).
 
+Diagnostics:
+
+- Every excluded version tag is reported, with the reason, as a diagnostic
+  (stderr). Tags that do not follow the `v<version>` convention, including
+  tags that resemble it such as `v1.0`, are ignored and not mentioned.
+
 Open:
 
-- How invalid versions and moved tags are presented in diagnostics, including
-  whether tags that resemble the convention without matching it, such as
-  `v1.0`, are mentioned. **OC-25.**
+- How integrity conflicts and other rejections are presented beyond that;
+  and whether publication rejects a version that differs from a published one
+  only in build metadata. **OC-25.**
 - Behavior when historical Git objects or registered sources are unavailable.
   **OC-9.**
 
@@ -141,14 +147,44 @@ Rules:
 - Registration does **not** assume that the dependencies of the units it
   registers are already available. Dependency resolution is a separate
   responsibility (see [dependencies.md](dependencies.md#resolution--approved)).
-- Registering a source that is already registered is **idempotent**.
+- Registering a source that is already registered is **idempotent**: adding a
+  reference that is already registered changes nothing. Newly published
+  versions are indexed by [synchronization](#synchronization--approved), not by
+  registering again.
 - A unit with **no published tags** may still be registered, for discovery. It
   has no published versions until it is published.
+- When a unit repository has **no valid published version**, its identity is
+  taken from `manifest.jsonc` **as committed at `HEAD`**. This does not make
+  `HEAD` a published version, and uncommitted or staged working-tree content is
+  never read. If `HEAD` has no commit, or the committed manifest is missing or
+  invalid, the registration fails explicitly and changes nothing. Once
+  registered, the unit's identity is fixed: every version found later must
+  declare it.
 - Registration **never publishes** a unit. It never turns uncommitted or
   untagged working-tree content into a published version. A request for a
   published version always obtains tagged content, never the current working
   tree.
 
+### Local repository references — Approved
+
+A local unit repository is registered by its path, and recorded as a
+reference:
+
+- The path is made **absolute** against the caller's working directory and
+  **normalized lexically**: `.` and `..` components are resolved by name,
+  without consulting the file system. Symbolic links are **not** resolved.
+- Stored references are compared **exactly**. No file-system identity, implicit
+  symbolic-link resolution, or case folding decides that two references are the
+  same. Two paths to the same repository, for example through a symbolic link
+  or in a different letter case on a case-insensitive file system, are
+  different references, and if they declare the same identity they are a
+  [source conflict](#source-conflicts--approved).
+- Portability: a local reference is meaningful only on the machine and in the
+  directory layout where it was registered. Moving or renaming the repository
+  makes the source unreadable until it is removed and registered again. Where
+  `..` crosses a symbolic link, the lexical result can differ from the path the
+  operating system would resolve. How lock state records local sources across
+  machines is **OC-49**.
 ### Invalid versions and failed sources — Approved
 
 Validation distinguishes two kinds of failure:
@@ -163,10 +199,32 @@ Validation distinguishes two kinds of failure:
   registration or synchronization is rejected under the atomicity guarantees
   above, and the active registry is left unchanged.
 
+For unit repositories, the checks are classified as follows:
+
+- **Version-level**, for a newly discovered version tag: a tag that does not
+  point at a commit; a commit or root tree larger than Assemblr reads; a
+  missing, oversized, non-UTF-8, or invalid manifest; a manifest declaring a
+  different version; and invalid `src/` content, such as a symbolic link, a
+  submodule, an invalid path, or files larger than Assemblr reads. The tag is
+  excluded and reported, and the operation continues. Content is validated
+  when a version is first indexed, so an indexed version is a valid published
+  artifact, not only a valid manifest.
+- **Source-level**: a repository that cannot be read; valid versions that
+  declare different unit identities, or an identity other than the one the
+  source is registered for; a source conflict; two or more published versions
+  of **equal SemVer precedence**, including versions that differ only in build
+  metadata, which no metadata-based preference resolves; and any integrity
+  violation of a version already indexed (below).
+- A version **already indexed** is never dropped silently. If its tag
+  disappears, moves to another commit, or no longer publishes a valid version,
+  that is an **integrity conflict**: the synchronization is rejected, across
+  the entire registry and not only for the affected source, and the index is
+  left unchanged.
+
 Open:
 
-- The classification of every individual validation check as a version-level
-  or a source-level failure, beyond the examples above. **OC-33.**
+- The classification of checks not covered above, such as those of catalogs
+  and their metadata indexes. **OC-33.**
 
 ## Source conflicts — Approved
 
@@ -372,11 +430,16 @@ Rules:
 - `registry sync` discovers changes made **outside** the local publishing flow,
   for example tags created or pushed elsewhere.
 
+- A synchronization reads every registered source. A source that cannot be
+  read, or any source-level failure or integrity conflict in any source,
+  rejects the whole synchronization, and every problem found is reported (see
+  [Invalid versions and failed sources](#invalid-versions-and-failed-sources--approved)).
+
 Open:
 
-- The classification of every individual validation check as a version-level
-  or a source-level failure; and whether synchronization can target individual
-  sources. **OC-33.**
+- The classification of checks not covered by
+  [Invalid versions and failed sources](#invalid-versions-and-failed-sources--approved);
+  and whether synchronization can target individual sources. **OC-33.**
 - Which revision is read for a local catalog, and how uncommitted local
   catalog changes are treated. **OC-32.**
 - How the index update of `unit publish` and the discovery of individually
@@ -532,9 +595,51 @@ synchronization.
 Catalog maintenance adds one conceptual operation outside this table,
 [catalog refresh](#catalog-refresh--approved).
 
+### Implemented grammar — Approved
+
+For local unit repositories:
+
+```text
+assemblr registry add <path>
+assemblr registry list
+assemblr registry list --json
+assemblr registry remove <identity>
+assemblr registry sync
+```
+
+- `add` takes the path of a local repository. Remote references are not
+  supported by this grammar yet: one fails explicitly and changes nothing.
+- `remove` takes the unit identity, which is unique in the registry, so a
+  source can be removed even when its repository no longer exists.
+- Data goes to stdout and diagnostics to stderr. A failed operation exits
+  non-zero and leaves the registry index unchanged.
+- `list --json` prints one JSON object, derived from the same index as the
+  text listing:
+
+  ```json
+  {
+    "units": [
+      {
+        "identity": "@acme/node",
+        "source": "/home/me/units/node",
+        "versions": [
+          { "commit": "<commit id>", "tree": "<tree id>", "version": "1.0.0" }
+        ]
+      }
+    ]
+  }
+  ```
+
+  Units are ordered by identity, and versions in SemVer order. `source` is the
+  stored [reference](#local-repository-references--approved). `commit` is the
+  version's provenance and `tree` its content identity, as lowercase
+  hexadecimal Git object ids. The order of keys within an object is not
+  significant. Fields may be added; existing ones keep their meaning.
+
 Open:
 
-- Exact grammar, arguments, and flags; how `registry info` relates to the
+- Exact grammar, arguments, and flags beyond the implemented grammar above,
+  including for catalogs and remote sources; how `registry info` relates to the
   top-level `info` command; what `registry doctor` does beyond diagnosis; and
   how catalog operations (`registry create`, catalog refresh) are grouped.
   **OC-7.**

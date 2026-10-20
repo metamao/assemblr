@@ -19,10 +19,10 @@ use std::process::ExitStatus;
 use command::{Object, Objects};
 use object::{EntryKind, TreeEntry, commit_tree, parse_tree};
 
-pub use object::ObjectId;
-
 use super::manifest::{ReadManifestError, read_manifest};
-use crate::domain::{FileTree, Manifest, RelativePath, RelativePathError, UnitFile, Version};
+use crate::domain::{
+    FileTree, Manifest, ObjectId, Provenance, RelativePath, RelativePathError, UnitFile, Version,
+};
 
 // Bounds on what is read from a repository, which is untrusted. Git stores
 // objects compressed, and trees can share subtrees, so a small repository can
@@ -166,7 +166,45 @@ impl GitRepository {
             }));
         }
         let commit = target.header.id;
-        let tree = match self.commit_tree(objects, &commit)? {
+        let (tree, manifest) = match self.read_manifest(objects, &commit)? {
+            Ok(read) => read,
+            Err(invalid) => return Ok(Err(invalid)),
+        };
+        if manifest.version() != version {
+            return Ok(Err(InvalidVersion::VersionMismatch {
+                manifest: manifest.version().clone(),
+            }));
+        }
+        Ok(Ok(PublishedVersion {
+            manifest,
+            provenance: Provenance::new(commit, tree),
+        }))
+    }
+
+    /// Reads `manifest.jsonc` as committed at `HEAD`, without the working
+    /// tree or the index. Registration takes a unit's identity from it when
+    /// no version is published (see `docs/domain/registries-and-discovery.md`).
+    pub fn head_manifest(&self) -> Result<Manifest, HeadManifestError> {
+        let mut objects = self.objects()?;
+        let Some(head) = objects.header("HEAD^{commit}")? else {
+            return Err(HeadManifestError::NoCommit);
+        };
+        let manifest = self
+            .read_manifest(&mut objects, &head.id)?
+            .map_err(HeadManifestError::Invalid)?
+            .1;
+        objects.finish()?;
+        Ok(manifest)
+    }
+
+    /// The root tree of `commit` and the manifest in it, or why it has no
+    /// valid manifest.
+    fn read_manifest(
+        &self,
+        objects: &mut Objects<'_>,
+        commit: &ObjectId,
+    ) -> Result<Result<(ObjectId, Manifest), InvalidVersion>, GitError> {
+        let tree = match self.commit_tree(objects, commit)? {
             Ok(tree) => tree,
             Err(too_large) => return Ok(Err(InvalidVersion::ObjectTooLarge(too_large))),
         };
@@ -190,19 +228,9 @@ impl GitRepository {
         let Ok(text) = String::from_utf8(bytes) else {
             return Ok(Err(InvalidVersion::ManifestNotUtf8));
         };
-        let manifest = match read_manifest(&text) {
-            Ok(manifest) => manifest,
-            Err(error) => return Ok(Err(InvalidVersion::InvalidManifest(error))),
-        };
-        if manifest.version() != version {
-            return Ok(Err(InvalidVersion::VersionMismatch {
-                manifest: manifest.version().clone(),
-            }));
-        }
-        Ok(Ok(PublishedVersion {
-            manifest,
-            provenance: Provenance { commit, tree },
-        }))
+        Ok(read_manifest(&text)
+            .map(|manifest| (tree, manifest))
+            .map_err(InvalidVersion::InvalidManifest))
     }
 
     /// Reads the `src/` files of `commit`, exactly as committed. A commit
@@ -429,27 +457,6 @@ impl PublishedVersion {
     }
 }
 
-/// Where a published version's content was read from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Provenance {
-    commit: ObjectId,
-    tree: ObjectId,
-}
-
-impl Provenance {
-    /// The commit the version tag points at.
-    pub fn commit(&self) -> &ObjectId {
-        &self.commit
-    }
-
-    /// The commit's root tree, which identifies the version's content. It
-    /// covers the entire repository snapshot, not only the files a
-    /// composition uses, so a change to any file gives a different tree.
-    pub fn tree(&self) -> &ObjectId {
-        &self.tree
-    }
-}
-
 /// Why a version tag does not publish a valid version.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InvalidVersion {
@@ -576,6 +583,50 @@ impl fmt::Display for ReadSrcError {
 }
 
 impl std::error::Error for ReadSrcError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Git(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// Why the manifest committed at `HEAD` could not be read.
+#[derive(Debug)]
+pub enum HeadManifestError {
+    /// The repository could not be read.
+    Git(GitError),
+    /// `HEAD` names no commit, as in a repository with no commits yet.
+    NoCommit,
+    /// The commit at `HEAD` has no valid manifest.
+    Invalid(InvalidVersion),
+}
+
+impl From<GitError> for HeadManifestError {
+    fn from(error: GitError) -> Self {
+        Self::Git(error)
+    }
+}
+
+impl fmt::Display for HeadManifestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Git(error) => error.fmt(f),
+            Self::NoCommit => f.write_str("`HEAD` has no commit"),
+            Self::Invalid(InvalidVersion::MissingManifest) => {
+                f.write_str("the commit at `HEAD` has no `manifest.jsonc`")
+            }
+            Self::Invalid(invalid) => {
+                write!(
+                    f,
+                    "the `manifest.jsonc` committed at `HEAD` is unusable: {invalid}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for HeadManifestError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Git(error) => Some(error),

@@ -50,9 +50,21 @@ fn missing_arguments_print_help_and_fail() {
 }
 
 #[test]
-fn unknown_arguments_are_rejected() {
+fn unknown_commands_and_arguments_are_rejected() {
     let output = assemblr(&["unit"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("unrecognized subcommand"));
 
+    let output = assemblr(&["--unknown"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("unexpected argument"));
+}
+
+#[test]
+fn help_offers_only_implemented_commands() {
+    let output = assemblr(&["--help"]);
+
+    let stdout = stdout(&output);
+    assert!(stdout.contains("  registry "), "{stdout}");
+    assert!(!stdout.contains("  unit "), "{stdout}");
 }
