@@ -1721,6 +1721,21 @@ mod tests {
     }
 
     #[test]
+    fn one_unit_s_file_where_it_also_needs_a_directory_collides() {
+        let units = [Spec::new("@metamao/docs", "1.0.0")
+            .file("guide")
+            .file("Guide/intro.md")];
+        let errors = run(&project(&[("@metamao/docs", "^1")]), &units, &[]).unwrap_err();
+        assert_eq!(
+            errors,
+            [CompositionError::NestedPathCollision {
+                file: contributed("guide", "@metamao/docs"),
+                nested: vec![contributed("Guide/intro.md", "@metamao/docs")],
+            }]
+        );
+    }
+
+    #[test]
     fn every_contributor_to_a_colliding_path_is_named_once() {
         let units = [
             Spec::new("@metamao/a", "1.0.0").file("LICENSE"),
