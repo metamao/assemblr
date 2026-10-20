@@ -131,6 +131,24 @@ In a consumer project, files delivered from `src/` are starting points that
 the consumer may modify. They are reconciled like every other contribution
 (see [consumer-projects.md](consumer-projects.md#file-contributions--approved)).
 
+File paths:
+
+- A unit file's path is relative to `src/`, with segments separated by `/`.
+- Paths are validated the same way on every platform, so a unit is accepted
+  or rejected the same way everywhere. Assemblr prefers predictable, portable
+  paths to accepting every name the current file system supports.
+- A path is rejected, never normalized, when:
+  - it is empty, or starts with `/`;
+  - it contains `\` or a NUL character;
+  - a segment is empty, `.`, or `..`;
+  - a segment contains `:`, which Windows reads as a drive prefix or an
+    alternate data stream;
+  - a segment ends with `.` or a space, which Windows removes;
+  - a segment is a device name Windows reserves (`CON`, `PRN`, `AUX`, `NUL`,
+    `COM0` to `COM9`, `LPT0` to `LPT9` and their superscript-digit forms,
+    `CONIN$`, `CONOUT$`), in any case and with any extension, such as
+    `nul.txt`.
+
 Path collisions:
 
 - If two different units in one composition provide a file at the same path
@@ -141,12 +159,21 @@ Path collisions:
   priority, and the two files are never merged automatically.
 - A unit that needs to modify a file a dependency provides does so through an
   [amendment](#amendments-modified-dependency-files), not through `src/`.
+- A path cannot be both a file and a directory. A file whose path is a
+  directory of another file's path, such as `config` and `config/app.json`,
+  is a path collision too.
+- Collisions are detected the same way within one unit's files and across the
+  files of several units.
+- Recommended (provisional): paths that differ only in case, such as
+  `README.md` and `readme.md`, also collide, and the file-or-directory check
+  ignores case too, because a case-insensitive file system would otherwise
+  lose one of the files silently (**OC-48**).
 
 Open:
 
 - File-system semantics of unit files: executable bits, symbolic links, binary
-  content, line endings, paths that differ only in case, and paths reserved for
-  Assemblr's own files. **OC-48.**
+  content, line endings, paths that differ only in case or only in Unicode
+  normalization, and paths reserved for Assemblr's own files. **OC-48.**
 
 ### `amendments/`: modified dependency files
 

@@ -4,12 +4,18 @@
 //! processes, the environment, the network, or clocks (see
 //! `docs/adr/0001-architecture.md`).
 
+mod composition;
 mod identity;
 mod manifest;
 mod parameter;
+mod path;
 mod resolution;
 mod version;
 
+pub use composition::{
+    ComposedFile, Composition, CompositionError, ContributedPath, FileTree, OptionRequirement,
+    ParameterValues, Root, RootTargetReason, UnitContent, UnitFile, compose,
+};
 pub use identity::{IdentityError, IdentityErrorReason, Segment, UnitIdentity};
 pub use manifest::{Manifest, ManifestError, OptionValues};
 pub use parameter::{
@@ -17,6 +23,7 @@ pub use parameter::{
     ParameterName, ParameterNameError, ParameterNameErrorReason, ParameterType, ParameterValue,
     ParameterValueError, ValueKind,
 };
+pub use path::{RelativePath, RelativePathError, RelativePathErrorReason};
 pub use resolution::{
     AvailableVersions, Dependencies, Lock, LockChange, Requirement, Requirer, Resolution,
     ResolutionError, ResolvedGraph, ResolvedUnit, resolve,

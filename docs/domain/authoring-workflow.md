@@ -161,6 +161,9 @@ Rules:
   against path traversal and symlink escapes.
 - A **failed build never damages authoring files**, such as the manifest,
   `src/`, or `amendments/`.
+- Development input values configure only the unit being built. Its
+  dependencies receive configuration only through the unit's own `options`;
+  a build has no other way to configure them.
 
 Open:
 
