@@ -23,6 +23,11 @@ enum Command {
     /// Compose the consumer project in the current directory from the
     /// units its `assemblr.jsonc` declares.
     Compose,
+    /// Select a unit in `assemblr.jsonc` and compose the project.
+    Add(project::AddArgs),
+    /// Remove a unit's selection from `assemblr.jsonc` and compose the
+    /// project.
+    Remove(project::RemoveArgs),
     /// Manage the local registry of unit repositories.
     #[command(subcommand)]
     Registry(registry::RegistryCommand),
@@ -36,6 +41,8 @@ pub(crate) fn run() -> ExitCode {
     match Cli::parse().command {
         Command::Init(args) => project::init(&args),
         Command::Compose => project::compose(),
+        Command::Add(args) => project::add(&args),
+        Command::Remove(args) => project::remove(&args),
         Command::Registry(command) => registry::run(command),
         Command::Unit(command) => unit::run(command),
     }

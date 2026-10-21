@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 
 use super::store::Store;
 use super::{
-    Application, Change, ComposeFailure, ComposeRecovery, Step, WriteStep, apply, recover,
+    Application, Change, ComposeFailure, ComposeRecovery, DeclarationWrite, Step, WriteStep, apply,
+    recover,
 };
 use crate::adapters::lockfile::serialize_lockfile;
 use crate::domain::{
@@ -162,6 +163,54 @@ fn apply_with(
         unbased: &BTreeSet::new(),
         lock_bytes: &plan.lock_bytes,
         directories: &plan.directories,
+        declaration: None,
+    };
+    apply(root, &store, &application, &mut fault)
+}
+
+/// The project's declaration, opened for reading and writing as a
+/// composition holds it, and created with `{}` when there is none.
+fn guard(root: &Path) -> fs::File {
+    let declaration = root.join("assemblr.jsonc");
+    if !declaration.exists() {
+        fs::write(&declaration, "{}\n").unwrap();
+    }
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(declaration)
+        .unwrap()
+}
+
+/// [`apply_with`] over a composition that also rewrites the declaration
+/// to `text`.
+fn apply_declaring(
+    root: &Path,
+    plan: &Plan,
+    step: Option<Step>,
+    text: &str,
+) -> Result<Vec<&'static str>, ComposeFailure> {
+    let mut fault = |current: Step| {
+        if Some(current) == step {
+            return Err(io::Error::other("injected"));
+        }
+        Ok(())
+    };
+    let guard = guard(root);
+    let previous = fs::read(root.join("assemblr.jsonc")).unwrap();
+    let store = Store::new(root);
+    let application = Application {
+        files: &plan.files,
+        changes: &plan.changes,
+        snapshot: &plan.snapshot,
+        unbased: &BTreeSet::new(),
+        lock_bytes: &plan.lock_bytes,
+        directories: &plan.directories,
+        declaration: Some(DeclarationWrite {
+            guard: &guard,
+            text: text.as_bytes(),
+            previous: &previous,
+        }),
     };
     apply(root, &store, &application, &mut fault)
 }
@@ -227,7 +276,7 @@ fn a_first_composition_interrupted_among_its_files_or_at_the_lock_is_reverted() 
         let journal = store.journal().unwrap().expect("the journal remains");
         assert!(!exists(&root, "assemblr-lock.json"), "{name}");
 
-        let recovered = recover(&root, &store, &journal).unwrap();
+        let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
         assert!(
             matches!(&recovered, ComposeRecovery::Reverted { kept, restored, .. } if kept.is_empty() && restored.is_empty()),
             "{name}: {recovered:?}"
@@ -256,7 +305,7 @@ fn a_failure_after_the_lock_is_completed_not_reverted() {
     let store = Store::new(&root);
     let journal = store.journal().unwrap().unwrap();
 
-    let recovered = recover(&root, &store, &journal).unwrap();
+    let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
     assert_eq!(recovered, ComposeRecovery::Completed);
     assert_eq!(text(&root, "README.md"), "readme\n");
     assert!(exists(&root, "bin/run"));
@@ -273,7 +322,7 @@ fn an_edited_file_is_kept_by_a_revert() {
     let store = Store::new(&root);
     let journal = store.journal().unwrap().unwrap();
 
-    let recovered = recover(&root, &store, &journal).unwrap();
+    let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
     assert_eq!(
         recovered,
         ComposeRecovery::Reverted {
@@ -308,7 +357,7 @@ fn a_reconciliation_interrupted_at_each_file_change_is_reverted_to_the_previous_
         let journal = store.journal().unwrap().expect("the journal remains");
         assert!(exists(&root, ".assemblr/previous"), "{n}");
 
-        let recovered = recover(&root, &store, &journal).unwrap();
+        let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
         let ComposeRecovery::Reverted {
             removed,
             restored,
@@ -358,7 +407,7 @@ fn a_reconciliation_interrupted_at_the_lock_is_reverted_and_after_it_completed()
     apply_failing(&root, &plan, Step::Lock, 1);
     let store = Store::new(&root);
     let journal = store.journal().unwrap().unwrap();
-    let recovered = recover(&root, &store, &journal).unwrap();
+    let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
     assert_eq!(
         recovered,
         ComposeRecovery::Reverted {
@@ -377,7 +426,7 @@ fn a_reconciliation_interrupted_at_the_lock_is_reverted_and_after_it_completed()
     let store = Store::new(&root);
     let journal = store.journal().unwrap().unwrap();
     assert_eq!(
-        recover(&root, &store, &journal).unwrap(),
+        recover(&root, &store, &journal, &guard(&root)).unwrap(),
         ComposeRecovery::Completed
     );
     assert_eq!(text(&root, "README.md"), "readme v2\n");
@@ -399,7 +448,7 @@ fn files_edited_during_an_interrupted_reconciliation_are_kept_and_named() {
     fs::write(root.join("new.txt"), "edited").unwrap();
     let store = Store::new(&root);
     let journal = store.journal().unwrap().unwrap();
-    let recovered = recover(&root, &store, &journal).unwrap();
+    let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
     assert_eq!(
         recovered,
         ComposeRecovery::Reverted {
@@ -485,4 +534,66 @@ fn a_managed_path_behind_a_symbolic_link_is_not_a_file_of_the_project() {
             .map(|file| &file.compared),
         Some(&Current::Other)
     );
+}
+
+#[test]
+fn a_declaration_rewritten_by_an_interrupted_composition_is_restored_with_the_files() {
+    // Before the declaration is written, nothing of it has changed; after
+    // it and before the lock, the revert puts the previous text back
+    // through the handle.
+    for (name, step, declaration) in [
+        ("declaration-step", Step::Declaration, "old\n"),
+        ("declaration-lock", Step::Lock, "new\n"),
+    ] {
+        let root = composed(name);
+        fs::write(root.join("assemblr.jsonc"), "old\n").unwrap();
+        let plan = second(&root);
+        let failure = apply_declaring(&root, &plan, Some(step), "new\n").unwrap_err();
+        assert!(matches!(failure, ComposeFailure::Write { .. }), "{name}");
+        assert_eq!(text(&root, "assemblr.jsonc"), declaration, "{name}");
+
+        let store = Store::new(&root);
+        let journal = store.journal().unwrap().unwrap();
+        let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
+        assert!(
+            matches!(recovered, ComposeRecovery::Reverted { .. }),
+            "{name}: {recovered:?}"
+        );
+        assert_eq!(text(&root, "assemblr.jsonc"), "old\n", "{name}");
+        assert_eq!(text(&root, "README.md"), "readme\n", "{name}");
+        assert!(!exists(&root, ".assemblr/journal.json"), "{name}");
+    }
+}
+
+#[test]
+fn a_declaration_written_before_an_interruption_at_the_end_is_kept() {
+    let root = composed("declaration-finish");
+    fs::write(root.join("assemblr.jsonc"), "old\n").unwrap();
+    let plan = second(&root);
+    apply_declaring(&root, &plan, Some(Step::Finish), "new\n").unwrap_err();
+    let store = Store::new(&root);
+    let journal = store.journal().unwrap().unwrap();
+    assert_eq!(
+        recover(&root, &store, &journal, &guard(&root)).unwrap(),
+        ComposeRecovery::Completed
+    );
+    assert_eq!(text(&root, "assemblr.jsonc"), "new\n");
+    assert_eq!(text(&root, "README.md"), "readme v2\n");
+}
+
+#[test]
+fn a_declaration_edited_during_an_interruption_is_kept_and_named() {
+    let root = composed("declaration-edited");
+    fs::write(root.join("assemblr.jsonc"), "old\n").unwrap();
+    let plan = second(&root);
+    apply_declaring(&root, &plan, Some(Step::Lock), "new\n").unwrap_err();
+    fs::write(root.join("assemblr.jsonc"), "edited by hand\n").unwrap();
+    let store = Store::new(&root);
+    let journal = store.journal().unwrap().unwrap();
+    let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
+    let ComposeRecovery::Reverted { kept, .. } = recovered else {
+        panic!("expected a revert");
+    };
+    assert_eq!(kept, vec![path("assemblr.jsonc")]);
+    assert_eq!(text(&root, "assemblr.jsonc"), "edited by hand\n");
 }

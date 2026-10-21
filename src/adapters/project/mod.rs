@@ -17,15 +17,17 @@
 //! interrupted composition is completed or reverted by the next one, and
 //! a composition that would change nothing changes nothing.
 
+mod declaration;
 mod ignore;
 mod store;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+pub use declaration::DeclarationChange;
 use ignore::IgnoreError;
 pub use store::StoreError;
 use store::{Journal, JournalEntry, STATE_DIR, Store, write_new};
@@ -38,8 +40,9 @@ use super::merge::{ReconcileFailure, reconcile_json};
 use super::registry::Registry;
 use crate::domain::{
     Action, BaseIdentity, BlobId, Conflict, Contributor, Current, Disagreement, LockChange,
-    MergeFormat, Mergeability, ReconciliationState, RelativePath, Root, Snapshot, SnapshotFile,
-    UnitFile, UnitIdentity, compose, reconcile,
+    MergeFormat, Mergeability, Project, ReconciliationState, RegistryIndex, RelativePath, Root,
+    Snapshot, SnapshotFile, UnitFile, UnitIdentity, UnitLock, VersionRequirement, compose,
+    reconcile,
 };
 
 /// The project's declaration, at its top level.
@@ -200,7 +203,57 @@ impl std::error::Error for InitProjectFailure {}
 /// Composes the project whose top level is `root`, resolving its units
 /// from `registry`.
 pub fn compose_project(root: &Path, registry: &Registry) -> Result<Composed, ComposeFailure> {
-    compose_with(root, registry, &mut |_| Ok(()))
+    compose_with(root, registry, None, &mut |_| Ok(()))
+}
+
+/// Selects `identity` in the declaration of the project whose top level is
+/// `root`, then composes it as [`compose_project`] does. Without a
+/// `requirement` the unit is recorded with a caret requirement on the
+/// version the resolution picks; a unit already selected keeps its own.
+/// A composition that is refused leaves the declaration as it was.
+pub fn add_unit(
+    root: &Path,
+    registry: &Registry,
+    identity: &UnitIdentity,
+    requirement: Option<&str>,
+) -> Result<Composed, ComposeFailure> {
+    let edit = DeclarationEdit::Add {
+        identity: identity.clone(),
+        requirement: requirement.map(str::to_owned),
+    };
+    compose_with(root, registry, Some(&edit), &mut |_| Ok(()))
+}
+
+/// Removes the selection of `identity`, and its `options` entry, from the
+/// declaration of the project whose top level is `root`, then composes it
+/// as [`compose_project`] does.
+pub fn remove_unit(
+    root: &Path,
+    registry: &Registry,
+    identity: &UnitIdentity,
+) -> Result<Composed, ComposeFailure> {
+    let edit = DeclarationEdit::Remove {
+        identity: identity.clone(),
+    };
+    compose_with(root, registry, Some(&edit), &mut |_| Ok(()))
+}
+
+/// What `add` and `remove` change in the declaration.
+enum DeclarationEdit {
+    Add {
+        identity: UnitIdentity,
+        requirement: Option<String>,
+    },
+    Remove {
+        identity: UnitIdentity,
+    },
+}
+
+/// The declaration an edit produced, planned and not written.
+struct PlannedDeclaration {
+    project: Project,
+    text: String,
+    change: DeclarationChange,
 }
 
 /// The steps of writing, so that tests can make each one fail.
@@ -210,6 +263,7 @@ enum Step {
     Previous,
     Journal,
     Files,
+    Declaration,
     Lock,
     Finish,
 }
@@ -217,6 +271,7 @@ enum Step {
 fn compose_with(
     root: &Path,
     registry: &Registry,
+    edit: Option<&DeclarationEdit>,
     fault: &mut dyn FnMut(Step) -> io::Result<()>,
 ) -> Result<Composed, ComposeFailure> {
     let rejected = |problem| ComposeFailure::Rejected {
@@ -232,9 +287,15 @@ fn compose_with(
     }
     // Compositions of one project run one at a time: the declaration,
     // which every composition reads and none writes, carries the lock.
+    // The handle is writable where the file system allows: `add` and
+    // `remove` write the declaration through it, and so does the recovery
+    // of one that was interrupted, since a rename would leave the lock on
+    // a file that is no longer the declaration.
     let guard = OpenOptions::new()
         .read(true)
+        .write(true)
         .open(&declaration_path)
+        .or_else(|_| OpenOptions::new().read(true).open(&declaration_path))
         .and_then(|file| fs4::FileExt::lock(&file).map(|()| file))
         .map_err(|error| {
             rejected(ComposeProblem::Io {
@@ -242,12 +303,21 @@ fn compose_with(
                 error,
             })
         })?;
+    // `add` and `remove` write the declaration, so a read-only one is
+    // refused before anything else happens, not after the files are.
+    if edit.is_some()
+        && fs::metadata(&declaration_path).is_ok_and(|metadata| metadata.permissions().readonly())
+    {
+        return Err(rejected(ComposeProblem::CannotEdit(format!(
+            "{DECLARATION} is read-only"
+        ))));
+    }
     let store = Store::new(root);
     let mut problems = Vec::new();
     let mut recovered = None;
     match store.journal() {
         Ok(None) => {}
-        Ok(Some(journal)) => match recover(root, &store, &journal) {
+        Ok(Some(journal)) => match recover(root, &store, &journal, &guard) {
             Ok(summary) => recovered = Some(summary),
             Err(error) => return Err(rejected(ComposeProblem::Store(error))),
         },
@@ -261,19 +331,23 @@ fn compose_with(
         problems,
         recovered: recovered.clone(),
     };
-    let project = read_handle(&guard)
+    let declaration_text = read_handle(&guard)
         .map_err(|error| ComposeProblem::Io {
             path: declaration_path.clone(),
             error,
         })
-        .and_then(|text| {
-            read_project(&text).map_err(|error| ComposeProblem::InvalidDeclaration {
-                path: declaration_path.clone(),
-                error,
-            })
-        })
         .map_err(|problem| problems.push(problem))
         .ok();
+    let project = declaration_text.as_deref().and_then(|text| {
+        read_project(text)
+            .map_err(|error| {
+                problems.push(ComposeProblem::InvalidDeclaration {
+                    path: declaration_path.clone(),
+                    error,
+                });
+            })
+            .ok()
+    });
     let previous = match lockfile::read_lockfile(root) {
         Ok(None) => Some(None),
         Ok(Some((_, Lockfile { project: None, .. }))) => {
@@ -324,6 +398,27 @@ fn compose_with(
         .as_ref()
         .map(|(lock, _)| lock.clone())
         .unwrap_or_default();
+    // `add` and `remove`: the composition runs from the edited declaration,
+    // which is written only after the composition is planned and
+    // validated, so a refused composition leaves the declaration as it was.
+    let mut planned_declaration: Option<PlannedDeclaration> = None;
+    let project = match (edit, declaration_text.as_deref()) {
+        (Some(edit), Some(text)) => match plan_declaration(edit, text, &previous_lock, &index) {
+            Ok(planned) => {
+                let edited = planned.project.clone();
+                planned_declaration = Some(planned);
+                edited
+            }
+            Err(found) => {
+                problems.extend(found);
+                return Err(rejected_all(problems));
+            }
+        },
+        _ => project,
+    };
+    let declaration_changes = planned_declaration
+        .as_ref()
+        .is_some_and(|planned| Some(planned.text.as_str()) != declaration_text.as_deref());
     let mut found = Vec::new();
     let Some(resolved) = resolve_graph(
         None,
@@ -403,7 +498,7 @@ fn compose_with(
         if !problems.is_empty() {
             return Err(rejected_all(problems));
         }
-        if *state.base() == identity {
+        if *state.base() == identity && !declaration_changes {
             return Ok(Composed {
                 units: resolved.lock.units().len(),
                 files: 0,
@@ -415,6 +510,7 @@ fn compose_with(
                 recovered: recovered.clone(),
                 unchanged: true,
                 first: false,
+                declaration: planned_declaration.map(|planned| planned.change),
             });
         }
     }
@@ -659,6 +755,15 @@ fn compose_with(
         unbased: &unbased,
         lock_bytes: &lock_bytes,
         directories: &directories,
+        declaration: planned_declaration
+            .as_ref()
+            .filter(|_| declaration_changes)
+            .zip(declaration_text.as_deref())
+            .map(|(planned, previous)| DeclarationWrite {
+                guard: &guard,
+                text: planned.text.as_bytes(),
+                previous: previous.as_bytes(),
+            }),
     };
     let restored = apply(root, &store, &application, fault).map_err(|failure| match failure {
         ComposeFailure::Rejected { problems, .. } => rejected_all(problems),
@@ -699,6 +804,7 @@ fn compose_with(
         recovered: recovered.clone(),
         unchanged: false,
         first: previous.is_none(),
+        declaration: planned_declaration.map(|planned| planned.change),
     })
 }
 
@@ -920,6 +1026,17 @@ struct Application<'a> {
     lock_bytes: &'a [u8],
     /// The directories to create, outermost first.
     directories: &'a [RelativePath],
+    /// The declaration `add` or `remove` rewrites, when it changes.
+    declaration: Option<DeclarationWrite<'a>>,
+}
+
+/// The declaration's new text, written through the handle that holds its
+/// lock.
+#[derive(Clone, Copy)]
+struct DeclarationWrite<'a> {
+    guard: &'a fs::File,
+    text: &'a [u8],
+    previous: &'a [u8],
 }
 
 /// Writes `application` into the project at `root`: the store first,
@@ -942,6 +1059,7 @@ fn apply(
         unbased,
         lock_bytes,
         directories,
+        declaration,
     } = *application;
     let rejected = |problem| ComposeFailure::Rejected {
         problems: vec![problem],
@@ -993,6 +1111,19 @@ fn apply(
         };
         entries.push((path.clone(), entry));
     }
+    if let Some(declaration) = &declaration {
+        entries.push((
+            declaration_path(),
+            JournalEntry::Modify {
+                blob: BlobId::of(declaration.text),
+                executable: false,
+                previous: store
+                    .save_previous(declaration.previous)
+                    .map_err(|error| rejected(ComposeProblem::Store(error)))?,
+                previous_executable: false,
+            },
+        ));
+    }
     let journal = Journal {
         base: snapshot.identity(),
         files: entries,
@@ -1031,6 +1162,16 @@ fn apply(
             return Err(write_failed(WriteStep::File(target), error));
         }
     }
+    // The declaration is the intent the lock then records, so it is
+    // written before the lock: an interruption between them reverts to the
+    // previous declaration with the previous files.
+    if let Some(declaration) = &declaration {
+        let written = fault(Step::Declaration)
+            .and_then(|()| write_in_place(declaration.guard, declaration.text));
+        if let Err(error) = written {
+            return Err(write_failed(WriteStep::Declaration, error));
+        }
+    }
     let staged = root.join(LOCK_STAGING);
     let lock_path = root.join(LOCKFILE);
     let locked = fault(Step::Lock)
@@ -1065,7 +1206,12 @@ fn apply(
 /// content, and a removed one is put back; a file with other content is
 /// left, since it is the consumer's now. The directories the composition
 /// created are removed when empty, innermost first, and the journal last.
-fn recover(root: &Path, store: &Store, journal: &Journal) -> Result<ComposeRecovery, StoreError> {
+fn recover(
+    root: &Path,
+    store: &Store,
+    journal: &Journal,
+    guard: &fs::File,
+) -> Result<ComposeRecovery, StoreError> {
     if let Ok(Some((
         _,
         Lockfile {
@@ -1086,9 +1232,27 @@ fn recover(root: &Path, store: &Store, journal: &Journal) -> Result<ComposeRecov
     for (path, entry) in &journal.files {
         let target = root.join(path.as_str());
         let _ = fs::remove_file(staging_path(&target));
-        let held = held_content(&target)?;
+        // The declaration is read and written through the handle that
+        // holds its lock, never replaced.
+        let is_declaration = *path == declaration_path();
+        let held = if is_declaration {
+            read_bytes(guard)
+                .map(Held::File)
+                .map_err(|error| StoreError::Io {
+                    path: target.clone(),
+                    error,
+                })?
+        } else {
+            held_content(&target)?
+        };
         let put_back = |blob: &BlobId, executable: bool| -> Result<(), StoreError> {
             let bytes = store.read_previous(blob)?;
+            if is_declaration {
+                return write_in_place(guard, &bytes).map_err(|error| StoreError::Io {
+                    path: target.clone(),
+                    error,
+                });
+            }
             if let Some(parent) = target.parent() {
                 let _ = fs::create_dir_all(parent);
             }
@@ -1284,6 +1448,123 @@ fn read_handle(file: &fs::File) -> io::Result<String> {
     String::from_utf8(bytes).map_err(|_| io::Error::other("it is not UTF-8 text"))
 }
 
+/// All of an open file's bytes, bounded like a manifest.
+fn read_bytes(file: &fs::File) -> io::Result<Vec<u8>> {
+    let mut file = file;
+    file.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    file.take(MANIFEST_LIMIT + 1).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Replaces an open file's content through the handle itself. A rename
+/// would put another file where the declaration was and leave the lock on
+/// one that is no longer it; the journal holds the previous content, so
+/// that an interruption does not lose it.
+fn write_in_place(file: &fs::File, bytes: &[u8]) -> io::Result<()> {
+    let mut file = file;
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// The declaration's path as the journal names it.
+fn declaration_path() -> RelativePath {
+    // A constant that is a valid path by construction.
+    #[allow(clippy::expect_used, reason = "DECLARATION is a valid relative path")]
+    RelativePath::parse(DECLARATION).expect("the declaration's name is a valid relative path")
+}
+
+/// Plans what `add` or `remove` does to the declaration `text`: the edited
+/// text, the project it declares, and what changed. For an `add` without a
+/// requirement the resolution says which version to record.
+fn plan_declaration(
+    edit: &DeclarationEdit,
+    text: &str,
+    previous_lock: &UnitLock,
+    index: &RegistryIndex,
+) -> Result<PlannedDeclaration, Vec<ComposeProblem>> {
+    let cannot = |detail: String| vec![ComposeProblem::CannotEdit(detail)];
+    let (edited, change) = match edit {
+        DeclarationEdit::Add {
+            identity,
+            requirement,
+        } => {
+            let requirement = match requirement {
+                Some(requirement) => {
+                    VersionRequirement::parse(requirement).map_err(|error| {
+                        vec![ComposeProblem::InvalidRequirement(error.to_string())]
+                    })?;
+                    requirement.clone()
+                }
+                None => match declaration::selected_requirement(text, identity) {
+                    // Already selected: its own requirement stays.
+                    Some(selected) => selected,
+                    None => probe_requirement(text, identity, previous_lock, index)?,
+                },
+            };
+            declaration::add(text, identity, &requirement).map_err(|failure| match failure {
+                declaration::EditFailure::Cannot(detail) => cannot(detail),
+                declaration::EditFailure::NotSelected => {
+                    cannot("the unit is not selected".to_owned())
+                }
+            })?
+        }
+        DeclarationEdit::Remove { identity } => {
+            declaration::remove(text, identity).map_err(|failure| match failure {
+                declaration::EditFailure::NotSelected => vec![ComposeProblem::NotSelected {
+                    identity: identity.clone(),
+                    transitive: previous_lock.units().contains_key(identity),
+                }],
+                declaration::EditFailure::Cannot(detail) => cannot(detail),
+            })?
+        }
+    };
+    let project = read_project(&edited)
+        .map_err(|error| cannot(format!("the edited declaration is not valid: {error}")))?;
+    Ok(PlannedDeclaration {
+        project,
+        text: edited,
+        change,
+    })
+}
+
+/// The requirement an `add` without one records: a caret requirement on
+/// the version the resolution picks for the unit when it is selected with
+/// any stable version, which is the one already locked when the unit is
+/// present transitively.
+fn probe_requirement(
+    text: &str,
+    identity: &UnitIdentity,
+    previous_lock: &UnitLock,
+    index: &RegistryIndex,
+) -> Result<String, Vec<ComposeProblem>> {
+    let cannot = |detail: String| vec![ComposeProblem::CannotEdit(detail)];
+    let (probe_text, _) =
+        declaration::add(text, identity, "*").map_err(|failure| match failure {
+            declaration::EditFailure::Cannot(detail) => cannot(detail),
+            declaration::EditFailure::NotSelected => cannot("the unit is not selected".to_owned()),
+        })?;
+    let probe = read_project(&probe_text)
+        .map_err(|error| cannot(format!("the edited declaration is not valid: {error}")))?;
+    let mut found = Vec::new();
+    let Some(resolved) =
+        resolve_graph(None, probe.dependencies(), previous_lock, index, &mut found)
+    else {
+        return Err(found
+            .into_iter()
+            .map(|problem| ComposeProblem::Build(Box::new(problem)))
+            .collect());
+    };
+    match resolved.lock.units().get(identity) {
+        Some(locked) => Ok(format!("^{}", locked.version())),
+        None => Err(cannot(format!(
+            "the resolution did not select {identity}, so there is no version to record"
+        ))),
+    }
+}
+
 /// A composed project.
 #[derive(Debug)]
 pub struct Composed {
@@ -1297,6 +1578,7 @@ pub struct Composed {
     recovered: Option<ComposeRecovery>,
     unchanged: bool,
     first: bool,
+    declaration: Option<DeclarationChange>,
 }
 
 impl Composed {
@@ -1340,6 +1622,12 @@ impl Composed {
     /// The interrupted composition that was recovered from first, if any.
     pub fn recovered(&self) -> Option<&ComposeRecovery> {
         self.recovered.as_ref()
+    }
+
+    /// What `add` or `remove` did to the declaration, or `None` for a
+    /// plain composition.
+    pub fn declaration(&self) -> Option<&DeclarationChange> {
+        self.declaration.as_ref()
     }
 
     /// Whether the project already held this composition, so that nothing
@@ -1422,6 +1710,9 @@ pub enum WriteStep {
     Journal,
     /// Writing a project file; the journal records the composition.
     File(PathBuf),
+    /// Writing the declaration, which `add` and `remove` change after the
+    /// files; the journal records the composition.
+    Declaration,
     /// Writing the lockfile; the files are written, the journal remains.
     Lock,
     /// Removing the journal; the composition is complete, and the next
@@ -1449,6 +1740,7 @@ impl fmt::Display for ComposeFailure {
                 ),
                 WriteStep::Journal => write!(f, "could not write the journal: {error}"),
                 WriteStep::File(path) => write!(f, "could not write {}: {error}", path.display()),
+                WriteStep::Declaration => write!(f, "could not write {DECLARATION}: {error}"),
                 WriteStep::Lock => write!(f, "could not write {LOCKFILE}: {error}"),
                 WriteStep::Finish => write!(f, "could not remove the journal: {error}"),
             },
@@ -1497,6 +1789,18 @@ pub enum ComposeProblem {
     Existing(Vec<RelativePath>),
     /// The project's ignore rules could not be read.
     Ignore(IgnoreError),
+    /// `remove` named a unit that is not an explicit selection.
+    NotSelected {
+        /// The unit.
+        identity: UnitIdentity,
+        /// Whether it is in the composition anyway, because a selected
+        /// unit requires it.
+        transitive: bool,
+    },
+    /// The requirement `add` was given is not a valid SemVer requirement.
+    InvalidRequirement(String),
+    /// The declaration could not be edited safely.
+    CannotEdit(String),
     /// Delivered files that only the consumer's own Git rules ignore, and
     /// that the base would store for the first time.
     LocallyIgnored(Vec<(RelativePath, String)>),
@@ -1623,6 +1927,26 @@ impl fmt::Display for ComposeProblem {
                 Ok(())
             }
             Self::Ignore(error) => error.fmt(f),
+            Self::NotSelected {
+                identity,
+                transitive,
+            } => {
+                write!(f, "{identity} is not an explicit selection of this project")?;
+                if *transitive {
+                    write!(
+                        f,
+                        "; it is in the composition only because a selected unit requires it, and \
+                         leaves with that unit"
+                    )?;
+                }
+                Ok(())
+            }
+            Self::InvalidRequirement(error) => {
+                write!(f, "the version requirement is not valid: {error}")
+            }
+            Self::CannotEdit(detail) => {
+                write!(f, "{DECLARATION} could not be edited safely: {detail}")
+            }
             Self::LocallyIgnored(paths) => {
                 write!(
                     f,

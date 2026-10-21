@@ -1,4 +1,4 @@
-//! `assemblr init` and `assemblr compose`: consumer projects.
+//! `assemblr init`, `compose`, `add`, and `remove`: consumer projects.
 //!
 //! The result goes to stdout. Diagnostics, and what a composition could
 //! not carry or store, go to stderr.
@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use assemblr::adapters::{
-    BuildProblem, ComposeFailure, ComposeProblem, ComposeRecovery, Composed, FileChange,
-    InitProjectFailure, Registry, StoreError, WriteStep, compose_project, init_project,
+    BuildProblem, ComposeFailure, ComposeProblem, ComposeRecovery, Composed, DeclarationChange,
+    FileChange, InitProjectFailure, Registry, StoreError, WriteStep, add_unit, compose_project,
+    init_project, remove_unit,
 };
 use assemblr::domain::{LockChange, LockError, ResolutionError, UnitIdentity};
 use clap::Args;
@@ -59,7 +60,79 @@ pub(super) fn init(args: &InitArgs) -> ExitCode {
     }
 }
 
+#[derive(Debug, Args)]
+pub(super) struct AddArgs {
+    /// The unit to select, `@owner/name`, optionally followed by `@` and a
+    /// version requirement, as in `@owner/name@~1.2`. Without one, the
+    /// unit is recorded with a caret requirement on the version the
+    /// resolution picks.
+    unit: String,
+}
+
+#[derive(Debug, Args)]
+pub(super) struct RemoveArgs {
+    /// The explicitly selected unit to remove, `@owner/name`.
+    unit: String,
+}
+
+/// `@owner/name` and the requirement after a second `@`, if any.
+fn split_unit(argument: &str) -> Result<(UnitIdentity, Option<String>), String> {
+    let (identity, requirement) = match argument.get(1..).and_then(|rest| rest.find('@')) {
+        Some(at) => (&argument[..=at], Some(argument[at + 2..].to_owned())),
+        None => (argument, None),
+    };
+    if requirement.as_deref() == Some("") {
+        return Err(format!(
+            "`{argument}` ends with `@` and names no version requirement"
+        ));
+    }
+    identity
+        .parse::<UnitIdentity>()
+        .map(|identity| (identity, requirement))
+        .map_err(|error| format!("`{identity}` is not a unit identity: {error}"))
+}
+
+pub(super) fn add(args: &AddArgs) -> ExitCode {
+    let (identity, requirement) = match split_unit(&args.unit) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            return fail(
+                &message,
+                Some("write the unit as @owner/name, or @owner/name@<requirement>"),
+            );
+        }
+    };
+    run(Some(&identity), |root, registry| {
+        add_unit(root, registry, &identity, requirement.as_deref())
+    })
+}
+
+pub(super) fn remove(args: &RemoveArgs) -> ExitCode {
+    let (identity, requirement) = match split_unit(&args.unit) {
+        Ok(parsed) => parsed,
+        Err(message) => return fail(&message, Some("write the unit as @owner/name")),
+    };
+    if requirement.is_some() {
+        return fail(
+            &format!("`{}` names a version requirement", args.unit),
+            Some("`assemblr remove` takes the unit only: @owner/name"),
+        );
+    }
+    run(Some(&identity), |root, registry| {
+        remove_unit(root, registry, &identity)
+    })
+}
+
 pub(super) fn compose() -> ExitCode {
+    run(None, compose_project)
+}
+
+/// Runs `operation` on the project in the current directory and reports
+/// it. `unit` is the unit `add` or `remove` was given.
+fn run(
+    unit: Option<&UnitIdentity>,
+    operation: impl FnOnce(&Path, &Registry) -> Result<Composed, ComposeFailure>,
+) -> ExitCode {
     let root = match std::env::current_dir() {
         Ok(root) => root,
         Err(error) => {
@@ -73,8 +146,9 @@ pub(super) fn compose() -> ExitCode {
         Ok(registry) => registry,
         Err(error) => return fail(&error.to_string(), None),
     };
-    match compose_project(&root, &registry) {
+    match operation(&root, &registry) {
         Ok(composed) => {
+            report_declaration(unit, &composed);
             report(&composed);
             ExitCode::SUCCESS
         }
@@ -92,6 +166,27 @@ pub(super) fn compose() -> ExitCode {
     }
 }
 
+fn report_declaration(unit: Option<&UnitIdentity>, composed: &Composed) {
+    let (Some(unit), Some(change)) = (unit, composed.declaration()) else {
+        return;
+    };
+    match change {
+        DeclarationChange::Added { requirement } => {
+            println!("Selected {unit} ({requirement}) in assemblr.jsonc.");
+        }
+        DeclarationChange::Replaced { from, to } => {
+            println!("Changed the requirement of {unit} from {from} to {to} in assemblr.jsonc.")
+        }
+        DeclarationChange::Kept { requirement } => {
+            println!("{unit} is already selected ({requirement}); assemblr.jsonc is unchanged.")
+        }
+        DeclarationChange::Removed { options } => println!(
+            "Removed {unit}{} from assemblr.jsonc.",
+            if *options { " and its options" } else { "" }
+        ),
+    }
+}
+
 fn report(composed: &Composed) {
     if let Some(recovered) = composed.recovered() {
         report_recovered(recovered);
@@ -99,7 +194,13 @@ fn report(composed: &Composed) {
     for note in composed.notes() {
         eprintln!("warning: {note}");
     }
-    if composed.unchanged() {
+    // A declaration that changed without changing the composition, as when
+    // a unit that is in the composition already is selected.
+    let declaration_only = composed.declaration().is_some()
+        && composed.paths().is_empty()
+        && composed.changes().is_empty()
+        && !composed.first();
+    if composed.unchanged() || declaration_only {
         println!(
             "Nothing to compose: the project already holds the declared composition ({}).",
             composed.base()
@@ -214,11 +315,11 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
                      compose` again"
                         .to_owned()
                 }
-                WriteStep::File(_) | WriteStep::Lock => "the composition is recorded in \
-                                                         .assemblr/journal.json; the next \
-                                                         `assemblr compose` reverts what was \
-                                                         changed and starts over"
-                    .to_owned(),
+                WriteStep::File(_) | WriteStep::Declaration | WriteStep::Lock => {
+                    "the composition is recorded in .assemblr/journal.json; the next `assemblr \
+                     compose` reverts what was changed, assemblr.jsonc included, and starts over"
+                        .to_owned()
+                }
                 WriteStep::Finish => "the composition is complete except for its journal; the \
                                       next `assemblr compose` removes it"
                     .to_owned(),
@@ -245,6 +346,20 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
              remove your own rule"
                 .to_owned(),
         ),
+        ComposeProblem::NotSelected { transitive, .. } => Some(if *transitive {
+            "remove the selected unit that requires it, or select it with `assemblr add` first"
+                .to_owned()
+        } else {
+            "assemblr.jsonc lists the units this project selects".to_owned()
+        }),
+        ComposeProblem::InvalidRequirement(_) => Some(
+            "write a SemVer requirement such as ^1.2.0, ~1.2, or =1.2.3 after the unit: \
+             @owner/name@^1.2.0"
+                .to_owned(),
+        ),
+        ComposeProblem::CannotEdit(_) => {
+            Some("edit assemblr.jsonc by hand and run `assemblr compose`".to_owned())
+        }
         ComposeProblem::Reserved(_) => Some(
             "a unit cannot deliver Assemblr's own files; the unit's author must move or remove \
              them"

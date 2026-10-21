@@ -274,12 +274,56 @@ file counts as the project's content.
 
 Open:
 
-- Exact grammar, including how `add` accepts a version requirement or
-  parameter values, the exact requirement `add` records, how `remove` treats a
-  unit that is not an explicit selection, and what happens to a removed unit's
-  `options` entry. **OC-7.** The grammar of `init` and `compose` is decided
-  provisionally above.
+- Exact grammar, including how `add` accepts parameter values. **OC-7.** The
+  grammar of `init`, `compose`, `add`, and `remove`, the requirement `add`
+  records, how `remove` treats a unit that is not an explicit selection, and
+  what happens to a removed unit's `options` entry are decided provisionally
+  (see [composition details](#composition-details--approved) and
+  [add and remove details](#add-and-remove-details--approved)).
 - Explicit update operations for a consumer project. **OC-38.**
+
+### Add and remove details — Approved
+
+Decided for `assemblr add` and `assemblr remove` under AGENTS.md §1.1
+(decision log D-17) and accepted by the owner with the merge of the pull
+request that implements them.
+
+**Commands.** `assemblr add <identity>[@<requirement>]` and `assemblr remove
+<identity>`, one unit per invocation, run at the project's top level. Each
+edits `assemblr.jsonc` and then composes the edited declaration exactly as
+`compose` does, so the report names the declaration change, the versions
+that changed, and every file created, modified, merged, and removed.
+Parameter values are not command-line arguments: they are edited in the
+declaration's `options`.
+
+**`add`.** A unit that is not selected is added at the end of
+`dependencies`. Without a requirement it is recorded with a caret
+requirement on the version the resolution picks for it, which is the locked
+version when the unit is in the composition already, so that selecting a
+transitive unit promotes it and changes no file. With a requirement, that
+text is recorded, after it is checked as a SemVer requirement. A unit that
+is selected already keeps its requirement when none is given and has it
+replaced when a different one is, so `add` never re-pins a selection the
+consumer wrote. Resolution keeps the locked versions that still satisfy the
+declaration, as `compose` does. Adding a unit that is selected with the same
+requirement changes nothing.
+
+**`remove`.** The unit must be an explicit selection. One that is in the
+composition only because a selected unit requires it is refused, and the
+message says so. The selection and the unit's `options` entry are removed
+from the declaration, and the composition retires what no remaining
+selection requires: files only that unit contributed are removed when the
+consumer did not edit them, files other units still require stay, and an
+edited file is a conflict that refuses the whole operation.
+
+**Writing.** The composition is planned and validated against the edited
+text before anything is written, so a refused composition leaves the
+declaration as it was. The edit keeps the file's comments, indentation, and
+line endings, and is read back to be exactly the intended declaration. The
+declaration is rewritten in place, through the handle that holds the
+project's lock, after the files and before the lock; the journal records it
+with its previous text, so that an interrupted run is reverted together with
+the files, the declaration included.
 
 ## Explicit and transitive dependencies — Approved
 
