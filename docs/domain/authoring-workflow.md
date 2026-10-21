@@ -32,9 +32,9 @@ assemblr unit publish
 ```
 
 The **operations and their intent** are approved. The exact command grammar,
-flags, arguments, and edge-case behavior are **Open (OC-7)**. Registry and
-catalog operations are described in
-[registries-and-discovery.md](registries-and-discovery.md).
+flags, arguments, and edge-case behavior are **Open (OC-7)**, except where a
+details subsection below records a decision. Registry and catalog operations
+are described in [registries-and-discovery.md](registries-and-discovery.md).
 
 ## Typical flow — Conceptual
 
@@ -155,15 +155,55 @@ the copy, as long as its content is still the provider's file.
 - merge validity;
 - an **effective, non-redundant contribution**.
 
-A unit that contributes nothing beyond its dependencies is **invalid for
-publication**. Contributions may come from files, amendments, or meaningful
-configuration of dependencies. This check is not a superficial "`src/` must
-contain files" rule. A unit with no `src/` files can still contribute through
-amendments or options.
+A unit that contributes nothing is **invalid for publication**. Contributions
+may come from files, amendments, meaningful configuration of dependencies, or
+the aggregation of dependencies into a reusable composition. This check is
+not a superficial "`src/` must contain files" rule. A unit with no `src/`
+files can still contribute through amendments, options, or the units it
+composes.
 
 Open:
 
-- The exact no-op / effective-contribution algorithm. **OC-11.**
+- The exact no-op / effective-contribution algorithm. **OC-11.** Decided
+  provisionally for the first `unit check` (decision log D-1); see
+  [check details](#check-details--approved).
+
+### Check details — Approved
+
+Decided for the first `unit check` under AGENTS.md §1.1 (decision log D-1
+and D-3) and accepted by the owner with PR #36.
+
+**Command.** `assemblr unit check`, with no arguments, run at the
+repository's top level as `unit build` is. It reads the unit as a build does,
+runs every validation that gates a build, with the same diagnostics, and then
+the checks that gate publication. It reports every problem it finds, exits
+non-zero on any, and writes nothing: no `build/`, no lockfile, nothing in the
+working tree. It takes the same lock as a build, so it never reads a manifest
+and a lockfile that an update is replacing. While an update of the unit is
+interrupted, it refuses to run, as a build does.
+
+**The lockfile.** A published version carries its lockfile, so `unit check`
+requires one that records the current resolution: a missing lockfile, and a
+resolution that would add, change, or retire an entry, are reported with the
+hint to run `unit build`, which writes it. `unit check` never creates it.
+
+**Effective contribution** (OC-11, provisional). A unit is effective when it
+delivers at least one `src/` file or declares at least one dependency.
+Aggregation is a contribution: a unit whose purpose is to compose other units
+into one reusable dependency contributes that composition, whether it
+aggregates one unit or many. Since amendments and options presuppose a
+dependency, a unit is ineffective exactly when it has no file and no
+dependency, and that is reported. An amendment whose copy is the provider's
+file byte for byte at the declared base is a **redundant** contribution and
+is reported by path: it changes nothing and claims the file for no reason.
+An option equal to the parameter's default at the locked version is not
+reported: consumers resolve the dependency within the declared range, where
+the default may differ, so the explicit value pins it. The check gates
+`unit check` and `unit publish`, never a build (OC-28).
+
+**Required parameters.** Until OC-6 is decided, a unit that declares required
+parameters without defaults cannot be checked or published, for the reason
+it cannot be built: its templates need development values.
 
 ## Build — Approved
 
@@ -399,14 +439,21 @@ The lockfile and amendments:
   a range edit, the build fails and changes nothing, naming the amendments
   concerned. The diagnostic distinguishes the two causes: the dependency's
   resolved version changed, which `unit update` reconciles, or the declared
-  base version was edited by hand, which reverting the edit fixes.
+  base version disagrees with the lockfile, as after an edit of the
+  declaration or an update whose record was deleted, which reverting the
+  declaration to the locked version fixes.
 
 `unit amend` reads the lockfile and never writes it (see
-[amend details](#amend-details--approved)).
+[amend details](#amend-details--approved)). `unit publish` never writes it
+either: it requires the lockfile to be committed and to record the current
+resolution (see [publication details](#publication-details--approved)), so
+the lockfile's writers are `unit build` and `unit update`.
 
 Open:
 
-- Whether `unit publish` writes the lockfile. **OC-46.**
+- Whether `unit publish` writes the lockfile. **OC-46.** Decided
+  provisionally: it does not (decision log D-4). The entry stays open until
+  the owner closes it.
 
 ## Update — Approved
 
@@ -573,6 +620,69 @@ Publishing locally is distinct from **pushing** to a remote Git server.
 `unit publish` establishes the published version locally and **never pushes**
 commits or tags as a side effect. Pushing is an explicit, separate operation.
 
+### Publication details — Approved
+
+Decided for the first `unit publish` under AGENTS.md §1.1 (decision log D-3
+and D-4) and accepted by the owner with PR #36.
+
+**Command.** `assemblr unit publish`, with no arguments, run at the
+repository's top level as `unit build` is. The version is the one the
+committed manifest declares. The result, the tag and what happened to the
+registry index, goes to stdout; diagnostics go to stderr. It takes the same
+lock as a build, and refuses to run while an update of the unit is
+interrupted.
+
+**Committed, clean state.** Committing everything must change nothing: a
+staged or unstaged change to a tracked file, a path in conflict, and an
+untracked file that no `.gitignore` ignores are each reported by path, and
+the publication is refused. The rule is the one the build reads `src/` with,
+so a file the build composed is never left out of the publication as
+"ignored": `.git/info/exclude` and the user's global excludes do not apply,
+and `build/` is ignored by the unit's own `.gitignore`. A repository with no
+commit cannot publish.
+
+**What is validated.** The tree of the commit at `HEAD`, read with the
+readers the registry and dependents use for a published version, never the
+working tree. With a clean tree the two agree; validating the tree makes "the
+tag references exactly the validated content" a check rather than an
+assumption. Every check of `unit check` runs on it, including the lockfile:
+`assemblr-lock.json` must be in the commit and record exactly the current
+resolution, with the content identity of every locked version, which the
+amendment bases are verified against. A missing or stale lockfile is
+reported with the hint to run `unit build` and commit.
+
+**The tag.** `v<version>`, annotated, with the message `<identity>
+<version>`, created at the commit's id with the author's own Git
+configuration and identity, so that the tagger is the author and signing
+follows the author's settings; a missing identity is reported with Git's
+explanation. A tag of the version that already points at `HEAD` means the
+version is already published: nothing is created, the command exits zero,
+and the index update below still runs, which is how a failed one is
+retried. A tag of the version at another commit refuses the publication, as
+does a published version of equal SemVer precedence, which differs only in
+build metadata (OC-25). A new version need not be greater than earlier
+published versions; only uniqueness is required, so a backport such as
+`1.2.5` after `2.0.0` is legitimate.
+
+**The registry.** When the local registry records this repository's
+reference as the source of the manifest's identity, the new tag is checked
+against the registry's synchronization rules before it is created, so a tag
+the registry would reject, for example because this repository is registered
+under another identity or an indexed tag of it was moved, is refused rather
+than created and left unindexable. After the tag is created, the registry
+reads this one source again and indexes the version under the registry lock,
+with the validation and integrity rules of synchronization; the other
+registered sources are not read. When the identity is registered from
+another reference, or not registered at all, the result says so and that the
+version is not discoverable until that source is synchronized or the
+repository is registered; nothing is registered, and this is not a failure.
+When the index update fails after the tag was created, the command reports
+the partial outcome, exits non-zero, and says that the tag stands and that
+`registry sync` indexes the version.
+
+**Ordering.** Everything is decided before the tag is created. After it,
+only the index update can fail. Nothing is pushed or fetched.
+
 Open:
 
 - Whether Alpha provides a push operation, and its command or flag.
@@ -580,4 +690,6 @@ Open:
 - Edge cases, including untracked files, an existing tag that already points
   at the validated commit, annotated vs lightweight tags (annotated tags are
   recommended for consideration), and whether a new version must be greater
-  than earlier published versions. **OC-26.**
+  than earlier published versions. **OC-26.** Decided provisionally as the
+  publication details above (decision log D-3); the entry stays open until
+  the owner closes it.

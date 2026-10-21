@@ -1,7 +1,9 @@
 # 0006: Reading Git repositories through the `git` executable
 
 - **Status:** Accepted. Extended by [0008](0008-unit-build.md), which also
-  reads a unit's working tree and index, for `unit build`.
+  reads a unit's working tree and index, for `unit build`, and by
+  [0013](0013-unit-check-and-publish.md), whose tag creation is the one
+  command that runs with the author's own configuration.
 - **Date:** 2026-10-20
 
 ## Context

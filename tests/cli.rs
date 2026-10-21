@@ -51,7 +51,7 @@ fn missing_arguments_print_help_and_fail() {
 
 #[test]
 fn unknown_commands_and_arguments_are_rejected() {
-    let output = assemblr(&["unit", "check"]);
+    let output = assemblr(&["unit", "inspect"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("unrecognized subcommand"));
 
@@ -77,7 +77,11 @@ fn help_offers_only_implemented_commands() {
         .take_while(|line| !line.is_empty())
         .filter_map(|line| line.split_whitespace().next())
         .collect();
-    assert_eq!(commands, ["build", "amend", "update", "help"], "{help}");
+    assert_eq!(
+        commands,
+        ["build", "check", "publish", "amend", "update", "help"],
+        "{help}"
+    );
 
     let output = assemblr(&["unit", "amend", "--help"]);
     let help = self::stdout(&output);

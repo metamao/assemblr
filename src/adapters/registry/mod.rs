@@ -17,6 +17,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub(crate) use self::observe as observe_tags;
 pub use reference::{ReferenceError, local_reference};
 pub use store::StorageError;
 use store::Store;
@@ -130,6 +131,41 @@ impl Registry {
         })
     }
 
+    /// Reads the repository registered from `source` again, and indexes the
+    /// versions it has published since, as [`sync`](Self::sync) would for
+    /// that one source: the same validation and integrity rules apply, and
+    /// a conflict in any of its tags rejects the update. The other
+    /// registered units are not read. `unit publish` indexes the version it
+    /// has just tagged this way.
+    pub fn index_source(&self, source: &SourceReference) -> Result<Indexed, RegistryFailure> {
+        let lock = self.store.lock()?;
+        let index = self.index()?;
+        let Some((identity, unit)) = index
+            .units()
+            .iter()
+            .find(|(_, unit)| unit.source() == source)
+        else {
+            return Ok(Indexed::NotRegistered);
+        };
+        let identity = identity.clone();
+        let tags = GitRepository::open(Path::new(source.as_str()))
+            .and_then(|repository| observe(&repository, Some(unit)))
+            .map_err(|error| RegistryFailure::unreadable(source, error))?;
+        let change = index
+            .sync(BTreeMap::from([(identity.clone(), tags)]))
+            .map_err(RegistryFailure::invalid)?;
+        let added = change.added().get(&identity).cloned().unwrap_or_default();
+        let (next, excluded) = change.into_parts();
+        if next != index {
+            self.store.replace(&lock, &next)?;
+        }
+        Ok(Indexed::Indexed {
+            identity,
+            added,
+            excluded,
+        })
+    }
+
     /// Removes the registration of `identity`, and returns it. The
     /// repository is not touched, and need not exist any more.
     pub fn remove(&self, identity: &UnitIdentity) -> Result<RegisteredUnit, RegistryFailure> {
@@ -197,7 +233,7 @@ impl Registry {
 /// version with amendments must also carry a lockfile that identifies each
 /// base (see [`published_amendments`]); whether a base's content is the one
 /// this registry records is checked by the build that composes it.
-fn observe(
+pub(crate) fn observe(
     repository: &GitRepository,
     unit: Option<&RegisteredUnit>,
 ) -> Result<Vec<ObservedTag<TagProblem>>, GitError> {
@@ -280,6 +316,22 @@ pub enum Added {
         /// The reference.
         source: SourceReference,
     },
+}
+
+/// The outcome of indexing one registered source again.
+#[derive(Debug)]
+pub enum Indexed {
+    /// The source is registered, and its versions are indexed.
+    Indexed {
+        /// The identity it is registered for.
+        identity: UnitIdentity,
+        /// The newly indexed versions, in order.
+        added: Vec<Version>,
+        /// The version tags excluded as invalid.
+        excluded: Vec<Excluded<TagProblem>>,
+    },
+    /// No unit is registered from the source, so nothing changed.
+    NotRegistered,
 }
 
 /// The outcome of a synchronization.

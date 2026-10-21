@@ -15,6 +15,7 @@
 //! unit's own `src/` from its working tree (see
 //! [`GitRepository::read_working_src`]).
 
+mod authoring;
 mod command;
 mod object;
 mod working_tree;
@@ -165,10 +166,11 @@ impl GitRepository {
             let Some(version) = Version::from_tag(name) else {
                 continue;
             };
-            let outcome = self.read_version(&mut objects, &object, &version)?;
+            let (commit, outcome) = self.read_version(&mut objects, &object, &version)?;
             tags.push(VersionTag {
                 name: name.to_owned(),
                 version,
+                commit,
                 outcome,
             });
         }
@@ -182,29 +184,32 @@ impl GitRepository {
         objects: &mut Objects<'_>,
         tag: &ObjectId,
         version: &Version,
-    ) -> Result<Result<PublishedVersion, InvalidVersion>, GitError> {
+    ) -> Result<(Option<ObjectId>, Result<PublishedVersion, InvalidVersion>), GitError> {
         // `^{}` peels annotated tags, including tags of tags, to the object
         // they finally point at.
         let target = self.require(objects, &format!("{tag}^{{}}"), 0)?;
         if target.header.kind != "commit" {
-            return Ok(Err(InvalidVersion::NotACommit {
-                object_type: target.header.kind,
-            }));
+            return Ok((
+                None,
+                Err(InvalidVersion::NotACommit {
+                    object_type: target.header.kind,
+                }),
+            ));
         }
         let commit = target.header.id;
-        let (tree, manifest) = match self.read_manifest(objects, &commit)? {
-            Ok(read) => read,
-            Err(invalid) => return Ok(Err(invalid)),
+        let outcome = match self.read_manifest(objects, &commit)? {
+            Ok((_, manifest)) if manifest.version() != version => {
+                Err(InvalidVersion::VersionMismatch {
+                    manifest: manifest.version().clone(),
+                })
+            }
+            Ok((tree, manifest)) => Ok(PublishedVersion {
+                manifest,
+                provenance: Provenance::new(commit.clone(), tree),
+            }),
+            Err(invalid) => Err(invalid),
         };
-        if manifest.version() != version {
-            return Ok(Err(InvalidVersion::VersionMismatch {
-                manifest: manifest.version().clone(),
-            }));
-        }
-        Ok(Ok(PublishedVersion {
-            manifest,
-            provenance: Provenance::new(commit, tree),
-        }))
+        Ok((Some(commit), outcome))
     }
 
     /// Reads `manifest.jsonc` as committed at `HEAD`, without the working
@@ -543,6 +548,7 @@ fn src_path(path: &[u8]) -> Result<RelativePath, SrcEntryErrorReason> {
 pub struct VersionTag {
     name: String,
     version: Version,
+    commit: Option<ObjectId>,
     outcome: Result<PublishedVersion, InvalidVersion>,
 }
 
@@ -555,6 +561,12 @@ impl VersionTag {
     /// The version the tag names.
     pub fn version(&self) -> &Version {
         &self.version
+    }
+
+    /// The commit the tag points at, through any annotated tags, or `None`
+    /// when it points at another kind of object.
+    pub fn commit(&self) -> Option<&ObjectId> {
+        self.commit.as_ref()
     }
 
     /// The published version, or why the tag does not publish a valid one.
