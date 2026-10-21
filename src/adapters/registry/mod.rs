@@ -9,6 +9,7 @@
 //! Every change is decided completely before the index is written, and a
 //! rejected change leaves the index as it was.
 
+mod info;
 mod reference;
 mod store;
 
@@ -18,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub(crate) use self::observe as observe_tags;
+pub use info::{InfoFailure, UnitInfo};
 pub use reference::{ReferenceError, local_reference};
 pub use store::StorageError;
 use store::Store;
