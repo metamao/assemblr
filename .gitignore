@@ -4,3 +4,7 @@
 # agents, or instructions) may be versioned.
 /.claude/settings.json
 /.claude/settings.local.json
+
+# Agent retrospectives (docs/agent-retrospective.md): local, write-only notes
+# collected for a separate analysis. Never committed.
+/.retro/

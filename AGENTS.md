@@ -19,18 +19,20 @@ Authority, highest first:
 
 Rules:
 
-- **Never invent domain behavior.** If `docs/domain/` does not specify a
-  behavior, it is unspecified. Check
-  [`open-contracts.md`](docs/domain/open-contracts.md). If the question is
-  not listed, add it there and ask the owner. Do not pick an answer and
-  implement it.
+- **Never invent domain behavior silently.** If `docs/domain/` does not
+  specify a behavior, it is unspecified. Check
+  [`open-contracts.md`](docs/domain/open-contracts.md), add the question
+  there if it is missing, and classify it under §1.1: decide it provisionally
+  and record it when the criteria allow, defer it when the task does not need
+  it, and escalate it only when it is a genuine blocker. Resolving a question
+  by assumption means implementing an answer without recording it.
 - Statements in **Approved** sections are normative. Items marked
-  **Conceptual** show intent, not syntax. Items marked **Open** must not be
-  implemented by assumption. The register separates unresolved contracts,
-  which need an owner decision, from approved semantics with open details.
-  For the latter, implement the approved part. A detail that affects
-  user-visible behavior, syntax, or file formats still needs an owner
-  decision.
+  **Conceptual** show intent, not syntax. The register separates unresolved
+  contracts from approved semantics with open details. Implement the approved
+  part. An open point that affects user-visible behavior, syntax, or file
+  formats is decided provisionally under §1.1 when it meets the criteria
+  there and escalated otherwise; the entry stays open in both cases until the
+  owner settles it.
 - Items marked **Recommended (provisional)** are defaults the owner has
   accepted for Alpha. Implementations may follow them, and doing so is not
   implementing by assumption. The related open contract stays open until the
@@ -45,6 +47,79 @@ Rules:
   are tracked in the register and must not be implemented by assumption.
 - When approved semantics change, update `docs/domain/` in the same change as
   the code.
+
+### 1.1 Decisions: autonomy by default, escalation by exception
+
+Uncertainty alone is never grounds for stopping. Investigate, decide what the
+contracts and the evidence support, record what matters, and continue.
+Classify a decision by its consequences, not by how unsure you feel:
+
+1. **Routine.** An engineering or product-detail choice that the contracts
+   and this file permit and that has no lasting consequence beyond the PR.
+   Decide it. Mention it in the PR when a reviewer should look at it.
+2. **Provisional.** A product decision the contracts leave open, that the
+   task needs, that contradicts no approved statement and follows the
+   approved direction where one exists, and that a later PR could revise
+   without breaking published units or persisted state. Decide it, implement
+   it, record it in the decision backlog (§1.2), and cite the entry in the PR
+   and in the domain document's implementation notes. The related open
+   contract stays open: a provisional decision is implemented behavior, not
+   an approved contract, until the owner settles it.
+3. **Deferred.** A question the task does not need answered. Record it in the
+   backlog as an open question and move on. Do not open an issue for it.
+4. **Blocker.** A decision that sets or changes product direction or the
+   trajectory, contradicts or changes an approved statement, commits the
+   compatibility of published content or persisted formats, or weakens a
+   security, integrity, determinism, or state-safety guarantee; or an action
+   that needs the owner's access. Escalate it (§13.7) and continue with the
+   work that does not depend on it.
+
+When two tiers seem to fit, ask whether a mistake would be cheap to correct
+in a later increment. If it would, decide and record it. An increment the
+trajectory authorizes proceeds from issue preparation through implementation
+and review on this basis. The owner's approval is for merges, for blockers,
+for changes to approved contracts, and for the occasional review of the
+backlog, not for every scope detail.
+
+### 1.2 Decision backlog
+
+The backlog is the single GitHub issue named in §14. It accumulates
+provisional decisions and deferred questions as independently identifiable
+entries, `D-<n>`, one comment each, in the format the issue describes: the
+problem, the decision or open question, the rationale, the alternatives and
+trade-offs, and the implementation reference. It is not a blocker queue:
+nothing waits for a reply there, a PR is reviewable and mergeable while its
+entries are unreviewed, and the owner reviews the backlog occasionally as a
+batch. Only an entry that needs correction produces follow-up work.
+
+Write an entry when the decision is made, during the increment. Do not write
+one for a status request, a resumed session that only re-establishes state,
+a review round that decides nothing new, or an investigation that ends in an
+intervention issue. Record each decision once: the PR links the entry
+instead of restating it, and an entry cites, never duplicates, an
+intervention issue or a register entry.
+
+### 1.3 Authoring experience
+
+Assemblr's users create, compose, publish, debug, and update units. Judge
+every decision on their experience as well as on correctness: predictability,
+discoverability, the coupling it creates between units or between a unit and
+a version of Assemblr, authoring friction, compatibility with what is already
+published, and the conceptual weight it adds. Ease of implementation never
+decides on its own. A recorded decision states the authoring consequence it
+accepted.
+
+### 1.4 Research
+
+When a provisional or blocking decision would materially improve with
+external evidence, consult it before deciding: authoritative documentation,
+mature projects that solved the same problem, their implementation details,
+their design discussions, and their known failures. Ask why they chose as they
+did and where it went wrong, then judge against Assemblr's requirements
+rather than copying what is popular. Keep the effort proportional to the
+uncertainty and the impact; routine choices need none. When findings
+influence a recorded decision, the entry carries concise references and
+conclusions. External evidence never overrides an approved contract.
 
 ## 2. Architecture and dependency boundaries
 
@@ -200,8 +275,8 @@ and Windows with `--locked`, and checks the MSRV.
 - When an engineering decision affects architecture, dependencies, or
   cross-cutting conventions, record it in [`docs/adr/`](docs/adr/README.md).
 - When work reveals an unspecified product question, add it to
-  [`open-contracts.md`](docs/domain/open-contracts.md) and surface it. Do not
-  resolve it silently.
+  [`open-contracts.md`](docs/domain/open-contracts.md) and classify it under
+  §1.1. Do not resolve it silently.
 - If a foundational technical constraint conflicts with the approved
   architecture, report the evidence before changing the architecture.
 
@@ -325,7 +400,8 @@ Before acting, confirm:
    architecture, an approved plan) describe the intended work.
 5. **For implementation**, in addition: the selected issue states its scope,
    exclusions, and acceptance criteria, and every product behavior it needs is
-   approved. If not, it is blocked (§13.7).
+   approved or decidable under §1.1. Only a blocker (§1.1, tier 4) blocks it
+   (§13.7); everything else proceeds with recorded decisions.
 6. **Before implementation work**, the checkout is synchronized. Fetch first
    and never assume the local checkout is current. For a new increment,
    fast-forward the integration branch (`--ff-only`) and create the feature
@@ -389,9 +465,12 @@ Take the first case that applies.
 6. Otherwise take the first open increment, in the umbrella's order, whose
    blockers are closed and whose prerequisite PRs are merged.
 7. If every listed increment is done, draft the next one from the umbrella's
-   trajectory and the earlier PRs' findings, create its issue, and link it to
-   the umbrella. If its actionable scope still needs confirmation, ask the
-   owner to approve it and implement only after approval.
+   trajectory and the earlier PRs' findings, create its issue, link it to
+   the umbrella, and proceed: the trajectory line authorizes the increment,
+   and the issue classifies the open points under §1.1. Ask the owner first
+   only when the scope would change the trajectory (reorder, add, or drop an
+   item or the milestone) or depends on a blocker; then ask on the issue and
+   stop.
 
 Never start an increment while a prerequisite PR is unmerged. Work on an
 independent increment in parallel only when the owner authorizes it
@@ -411,26 +490,30 @@ Never open a second branch or PR for an issue that already has one.
 
 A merge accepts the merged change and any decision the owner explicitly
 approved as part of the PR. It does not answer questions the PR asked
-separately. Keep each unanswered question visible, in the next increment's
-issue, an intervention issue, or the open-question register. Assess whether
-it blocks a future increment, and never resolve it by assumption.
+separately. Keep each unanswered question visible, in the decision backlog,
+the next increment's issue, an intervention issue, or the open-question
+register. Assess whether it blocks a future increment, and never resolve it
+by assumption.
 
 ### 13.7 Human intervention
 
 Escalate only for:
 
-- a consequential product or domain decision that is missing;
+- a blocker under §1.1: a missing decision that sets product direction,
+  changes an approved contract, or commits a fundamental guarantee;
 - an external action that needs human access or authorization;
 - a permission or environment problem the agent cannot resolve;
 - a disagreement that the available evidence does not settle;
 - a next step that would violate approved constraints.
 
-Do not escalate ordinary engineering choices or speculative doubts.
+Do not escalate routine, provisional, or deferred decisions (§1.1): decide
+them or record them in the backlog. Do not escalate speculative doubts.
 
 **Reuse first.** A request may already live in the increment's issue, its PR,
-an open intervention issue, the open-question register (§14), or another
-active discussion. If it does, keep it there. Create an intervention issue only when
-the blocker must be tracked across sessions, affects several increments, or
+an open intervention issue, the decision backlog (§1.2), the open-question
+register (§14), or another active discussion. If it does, keep it there.
+Create an intervention issue only when the blocker must be tracked across
+sessions, affects several increments, or
 does not fit the existing discussion.
 
 **Intervention issue.** An ordinary issue titled `[Owner decision] …` or
@@ -497,12 +580,18 @@ be working at the same time.
 - **Owner:** `metamao`, who approves, decides, and merges.
 - **Increments:** sub-issues of #9, in trajectory order. Branches are named
   `feat/<issue>-<slug>`, for example `feat/6-unit-manifest`. The PR says
-  `Closes #N`, lists the checks it ran and any changes to `docs/domain/`,
-  ADRs, or open contracts, and ends with "Findings for later increments".
+  `Closes #N`, lists the checks it ran, any changes to `docs/domain/`,
+  ADRs, or open contracts, and its backlog entries (`D-<n>`, one line each
+  with what was decided and why), and ends with "Findings for later
+  increments".
 - **Contracts:** approved contracts live in [`docs/domain/`](docs/domain/),
   and open questions in the register
   [`open-contracts.md`](docs/domain/open-contracts.md).
-- **Interventions:** domain questions belong in the register. A question that
+- **Decision backlog:** [#34](https://github.com/metamao/assemblr/issues/34)
+  (§1.2). Its body gives the entry format; agents post one comment per entry
+  and take the next free `D-<n>`.
+- **Interventions:** domain questions belong in the register, and their
+  provisional answers and deferred questions in the backlog. A question that
   blocks the next increment gets an `[Owner decision] Decide OC-<n>: …` issue.
 - **Checks:** [`ci.yml`](.github/workflows/ci.yml) runs format, lint, build,
   and test on Linux and Windows, and checks the MSRV.
@@ -530,3 +619,13 @@ be working at the same time.
   gh pr view <n> --json headRefOid,isDraft,statusCheckRollup,closingIssuesReferences,comments,reviews
   gh api 'repos/{owner}/{repo}/pulls/<n>/comments' --paginate
   ```
+
+## 15. Agent retrospectives
+
+After completing a substantive implementation task, and before reporting it
+complete, write a retrospective as
+[`docs/agent-retrospective.md`](docs/agent-retrospective.md) describes. It
+records how well this repository's instructions, documentation, tools, and
+workflow supported the task, not the quality of the implementation, and it
+changes nothing else: no implementation decision, no issue, no follow-up
+work, and no effect on delivery.

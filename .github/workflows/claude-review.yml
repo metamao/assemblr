@@ -52,7 +52,10 @@ jobs:
 
             1. Investigate. Read the PR description with `gh pr view`, the
                change with `gh pr diff`, and the code and docs you need. Read
-               earlier review summaries with `gh pr view --comments`, and
+               the decisions the description records and, when the command
+               succeeds, the backlog entries it links with
+               `gh issue view <number> --comments`. Read earlier review
+               summaries with `gh pr view --comments`, and
                earlier inline comments and their replies with
                `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate --jq 'map({id, in_reply_to_id, user: .user.login, path, line, original_line, commit_id, body})'`.
             2. Validate. Re-check every candidate against the code and keep
@@ -71,9 +74,10 @@ jobs:
                new findings by severity, earlier findings verified as resolved,
                and significant earlier findings that still apply. If the PR
                changes AGENTS.md or approved contracts in `docs/domain/`, note
-               that those changes need the owner's approval. If there is
+               that those changes need the owner's approval. Do not ask the
+               owner to settle recorded provisional decisions. If there is
                nothing significant, say so in one line. Post nothing else.
           claude_args: |
             --max-turns 20
             --model claude-sonnet-5-5
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Read,Glob,Grep"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh issue view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Read,Glob,Grep"
