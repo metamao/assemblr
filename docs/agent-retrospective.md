@@ -51,17 +51,18 @@ run.
 
 ## Example
 
-```markdown
-# 2026-10-21 · PR #31 · Claude Opus 5.5 · new increment
+Illustrative only; the PR, the observations, and the agent are invented.
 
-The ADR index and the "Findings for later increments" of PR #29 gave me the
-seams for `unit update` in minutes. I lost about an hour because the register
-told me OC-53 needed the owner while the issue said to proceed with the
-carry-over case; §1.1 would have settled that. `cargo test` on the fault
-injection suite takes long enough that I skipped it between small edits.
-Missing: a way to run only the integration tests of one command. The review
-found a real recovery bug on the first pass, which the acceptance criteria
-did not cover.
+```markdown
+# 2026-11-03 · PR #NN · <model or agent> · new increment
+
+The ADR index and the "Findings for later increments" of the previous PR
+gave me the seams for the command in minutes. I lost about an hour because
+the register said a detail needed the owner while the issue said to proceed;
+§1.1 would have settled that. The fault-injection suite takes long enough
+that I skipped it between small edits. Missing: a way to run only the
+integration tests of one command. The review found a real recovery bug on
+the first pass, which the acceptance criteria did not cover.
 ```
 
 ## Isolation of `.retro/`
