@@ -45,6 +45,11 @@ impl SnapshotFile {
         }
     }
 
+    /// A file whose contents have this identity.
+    pub fn from_blob(blob: BlobId, executable: bool) -> Self {
+        Self { executable, blob }
+    }
+
     /// Whether the file is executable.
     pub fn is_executable(&self) -> bool {
         self.executable

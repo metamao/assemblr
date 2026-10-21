@@ -565,33 +565,159 @@ fn reserved_paths_cannot_be_delivered() {
     assert_eq!(tree(&project).len(), 1);
 }
 
+/// Publishes `version` of the registered `node` with `readme` and `run` as
+/// its plain files, and indexes it.
+fn publish_node(fixture: &Fixture, node: &Repo, version: &str, readme: &str, run: &str) {
+    node.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/node",
+            version,
+            &[],
+            r#", "params": {"port": {"type": "integer", "description": "The port.", "default": 3000}}"#,
+        ),
+    );
+    node.write("src/README.md", readme);
+    node.write("src/bin/run", run);
+    node.publish(version);
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+}
+
 #[test]
-fn a_changed_declaration_is_refused_until_reconciliation_exists_and_a_bad_base_is_detected() {
+fn a_changed_declaration_is_reconciled_three_way_and_a_bad_base_is_detected() {
     let fixture = Fixture::new("changed");
     registry(&fixture);
     let project = fixture.project("shop", &[("@acme/node", "^1")], "");
     succeeds(fixture.compose(&project));
-    let before = tree(&project);
+    let first_base = lockfile(&project)["project"]["base"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
+    // The consumer edits a file the composition will not change, adds a
+    // member to one it will, and deletes one it leaves alone.
+    fs::write(project.join("README.md"), "node\nmine\n").unwrap();
+    fs::write(
+        project.join("config/app.json"),
+        "{\n  \"port\": 3000,\n  \"mine\": 1\n}\n",
+    )
+    .unwrap();
+    fs::remove_file(project.join("bin/run")).unwrap();
+
+    // Selecting `web` instead brings its file, its option for `node`, and
+    // its amendment of the template: the consumer's member survives the
+    // merge, the edit survives untouched, and the deletion stands.
     declare(&project, &[("@acme/web", "^1")], "");
-    let err = stderr(&fails(fixture.compose(&project)));
+    let output = succeeds(fixture.compose(&project));
+    let out = stdout(&output);
     assert!(
-        err.contains("reconciling a project that was composed before is not supported yet"),
+        out.contains(
+            "Reconciled the project with 2 units (4 file(s)): created 1, modified 0, merged 1, \
+             removed 0; the reconciliation base sha256-v1:"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("\n  merged config/app.json\n  created web.txt\n"),
+        "{out}"
+    );
+    let err = stderr(&output);
+    assert!(
+        err.contains("note: updated assemblr-lock.json: @acme/web 1.0.0 (new)"),
         "{err}"
     );
-    assert!(err.contains("(1 path(s) added or removed)"), "{err}");
-    let mut after = tree(&project);
-    after.retain(|(path, _)| path != "assemblr.jsonc");
-    let mut expected = before.clone();
-    expected.retain(|(path, _)| path != "assemblr.jsonc");
-    assert_eq!(after, expected);
+    assert!(
+        err.contains(
+            "warning: bin/run was deleted in the project and the composition does not change \
+             it; it stays deleted"
+        ),
+        "{err}"
+    );
+    assert_eq!(read(&project.join("README.md")), "node\nmine\n");
+    assert_eq!(
+        read(&project.join("config/app.json")),
+        "{\n  \"port\": 8080,\n  \"web\": true,\n  \"mine\": 1\n}\n"
+    );
+    assert_eq!(read(&project.join("web.txt")), "web\n");
+    assert!(!project.join("bin/run").exists());
+    let lock = lockfile(&project);
+    let second_base = lock["project"]["base"].as_str().unwrap().to_owned();
+    assert_ne!(second_base, first_base);
+    assert_eq!(
+        lock["project"]["managed"],
+        serde_json::json!(["README.md", "bin/run", "config/app.json", "web.txt"])
+    );
+    // The new base is stored beside the old one, which stays.
+    let bases = project.join(".assemblr").join("bases");
+    assert!(bases.join(&first_base["sha256-v1:".len()..]).exists());
+    assert!(bases.join(&second_base["sha256-v1:".len()..]).exists());
+    assert!(!project.join(".assemblr").join("journal.json").exists());
+    assert!(!project.join(".assemblr").join("previous").exists());
+    assert_eq!(
+        read(&project.join(".assemblr").join(".gitignore")),
+        "/journal.json\n/journal.json.new\n/previous/\n"
+    );
+    let output = succeeds(fixture.compose(&project));
+    assert!(
+        stdout(&output).contains("Nothing to compose"),
+        "{}",
+        stdout(&output)
+    );
+
+    // Back to `node` alone: the amendment's member and the option go, the
+    // consumer's member stays, and the unedited file is removed.
+    declare(&project, &[("@acme/node", "^1")], "");
+    let output = succeeds(fixture.compose(&project));
+    let out = stdout(&output);
+    assert!(
+        out.contains("created 0, modified 0, merged 1, removed 1;"),
+        "{out}"
+    );
+    assert!(
+        out.contains("\n  merged config/app.json\n  removed web.txt\n"),
+        "{out}"
+    );
+    assert!(
+        stderr(&output).contains("@acme/web 1.0.0 (no longer required)"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        read(&project.join("config/app.json")),
+        "{\n  \"port\": 3000,\n  \"mine\": 1\n}\n"
+    );
+    assert!(!project.join("web.txt").exists());
+    assert_eq!(lockfile(&project)["project"]["base"], first_base);
+
+    // No units at all: every file would go, but one is edited, so nothing
+    // happens.
+    declare(&project, &[], "");
+    let before = tree(&project);
+    let output = fails(fixture.compose(&project));
+    let err = stderr(&output);
+    assert!(
+        err.contains(
+            "the project and the declared composition disagree at 2 path(s), and resolving \
+             conflicts in the project is not supported yet:\nerror:   README.md: the composition \
+             no longer delivers it, and the project edited it\nerror:   config/app.json: the \
+             composition no longer delivers it, and the project edited it"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("resolving conflicts in place is a later increment"),
+        "{err}"
+    );
+    assert_eq!(tree(&project), before);
+    declare(&project, &[("@acme/node", "^1")], "");
 
     // A tampered blob, a tampered listing, and a missing store each fail
     // verification by name, before anything else.
-    declare(&project, &[("@acme/node", "^1")], "");
     let objects = project.join(".assemblr").join("objects");
-    let (blob, original) = tree(&objects).into_iter().next().unwrap();
-    fs::write(objects.join(&blob), b"tampered").unwrap();
+    let readme_blob = assemblr::domain::BlobId::of(b"node\n").to_string();
+    let blob_path = objects.join(&readme_blob[..2]).join(&readme_blob[2..]);
+    let original = fs::read(&blob_path).unwrap();
+    fs::write(&blob_path, b"tampered").unwrap();
     let err = stderr(&fails(fixture.compose(&project)));
     assert!(
         err.contains("does not verify: its bytes are not the content of"),
@@ -601,11 +727,11 @@ fn a_changed_declaration_is_refused_until_reconciliation_exists_and_a_bad_base_i
         err.contains("restore .assemblr/ from version control"),
         "{err}"
     );
-    fs::write(objects.join(&blob), original).unwrap();
+    fs::write(&blob_path, original).unwrap();
     succeeds(fixture.compose(&project));
-    let bases = project.join(".assemblr").join("bases");
-    let (listing, text) = tree(&bases).into_iter().next().unwrap();
-    fs::write(bases.join(&listing), [text.clone(), b"x".to_vec()].concat()).unwrap();
+    let listing = bases.join(&first_base["sha256-v1:".len()..]);
+    let text = fs::read(&listing).unwrap();
+    fs::write(&listing, [text, b"x".to_vec()].concat()).unwrap();
     let err = stderr(&fails(fixture.compose(&project)));
     assert!(
         err.contains("its bytes do not hash to the identity the lockfile records"),
@@ -618,6 +744,237 @@ fn a_changed_declaration_is_refused_until_reconciliation_exists_and_a_bad_base_i
         "{err}"
     );
     assert!(err.contains("restore it from version control"), "{err}");
+}
+
+#[test]
+fn conflicts_are_refused_before_anything_is_written() {
+    let fixture = Fixture::new("conflicts");
+    let (node, _) = registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/node", "^1")], "");
+    succeeds(fixture.compose(&project));
+
+    // The consumer changes the port the option will change, edits the
+    // text file the new version changes, and deletes the script the new
+    // version changes.
+    fs::write(project.join("config/app.json"), "{\n  \"port\": 9000\n}\n").unwrap();
+    fs::write(project.join("README.md"), "mine\n").unwrap();
+    fs::remove_file(project.join("bin/run")).unwrap();
+    publish_node(
+        &fixture,
+        &node,
+        "1.1.0",
+        "node v2\n",
+        "#!/bin/sh\necho run v2\n",
+    );
+    declare(
+        &project,
+        &[("@acme/node", "^1.1")],
+        "\"@acme/node\": {\"port\": 8080}",
+    );
+    let before = tree(&project);
+
+    let output = fails(fixture.compose(&project));
+    let err = stderr(&output);
+    assert!(
+        err.contains(
+            "disagree at 3 path(s), and resolving conflicts in the project is not supported \
+             yet:\nerror:   README.md: the project and the composition both changed it, and its \
+             format has no merge\nerror:   bin/run: the project deleted it, and the composition \
+             changes it\nerror:   config/app.json: the project and the composition change the \
+             same values:\nerror:     /port: the project changes 3000 to 9000; the composition \
+             changes 3000 to 8080"
+        ),
+        "{err}"
+    );
+    assert_eq!(tree(&project), before);
+    assert_eq!(
+        lockfile(&project)["units"]["@acme/node"]["version"],
+        "1.0.0"
+    );
+
+    // A managed path that is no longer a regular file is a conflict too.
+    fs::write(project.join("config/app.json"), "{\n  \"port\": 3000\n}\n").unwrap();
+    fs::write(project.join("README.md"), "node\n").unwrap();
+    fs::create_dir(project.join("bin/run")).unwrap();
+    let err = stderr(&fails(fixture.compose(&project)));
+    assert!(err.contains("disagree at 1 path(s)"), "{err}");
+    assert!(
+        err.contains("bin/run: it is not a regular file in the project"),
+        "{err}"
+    );
+
+    // With every file as composed, the new version and the option apply.
+    fs::remove_dir(project.join("bin/run")).unwrap();
+    fs::write(project.join("bin/run"), "#!/bin/sh\necho run\n").unwrap();
+    let output = succeeds(fixture.compose(&project));
+    let out = stdout(&output);
+    assert!(
+        out.contains("created 0, modified 3, merged 0, removed 0;"),
+        "{out}"
+    );
+    assert_eq!(read(&project.join("README.md")), "node v2\n");
+    assert_eq!(read(&project.join("bin/run")), "#!/bin/sh\necho run v2\n");
+    assert_eq!(
+        read(&project.join("config/app.json")),
+        "{\n  \"port\": 8080\n}\n"
+    );
+    assert_eq!(
+        lockfile(&project)["units"]["@acme/node"]["version"],
+        "1.1.0"
+    );
+}
+
+#[test]
+fn crlf_line_endings_in_the_project_count_as_unchanged_and_are_kept() {
+    let fixture = Fixture::new("crlf");
+    registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/node", "^1")], "");
+    succeeds(fixture.compose(&project));
+    let crlf = |name: &str| {
+        let path = project.join(name);
+        let text = read(&path).replace('\n', "\r\n");
+        fs::write(&path, text).unwrap();
+    };
+    crlf("README.md");
+    crlf("config/app.json");
+
+    // The option changes the template's output: the file is replaced, with
+    // its line endings; the other file is unchanged and stays as it is.
+    declare(
+        &project,
+        &[("@acme/node", "^1")],
+        "\"@acme/node\": {\"port\": 8080}",
+    );
+    let output = succeeds(fixture.compose(&project));
+    let out = stdout(&output);
+    assert!(
+        out.contains("created 0, modified 1, merged 0, removed 0;"),
+        "{out}"
+    );
+    assert!(
+        stderr(&output).contains(
+            "warning: config/app.json has CRLF line endings in the project, so the composed \
+             content was written with CRLF line endings too"
+        ),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        read(&project.join("config/app.json")),
+        "{\r\n  \"port\": 8080\r\n}\r\n"
+    );
+    assert_eq!(read(&project.join("README.md")), "node\r\n");
+
+    // A merge into a file with CRLF line endings keeps them.
+    fs::write(
+        project.join("config/app.json"),
+        "{\r\n  \"port\": 8080,\r\n  \"mine\": 1\r\n}\r\n",
+    )
+    .unwrap();
+    declare(&project, &[("@acme/web", "^1")], "");
+    let output = succeeds(fixture.compose(&project));
+    assert!(
+        stdout(&output).contains("  merged config/app.json\n"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(
+        read(&project.join("config/app.json")),
+        "{\r\n  \"port\": 8080,\r\n  \"web\": true,\r\n  \"mine\": 1\r\n}\r\n"
+    );
+}
+
+#[test]
+fn unbased_files_are_compared_by_identity_and_the_ignore_rules_are_read_again() {
+    let fixture = Fixture::new("unbased");
+    let unit = fixture.repo("env");
+    let publish = |version: &str, env: &str, app: &str| {
+        unit.write("manifest.jsonc", &manifest("@acme/env", version, &[], ""));
+        unit.write("src/.env", env);
+        unit.write("src/app.txt", app);
+        unit.publish(version);
+    };
+    publish("1.0.0", "SECRET=1\n", "app\n");
+    fixture.register(&unit);
+    let project = fixture.project("shop", &[("@acme/env", "^1")], "");
+    git(&project, &["init", "-q"]);
+    fs::write(project.join(".gitignore"), ".env\n").unwrap();
+    succeeds(fixture.compose(&project));
+    let blobs = || tree(&project.join(".assemblr").join("objects")).len();
+    assert_eq!(blobs(), 1);
+
+    // The consumer edits the ignored file; a new version changes the other
+    // one only, so the edit is left alone.
+    fs::write(project.join(".env"), "SECRET=mine\n").unwrap();
+    publish("1.1.0", "SECRET=1\n", "app v2\n");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    declare(&project, &[("@acme/env", "^1.1")], "");
+    let output = succeeds(fixture.compose(&project));
+    let out = stdout(&output);
+    assert!(
+        out.contains("created 0, modified 1, merged 0, removed 0;"),
+        "{out}"
+    );
+    assert!(out.contains("  modified app.txt\n"), "{out}");
+    assert!(
+        !stderr(&output).contains("warning: .env is ignored"),
+        "an unbased file is announced once: {}",
+        stderr(&output)
+    );
+    assert_eq!(read(&project.join(".env")), "SECRET=mine\n");
+    assert_eq!(read(&project.join("app.txt")), "app v2\n");
+
+    // A version that changes the ignored file too: both sides changed it,
+    // and without a stored base the changes cannot be merged.
+    publish("1.2.0", "SECRET=2\n", "app v2\n");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    declare(&project, &[("@acme/env", "^1.2")], "");
+    let before = tree(&project);
+    let err = stderr(&fails(fixture.compose(&project)));
+    assert!(
+        err.contains(
+            ".env: the project and the composition both changed it, and its base is not stored \
+             (the file was ignored by version control when it was composed), so the changes \
+             cannot be told apart"
+        ),
+        "{err}"
+    );
+    assert_eq!(tree(&project), before);
+
+    // Back at the composed content, the change applies; and once the file
+    // is no longer ignored, its base is stored from then on.
+    fs::write(project.join(".env"), "SECRET=1\n").unwrap();
+    fs::write(project.join(".gitignore"), "").unwrap();
+    let output = succeeds(fixture.compose(&project));
+    assert!(
+        stdout(&output).contains("  modified .env\n"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(read(&project.join(".env")), "SECRET=2\n");
+    assert_eq!(
+        lockfile(&project)["project"]["unbased"],
+        serde_json::json!([])
+    );
+    assert_eq!(blobs(), 3);
+
+    // Ignoring a file later keeps its new content out of the store.
+    fs::write(project.join(".gitignore"), "app.txt\n").unwrap();
+    publish("1.3.0", "SECRET=2\n", "app v3\n");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    declare(&project, &[("@acme/env", "^1.3")], "");
+    let output = succeeds(fixture.compose(&project));
+    assert!(
+        stderr(&output).contains("warning: app.txt is ignored by the project's version control"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(read(&project.join("app.txt")), "app v3\n");
+    assert_eq!(
+        lockfile(&project)["project"]["unbased"],
+        serde_json::json!(["app.txt"])
+    );
+    assert_eq!(blobs(), 3);
 }
 
 #[test]
@@ -655,7 +1012,8 @@ fn an_interrupted_composition_is_reverted_by_the_next_one() {
     assert!(
         stderr(&output).contains(
             "note: reverted a composition that was interrupted earlier: removed 1 file(s) it had \
-             written, kept 1 whose content changed since (bin/run)"
+             created, restored 0 it had changed or removed, kept 1 whose content changed since \
+             (bin/run)"
         ),
         "{}",
         stderr(&output)

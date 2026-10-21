@@ -39,10 +39,11 @@ pub use manifest::{
     EditError, FieldPath, IssueKind, JsonKind, ManifestIssue, PathSegment, ReadManifestError,
     declare_amendment, read_manifest, read_project, rebase_amendments,
 };
-pub use merge::{MergeFailure, MergeNote, Merged};
+pub use merge::{MergeFailure, MergeNote, Merged, ReconcileFailure};
 pub use project::{
-    ComposeFailure, ComposeProblem, ComposeRecovery, Composed, DECLARATION, InitProjectFailure,
-    ProjectInitialized, StoreError, WriteStep, compose_project, init_project,
+    ComposeFailure, ComposeProblem, ComposeRecovery, Composed, DECLARATION, FileChange,
+    FileConflict, FileConflictKind, InitProjectFailure, ProjectInitialized, StoreError, WriteStep,
+    compose_project, init_project,
 };
 pub use registry::{
     Added, Indexed, Problem, ReferenceError, Registry, RegistryFailure, StorageError, Synced,

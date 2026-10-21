@@ -12,11 +12,16 @@
 //! the listing and every blob back and compares them with the identities
 //! the lock records.
 //!
-//! The journal lists the files a composition is about to create. It is
-//! written after the store and before the project's files, and removed
-//! after the lock, so that its presence means an interrupted composition:
-//! the next one reverts the files it lists whose content is still what was
-//! planned, and starts over.
+//! The journal lists what a composition is about to do to each file:
+//! create it, replace it, or remove it, with the identities of the planned
+//! and the previous content. It is written after the store and before the
+//! project's files, and removed after the lock, so that its presence means
+//! an interrupted composition: the next one completes it when the lock is
+//! in place and reverts it otherwise. The previous bytes of the files a
+//! composition replaces or removes wait under `previous/` until it
+//! completes. The journal and `previous/` are the project's transient
+//! state, which the directory's own `.gitignore` keeps out of version
+//! control: the consumer's edits never enter the tracked store.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -34,6 +39,13 @@ pub(crate) const STATE_DIR: &str = ".assemblr";
 const ATTRIBUTES: &str = ".gitattributes";
 /// What it says.
 const ATTRIBUTES_TEXT: &str = "* -text\n";
+/// The ignore file that keeps the transient state out of version control.
+const IGNORE: &str = ".gitignore";
+/// What it says.
+const IGNORE_TEXT: &str = "/journal.json\n/journal.json.new\n/previous/\n";
+/// The previous content of the files a composition replaces or removes,
+/// by content identity, until it completes.
+const PREVIOUS: &str = "previous";
 /// The blobs, by content identity.
 const OBJECTS: &str = "objects";
 /// The listings, by base identity.
@@ -50,22 +62,24 @@ const TEXT_LIMIT: u64 = 64 * 1024 * 1024;
 /// The store under `root/.assemblr`.
 pub(super) struct Store {
     dir: PathBuf,
-    /// Whether writing the base restored an edited attributes file.
-    restored_attributes: std::cell::Cell<bool>,
+    /// The store's own files that writing the base restored, because
+    /// they had been edited.
+    restored: std::cell::RefCell<Vec<&'static str>>,
 }
 
 impl Store {
     pub(super) fn new(root: &Path) -> Self {
         Self {
             dir: root.join(STATE_DIR),
-            restored_attributes: std::cell::Cell::new(false),
+            restored: std::cell::RefCell::new(Vec::new()),
         }
     }
 
-    /// Whether [`write_base`](Self::write_base) restored
-    /// `.assemblr/.gitattributes`, which had been edited.
-    pub(super) fn restored_attributes(&self) -> bool {
-        self.restored_attributes.get()
+    /// The names of the store's own files, `.gitattributes` and
+    /// `.gitignore`, that [`write_base`](Self::write_base) restored
+    /// because they had been edited.
+    pub(super) fn restored(&self) -> Vec<&'static str> {
+        self.restored.borrow().clone()
     }
 
     /// The store's directories as `git check-ignore` must see them, with a
@@ -115,27 +129,29 @@ impl Store {
                 Err(error) => return Err(io(&dir, error)),
             }
         }
-        // The attributes file is Assemblr's own: when it was edited, it is
-        // restored, since without it a checkout could convert the store.
-        let attributes = self.dir.join(ATTRIBUTES);
-        match fs::symlink_metadata(&attributes) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                write_new(&attributes, ATTRIBUTES_TEXT.as_bytes())
-                    .map_err(|error| io(&attributes, error))?;
-            }
-            Err(error) => return Err(io(&attributes, error)),
-            Ok(metadata) if metadata.is_file() => {
-                let current = fs::read(&attributes).map_err(|error| io(&attributes, error))?;
-                if current != ATTRIBUTES_TEXT.as_bytes() {
-                    let staged = self.dir.join(format!("{ATTRIBUTES}.new"));
-                    let _ = fs::remove_file(&staged);
-                    write_new(&staged, ATTRIBUTES_TEXT.as_bytes())
-                        .and_then(|()| fs::rename(&staged, &attributes))
-                        .map_err(|error| io(&attributes, error))?;
-                    self.restored_attributes.set(true);
+        // The attributes and ignore files are Assemblr's own: when one was
+        // edited, it is restored, since without them a checkout could
+        // convert the store or commit the transient state.
+        for (name, text) in [(ATTRIBUTES, ATTRIBUTES_TEXT), (IGNORE, IGNORE_TEXT)] {
+            let path = self.dir.join(name);
+            match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    write_new(&path, text.as_bytes()).map_err(|error| io(&path, error))?;
                 }
+                Err(error) => return Err(io(&path, error)),
+                Ok(metadata) if metadata.is_file() => {
+                    let current = fs::read(&path).map_err(|error| io(&path, error))?;
+                    if current != text.as_bytes() {
+                        let staged = self.dir.join(format!("{name}.new"));
+                        let _ = fs::remove_file(&staged);
+                        write_new(&staged, text.as_bytes())
+                            .and_then(|()| fs::rename(&staged, &path))
+                            .map_err(|error| io(&path, error))?;
+                        self.restored.borrow_mut().push(name);
+                    }
+                }
+                Ok(_) => return Err(StoreError::NotADirectory(path)),
             }
-            Ok(_) => return Err(StoreError::NotADirectory(attributes)),
         }
         for (path, bytes) in files {
             let Some(file) = snapshot.files().get(*path) else {
@@ -239,6 +255,75 @@ impl Store {
         Ok(snapshot)
     }
 
+    /// The stored bytes of `blob`.
+    pub(super) fn read_blob(&self, blob: &BlobId) -> Result<Vec<u8>, StoreError> {
+        let path = self.blob_path(blob);
+        let bytes = read_bounded(&path, u64::MAX).map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound => StoreError::Missing(path.clone()),
+            _ => StoreError::Io {
+                path: path.clone(),
+                error,
+            },
+        })?;
+        if BlobId::of(&bytes) == *blob {
+            Ok(bytes)
+        } else {
+            Err(StoreError::Corrupt {
+                path,
+                detail: "its bytes are not the content it is named after".to_owned(),
+            })
+        }
+    }
+
+    fn previous_path(&self, blob: &BlobId) -> PathBuf {
+        self.dir.join(PREVIOUS).join(blob.as_str())
+    }
+
+    /// Keeps `bytes`, the previous content of a file the composition is
+    /// about to replace or remove, until the composition completes.
+    pub(super) fn save_previous(&self, bytes: &[u8]) -> Result<BlobId, StoreError> {
+        let dir = self.dir.join(PREVIOUS);
+        match fs::symlink_metadata(&dir) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Err(StoreError::NotADirectory(dir)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir(&dir).map_err(|error| StoreError::Io {
+                    path: dir.clone(),
+                    error,
+                })?;
+            }
+            Err(error) => return Err(StoreError::Io { path: dir, error }),
+        }
+        let blob = BlobId::of(bytes);
+        let path = self.previous_path(&blob);
+        if fs::symlink_metadata(&path).is_ok() {
+            let _ = fs::remove_file(&path);
+        }
+        write_new(&path, bytes).map_err(|error| StoreError::Io { path, error })?;
+        Ok(blob)
+    }
+
+    /// The previous content `blob` that [`save_previous`](Self::save_previous)
+    /// kept.
+    pub(super) fn read_previous(&self, blob: &BlobId) -> Result<Vec<u8>, StoreError> {
+        let path = self.previous_path(blob);
+        let bytes = read_bounded(&path, u64::MAX).map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound => StoreError::Missing(path.clone()),
+            _ => StoreError::Io {
+                path: path.clone(),
+                error,
+            },
+        })?;
+        if BlobId::of(&bytes) == *blob {
+            Ok(bytes)
+        } else {
+            Err(StoreError::Corrupt {
+                path,
+                detail: "its bytes are not the content it is named after".to_owned(),
+            })
+        }
+    }
+
     /// The journal, if a composition was interrupted.
     pub(super) fn journal(&self) -> Result<Option<Journal>, StoreError> {
         let path = self.dir.join(JOURNAL);
@@ -268,24 +353,46 @@ impl Store {
         Ok(())
     }
 
-    /// Removes the journal: the composition is complete.
+    /// Removes the journal and the previous content it refers to: the
+    /// composition is complete, or reverted.
     pub(super) fn finish(&self) -> Result<(), StoreError> {
         let path = self.dir.join(JOURNAL);
-        fs::remove_file(&path).map_err(|error| StoreError::Io { path, error })
+        fs::remove_file(&path).map_err(|error| StoreError::Io { path, error })?;
+        let _ = fs::remove_dir_all(self.dir.join(PREVIOUS));
+        Ok(())
     }
 }
 
-/// What a composition is about to write in the project: the files, each
-/// with the identity of its planned content, and the directories it will
-/// create, outermost first.
+/// What a composition is about to do in the project: each file with its
+/// planned and previous content, and the directories it will create,
+/// outermost first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Journal {
     /// The identity of the composition being applied: the lock, written
     /// after every file, records the same identity, which tells a
     /// completed composition from an interrupted one.
     pub(super) base: BaseIdentity,
-    pub(super) files: Vec<(RelativePath, BlobId)>,
+    pub(super) files: Vec<(RelativePath, JournalEntry)>,
     pub(super) directories: Vec<RelativePath>,
+}
+
+/// What the composition does to one file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum JournalEntry {
+    /// Creates it with this content.
+    Create { blob: BlobId },
+    /// Replaces its content, or its mode, keeping the previous bytes.
+    Modify {
+        blob: BlobId,
+        executable: bool,
+        previous: BlobId,
+        previous_executable: bool,
+    },
+    /// Removes it, keeping the previous bytes.
+    Remove {
+        previous: BlobId,
+        previous_executable: bool,
+    },
 }
 
 impl Journal {
@@ -293,7 +400,33 @@ impl Journal {
         let files: Vec<Value> = self
             .files
             .iter()
-            .map(|(path, blob)| json!({ "path": path.as_str(), "blob": blob.as_str() }))
+            .map(|(path, entry)| match entry {
+                JournalEntry::Create { blob } => {
+                    json!({ "path": path.as_str(), "action": "create", "blob": blob.as_str() })
+                }
+                JournalEntry::Modify {
+                    blob,
+                    executable,
+                    previous,
+                    previous_executable,
+                } => json!({
+                    "path": path.as_str(),
+                    "action": "modify",
+                    "blob": blob.as_str(),
+                    "executable": executable,
+                    "previous": previous.as_str(),
+                    "previous_executable": previous_executable,
+                }),
+                JournalEntry::Remove {
+                    previous,
+                    previous_executable,
+                } => json!({
+                    "path": path.as_str(),
+                    "action": "remove",
+                    "previous": previous.as_str(),
+                    "previous_executable": previous_executable,
+                }),
+            })
             .collect();
         let directories: Vec<Value> = self
             .directories
@@ -338,15 +471,39 @@ impl Journal {
                 let path = entry
                     .get("path")
                     .and_then(Value::as_str)
-                    .and_then(|text| RelativePath::parse(text).ok());
-                let blob = entry
-                    .get("blob")
+                    .and_then(|text| RelativePath::parse(text).ok())
+                    .ok_or_else(|| "a `files` entry has no valid `path`".to_owned())?;
+                let blob = |name: &str| {
+                    entry
+                        .get(name)
+                        .and_then(Value::as_str)
+                        .and_then(BlobId::parse)
+                        .ok_or_else(|| format!("the entry for {path} has no valid `{name}`"))
+                };
+                let flag = |name: &str| entry.get(name).and_then(Value::as_bool).unwrap_or(false);
+                // An entry without an action was written by a first
+                // composition, which only creates.
+                let action = entry
+                    .get("action")
                     .and_then(Value::as_str)
-                    .and_then(BlobId::parse);
-                match (path, blob) {
-                    (Some(path), Some(blob)) => Ok((path, blob)),
-                    _ => Err("a `files` entry has no valid `path` and `blob`".to_owned()),
-                }
+                    .unwrap_or("create");
+                let entry = match action {
+                    "create" => JournalEntry::Create {
+                        blob: blob("blob")?,
+                    },
+                    "modify" => JournalEntry::Modify {
+                        blob: blob("blob")?,
+                        executable: flag("executable"),
+                        previous: blob("previous")?,
+                        previous_executable: flag("previous_executable"),
+                    },
+                    "remove" => JournalEntry::Remove {
+                        previous: blob("previous")?,
+                        previous_executable: flag("previous_executable"),
+                    },
+                    other => return Err(format!("the entry for {path} has the action {other:?}")),
+                };
+                Ok((path, entry))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let directories = root
