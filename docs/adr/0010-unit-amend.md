@@ -1,6 +1,6 @@
 # 0010: `unit amend`: the search, the manifest edit, and recovery; amendments in a build
 
-- **Status:** Accepted
+- **Status:** Accepted; point 8 superseded by [0011](0011-published-amendments.md)
 - **Date:** 2026-10-21
 
 ## Context
@@ -90,7 +90,8 @@ out of the index until they can be composed.
    from the moment the repository opens until the manifest is replaced, so
    a concurrent build reads either the old manifest or the new one, never a
    half-written file, and the lockfile it reads cannot change under it.
-8. **Published versions with amendments.** Registration and synchronization
+8. **Published versions with amendments.** *Superseded by ADR 0011.*
+   Registration and synchronization
    read each newly discovered version's manifest and `src/`. A version that
    declares amendments, or whose root tree has an `amendments` entry, is
    excluded at version level with that reason, like invalid `src/` content.
@@ -105,6 +106,7 @@ out of the index until they can be composed.
 - A unit with amendments builds, but its published versions are not indexed
   until published amendments can be composed, so no dependent can use them
   yet. The exclusion is reported with every `registry add` and `sync`.
+  (Lifted by ADR 0011.)
 - `unit amend` fails without a lockfile, so the first command in a unit with
   dependencies is `unit build`.
 - The in-place editor handles one insertion. Other manifest edits, such as
