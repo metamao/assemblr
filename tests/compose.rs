@@ -951,6 +951,14 @@ fn unbased_files_are_compared_by_identity_and_the_ignore_rules_are_read_again() 
         "{}",
         stdout(&output)
     );
+    assert!(
+        stderr(&output).contains(
+            ".env is no longer ignored by the project's .gitignore, so its composed content is \
+             stored in the tracked base from now on"
+        ),
+        "a file entering the tracked base is announced: {}",
+        stderr(&output)
+    );
     assert_eq!(read(&project.join(".env")), "SECRET=2\n");
     assert_eq!(
         lockfile(&project)["project"]["unbased"],
@@ -965,7 +973,7 @@ fn unbased_files_are_compared_by_identity_and_the_ignore_rules_are_read_again() 
     declare(&project, &[("@acme/env", "^1.3")], "");
     let output = succeeds(fixture.compose(&project));
     assert!(
-        stderr(&output).contains("warning: app.txt is ignored by the project's version control"),
+        stderr(&output).contains("warning: app.txt is ignored by the project's .gitignore"),
         "{}",
         stderr(&output)
     );
@@ -1073,8 +1081,8 @@ fn ignored_delivered_files_get_no_stored_base_and_a_warning() {
     let output = succeeds(fixture.compose(&project));
     assert!(
         stderr(&output).contains(
-            "warning: .env is ignored by the project's version control, so its reconciliation base \
-             is not stored"
+            "warning: .env is ignored by the project's .gitignore, so its reconciliation base is \
+             not stored"
         ),
         "{}",
         stderr(&output)
@@ -1089,42 +1097,6 @@ fn ignored_delivered_files_get_no_stored_base_and_a_warning() {
     );
     // Nothing was staged.
     assert!(git(&project, &["diff", "--cached", "--name-only"]).is_empty());
-
-    // The user's global excludes count too, which the scrubbed environment
-    // of a read would miss.
-    let global = fixture.dir.join("gitconfig");
-    let excludes = fixture.dir.join("global-ignores");
-    fs::write(&excludes, "*.secret\n").unwrap();
-    fs::write(
-        &global,
-        format!(
-            "[core]\n\texcludesFile = {}\n",
-            excludes.display().to_string().replace('\\', "/")
-        ),
-    )
-    .unwrap();
-    let secret = fixture.repo("secret");
-    secret.write(
-        "manifest.jsonc",
-        &manifest("@acme/secret", "1.0.0", &[], ""),
-    );
-    secret.write("src/a.secret", "s\n");
-    secret.write("src/b.txt", "b\n");
-    secret.publish("1.0.0");
-    fixture.register(&secret);
-    let global_project = fixture.project("global", &[("@acme/secret", "^1")], "");
-    git(&global_project, &["init", "-q"]);
-    let output =
-        succeeds(fixture.assemblr_with_global_config(&global_project, &global, &["compose"]));
-    assert!(
-        stderr(&output).contains("warning: a.secret is ignored"),
-        "{}",
-        stderr(&output)
-    );
-    assert_eq!(
-        lockfile(&global_project)["project"]["unbased"],
-        serde_json::json!(["a.secret"])
-    );
 
     // A project that ignores `.assemblr/`, or one of its directories, is
     // warned that the base will not travel; a project outside any
@@ -1192,5 +1164,244 @@ fn a_checkout_with_line_ending_conversion_leaves_the_stored_base_intact() {
         stdout(&output).contains("Nothing to compose"),
         "{}",
         stdout(&output)
+    );
+}
+
+/// A unit that delivers `a.secret` and `b.txt` at `version`, registered.
+fn secret_unit(fixture: &Fixture, version: &str, a: &str) -> Repo {
+    let secret = fixture.repo("secret");
+    secret.write(
+        "manifest.jsonc",
+        &manifest("@acme/secret", version, &[], ""),
+    );
+    secret.write("src/a.secret", a);
+    secret.write("src/b.txt", "b\n");
+    secret.publish(version);
+    fixture.register(&secret);
+    secret
+}
+
+/// A global Git configuration that excludes `patterns`, in a file of the
+/// fixture.
+fn global_excludes(fixture: &Fixture, name: &str, patterns: &str) -> PathBuf {
+    let excludes = fixture.dir.join(format!("{name}-ignores"));
+    fs::write(&excludes, patterns).unwrap();
+    let global = fixture.dir.join(format!("{name}-gitconfig"));
+    fs::write(
+        &global,
+        format!(
+            "[core]\n\texcludesFile = {}\n",
+            excludes.display().to_string().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+    global
+}
+
+fn compose_with(fixture: &Fixture, project: &Path, global: &Path) -> Output {
+    fixture.assemblr_with_global_config(project, global, &["compose"])
+}
+
+#[test]
+fn a_file_only_the_consumer_s_own_rules_ignore_is_refused_not_stored_or_left_out() {
+    let fixture = Fixture::new("local-rules");
+    secret_unit(&fixture, "1.0.0", "s\n");
+    let global = global_excludes(&fixture, "mine", "*.secret\n");
+
+    // The user's global excludes ignore `a.secret` on this machine only.
+    // The lock cannot record it as unbased, since another clone would lock
+    // it as based, and the tracked base must not receive it either.
+    let project = fixture.project("shop", &[("@acme/secret", "^1")], "");
+    git(&project, &["init", "-q"]);
+    let before = tree(&project);
+    let err = stderr(&fails(compose_with(&fixture, &project, &global)));
+    assert!(
+        err.contains("only your own Git rules ignore, not the project's .gitignore"),
+        "{err}"
+    );
+    assert!(err.contains("a.secret (pattern \"*.secret\" in "), "{err}");
+    assert!(
+        err.contains("add the file to the project's .gitignore"),
+        "the way out is named: {err}"
+    );
+    assert!(!err.contains("b.txt"), "{err}");
+    assert_eq!(tree(&project), before, "nothing was written");
+
+    // `.git/info/exclude` is the same kind of rule.
+    let exclude = project.join(".git/info/exclude");
+    fs::write(&exclude, "a.secret\n").unwrap();
+    let err = stderr(&fails(fixture.compose(&project)));
+    assert!(
+        err.contains("a.secret (pattern \"a.secret\" in .git/info/exclude)"),
+        "{err}"
+    );
+    assert_eq!(tree(&project), before);
+    fs::write(&exclude, "").unwrap();
+
+    // The project's own rule decides, whatever the machine ignores: the
+    // file is unbased, as it is for every clone.
+    fs::write(project.join(".gitignore"), "*.secret\n").unwrap();
+    let output = succeeds(compose_with(&fixture, &project, &global));
+    assert_eq!(
+        lockfile(&project)["project"]["unbased"],
+        serde_json::json!(["a.secret"])
+    );
+    assert!(
+        stderr(&output).contains("a.secret is ignored by the project's .gitignore"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(tree(&project.join(".assemblr").join("objects")).len(), 1);
+
+    // A project that re-includes the file settles it the other way, over
+    // the machine's rule: it is stored.
+    let kept = fixture.project("kept", &[("@acme/secret", "^1")], "");
+    git(&kept, &["init", "-q"]);
+    fs::write(kept.join(".gitignore"), "!a.secret\n").unwrap();
+    succeeds(compose_with(&fixture, &kept, &global));
+    assert_eq!(lockfile(&kept)["project"]["unbased"], serde_json::json!([]));
+    assert_eq!(tree(&kept.join(".assemblr").join("objects")).len(), 2);
+}
+
+#[test]
+fn the_lock_does_not_depend_on_the_machine_that_composed() {
+    let fixture = Fixture::new("same-lock");
+    let unit = fixture.repo("env");
+    unit.write("manifest.jsonc", &manifest("@acme/env", "1.0.0", &[], ""));
+    unit.write("src/.env", "SECRET=1\n");
+    unit.write("src/app.txt", "app\n");
+    unit.publish("1.0.0");
+    fixture.register(&unit);
+
+    // Two clones of one project, whose `.gitignore` is committed, on
+    // machines with different personal rules.
+    let compose_clone = |name: &str, global: &Path| {
+        let project = fixture.project(name, &[("@acme/env", "^1")], "");
+        git(&project, &["init", "-q"]);
+        fs::write(project.join(".gitignore"), ".env\n").unwrap();
+        succeeds(compose_with(&fixture, &project, global));
+        project
+    };
+    let plain = compose_clone("plain", Path::new(NULL_DEVICE));
+    let personal = global_excludes(&fixture, "personal", "*.bak\n.env\n.idea/\n");
+    let other = compose_clone("other", &personal);
+
+    assert_eq!(
+        read(&plain.join("assemblr-lock.json")),
+        read(&other.join("assemblr-lock.json"))
+    );
+    assert_eq!(
+        tree(&plain.join(".assemblr")),
+        tree(&other.join(".assemblr"))
+    );
+}
+
+#[test]
+fn a_stored_file_stays_stored_when_a_local_rule_appears_and_a_new_entry_is_never_silent() {
+    let fixture = Fixture::new("local-later");
+    let unit = fixture.repo("env");
+    let publish = |version: &str, env: &str| {
+        unit.write("manifest.jsonc", &manifest("@acme/env", version, &[], ""));
+        unit.write("src/.env", env);
+        unit.write("src/app.txt", "app\n");
+        unit.publish(version);
+    };
+    publish("1.0.0", "SECRET=1\n");
+    fixture.register(&unit);
+    let project = fixture.project("shop", &[("@acme/env", "^1")], "");
+    git(&project, &["init", "-q"]);
+    fs::write(project.join(".gitignore"), ".env\n").unwrap();
+    succeeds(fixture.compose(&project));
+    assert_eq!(
+        lockfile(&project)["project"]["unbased"],
+        serde_json::json!([".env"])
+    );
+
+    // The project stops ignoring `.env` while this machine still does. The
+    // file would enter the tracked base because of a project change, but
+    // against the consumer's own rule: refused, with the project untouched.
+    fs::write(project.join(".gitignore"), "").unwrap();
+    let mine = global_excludes(&fixture, "mine", ".env\n");
+    publish("1.1.0", "SECRET=2\n");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    declare(&project, &[("@acme/env", "^1.1")], "");
+    let before = tree(&project);
+    let err = stderr(&fails(compose_with(&fixture, &project, &mine)));
+    assert!(err.contains(".env (pattern \".env\" in "), "{err}");
+    assert_eq!(tree(&project), before);
+
+    // Without the personal rule it composes, and the file is announced as
+    // entering the base. From then on a personal rule changes nothing: the
+    // file is already stored.
+    let output = succeeds(fixture.compose(&project));
+    assert!(
+        stderr(&output).contains(".env is no longer ignored by the project's .gitignore"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        lockfile(&project)["project"]["unbased"],
+        serde_json::json!([])
+    );
+    publish("1.2.0", "SECRET=3\n");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    declare(&project, &[("@acme/env", "^1.2")], "");
+    let output = succeeds(compose_with(&fixture, &project, &mine));
+    assert!(
+        stdout(&output).contains("  modified .env\n"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(
+        lockfile(&project)["project"]["unbased"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn what_a_new_version_changes_beyond_values_is_reported_when_it_is_merged_into_an_edited_file() {
+    let fixture = Fixture::new("merge-notes");
+    let unit = fixture.repo("cfg");
+    let publish = |version: &str, config: &str| {
+        unit.write("manifest.jsonc", &manifest("@acme/cfg", version, &[], ""));
+        unit.write("src/config.json", config);
+        unit.publish(version);
+    };
+    publish("1.0.0", "{\n  \"a\": 1,\n  \"b\": 2\n}\n");
+    fixture.register(&unit);
+    let project = fixture.project("shop", &[("@acme/cfg", "^1")], "");
+    succeeds(fixture.compose(&project));
+
+    // The consumer edits `a`; version 1.1 changes `b`, moves it first, and
+    // adds a comment. The values merge into the consumer's text, whose
+    // order and comments stay, and the build says the composition's order
+    // and comment are not in the file, rather than leaving the project to
+    // differ from the composition without a word.
+    fs::write(
+        project.join("config.json"),
+        "{\n  \"a\": 5,\n  \"b\": 2\n}\n",
+    )
+    .unwrap();
+    publish("1.1.0", "{\n  // Raised.\n  \"b\": 3,\n  \"a\": 1\n}\n");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    declare(&project, &[("@acme/cfg", "^1.1")], "");
+    let output = succeeds(fixture.compose(&project));
+    assert_eq!(
+        read(&project.join("config.json")),
+        "{\n  \"a\": 5,\n  \"b\": 3\n}\n"
+    );
+    let err = stderr(&output);
+    assert!(
+        err.contains(
+            "config.json: the order of the members of / in the composition is not in your file; the \
+             merge carries members and values, not comments or order"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "config.json: the comment \"// Raised.\" in the composition is not in your file"
+        ),
+        "{err}"
     );
 }

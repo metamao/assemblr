@@ -238,6 +238,13 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
              existing content is not supported yet"
                 .to_owned(),
         ),
+        ComposeProblem::LocallyIgnored(_) => Some(
+            "whether a file enters the tracked base must not depend on one machine's rules: add \
+             the file to the project's .gitignore to keep it out of the base for everyone, or \
+             re-include it there with a `!` pattern (a directory with `!dir/`) to store it, or \
+             remove your own rule"
+                .to_owned(),
+        ),
         ComposeProblem::Reserved(_) => Some(
             "a unit cannot deliver Assemblr's own files; the unit's author must move or remove \
              them"
