@@ -480,9 +480,12 @@ pub(super) fn validate(
                                 |locked| locked.version().clone(),
                             ),
                             path: composed.source().clone(),
+                            // By identity, as the conflicts name them.
                             amenders: amendments
                                 .iter()
                                 .map(|(amender, _)| (*amender).clone())
+                                .collect::<std::collections::BTreeSet<_>>()
+                                .into_iter()
                                 .collect(),
                             failure: None,
                         };
@@ -944,7 +947,7 @@ pub enum BuildProblem {
         version: Version,
         /// The amended path in its `src/`.
         path: RelativePath,
-        /// The amenders, in requirer order.
+        /// The amenders, by identity.
         amenders: Vec<UnitIdentity>,
         /// Why, or `None` when a rendered side is not UTF-8 text.
         failure: Option<super::merge::MergeFailure>,

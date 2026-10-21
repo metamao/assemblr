@@ -164,9 +164,12 @@ either before or after the amendment.
 dependency; a path the unit's own `src/` holds, which would collide; a path
 the manifest already declares; a file of the same provider that a locked
 dependency, direct or transitive, already amends, naming that amender and
-its version, since several amenders of one file are not supported yet; and a
-file at `amendments/<path>` whose content differs from the provider's file,
-or that is not a regular file. While an update of the unit is interrupted,
+its version, unless the file is JSON or JSONC, whose amendments the build
+combines (see
+[amendments-and-composition.md](amendments-and-composition.md#the-merge-engine--approved)),
+in which case the copy is created and the result names the other amenders;
+and a file at `amendments/<path>` whose content differs from the provider's
+file, or that is not a regular file. While an update of the unit is interrupted,
 it refuses to run at all, until `unit update` completes it (see
 [update details](#update-details--approved)). A file of another provider
 with the same name is a different file, and delivered-path collisions are

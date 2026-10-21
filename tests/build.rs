@@ -1941,8 +1941,8 @@ fn several_amenders_of_one_provider_file_are_refused() {
     assert!(
         err.contains(
             "src/bin/run of @acme/node is already amended by @acme/app 0.1.0, a locked \
-             dependency, based on @acme/node 1.0.0; several amenders of one file are not \
-             supported yet"
+             dependency, based on @acme/node 1.0.0; several amendments of one file are \
+             combined for JSON and JSONC files only"
         ),
         "{err}"
     );

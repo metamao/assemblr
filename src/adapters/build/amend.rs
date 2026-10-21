@@ -33,8 +33,8 @@ use crate::adapters::lockfile::{self, LockfileError};
 use crate::adapters::manifest::{EditError, declare_amendment, read_manifest};
 use crate::adapters::registry::{Registry, StorageError};
 use crate::domain::{
-    AmendmentDeclaration, LockChange, LockError, RelativePath, RelativePathError, ResolutionError,
-    UnitIdentity, Version, delivered_path, relock, resolve,
+    AmendmentDeclaration, LockChange, LockError, MergeFormat, RelativePath, RelativePathError,
+    ResolutionError, UnitIdentity, Version, delivered_path, relock, resolve,
 };
 
 /// Where the edited manifest is written before it replaces `manifest.jsonc`.
@@ -222,8 +222,8 @@ pub fn amend_unit(
         });
     }
     // A locked dependency, direct or transitive, that already amends the
-    // same file of the same provider would make the build refuse both
-    // amenders, so the copy is not created.
+    // same file of the same provider.
+    let mut shared_with = Vec::new();
     for (identity, locked) in lock.units() {
         let key = (identity.clone(), locked.version().clone());
         let Some(existing) = dependencies
@@ -234,6 +234,15 @@ pub fn amend_unit(
         else {
             continue;
         };
+        // Several amendments of a JSON or JSONC file are combined by the
+        // build (OC-10): the copy is created, and the author is told who
+        // else amends the file. Any other format would make the build
+        // refuse both amenders, so the copy is not created.
+        let delivered = delivered_path(&found.path).ok().flatten();
+        if MergeFormat::of_path(delivered.as_ref().unwrap_or(&found.path)).is_some() {
+            shared_with.push((identity.clone(), locked.version().clone()));
+            continue;
+        }
         problems.push(AmendProblem::AmendedByDependency {
             path: found.path.clone(),
             provider: found.unit.clone(),
@@ -317,6 +326,7 @@ pub fn amend_unit(
     Ok(Amended {
         found,
         kept_existing: keep,
+        shared_with,
     })
 }
 
@@ -475,6 +485,7 @@ impl fmt::Display for Match {
 pub struct Amended {
     found: Match,
     kept_existing: bool,
+    shared_with: Vec<(UnitIdentity, Version)>,
 }
 
 impl Amended {
@@ -487,6 +498,13 @@ impl Amended {
     /// an earlier run was interrupted after writing it.
     pub fn kept_existing(&self) -> bool {
         self.kept_existing
+    }
+
+    /// The locked dependencies, with their versions, whose published
+    /// amendments of the same file the build combines with this one, by
+    /// identity.
+    pub fn shared_with(&self) -> &[(UnitIdentity, Version)] {
+        &self.shared_with
     }
 }
 
@@ -629,8 +647,8 @@ pub enum AmendProblem {
         base: Version,
     },
     /// A locked dependency's published version already amends the same
-    /// file of the same provider, and several amenders of one file are not
-    /// supported yet.
+    /// file of the same provider, and the file is not one whose amendments
+    /// the build combines (JSON and JSONC are).
     AmendedByDependency {
         /// The path.
         path: RelativePath,
@@ -782,8 +800,8 @@ impl fmt::Display for AmendProblem {
             } => write!(
                 f,
                 "src/{path} of {provider} is already amended by {amender} {version}, a locked \
-                 dependency, based on {provider} {base}; several amenders of one file are not \
-                 supported yet, so the file cannot be amended here"
+                 dependency, based on {provider} {base}; several amendments of one file are \
+                 combined for JSON and JSONC files only, so the file cannot be amended here"
             ),
             Self::CopyExists { path } => write!(
                 f,

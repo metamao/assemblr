@@ -257,6 +257,18 @@ fn amend(args: &AmendArgs) -> ExitCode {
                 "Amended {found}: {copy} amendments/{} and declared it in manifest.jsonc.",
                 found.path()
             );
+            if !amended.shared_with().is_empty() {
+                let others: Vec<String> = amended
+                    .shared_with()
+                    .iter()
+                    .map(|(unit, version)| format!("{unit} {version}"))
+                    .collect();
+                println!(
+                    "The file is also amended by {}; the build combines the copies, and changes \
+                     to the same value conflict.",
+                    others.join(", ")
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(failure) => {

@@ -701,3 +701,58 @@ fn crlf_providers_keep_their_line_endings_and_single_amenders_are_unchanged() {
     succeeds(fixture.build(&app));
     assert_eq!(app.read("build/package.json"), copy);
 }
+
+#[test]
+fn unit_amend_creates_a_copy_of_a_json_file_another_amender_amends() {
+    let fixture = Fixture::new("amend-shared");
+    let db = PACKAGE.replace(
+        "    \"hono\": \"^4\"\n",
+        "    \"drizzle-orm\": \"^0.44\",\n    \"hono\": \"^4\"\n",
+    );
+    let (_worker, app) = scenario(&fixture, &[("package.json", &db)], &[]);
+    succeeds(fixture.build(&app));
+
+    let output = succeeds(fixture.assemblr(&app.path, &["unit", "amend", "package.json"]));
+    assert!(
+        stdout(&output).contains(
+            "The file is also amended by @acme/db 1.0.0; the build combines the copies, and \
+             changes to the same value conflict."
+        ),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(app.read("amendments/package.json"), PACKAGE);
+    app.write(
+        "amendments/package.json",
+        &PACKAGE.replace(
+            "    \"deploy\": \"wrangler deploy\"\n",
+            "    \"deploy\": \"wrangler deploy\",\n    \"test\": \"vitest\"\n",
+        ),
+    );
+    succeeds(fixture.build(&app));
+    let built = app.read("build/package.json");
+    assert!(built.contains("\"drizzle-orm\": \"^0.44\""), "{built}");
+    assert!(built.contains("\"test\": \"vitest\""), "{built}");
+}
+
+#[test]
+fn two_amenders_removing_the_same_member_agree() {
+    let fixture = Fixture::new("shared-removal");
+    let without_private = PACKAGE.replace("  \"private\": true,\n", "");
+    let (_worker, app) = scenario(
+        &fixture,
+        &[("package.json", &without_private)],
+        &[(
+            "package.json",
+            &without_private.replace("\"wrangler dev\"", "\"wrangler dev --local\""),
+        )],
+    );
+    succeeds(fixture.build(&app));
+    let built = app.read("build/package.json");
+    assert!(!built.contains("private"), "{built}");
+    assert!(built.contains("\"wrangler dev --local\""), "{built}");
+    assert!(
+        built.starts_with("{\n  \"name\": \"worker\",\n  \"scripts\": {"),
+        "{built}"
+    );
+}

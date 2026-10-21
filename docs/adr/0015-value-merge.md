@@ -100,5 +100,10 @@ D) is evidence for the approach, not code that was adopted.
   application (OC-52) and update reconciliation (OC-53) reuse `derive`,
   `combine`, and `plan` against another target.
 - The editor's layout rules are heuristics guarded by the projection check:
-  a file whose layout they misjudge is refused rather than corrupted, and
-  the refusal names the file so the layout can be supported.
+  a file whose layout they misjudge is refused when the edited text would
+  not hold the planned value, and the refusal names the file; a misjudged
+  indentation that keeps the value yields valid but less tidy JSON.
+- `unit amend` no longer refuses a JSON or JSONC file that a locked
+  dependency already amends (ADR 0011, point 6, narrowed to the other
+  formats): it creates the copy and names the other amenders, since the
+  build now combines the copies.
