@@ -9,10 +9,10 @@
 //!   ASCII whitespace allowed inside the braces. A string value is inserted
 //!   as it is, an integer in decimal, and a boolean as `true` or `false`.
 //!   Nothing is quoted or escaped for the file's format.
-//! - `{{ own.name }}` refers to the amending author's own context. The
-//!   reference is parsed here so that amendment copies can use the same
-//!   language later; a unit's own files have no such context, and the
-//!   reference is an error there.
+//! - `{{ own.name }}` refers to the amending author's own context: the
+//!   amending unit's resolved parameter values, defined only when an
+//!   amendment copy is rendered. A unit's own files have no such context,
+//!   and the reference is an error there.
 //! - `{{ "{{" }}` is the one escape: it produces a literal `{{`.
 //! - Everything else that starts with `{{`, `{%`, or `{#` is unsupported and
 //!   an error, never passed through. A `}}` on its own is ordinary text.
@@ -33,36 +33,47 @@ use crate::domain::{OWN, ParameterName, ParameterValue, ParameterValues};
 const RENDERED_LIMIT: usize = FILE_LIMIT as usize;
 
 /// What a template's references resolve against: the resolved parameter
-/// values of the unit that provides the file.
+/// values of the unit that provides the file, and, for an amendment copy,
+/// the amending unit's own values as `own`.
 #[derive(Debug, Clone, Copy)]
 pub struct Context<'a> {
     values: &'a ParameterValues,
+    own: Option<&'a ParameterValues>,
 }
 
 impl<'a> Context<'a> {
     /// The context of a unit's own file.
     pub fn new(values: &'a ParameterValues) -> Self {
-        Self { values }
+        Self { values, own: None }
+    }
+
+    /// The context of an amendment copy: the provider's `values`, which
+    /// its own references see, plus the amending unit's `own` values.
+    pub fn amended(values: &'a ParameterValues, own: &'a ParameterValues) -> Self {
+        Self {
+            values,
+            own: Some(own),
+        }
     }
 
     /// The value a reference names, if the context defines it.
-    fn resolve(&self, reference: &Reference<'_>) -> Option<&'a ParameterValue> {
+    fn resolve(&self, reference: &Reference) -> Option<&'a ParameterValue> {
         match reference {
             Reference::Parameter(name) => self.values.get(name),
             // A unit's own files have no `own` context: that belongs to
-            // amendment copies, which are not rendered here.
-            Reference::Own(_) => None,
+            // amendment copies.
+            Reference::Own(name) => self.own?.get(name),
         }
     }
 }
 
 /// A parsed reference: what `{{ … }}` names.
 #[derive(Debug, PartialEq, Eq)]
-enum Reference<'a> {
+enum Reference {
     /// A parameter of the unit that provides the file.
     Parameter(ParameterName),
     /// `own.<name>`: a parameter of the amending author's own context.
-    Own(&'a str),
+    Own(ParameterName),
 }
 
 /// Renders `source` with `context`. On failure every error is returned, in
@@ -208,17 +219,17 @@ fn next_opener(text: &str) -> Option<(usize, Opener)> {
 
 /// What the text between `{{` and `}}` means.
 #[derive(Debug, PartialEq, Eq)]
-enum Expression<'a> {
+enum Expression {
     /// Text to insert as it is.
     Literal(&'static str),
-    Reference(Reference<'a>),
+    Reference(Reference),
     Unsupported,
 }
 
 /// The one escape: a double-quoted `{{`.
 const ESCAPE: &str = "\"{{\"";
 
-fn parse(inner: &str) -> Expression<'_> {
+fn parse(inner: &str) -> Expression {
     let trimmed = inner.trim_matches(|c: char| c.is_ascii_whitespace());
     if trimmed == ESCAPE {
         return Expression::Literal("{{");
@@ -228,7 +239,7 @@ fn parse(inner: &str) -> Expression<'_> {
         .and_then(|rest| rest.strip_prefix('.'))
     {
         return match ParameterName::parse(name) {
-            Ok(_) => Expression::Reference(Reference::Own(name)),
+            Ok(name) => Expression::Reference(Reference::Own(name)),
             Err(_) => Expression::Unsupported,
         };
     }
@@ -238,14 +249,15 @@ fn parse(inner: &str) -> Expression<'_> {
     }
 }
 
-fn undefined(reference: Reference<'_>, context: &Context<'_>) -> RenderErrorKind {
+fn undefined(reference: Reference, context: &Context<'_>) -> RenderErrorKind {
     match reference {
         Reference::Parameter(name) => RenderErrorKind::Undefined {
             name,
             declared: context.values.keys().cloned().collect(),
         },
         Reference::Own(name) => RenderErrorKind::OwnUndefined {
-            name: name.to_owned(),
+            name,
+            declared: context.own.map(|own| own.keys().cloned().collect()),
         },
     }
 }
@@ -314,10 +326,14 @@ pub enum RenderErrorKind {
         /// The parameters the context defines, sorted.
         declared: Vec<ParameterName>,
     },
-    /// `{{ own.name }}` in a file that has no `own` context.
+    /// `{{ own.name }}` names a parameter the `own` context does not
+    /// define, or appears in a file that has no `own` context.
     OwnUndefined {
         /// The name after `own.`.
-        name: String,
+        name: ParameterName,
+        /// The parameters `own` defines, sorted, or `None` in a file with
+        /// no `own` context.
+        declared: Option<Vec<ParameterName>>,
     },
     /// A construct outside the grammar: a statement, a comment, or an
     /// expression that is not a reference or the escape.
@@ -350,11 +366,33 @@ impl fmt::Display for RenderErrorKind {
                     write!(f, "; the unit's parameters are {}", names.join(", "))
                 }
             }
-            Self::OwnUndefined { name } => write!(
+            Self::OwnUndefined {
+                name,
+                declared: None,
+            } => write!(
                 f,
                 "undefined reference `{OWN}.{name}`; `{OWN}` is defined only when an amendment \
                  copy is rendered, and a unit's own files refer to its parameters by name"
             ),
+            Self::OwnUndefined {
+                name,
+                declared: Some(declared),
+            } => {
+                write!(f, "undefined reference `{OWN}.{name}`")?;
+                if declared.is_empty() {
+                    f.write_str("; the amending unit declares no parameters")
+                } else {
+                    let names: Vec<String> = declared
+                        .iter()
+                        .map(|name| format!("`{OWN}.{name}`"))
+                        .collect();
+                    write!(
+                        f,
+                        "; the amending unit's parameters are {}",
+                        names.join(", ")
+                    )
+                }
+            }
             Self::Unsupported { construct } => write!(
                 f,
                 "unsupported template construct {construct:?}; only `{{{{ name }}}}` references \
@@ -526,7 +564,8 @@ mod tests {
                 1,
                 1,
                 RenderErrorKind::OwnUndefined {
-                    name: "appName".to_owned()
+                    name: name("appName"),
+                    declared: None,
                 }
             )]
         );
@@ -546,6 +585,57 @@ mod tests {
         assert_eq!(
             errors("{{ app.name }}"),
             [(1, 1, unsupported("{{ app.name }}"))]
+        );
+    }
+
+    #[test]
+    fn an_amendment_copy_sees_the_provider_s_values_and_its_own() {
+        let own = values(&[
+            ("appName", text("amender")),
+            ("replicas", ParameterValue::Integer(3)),
+        ]);
+        let provider = sample();
+        let context = Context::amended(&provider, &own);
+        assert_eq!(
+            render(
+                "{{ appName }} on {{ port }} by {{ own.appName }} x{{ own.replicas }}",
+                &context
+            )
+            .unwrap(),
+            "demo on 8080 by amender x3"
+        );
+        // The provider's values are never reached through `own`, and the
+        // amending unit's never through a plain reference.
+        let errors: Vec<RenderErrorKind> = render("{{ own.port }} {{ replicas }}", &context)
+            .unwrap_err()
+            .into_iter()
+            .map(|error| error.kind().clone())
+            .collect();
+        assert_eq!(
+            errors,
+            [
+                RenderErrorKind::OwnUndefined {
+                    name: name("port"),
+                    declared: Some(vec![name("appName"), name("replicas")]),
+                },
+                RenderErrorKind::Undefined {
+                    name: name("replicas"),
+                    declared: vec![name("appName"), name("minify"), name("port"), name("ssr")],
+                },
+            ]
+        );
+        assert_eq!(
+            errors[0].to_string(),
+            "undefined reference `own.port`; the amending unit's parameters are `own.appName`, \
+             `own.replicas`"
+        );
+        let none = ParameterValues::new();
+        let error = render("{{ own.x }}", &Context::amended(&provider, &none)).unwrap_err();
+        assert!(
+            error[0]
+                .to_string()
+                .contains("the amending unit declares no parameters"),
+            "{error:?}"
         );
     }
 
@@ -641,7 +731,7 @@ mod tests {
             .map(|error| {
                 let kind = match error.kind() {
                     RenderErrorKind::Undefined { name, .. } => format!("undefined {name}"),
-                    RenderErrorKind::OwnUndefined { name } => format!("own {name}"),
+                    RenderErrorKind::OwnUndefined { name, .. } => format!("own {name}"),
                     RenderErrorKind::Unsupported { construct } => {
                         format!("unsupported {construct}")
                     }

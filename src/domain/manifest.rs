@@ -1,15 +1,42 @@
 //! The unit manifest: a unit's identity, version, description, dependencies,
-//! dependency options, and parameters.
+//! dependency options, parameters, and amendment declarations.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use super::identity::UnitIdentity;
 use super::parameter::{Description, ParameterDefinition, ParameterName, ParameterValue};
+use super::path::RelativePath;
 use super::version::{Version, VersionRequirement};
 
 /// The values a unit requires for one dependency's parameters.
 pub type OptionValues = BTreeMap<ParameterName, ParameterValue>;
+
+/// The provenance of one amendment: the direct dependency whose `src/` file
+/// the copy at `amendments/<path>` was taken from, and the exact published
+/// version it was taken at (see `docs/domain/amendments-and-composition.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmendmentDeclaration {
+    unit: UnitIdentity,
+    base: Version,
+}
+
+impl AmendmentDeclaration {
+    /// An amendment of `unit`'s file at version `base`.
+    pub fn new(unit: UnitIdentity, base: Version) -> Self {
+        Self { unit, base }
+    }
+
+    /// The direct dependency that provides the amended file.
+    pub fn unit(&self) -> &UnitIdentity {
+        &self.unit
+    }
+
+    /// The exact version of that dependency the copy was taken from.
+    pub fn base(&self) -> &Version {
+        &self.base
+    }
+}
 
 /// A validated unit manifest.
 ///
@@ -17,10 +44,13 @@ pub type OptionValues = BTreeMap<ParameterName, ParameterValue>;
 ///
 /// - every `options` key is a declared dependency, because options target
 ///   only direct dependencies;
+/// - every amendment targets a declared dependency, because an amendment
+///   targets only a direct dependency;
 /// - a unit never depends on itself.
 ///
-/// Whether an option value suits the dependency's parameter depends on the
-/// dependency's own manifest, so it is checked during composition, not here.
+/// Whether an option value suits the dependency's parameter, and whether an
+/// amended path exists in the dependency's `src/`, depend on the dependency's
+/// own content, so they are checked during composition, not here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     name: UnitIdentity,
@@ -29,6 +59,7 @@ pub struct Manifest {
     dependencies: BTreeMap<UnitIdentity, VersionRequirement>,
     options: BTreeMap<UnitIdentity, OptionValues>,
     params: BTreeMap<ParameterName, ParameterDefinition>,
+    amendments: BTreeMap<RelativePath, AmendmentDeclaration>,
 }
 
 impl Manifest {
@@ -40,9 +71,17 @@ impl Manifest {
         dependencies: BTreeMap<UnitIdentity, VersionRequirement>,
         options: BTreeMap<UnitIdentity, OptionValues>,
         params: BTreeMap<ParameterName, ParameterDefinition>,
+        amendments: BTreeMap<RelativePath, AmendmentDeclaration>,
     ) -> Result<Self, Vec<ManifestError>> {
         let declared = dependencies.keys().cloned().collect();
-        let errors = relation_errors(Some(&name), &declared, options.keys());
+        let errors = relation_errors(
+            Some(&name),
+            &declared,
+            options.keys(),
+            amendments
+                .iter()
+                .map(|(path, declaration)| (path, &declaration.unit)),
+        );
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -53,7 +92,24 @@ impl Manifest {
             dependencies,
             options,
             params,
+            amendments,
         })
+    }
+
+    /// The same manifest with `declaration` added for `path`, or `None` when
+    /// `path` is already amended or the target is not a direct dependency.
+    pub fn with_amendment(
+        &self,
+        path: RelativePath,
+        declaration: AmendmentDeclaration,
+    ) -> Option<Self> {
+        if self.amendments.contains_key(&path) || !self.dependencies.contains_key(&declaration.unit)
+        {
+            return None;
+        }
+        let mut manifest = self.clone();
+        manifest.amendments.insert(path, declaration);
+        Some(manifest)
     }
 
     /// The unit's identity.
@@ -85,10 +141,16 @@ impl Manifest {
     pub fn params(&self) -> &BTreeMap<ParameterName, ParameterDefinition> {
         &self.params
     }
+
+    /// The unit's amendments, by the amended file's path in the provider's
+    /// `src/`, which is also the copy's path under `amendments/`.
+    pub fn amendments(&self) -> &BTreeMap<RelativePath, AmendmentDeclaration> {
+        &self.amendments
+    }
 }
 
-/// Checks the relations between a manifest's name, dependencies, and option
-/// targets, in deterministic order.
+/// Checks the relations between a manifest's name, dependencies, option
+/// targets, and amendment targets, in deterministic order.
 ///
 /// Readers call this with whatever parts are valid, so these problems are
 /// reported together with problems in other fields. `name` is `None` when the
@@ -98,6 +160,7 @@ pub(crate) fn relation_errors<'a>(
     name: Option<&UnitIdentity>,
     declared: &BTreeSet<UnitIdentity>,
     option_targets: impl IntoIterator<Item = &'a UnitIdentity>,
+    amendment_targets: impl IntoIterator<Item = (&'a RelativePath, &'a UnitIdentity)>,
 ) -> Vec<ManifestError> {
     let mut errors = Vec::new();
     if let Some(name) = name {
@@ -116,6 +179,17 @@ pub(crate) fn relation_errors<'a>(
             .into_iter()
             .map(|target| ManifestError::UndeclaredOptionTarget(target.clone())),
     );
+    let mut undeclared: Vec<(&RelativePath, &UnitIdentity)> = amendment_targets
+        .into_iter()
+        .filter(|(_, target)| !declared.contains(*target))
+        .collect();
+    undeclared.sort();
+    errors.extend(undeclared.into_iter().map(|(path, target)| {
+        ManifestError::UndeclaredAmendmentTarget {
+            path: path.clone(),
+            unit: target.clone(),
+        }
+    }));
     errors
 }
 
@@ -126,6 +200,13 @@ pub enum ManifestError {
     SelfDependency(UnitIdentity),
     /// `options` targets an identity that is not a declared dependency.
     UndeclaredOptionTarget(UnitIdentity),
+    /// An amendment targets an identity that is not a declared dependency.
+    UndeclaredAmendmentTarget {
+        /// The amended path.
+        path: RelativePath,
+        /// The identity the declaration names.
+        unit: UnitIdentity,
+    },
 }
 
 impl fmt::Display for ManifestError {
@@ -138,6 +219,11 @@ impl fmt::Display for ManifestError {
                 f,
                 "{target} is not declared in `dependencies`; options may only target direct dependencies"
             ),
+            Self::UndeclaredAmendmentTarget { path, unit } => write!(
+                f,
+                "the amendment of {path} names {unit}, which is not declared in `dependencies`; \
+                 an amendment targets a direct dependency"
+            ),
         }
     }
 }
@@ -148,18 +234,28 @@ impl std::error::Error for ManifestError {}
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{Manifest, ManifestError, OptionValues};
+    use super::{AmendmentDeclaration, Manifest, ManifestError, OptionValues};
     use crate::domain::{
-        Description, ParameterName, ParameterValue, UnitIdentity, Version, VersionRequirement,
+        Description, ParameterName, ParameterValue, RelativePath, UnitIdentity, Version,
+        VersionRequirement,
     };
 
     fn identity(input: &str) -> UnitIdentity {
         input.parse().unwrap()
     }
 
+    fn path(input: &str) -> RelativePath {
+        input.parse().unwrap()
+    }
+
+    fn declaration(unit: &str) -> AmendmentDeclaration {
+        AmendmentDeclaration::new(identity(unit), Version::parse("1.2.0").unwrap())
+    }
+
     fn manifest(
         dependencies: &[&str],
         option_targets: &[&str],
+        amendments: &[(&str, &str)],
     ) -> Result<Manifest, Vec<ManifestError>> {
         let dependencies = dependencies
             .iter()
@@ -174,6 +270,10 @@ mod tests {
             .iter()
             .map(|name| (identity(name), option_values.clone()))
             .collect();
+        let amendments = amendments
+            .iter()
+            .map(|(amended, unit)| (path(amended), declaration(unit)))
+            .collect();
         Manifest::new(
             identity("@metamao/app"),
             Version::parse("1.0.0").unwrap(),
@@ -181,34 +281,84 @@ mod tests {
             dependencies,
             options,
             BTreeMap::new(),
+            amendments,
         )
     }
 
     #[test]
-    fn options_may_target_declared_dependencies() {
-        let manifest = manifest(&["@metamao/node"], &["@metamao/node"]).unwrap();
+    fn options_and_amendments_may_target_declared_dependencies() {
+        let manifest = manifest(
+            &["@metamao/node"],
+            &["@metamao/node"],
+            &[("package.json", "@metamao/node")],
+        )
+        .unwrap();
         assert_eq!(manifest.options().len(), 1);
         assert_eq!(manifest.dependencies().len(), 1);
+        let amendment = &manifest.amendments()[&path("package.json")];
+        assert_eq!(amendment.unit(), &identity("@metamao/node"));
+        assert_eq!(amendment.base().to_string(), "1.2.0");
     }
 
     #[test]
     fn every_inconsistency_is_reported_in_order() {
-        let errors = manifest(&["@metamao/app"], &["@z/z", "@metamao/app", "@a/a"]).unwrap_err();
+        let errors = manifest(
+            &["@metamao/app"],
+            &["@z/z", "@metamao/app", "@a/a"],
+            &[
+                ("z.txt", "@z/z"),
+                ("a.txt", "@metamao/app"),
+                ("b.txt", "@a/a"),
+            ],
+        )
+        .unwrap_err();
         assert_eq!(
             errors,
             [
                 ManifestError::SelfDependency(identity("@metamao/app")),
                 ManifestError::UndeclaredOptionTarget(identity("@a/a")),
                 ManifestError::UndeclaredOptionTarget(identity("@z/z")),
+                ManifestError::UndeclaredAmendmentTarget {
+                    path: path("b.txt"),
+                    unit: identity("@a/a"),
+                },
+                ManifestError::UndeclaredAmendmentTarget {
+                    path: path("z.txt"),
+                    unit: identity("@z/z"),
+                },
             ]
         );
     }
 
     #[test]
     fn errors_explain_the_rule() {
-        let errors = manifest(&[], &["@metamao/node"]).unwrap_err();
+        let errors =
+            manifest(&[], &["@metamao/node"], &[("a.txt", "@metamao/docker")]).unwrap_err();
         let message = errors[0].to_string();
         assert!(message.contains("@metamao/node"), "{message}");
         assert!(message.contains("direct dependencies"), "{message}");
+        let message = errors[1].to_string();
+        assert!(message.contains("a.txt"), "{message}");
+        assert!(message.contains("@metamao/docker"), "{message}");
+        assert!(message.contains("direct dependency"), "{message}");
+    }
+
+    #[test]
+    fn an_amendment_is_added_once_and_only_for_a_direct_dependency() {
+        let manifest = manifest(&["@metamao/node"], &[], &[]).unwrap();
+        let amended = manifest
+            .with_amendment(path("package.json"), declaration("@metamao/node"))
+            .unwrap();
+        assert_eq!(amended.amendments().len(), 1);
+        assert!(
+            amended
+                .with_amendment(path("package.json"), declaration("@metamao/node"))
+                .is_none()
+        );
+        assert!(
+            manifest
+                .with_amendment(path("package.json"), declaration("@metamao/docker"))
+                .is_none()
+        );
     }
 }

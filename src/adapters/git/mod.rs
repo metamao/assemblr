@@ -50,6 +50,7 @@ const SRC_ENTRY_LIMIT: usize = 10_000;
 
 const MANIFEST: &[u8] = b"manifest.jsonc";
 const SRC: &[u8] = b"src";
+const AMENDMENTS: &[u8] = b"amendments";
 
 /// A local Git repository, with or without a working tree.
 #[derive(Debug, Clone)]
@@ -288,6 +289,20 @@ impl GitRepository {
             .map_err(InvalidVersion::InvalidManifest))
     }
 
+    /// Whether `commit`'s root tree holds an `amendments` entry of any kind.
+    /// Git records no empty directories, so an entry means content.
+    pub fn has_amendments(&self, commit: &ObjectId) -> Result<bool, ReadSrcError> {
+        let mut objects = self.objects()?;
+        let tree = self
+            .commit_tree(&mut objects, commit)?
+            .map_err(ReadSrcError::ObjectTooLarge)?;
+        let root = self
+            .read_tree(&mut objects, &tree)?
+            .map_err(ReadSrcError::ObjectTooLarge)?;
+        objects.finish()?;
+        Ok(root.iter().any(|entry| entry.name == AMENDMENTS))
+    }
+
     /// Reads the `src/` files of `commit`, exactly as committed. A commit
     /// without `src/` has no files.
     ///
@@ -317,7 +332,7 @@ impl GitRepository {
             return Ok(FileTree::new());
         };
         if src.kind != EntryKind::Directory {
-            return Err(ReadSrcError::SrcNotADirectory);
+            return Err(ReadSrcError::NotADirectory(UnitDirectory::Src));
         }
 
         let mut files = Vec::new();
@@ -329,6 +344,7 @@ impl GitRepository {
                 Ok(listing) => listing,
                 Err(too_large) => {
                     errors.push(SrcEntryError {
+                        directory: UnitDirectory::Src,
                         path: String::from_utf8_lossy(prefix.strip_suffix(b"/").unwrap_or(&prefix))
                             .into_owned(),
                         reason: SrcEntryErrorReason::TooLarge {
@@ -342,6 +358,7 @@ impl GitRepository {
             entries += listing.len();
             if entries > SRC_ENTRY_LIMIT {
                 return Err(ReadSrcError::TooManyEntries {
+                    directory: UnitDirectory::Src,
                     limit: SRC_ENTRY_LIMIT,
                 });
             }
@@ -364,6 +381,7 @@ impl GitRepository {
                     EntryKind::Other(mode) => SrcEntryErrorReason::UnsupportedMode(mode),
                 };
                 errors.push(SrcEntryError {
+                    directory: UnitDirectory::Src,
                     path: String::from_utf8_lossy(&path).into_owned(),
                     reason,
                 });
@@ -379,6 +397,7 @@ impl GitRepository {
             }
             if header.size > FILE_LIMIT {
                 errors.push(SrcEntryError {
+                    directory: UnitDirectory::Src,
                     path: path.to_string(),
                     reason: SrcEntryErrorReason::TooLarge {
                         size: header.size,
@@ -394,6 +413,7 @@ impl GitRepository {
         }
         if total > SRC_SIZE_LIMIT {
             return Err(ReadSrcError::TooLarge {
+                directory: UnitDirectory::Src,
                 size: total,
                 limit: SRC_SIZE_LIMIT,
             });
@@ -567,7 +587,33 @@ impl fmt::Display for InvalidVersion {
     }
 }
 
-/// Why the `src/` files of a commit could not be read.
+/// A directory of a unit repository that holds unit files: `src/`, or
+/// `amendments/`, which follows the same rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitDirectory {
+    /// `src/`, the files the unit introduces.
+    Src,
+    /// `amendments/`, the unit's copies of dependency files.
+    Amendments,
+}
+
+impl UnitDirectory {
+    /// The directory's name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Src => "src",
+            Self::Amendments => "amendments",
+        }
+    }
+}
+
+impl fmt::Display for UnitDirectory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Why the unit files of a directory could not be read.
 #[derive(Debug)]
 pub enum ReadSrcError {
     /// The repository could not be read.
@@ -582,18 +628,22 @@ pub enum ReadSrcError {
     /// The commit, or its root directory listing, is larger than Assemblr
     /// reads.
     ObjectTooLarge(ObjectTooLarge),
-    /// `src` is not a directory.
-    SrcNotADirectory,
+    /// The entry at the directory's path is not a directory.
+    NotADirectory(UnitDirectory),
     /// Entries that cannot be unit files, sorted by path. Every one is
     /// reported.
     Entries(Vec<SrcEntryError>),
-    /// `src/` holds more files and directories than Assemblr reads.
+    /// The directory holds more files and directories than Assemblr reads.
     TooManyEntries {
+        /// The directory.
+        directory: UnitDirectory,
         /// The most entries read.
         limit: usize,
     },
-    /// `src/` files total more bytes than Assemblr reads.
+    /// The directory's files total more bytes than Assemblr reads.
     TooLarge {
+        /// The directory.
+        directory: UnitDirectory,
         /// Their total size, in bytes.
         size: u64,
         /// The largest total read, in bytes.
@@ -616,18 +666,30 @@ impl fmt::Display for ReadSrcError {
                 object_type,
             } => write!(f, "{commit} is a {object_type}, not a commit"),
             Self::ObjectTooLarge(too_large) => too_large.fmt(f),
-            Self::SrcNotADirectory => f.write_str("`src` is not a directory"),
-            Self::TooManyEntries { limit } => write!(
+            Self::NotADirectory(directory) => write!(f, "`{directory}` is not a directory"),
+            Self::TooManyEntries { directory, limit } => write!(
                 f,
-                "`src/` has more than {limit} files and directories, the most Assemblr reads"
+                "`{directory}/` has more than {limit} files and directories, the most Assemblr \
+                 reads"
             ),
-            Self::TooLarge { size, limit } => write!(
+            Self::TooLarge {
+                directory,
+                size,
+                limit,
+            } => write!(
                 f,
-                "`src/` files total {size} bytes, more than the {limit} Assemblr reads"
+                "`{directory}/` files total {size} bytes, more than the {limit} Assemblr reads"
             ),
             Self::Entries(errors) => {
                 let plural = if errors.len() == 1 { "y" } else { "ies" };
-                write!(f, "`src/` has {} unsupported entr{plural}:", errors.len())?;
+                let directory = errors
+                    .first()
+                    .map_or(UnitDirectory::Src, |error| error.directory);
+                write!(
+                    f,
+                    "`{directory}/` has {} unsupported entr{plural}:",
+                    errors.len()
+                )?;
                 for error in errors {
                     write!(f, "\n  {error}")?;
                 }
@@ -690,16 +752,22 @@ impl std::error::Error for HeadManifestError {
     }
 }
 
-/// An entry of `src/` that cannot be a unit file.
+/// An entry of `src/` or `amendments/` that cannot be a unit file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SrcEntryError {
+    directory: UnitDirectory,
     path: String,
     reason: SrcEntryErrorReason,
 }
 
 impl SrcEntryError {
-    /// The entry's path relative to `src/`. Bytes that are not UTF-8 are
-    /// replaced with `U+FFFD`.
+    /// The directory the entry is in.
+    pub fn directory(&self) -> UnitDirectory {
+        self.directory
+    }
+
+    /// The entry's path relative to that directory. Bytes that are not
+    /// UTF-8 are replaced with `U+FFFD`.
     pub fn path(&self) -> &str {
         &self.path
     }
@@ -712,12 +780,15 @@ impl SrcEntryError {
 
 impl fmt::Display for SrcEntryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "src/{}: ", self.path)?;
+        let directory = self.directory;
+        write!(f, "{directory}/{}: ", self.path)?;
         match &self.reason {
             SrcEntryErrorReason::SymbolicLink => {
-                f.write_str("symbolic links are not supported in `src/`")
+                write!(f, "symbolic links are not supported in `{directory}/`")
             }
-            SrcEntryErrorReason::Submodule => f.write_str("submodules are not supported in `src/`"),
+            SrcEntryErrorReason::Submodule => {
+                write!(f, "submodules are not supported in `{directory}/`")
+            }
             SrcEntryErrorReason::UnsupportedMode(mode) => {
                 write!(f, "Git file mode {mode} is not supported")
             }
@@ -727,7 +798,7 @@ impl fmt::Display for SrcEntryError {
             SrcEntryErrorReason::NotUtf8 => f.write_str("the path is not UTF-8"),
             SrcEntryErrorReason::InvalidPath(error) => error.fmt(f),
             SrcEntryErrorReason::NotARegularFile => {
-                f.write_str("not a regular file, which `src/` may hold only")
+                write!(f, "not a regular file, which `{directory}/` may hold only")
             }
             SrcEntryErrorReason::Unreadable(reason) => write!(f, "could not be read: {reason}"),
         }

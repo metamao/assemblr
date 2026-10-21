@@ -1,15 +1,18 @@
 //! `unit build`: the unit's working tree, composed with the published
 //! versions of its dependencies, written to `build/` (see
-//! `docs/domain/authoring-workflow.md` and `docs/adr/0008-unit-build.md`).
+//! `docs/domain/authoring-workflow.md` and `docs/adr/0008-unit-build.md`),
+//! and `unit amend`, which shares its reading of the unit and its
+//! dependencies (see [`amend`]).
 //!
 //! A build is decided completely before anything is written. It reads the
-//! unit's `manifest.jsonc` and `src/` from its working tree, resolves its
-//! dependencies from the registry index under the unit lockfile, reads each
-//! resolved version's content from Git at the commit the index records, and
-//! composes the result. Every problem found along the way is reported, and
-//! then nothing is written. Only a build without problems is published,
-//! together with its lockfile (see [`output`]).
+//! unit's `manifest.jsonc`, `src/`, and `amendments/` from its working tree,
+//! resolves its dependencies from the registry index under the unit
+//! lockfile, reads each resolved version's content from Git at the commit
+//! the index records, and composes the result. Every problem found along the
+//! way is reported, and then nothing is written. Only a build without
+//! problems is published, together with its lockfile (see [`output`]).
 
+mod amend;
 mod exclusive;
 mod lockfile;
 mod output;
@@ -21,6 +24,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+pub use amend::{AmendFailure, AmendProblem, AmendState, Amended, Match, WriteError, amend_unit};
 use exclusive::BuildLock;
 pub use exclusive::BuildLockError;
 pub use lockfile::LockfileError;
@@ -31,15 +35,14 @@ use super::manifest::{ReadManifestError, read_manifest};
 use super::registry::{Registry, StorageError};
 use super::render::{Context, RenderError, render};
 use crate::domain::{
-    AvailableVersions, CompositionError, FileTree, LockChange, LockError, Manifest, ObjectId,
-    ParameterName, ParameterValues, RelativePath, ResolutionError, Root, TEMPLATE_SUFFIX,
-    UnitContent, UnitFile, UnitIdentity, UnitLock, Version, compose, relock, resolve,
+    AmendmentBaseError, AvailableVersions, CompositionError, FileTree, LockChange, LockError,
+    Manifest, ObjectId, ParameterName, ParameterValues, RelativePath, ResolutionError, Root,
+    TEMPLATE_SUFFIX, UnitContent, UnitFile, UnitIdentity, UnitLock, Version, amendment_bases,
+    compose, relock, resolve,
 };
 
 /// The unit's manifest, at the repository's top level.
 const MANIFEST: &str = "manifest.jsonc";
-/// The directory amendments will live in, which a build cannot apply yet.
-const AMENDMENTS: &str = "amendments";
 
 /// Builds the unit whose repository's top level is `root`, resolving its
 /// dependencies from `registry`.
@@ -98,11 +101,17 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
             None
         }
     };
-    match repository.working_paths(AMENDMENTS) {
-        Ok(paths) if paths.is_empty() => {}
-        Ok(paths) => problems.push(BuildProblem::Amendments(paths)),
-        Err(error) => problems.push(BuildProblem::Repository(error)),
-    }
+    let amendments = match repository.read_working_amendments() {
+        Ok(amendments) => Some(amendments),
+        Err(ReadSrcError::Git(error)) => {
+            problems.push(BuildProblem::Repository(error));
+            None
+        }
+        Err(error) => {
+            problems.push(BuildProblem::Amendments(error));
+            None
+        }
+    };
     // If the record cannot be read, nothing at the reserved paths is taken
     // for a leftover, so nothing there is deleted.
     let interrupted = guard.interrupted().unwrap_or(false);
@@ -164,27 +173,46 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
             return Err(BuildFailure::Rejected(problems));
         }
     };
-    let trees = match dependencies.read_src(&lock) {
+    // A build never moves an amended unit away from its base. The cause is
+    // told apart here, with the previous lock; the composition below would
+    // only see that the base and the resolved version differ.
+    let moved: BTreeSet<RelativePath> = amendment_bases(manifest, &previous_lock, &resolution)
+        .into_iter()
+        .map(|error| {
+            let path = match &error {
+                AmendmentBaseError::ResolutionChanged { path, .. }
+                | AmendmentBaseError::DeclarationChanged { path, .. }
+                | AmendmentBaseError::NotLocked { path, .. } => path.clone(),
+            };
+            problems.push(BuildProblem::AmendmentBase(error));
+            path
+        })
+        .collect();
+    let trees = match dependencies.read_src(&lock, lock.units().keys()) {
         Ok(trees) => trees,
         Err(found) => {
             problems.extend(found);
             return Err(BuildFailure::Rejected(problems));
         }
     };
-    let Some(src) = src else {
+    let (Some(src), Some(amendments)) = (src, amendments) else {
         return Err(BuildFailure::Rejected(problems));
     };
 
+    let no_amendments = FileTree::new();
     let mut units = BTreeMap::new();
     for (identity, locked) in lock.units() {
         let key = (identity.clone(), locked.version().clone());
         if let (Some(manifest), Some(files)) =
             (dependencies.manifests.get(&key), trees.get(identity))
         {
-            units.insert(identity.clone(), UnitContent::new(manifest, files));
+            units.insert(
+                identity.clone(),
+                UnitContent::new(manifest, files, &no_amendments),
+            );
         }
     }
-    let root_content = UnitContent::new(manifest, &src);
+    let root_content = UnitContent::new(manifest, &src, &amendments);
     let composition = compose(
         resolution.graph(),
         Root::Unit(root_content),
@@ -197,10 +225,12 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
             problems.extend(
                 errors
                     .into_iter()
-                    // Already reported, from the manifest alone.
-                    .filter(|error| {
-                        !matches!(error, CompositionError::MissingValue { unit, .. }
-                            if unit == manifest.name())
+                    // Already reported, from the manifest alone, or with
+                    // the cause, from the lock.
+                    .filter(|error| match error {
+                        CompositionError::MissingValue { unit, .. } => unit != manifest.name(),
+                        CompositionError::AmendmentBase { path, .. } => !moved.contains(path),
+                        _ => true,
                     })
                     .map(BuildProblem::Composition),
             );
@@ -218,36 +248,35 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
     };
 
     // Templates are rendered with the parameter values of the unit that
-    // provides each one. Every template's problems are reported, by delivered
-    // path and then position, and nothing is written when there is any.
+    // provides each one, plus the amending unit's values as `own` for an
+    // amended one. Every template's problems are reported, by delivered path
+    // and then position, and nothing is written when there is any.
     let no_values = ParameterValues::new();
-    let mut files: Vec<(&RelativePath, Cow<'_, UnitFile>)> = Vec::new();
+    let mut files: Vec<(&RelativePath, Cow<'_, [u8]>, bool)> = Vec::new();
     for (path, composed) in composition.files() {
+        let executable = composed.is_executable();
         if !composed.is_template() {
-            files.push((path, Cow::Borrowed(composed.file())));
+            files.push((path, Cow::Borrowed(composed.contents()), executable));
             continue;
         }
         let template = |error| BuildProblem::Template {
             unit: composed.unit().clone(),
             path: composed.source().clone(),
+            amended_by: composed.amended_by().cloned(),
             error,
         };
-        let Ok(text) = std::str::from_utf8(composed.file().contents()) else {
+        let Ok(text) = std::str::from_utf8(composed.contents()) else {
             problems.push(template(TemplateError::NotUtf8));
             continue;
         };
-        let values = composition
-            .values()
-            .get(composed.unit())
-            .unwrap_or(&no_values);
-        match render(text, &Context::new(values)) {
-            Ok(rendered) => files.push((
-                path,
-                Cow::Owned(UnitFile::new(
-                    rendered.into_bytes(),
-                    composed.file().is_executable(),
-                )),
-            )),
+        let values_of = |unit| composition.values().get(unit).unwrap_or(&no_values);
+        let values = values_of(composed.unit());
+        let context = match composed.amended_by() {
+            Some(amender) => Context::amended(values, values_of(amender)),
+            None => Context::new(values),
+        };
+        match render(text, &context) {
+            Ok(rendered) => files.push((path, Cow::Owned(rendered.into_bytes()), executable)),
             Err(errors) => {
                 problems.extend(errors.into_iter().map(TemplateError::Render).map(template))
             }
@@ -256,10 +285,14 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
     if !problems.is_empty() {
         return Err(BuildFailure::Rejected(problems));
     }
-    let files: Vec<(&RelativePath, &UnitFile)> = files
-        .iter()
-        .map(|(path, file)| (*path, file.as_ref()))
+    let files: Vec<(&RelativePath, UnitFile)> = files
+        .into_iter()
+        .map(|(path, contents, executable)| {
+            (path, UnitFile::new(contents.into_owned(), executable))
+        })
         .collect();
+    let files: Vec<(&RelativePath, &UnitFile)> =
+        files.iter().map(|(path, file)| (*path, file)).collect();
     let new_lock = (lockfile != LockfileOutcome::Unchanged).then_some(&lock);
     let published =
         output::publish(root, &files, new_lock, &guard).map_err(BuildFailure::Publish)?;
@@ -276,6 +309,15 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
 
 /// Reads the working tree's `manifest.jsonc`.
 fn read_working_manifest(root: &Path) -> Result<Manifest, ManifestFileError> {
+    let text = read_working_manifest_text(root)?;
+    read_manifest(&text).map_err(|error| ManifestFileError::Invalid {
+        path: root.join(MANIFEST),
+        error,
+    })
+}
+
+/// Reads the text of the working tree's `manifest.jsonc`.
+fn read_working_manifest_text(root: &Path) -> Result<String, ManifestFileError> {
     let path = root.join(MANIFEST);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -300,9 +342,7 @@ fn read_working_manifest(root: &Path) -> Result<Manifest, ManifestFileError> {
             limit: MANIFEST_LIMIT,
         });
     }
-    let text =
-        String::from_utf8(bytes).map_err(|_| ManifestFileError::NotUtf8 { path: path.clone() })?;
-    read_manifest(&text).map_err(|error| ManifestFileError::Invalid { path, error })
+    String::from_utf8(bytes).map_err(|_| ManifestFileError::NotUtf8 { path })
 }
 
 /// The published versions a resolution may choose from, read from the
@@ -407,14 +447,18 @@ impl Dependencies {
         }
     }
 
-    /// Reads the `src/` files of each locked version.
-    fn read_src(
+    /// Reads the `src/` files of the locked versions of `identities`.
+    fn read_src<'a>(
         &self,
         lock: &UnitLock,
+        identities: impl IntoIterator<Item = &'a UnitIdentity>,
     ) -> Result<BTreeMap<UnitIdentity, FileTree>, Vec<BuildProblem>> {
         let mut trees = BTreeMap::new();
         let mut problems = Vec::new();
-        for (identity, locked) in lock.units() {
+        for identity in identities {
+            let Some(locked) = lock.units().get(identity) else {
+                continue;
+            };
             let key = (identity.clone(), locked.version().clone());
             let (Some(repository), Some(commit)) =
                 (self.repositories.get(identity), self.commits.get(&key))
@@ -549,9 +593,9 @@ pub enum BuildProblem {
     BuildLock(BuildLockError),
     /// The working tree's `src/` holds something a unit file cannot be.
     Src(ReadSrcError),
-    /// The working tree holds amendments, which a build cannot apply yet.
-    /// Holds their paths, sorted.
-    Amendments(Vec<String>),
+    /// The working tree's `amendments/` holds something a unit file cannot
+    /// be.
+    Amendments(ReadSrcError),
     /// A path the build would replace is not what Assemblr writes there.
     Output(OutputProblem),
     /// The lockfile cannot be read.
@@ -587,6 +631,8 @@ pub enum BuildProblem {
     Resolution(ResolutionError),
     /// The resolution contradicts the lockfile.
     Lock(LockError),
+    /// The resolution would move an amended unit away from its base.
+    AmendmentBase(AmendmentBaseError),
     /// The unit and its dependencies cannot be composed.
     Composition(CompositionError),
     /// A template cannot be rendered.
@@ -595,6 +641,9 @@ pub enum BuildProblem {
         unit: UnitIdentity,
         /// The template's path in that `src/`.
         path: RelativePath,
+        /// The unit whose copy at `amendments/<path>` is rendered instead
+        /// of the provider's file, if the template is amended.
+        amended_by: Option<UnitIdentity>,
         /// What is wrong.
         error: TemplateError,
     },
@@ -607,13 +656,7 @@ impl fmt::Display for BuildProblem {
             Self::Repository(error) => error.fmt(f),
             Self::BuildLock(error) => error.fmt(f),
             Self::Src(error) => error.fmt(f),
-            Self::Amendments(paths) => {
-                write!(
-                    f,
-                    "`{AMENDMENTS}/` has content, and amendments cannot be built yet: {}",
-                    paths.join(", ")
-                )
-            }
+            Self::Amendments(error) => error.fmt(f),
             Self::Output(problem) => problem.fmt(f),
             Self::Lockfile(error) => error.fmt(f),
             Self::DevelopmentValues { unit, parameters } => {
@@ -641,9 +684,21 @@ impl fmt::Display for BuildProblem {
             ),
             Self::Resolution(error) => error.fmt(f),
             Self::Lock(error) => error.fmt(f),
+            Self::AmendmentBase(error) => error.fmt(f),
             Self::Composition(error) => error.fmt(f),
-            Self::Template { unit, path, error } => {
-                write!(f, "template src/{path} of {unit}")?;
+            Self::Template {
+                unit,
+                path,
+                amended_by,
+                error,
+            } => {
+                match amended_by {
+                    Some(amender) => write!(
+                        f,
+                        "amendments/{path} of {amender} (a copy of template src/{path} of {unit})"
+                    )?,
+                    None => write!(f, "template src/{path} of {unit}")?,
+                }
                 match error {
                     TemplateError::NotUtf8 => write!(
                         f,

@@ -34,6 +34,21 @@
 //! compare it (see `collision_key`). Every collision is reported, whether
 //! the units are independent or one depends on the other, and no unit wins.
 //!
+//! # Amendments
+//!
+//! The unit being built may amend files of its direct dependencies: its
+//! manifest declares each amended path with the provider and the exact base
+//! version, and the edited copy lives at `amendments/<path>` (see
+//! `docs/domain/amendments-and-composition.md`). The copy takes the place of
+//! the provider's file, at the provider's delivered path and with the
+//! provider's executable bit, and it is a template exactly when the
+//! provider's file is. The provider must resolve to the declared base: that
+//! is the one case in which the result is simply the copy, and the only one
+//! supported so far. A declaration whose copy is missing, a copy that is not
+//! declared, and a copy of a file the provider does not have are errors. A
+//! dependency whose published version declares amendments is refused
+//! explicitly: composing published amendments is not supported yet.
+//!
 //! Every problem is reported, in the order [`compose`] documents.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,7 +57,7 @@ use std::fmt;
 use unicode_normalization::UnicodeNormalization;
 
 use super::identity::UnitIdentity;
-use super::manifest::{Manifest, OptionValues};
+use super::manifest::{AmendmentDeclaration, Manifest, OptionValues};
 use super::parameter::{ParameterName, ParameterValue, ParameterValueError};
 use super::path::{RelativePath, RelativePathError};
 use super::resolution::{Requirer, ResolvedGraph};
@@ -100,17 +115,25 @@ impl UnitFile {
     }
 }
 
-/// What composition needs from one unit: its manifest and its `src/` files.
+/// What composition needs from one unit: its manifest, its `src/` files,
+/// and its amendment copies.
 #[derive(Debug, Clone, Copy)]
 pub struct UnitContent<'a> {
     manifest: &'a Manifest,
     files: &'a FileTree,
+    amendments: &'a FileTree,
 }
 
 impl<'a> UnitContent<'a> {
-    /// The content of the unit `manifest` describes.
-    pub fn new(manifest: &'a Manifest, files: &'a FileTree) -> Self {
-        Self { manifest, files }
+    /// The content of the unit `manifest` describes: its `src/` files and
+    /// its copies under `amendments/`, each by path relative to that
+    /// directory.
+    pub fn new(manifest: &'a Manifest, files: &'a FileTree, amendments: &'a FileTree) -> Self {
+        Self {
+            manifest,
+            files,
+            amendments,
+        }
     }
 }
 
@@ -141,11 +164,14 @@ pub enum Root<'a> {
 /// 3. requirements naming undeclared parameters or holding invalid values;
 /// 4. options conflicts;
 /// 5. missing required values;
-/// 6. templates whose delivered path is invalid;
-/// 7. path collisions.
+/// 6. dependencies whose published versions declare amendments;
+/// 7. amendments that cannot be applied, and copies that are not declared;
+/// 8. templates whose delivered path is invalid;
+/// 9. path collisions.
 ///
 /// A parameter whose requirements are invalid is not also reported as
-/// missing or conflicting.
+/// missing or conflicting. An amendment that cannot be applied leaves the
+/// provider's file in place, so collisions are still found.
 pub fn compose<'a>(
     graph: &ResolvedGraph,
     root: Root<'a>,
@@ -190,8 +216,10 @@ impl<'a> Composition<'a> {
 pub struct ComposedFile<'a> {
     unit: &'a UnitIdentity,
     source: &'a RelativePath,
-    file: &'a UnitFile,
+    contents: &'a [u8],
+    executable: bool,
     template: bool,
+    amended_by: Option<&'a UnitIdentity>,
 }
 
 impl<'a> ComposedFile<'a> {
@@ -201,20 +229,35 @@ impl<'a> ComposedFile<'a> {
     }
 
     /// The file's path in that unit's `src/`. For a template it ends in
-    /// [`TEMPLATE_SUFFIX`], which the delivered path does not.
+    /// [`TEMPLATE_SUFFIX`], which the delivered path does not. For an
+    /// amended file it is also the copy's path under `amendments/`.
     pub fn source(&self) -> &'a RelativePath {
         self.source
     }
 
-    /// The file as the unit provides it: the bytes to deliver, or, for a
-    /// template, the source to render with the unit's parameter values.
-    pub fn file(&self) -> &'a UnitFile {
-        self.file
+    /// The bytes to deliver, or, for a template, the source to render with
+    /// the providing unit's parameter values. For an amended file these are
+    /// the copy's bytes.
+    pub fn contents(&self) -> &'a [u8] {
+        self.contents
+    }
+
+    /// Whether the file is executable. An amendment never changes it: the
+    /// provider's bit stands.
+    pub fn is_executable(&self) -> bool {
+        self.executable
     }
 
     /// Whether the file is a template, to be rendered before delivery.
     pub fn is_template(&self) -> bool {
         self.template
+    }
+
+    /// The unit whose amendment copy the contents come from, if the file is
+    /// amended. A template amended by a unit is rendered with that unit's
+    /// values as `own`, in addition to the provider's.
+    pub fn amended_by(&self) -> Option<&'a UnitIdentity> {
+        self.amended_by
     }
 }
 
@@ -363,6 +406,59 @@ pub enum CompositionError {
         /// directly, and the root when it may configure this unit.
         responsible: Vec<Requirer>,
     },
+    /// A dependency's published version declares amendments. Composing a
+    /// dependency's amendments is not supported yet.
+    PublishedAmendments {
+        /// The dependency.
+        unit: UnitIdentity,
+        /// Its resolved version.
+        version: Version,
+        /// The paths it amends, sorted.
+        paths: Vec<RelativePath>,
+    },
+    /// An amendment's declared base is not the version its provider
+    /// resolved to, so the copy cannot be applied.
+    AmendmentBase {
+        /// The amended path.
+        path: RelativePath,
+        /// The provider.
+        unit: UnitIdentity,
+        /// The declared base version.
+        base: Version,
+        /// The version the provider resolved to.
+        resolved: Version,
+    },
+    /// The provider's `src/` at the resolved version has no file at the
+    /// amended path.
+    AmendmentNotProvided {
+        /// The amended path.
+        path: RelativePath,
+        /// The provider.
+        unit: UnitIdentity,
+        /// Its resolved version.
+        version: Version,
+        /// A file the provider does have at that delivered path: the
+        /// template the path names without its suffix, or the plain file
+        /// the path names with a suffix it does not have.
+        similar: Option<RelativePath>,
+    },
+    /// A declared amendment has no copy under `amendments/`.
+    AmendmentMissingCopy {
+        /// The amended path.
+        path: RelativePath,
+        /// The amending unit.
+        unit: UnitIdentity,
+        /// The provider the declaration names.
+        provider: UnitIdentity,
+    },
+    /// A copy under `amendments/` is not declared in the manifest, so its
+    /// base is unknown.
+    AmendmentUndeclared {
+        /// The copy's path under `amendments/`.
+        path: RelativePath,
+        /// The unit holding the copy.
+        unit: UnitIdentity,
+    },
     /// A template whose path without [`TEMPLATE_SUFFIX`] is not a valid
     /// path, so it cannot be delivered.
     InvalidDeliveredPath {
@@ -471,6 +567,66 @@ impl fmt::Display for CompositionError {
                 )?;
                 write_list(f, responsible)
             }
+            Self::PublishedAmendments {
+                unit,
+                version,
+                paths,
+            } => {
+                write!(f, "{unit} {version} declares amendments of ")?;
+                write_list(f, paths)?;
+                f.write_str("; composing a dependency's amendments is not supported yet")
+            }
+            Self::AmendmentBase {
+                path,
+                unit,
+                base,
+                resolved,
+            } => write!(
+                f,
+                "amendments/{path} is based on {unit} {base}, but {unit} resolved to {resolved}; \
+                 an amendment is applied only to its base version"
+            ),
+            Self::AmendmentNotProvided {
+                path,
+                unit,
+                version,
+                similar,
+            } => {
+                write!(
+                    f,
+                    "amendments/{path} amends a file that {unit} {version} does not provide: it \
+                     has no src/{path}"
+                )?;
+                match similar {
+                    Some(similar) if similar.as_str().ends_with(TEMPLATE_SUFFIX) => write!(
+                        f,
+                        "; its file is the template src/{similar}, and a copy keeps the \
+                         provider's path, suffix included"
+                    ),
+                    Some(similar) => write!(
+                        f,
+                        "; its file is src/{similar}, which is not a template, and a copy keeps \
+                         the provider's path"
+                    ),
+                    None => Ok(()),
+                }
+            }
+            Self::AmendmentMissingCopy {
+                path,
+                unit,
+                provider,
+            } => write!(
+                f,
+                "the manifest of {unit} declares an amendment of {path} from {provider}, but \
+                 amendments/{path} does not exist; restore the copy, or remove the declaration \
+                 and run `assemblr unit amend` again"
+            ),
+            Self::AmendmentUndeclared { path, unit } => write!(
+                f,
+                "amendments/{path} of {unit} is not declared in the manifest, so its base is \
+                 unknown; if an `assemblr unit amend` was interrupted, run it again, and \
+                 otherwise declare the copy in `amendments` or delete it"
+            ),
             Self::InvalidDeliveredPath { path, unit, error } => write!(
                 f,
                 "{path} from {unit} is a template, but without `{TEMPLATE_SUFFIX}` its path is \
@@ -526,6 +682,8 @@ struct Member<'a> {
     identity: &'a UnitIdentity,
     manifest: &'a Manifest,
     files: &'a FileTree,
+    /// The unit's copies under `amendments/`.
+    amendments: &'a FileTree,
     /// How the unit appears as the requirer of its `options`.
     requirer: Requirer,
 }
@@ -548,6 +706,7 @@ fn members<'a>(
                     identity: manifest.name(),
                     manifest,
                     files: content.files,
+                    amendments: content.amendments,
                     requirer: Requirer::Root,
                 },
             );
@@ -574,6 +733,7 @@ fn members<'a>(
                         identity: manifest.name(),
                         manifest,
                         files: content.files,
+                        amendments: content.amendments,
                         requirer: Requirer::Unit(identity.clone(), resolved.version().clone()),
                     },
                 );
@@ -788,13 +948,102 @@ fn responsible(
     responsible.into_iter().collect()
 }
 
-/// The composed file tree, or every collision that prevents it.
+/// The amendments that apply: for each provider's file, the amending unit
+/// and the copy that takes the file's place.
+type Applied<'a> = BTreeMap<(&'a UnitIdentity, &'a RelativePath), (&'a UnitIdentity, &'a UnitFile)>;
+
+/// The amendments the members declare that can be applied, and every
+/// problem with the others, in the documented order.
+fn amendments<'a>(
+    members: &BTreeMap<&'a UnitIdentity, Member<'a>>,
+) -> (Applied<'a>, Vec<CompositionError>) {
+    let mut applied = Applied::new();
+    let mut published = Vec::new();
+    let mut problems = Vec::new();
+    for member in members.values() {
+        let declared = member.manifest.amendments();
+        if member.requirer != Requirer::Root && !declared.is_empty() {
+            published.push(CompositionError::PublishedAmendments {
+                unit: member.identity.clone(),
+                version: member.manifest.version().clone(),
+                paths: declared.keys().cloned().collect(),
+            });
+            continue;
+        }
+        for (path, declaration) in declared {
+            if let Some(problem) = amendment(members, member, path, declaration, &mut applied) {
+                problems.push(problem);
+            }
+        }
+        problems.extend(
+            member
+                .amendments
+                .keys()
+                .filter(|path| !declared.contains_key(*path))
+                .map(|path| CompositionError::AmendmentUndeclared {
+                    path: path.clone(),
+                    unit: member.identity.clone(),
+                }),
+        );
+    }
+    published.extend(problems);
+    (applied, published)
+}
+
+/// Records the amendment of `path` that `member` declares, or why it cannot
+/// be applied.
+fn amendment<'a>(
+    members: &BTreeMap<&'a UnitIdentity, Member<'a>>,
+    member: &Member<'a>,
+    path: &'a RelativePath,
+    declaration: &'a AmendmentDeclaration,
+    applied: &mut Applied<'a>,
+) -> Option<CompositionError> {
+    // Every target is a member: amendments target declared dependencies,
+    // which the graph resolved.
+    let provider = members.get(declaration.unit())?;
+    let resolved = provider.manifest.version();
+    if resolved != declaration.base() {
+        return Some(CompositionError::AmendmentBase {
+            path: path.clone(),
+            unit: provider.identity.clone(),
+            base: declaration.base().clone(),
+            resolved: resolved.clone(),
+        });
+    }
+    if !provider.files.contains_key(path) {
+        let with_suffix = RelativePath::parse(&format!("{path}{TEMPLATE_SUFFIX}")).ok();
+        let without_suffix = delivered_path(path).ok().flatten();
+        let similar = [with_suffix, without_suffix]
+            .into_iter()
+            .flatten()
+            .find(|candidate| provider.files.contains_key(candidate));
+        return Some(CompositionError::AmendmentNotProvided {
+            path: path.clone(),
+            unit: provider.identity.clone(),
+            version: resolved.clone(),
+            similar,
+        });
+    }
+    let Some(copy) = member.amendments.get(path) else {
+        return Some(CompositionError::AmendmentMissingCopy {
+            path: path.clone(),
+            unit: member.identity.clone(),
+            provider: provider.identity.clone(),
+        });
+    };
+    applied.insert((provider.identity, path), (member.identity, copy));
+    None
+}
+
+/// The composed file tree, or every problem that prevents it.
 fn compose_files<'a>(
     members: &BTreeMap<&'a UnitIdentity, Member<'a>>,
 ) -> (
     BTreeMap<RelativePath, ComposedFile<'a>>,
     Vec<CompositionError>,
 ) {
+    let (applied, mut errors) = amendments(members);
     // Files by the collision key of their delivered path.
     let mut folded: BTreeMap<String, Vec<ContributedPath>> = BTreeMap::new();
     let mut files = BTreeMap::new();
@@ -817,13 +1066,19 @@ fn compose_files<'a>(
                     unit: member.identity.clone(),
                     delivered: delivered.clone(),
                 });
+            let (contents, amended_by) = match applied.get(&(member.identity, path)) {
+                Some((amender, copy)) => (copy.contents(), Some(*amender)),
+                None => (file.contents(), None),
+            };
             files.insert(
                 delivered,
                 ComposedFile {
                     unit: member.identity,
                     source: path,
-                    file,
+                    contents,
+                    executable: file.is_executable(),
                     template,
+                    amended_by,
                 },
             );
         }
@@ -865,7 +1120,8 @@ fn compose_files<'a>(
         }
     }));
 
-    (files, collisions)
+    errors.extend(collisions);
+    (files, errors)
 }
 
 /// The key under which paths collide: `NFD(case(NFD(path)))`, where `case`
@@ -910,9 +1166,9 @@ mod tests {
         TEMPLATE_SUFFIX, UnitContent, UnitFile, compose, delivered_path,
     };
     use crate::domain::{
-        AllowedValues, AvailableVersions, Dependencies, Description, Lock, Manifest, OptionValues,
-        ParameterDefinition, ParameterName, ParameterType, ParameterValue, ParameterValueError,
-        RelativePath, Requirer, UnitIdentity, ValueKind, Version, resolve,
+        AllowedValues, AmendmentDeclaration, AvailableVersions, Dependencies, Description, Lock,
+        Manifest, OptionValues, ParameterDefinition, ParameterName, ParameterType, ParameterValue,
+        ParameterValueError, RelativePath, Requirer, UnitIdentity, ValueKind, Version, resolve,
     };
 
     fn identity(input: &str) -> UnitIdentity {
@@ -972,6 +1228,10 @@ mod tests {
         options: Vec<(&'static str, &'static str, ParameterValue)>,
         params: Vec<(&'static str, ParameterDefinition)>,
         files: Vec<(&'static str, Vec<u8>, bool)>,
+        /// Declared amendments: path, provider, and base version.
+        amendments: Vec<(&'static str, &'static str, &'static str)>,
+        /// Copies under `amendments/`: path and contents.
+        copies: Vec<(&'static str, Vec<u8>)>,
     }
 
     impl Spec {
@@ -983,7 +1243,26 @@ mod tests {
                 options: Vec::new(),
                 params: Vec::new(),
                 files: Vec::new(),
+                amendments: Vec::new(),
+                copies: Vec::new(),
             }
+        }
+
+        /// Declares an amendment of `file` from `provider` at `base`.
+        fn amends(
+            mut self,
+            file: &'static str,
+            provider: &'static str,
+            base: &'static str,
+        ) -> Self {
+            self.amendments.push((file, provider, base));
+            self
+        }
+
+        /// Adds a copy under `amendments/`.
+        fn copy(mut self, file: &'static str, contents: &str) -> Self {
+            self.copies.push((file, contents.as_bytes().to_vec()));
+            self
         }
 
         fn depends(mut self, target: &'static str, range: &'static str) -> Self {
@@ -1035,6 +1314,15 @@ mod tests {
                     .iter()
                     .map(|(parameter, definition)| (name(parameter), definition.clone()))
                     .collect(),
+                self.amendments
+                    .iter()
+                    .map(|(file, provider, base)| {
+                        (
+                            path(file),
+                            AmendmentDeclaration::new(identity(provider), version(base)),
+                        )
+                    })
+                    .collect(),
             )
             .unwrap()
         }
@@ -1045,6 +1333,13 @@ mod tests {
                 .map(|(file, contents, executable)| {
                     (path(file), UnitFile::new(contents.clone(), *executable))
                 })
+                .collect()
+        }
+
+        fn copies(&self) -> FileTree {
+            self.copies
+                .iter()
+                .map(|(file, contents)| (path(file), UnitFile::new(contents.clone(), false)))
                 .collect()
         }
     }
@@ -1071,6 +1366,8 @@ mod tests {
         files: Vec<(String, String, Vec<u8>, bool)>,
         /// The templates: delivered path and source path.
         templates: Vec<(String, String)>,
+        /// The amended files: delivered path and amending unit.
+        amended: Vec<(String, String)>,
     }
 
     type RootValue = (&'static str, &'static str, ParameterValue);
@@ -1081,28 +1378,28 @@ mod tests {
         published: &[Spec],
         root_values: &[RootValue],
     ) -> Result<Composed, Vec<CompositionError>> {
-        let contents: Vec<(Manifest, FileTree)> = published
+        let contents: Vec<(Manifest, FileTree, FileTree)> = published
             .iter()
-            .map(|spec| (spec.manifest(), spec.tree()))
+            .map(|spec| (spec.manifest(), spec.tree(), spec.copies()))
             .collect();
         let mut available = AvailableVersions::new();
-        for (manifest, _) in &contents {
+        for (manifest, _, _) in &contents {
             available
                 .entry(manifest.name().clone())
                 .or_default()
                 .insert(manifest.version().clone(), manifest.dependencies().clone());
         }
         let built = match root {
-            For::Build(spec) => Some((spec.manifest(), spec.tree())),
+            For::Build(spec) => Some((spec.manifest(), spec.tree(), spec.copies())),
             For::Project(_) => None,
         };
         let requirements = match (root, &built) {
-            (_, Some((manifest, _))) => manifest.dependencies().clone(),
+            (_, Some((manifest, _, _))) => manifest.dependencies().clone(),
             (For::Project(selections), None) => dependencies(selections),
             (For::Build(_), None) => unreachable!(),
         };
         let resolution = resolve(
-            built.as_ref().map(|(manifest, _)| manifest.name()),
+            built.as_ref().map(|(manifest, _, _)| manifest.name()),
             &requirements,
             &available,
             &Lock::new(),
@@ -1110,17 +1407,24 @@ mod tests {
         .unwrap();
         let units: BTreeMap<UnitIdentity, UnitContent<'_>> = contents
             .iter()
-            .filter(|(manifest, _)| {
+            .filter(|(manifest, _, _)| {
                 resolution
                     .graph()
                     .units()
                     .get(manifest.name())
                     .is_some_and(|resolved| resolved.version() == manifest.version())
             })
-            .map(|(manifest, files)| (manifest.name().clone(), UnitContent::new(manifest, files)))
+            .map(|(manifest, files, copies)| {
+                (
+                    manifest.name().clone(),
+                    UnitContent::new(manifest, files, copies),
+                )
+            })
             .collect();
         let root = match &built {
-            Some((manifest, files)) => Root::Unit(UnitContent::new(manifest, files)),
+            Some((manifest, files, copies)) => {
+                Root::Unit(UnitContent::new(manifest, files, copies))
+            }
             None => Root::Project,
         };
         let mut values: BTreeMap<UnitIdentity, OptionValues> = BTreeMap::new();
@@ -1151,8 +1455,8 @@ mod tests {
                     (
                         file.to_string(),
                         composed.unit().to_string(),
-                        composed.file().contents().to_vec(),
-                        composed.file().is_executable(),
+                        composed.contents().to_vec(),
+                        composed.is_executable(),
                     )
                 })
                 .collect(),
@@ -1161,6 +1465,15 @@ mod tests {
                 .iter()
                 .filter(|(_, composed)| composed.is_template())
                 .map(|(file, composed)| (file.to_string(), composed.source().to_string()))
+                .collect(),
+            amended: composition
+                .files()
+                .iter()
+                .filter_map(|(file, composed)| {
+                    composed
+                        .amended_by()
+                        .map(|amender| (file.to_string(), amender.to_string()))
+                })
                 .collect(),
         })
     }
@@ -1908,6 +2221,211 @@ mod tests {
         assert_eq!(contents, b"@metamao/app package.json.assemblr.tmpl");
     }
 
+    /// `@metamao/node` 1.0.0 providing a template and a script, published
+    /// alone and with 1.1.0.
+    fn provider() -> Vec<Spec> {
+        vec![
+            node().file("package.json.assemblr.tmpl").file_with(
+                "bin/run",
+                b"#!/bin/sh".to_vec(),
+                true,
+            ),
+            node()
+                .clone_as("1.1.0")
+                .file("package.json.assemblr.tmpl")
+                .file_with("bin/run", b"#!/bin/sh".to_vec(), true),
+        ]
+    }
+
+    impl Spec {
+        fn clone_as(mut self, version: &'static str) -> Self {
+            self.version = version;
+            self
+        }
+    }
+
+    #[test]
+    fn an_amendment_copy_takes_the_provider_s_file_s_place() {
+        let built = Spec::new("@metamao/app", "0.1.0")
+            .depends("@metamao/node", "=1.0.0")
+            .amends("package.json.assemblr.tmpl", "@metamao/node", "1.0.0")
+            .amends("bin/run", "@metamao/node", "1.0.0")
+            .copy(
+                "package.json.assemblr.tmpl",
+                "{ \"name\": \"{{ own.name }}\" }",
+            )
+            .copy("bin/run", "#!/bin/sh\necho amended")
+            .file("index.ts");
+        let composed = run(&For::Build(built), &provider(), &[]).unwrap();
+        let files: Vec<(&str, &str, &[u8], bool)> = composed
+            .files
+            .iter()
+            .map(|(file, unit, contents, executable)| {
+                (
+                    file.as_str(),
+                    unit.as_str(),
+                    contents.as_slice(),
+                    *executable,
+                )
+            })
+            .collect();
+        assert_eq!(
+            files,
+            [
+                // The copy's bytes, the provider's bit.
+                (
+                    "bin/run",
+                    "@metamao/node",
+                    b"#!/bin/sh\necho amended".as_slice(),
+                    true
+                ),
+                (
+                    "index.ts",
+                    "@metamao/app",
+                    b"@metamao/app index.ts".as_slice(),
+                    false
+                ),
+                (
+                    "package.json",
+                    "@metamao/node",
+                    b"{ \"name\": \"{{ own.name }}\" }".as_slice(),
+                    false
+                ),
+            ]
+        );
+        assert_eq!(
+            composed.templates,
+            [(
+                "package.json".to_owned(),
+                "package.json.assemblr.tmpl".to_owned()
+            )]
+        );
+        assert_eq!(
+            composed.amended,
+            [
+                ("bin/run".to_owned(), "@metamao/app".to_owned()),
+                ("package.json".to_owned(), "@metamao/app".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_amendment_problem_is_reported_and_the_provider_s_file_stands() {
+        let built = Spec::new("@metamao/app", "0.1.0")
+            .depends("@metamao/node", "^1")
+            // Resolved to 1.1.0, not the base.
+            .amends("bin/run", "@metamao/node", "1.0.0")
+            .copy("bin/run", "#!/bin/sh\necho amended")
+            // The provider's file is the template; the copy lacks the suffix.
+            .amends("package.json", "@metamao/node", "1.1.0")
+            .copy("package.json", "{}")
+            // The provider's file is not a template; the copy has the suffix.
+            .amends("bin/run.assemblr.tmpl", "@metamao/node", "1.1.0")
+            .copy("bin/run.assemblr.tmpl", "")
+            // Not provided at all.
+            .amends("missing.txt", "@metamao/node", "1.1.0")
+            .copy("missing.txt", "")
+            // Declared without a copy.
+            .amends("package.json.assemblr.tmpl", "@metamao/node", "1.1.0")
+            // A copy without a declaration.
+            .copy("stray.txt", "")
+            // The unit's own file at an amended path collides.
+            .file("package.json.assemblr.tmpl");
+        let errors = run(&For::Build(built), &provider(), &[]).unwrap_err();
+        let path = |input: &str| path(input);
+        assert_eq!(
+            errors,
+            [
+                CompositionError::AmendmentBase {
+                    path: path("bin/run"),
+                    unit: identity("@metamao/node"),
+                    base: version("1.0.0"),
+                    resolved: version("1.1.0"),
+                },
+                CompositionError::AmendmentNotProvided {
+                    path: path("bin/run.assemblr.tmpl"),
+                    unit: identity("@metamao/node"),
+                    version: version("1.1.0"),
+                    similar: Some(path("bin/run")),
+                },
+                CompositionError::AmendmentNotProvided {
+                    path: path("missing.txt"),
+                    unit: identity("@metamao/node"),
+                    version: version("1.1.0"),
+                    similar: None,
+                },
+                CompositionError::AmendmentNotProvided {
+                    path: path("package.json"),
+                    unit: identity("@metamao/node"),
+                    version: version("1.1.0"),
+                    similar: Some(path("package.json.assemblr.tmpl")),
+                },
+                CompositionError::AmendmentMissingCopy {
+                    path: path("package.json.assemblr.tmpl"),
+                    unit: identity("@metamao/app"),
+                    provider: identity("@metamao/node"),
+                },
+                CompositionError::AmendmentUndeclared {
+                    path: path("stray.txt"),
+                    unit: identity("@metamao/app"),
+                },
+                CompositionError::PathCollision {
+                    files: vec![
+                        templated("package.json.assemblr.tmpl", "@metamao/app"),
+                        templated("package.json.assemblr.tmpl", "@metamao/node"),
+                    ],
+                },
+            ]
+        );
+        let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert!(
+            messages[0].contains("applied only to its base version"),
+            "{}",
+            messages[0]
+        );
+        assert!(
+            messages[1].contains("src/bin/run, which is not a template"),
+            "{}",
+            messages[1]
+        );
+        assert!(
+            messages[2].ends_with("has no src/missing.txt"),
+            "{}",
+            messages[2]
+        );
+        assert!(
+            messages[3].contains("template src/package.json.assemblr.tmpl"),
+            "{}",
+            messages[3]
+        );
+        assert!(messages[4].contains("does not exist"), "{}", messages[4]);
+        assert!(messages[5].contains("not declared"), "{}", messages[5]);
+    }
+
+    #[test]
+    fn a_dependency_s_published_amendments_are_refused() {
+        let amender = Spec::new("@metamao/amender", "1.0.0")
+            .depends("@metamao/node", "^1")
+            .amends("bin/run", "@metamao/node", "1.1.0")
+            .amends("package.json.assemblr.tmpl", "@metamao/node", "1.1.0")
+            .file("amender.txt");
+        let built = Spec::new("@metamao/app", "0.1.0")
+            .depends("@metamao/amender", "^1")
+            .depends("@metamao/node", "^1");
+        let mut published = provider();
+        published.push(amender);
+        let errors = run(&For::Build(built), &published, &[]).unwrap_err();
+        assert_eq!(
+            errors,
+            [CompositionError::PublishedAmendments {
+                unit: identity("@metamao/amender"),
+                version: version("1.0.0"),
+                paths: vec![path("bin/run"), path("package.json.assemblr.tmpl")],
+            }]
+        );
+        assert!(errors[0].to_string().contains("not supported yet"));
+    }
+
     #[test]
     fn a_template_and_an_ordinary_file_delivered_at_the_same_path_collide() {
         let units = [
@@ -2307,6 +2825,7 @@ mod tests {
             version: version(resolved),
         };
 
+        let none = FileTree::new();
         let missing = BTreeMap::new();
         assert_eq!(
             compose(
@@ -2325,11 +2844,11 @@ mod tests {
         let wrong_version: BTreeMap<_, _> = [
             (
                 identity("@metamao/app"),
-                UnitContent::new(&app_manifest, &app_files),
+                UnitContent::new(&app_manifest, &app_files, &none),
             ),
             (
                 identity("@metamao/node"),
-                UnitContent::new(&stale_manifest, &stale_files),
+                UnitContent::new(&stale_manifest, &stale_files, &none),
             ),
         ]
         .into();
@@ -2344,15 +2863,15 @@ mod tests {
         assert!(errors[0].to_string().contains("does not match"));
 
         // A built unit whose dependencies differ from the graph's root.
-        let built = Root::Unit(UnitContent::new(&node_manifest, &node_files));
+        let built = Root::Unit(UnitContent::new(&node_manifest, &node_files, &none));
         let complete: BTreeMap<_, _> = [
             (
                 identity("@metamao/app"),
-                UnitContent::new(&app_manifest, &app_files),
+                UnitContent::new(&app_manifest, &app_files, &none),
             ),
             (
                 identity("@metamao/node"),
-                UnitContent::new(&node_manifest, &node_files),
+                UnitContent::new(&node_manifest, &node_files, &none),
             ),
         ]
         .into();
@@ -2377,6 +2896,7 @@ mod tests {
                 .depends("@metamao/node", "^1")
                 .depends("@metamao/db", "^1")
                 .option("@metamao/node", "packageManager", text("bun"))
+                .amends("README.md", "@metamao/node", "1.0.0")
                 .file("readme.md")
                 .file("docs/index.md")
                 .file("notes..assemblr.tmpl"),
@@ -2417,6 +2937,13 @@ mod tests {
                 CompositionError::MissingValue {
                     unit, parameter, ..
                 } => format!("missing {unit} {parameter}"),
+                CompositionError::PublishedAmendments { unit, .. } => format!("published {unit}"),
+                CompositionError::AmendmentBase { path, .. }
+                | CompositionError::AmendmentNotProvided { path, .. }
+                | CompositionError::AmendmentMissingCopy { path, .. }
+                | CompositionError::AmendmentUndeclared { path, .. } => {
+                    format!("amendment {path}")
+                }
                 CompositionError::InvalidDeliveredPath { path, unit, .. } => {
                     format!("undeliverable {path} {unit}")
                 }
@@ -2433,6 +2960,7 @@ mod tests {
                 "undeclared @metamao/web theme the root",
                 "conflict @metamao/node packageManager",
                 "missing @metamao/db url",
+                "published @metamao/web",
                 "undeliverable notes..assemblr.tmpl @metamao/web",
                 "collision README.md from @metamao/api",
                 "nested docs from @metamao/api",

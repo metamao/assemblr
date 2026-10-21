@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use super::identity::UnitIdentity;
+use super::manifest::Manifest;
+use super::path::RelativePath;
 use super::provenance::Provenance;
 use super::registry::RegistryIndex;
 use super::resolution::{Lock, Resolution};
@@ -122,6 +124,147 @@ pub fn relock(
     }
 }
 
+/// Checks that `resolution` keeps every amended unit of `manifest` at its
+/// declared base, which the lock state `previous` records.
+///
+/// The lockfile entry for an amended unit is the base's identity, and a
+/// build never changes it: changing the base is an explicit `unit update`
+/// (see `docs/domain/authoring-workflow.md`). Every amendment whose provider
+/// resolves to another version is reported, sorted by path, and the error
+/// tells apart the causes: the resolution moved away from the locked base,
+/// the declaration no longer names the locked version, or the unit is not
+/// locked at all.
+pub fn amendment_bases(
+    manifest: &Manifest,
+    previous: &UnitLock,
+    resolution: &Resolution,
+) -> Vec<AmendmentBaseError> {
+    let mut errors = Vec::new();
+    for (path, declaration) in manifest.amendments() {
+        let unit = declaration.unit();
+        let base = declaration.base();
+        let Some(resolved) = resolution.graph().units().get(unit) else {
+            continue;
+        };
+        let resolved = resolved.version();
+        if resolved == base {
+            continue;
+        }
+        let error = match previous.units.get(unit) {
+            Some(locked) if locked.version == *base => AmendmentBaseError::ResolutionChanged {
+                path: path.clone(),
+                unit: unit.clone(),
+                base: base.clone(),
+                resolved: resolved.clone(),
+            },
+            Some(locked) => AmendmentBaseError::DeclarationChanged {
+                path: path.clone(),
+                unit: unit.clone(),
+                base: base.clone(),
+                locked: locked.version.clone(),
+                resolved: resolved.clone(),
+            },
+            None => AmendmentBaseError::NotLocked {
+                path: path.clone(),
+                unit: unit.clone(),
+                base: base.clone(),
+                resolved: resolved.clone(),
+            },
+        };
+        errors.push(error);
+    }
+    errors
+}
+
+/// Why a build cannot keep an amendment's provider at the declared base.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AmendmentBaseError {
+    /// The lock agrees with the declaration, but the resolution would move
+    /// the provider to another version, for example after a range was
+    /// edited. Reconciling the amendment is `unit update`'s work.
+    ResolutionChanged {
+        /// The amended path.
+        path: RelativePath,
+        /// The provider.
+        unit: UnitIdentity,
+        /// The declared and locked base.
+        base: Version,
+        /// The version the resolution would lock instead.
+        resolved: Version,
+    },
+    /// The declaration names a version other than the locked one, which the
+    /// resolution keeps: the declaration was edited by hand.
+    DeclarationChanged {
+        /// The amended path.
+        path: RelativePath,
+        /// The provider.
+        unit: UnitIdentity,
+        /// The declared base.
+        base: Version,
+        /// The locked version.
+        locked: Version,
+        /// The resolved version.
+        resolved: Version,
+    },
+    /// The provider is not locked, and the resolution picks a version other
+    /// than the declared base.
+    NotLocked {
+        /// The amended path.
+        path: RelativePath,
+        /// The provider.
+        unit: UnitIdentity,
+        /// The declared base.
+        base: Version,
+        /// The resolved version.
+        resolved: Version,
+    },
+}
+
+impl fmt::Display for AmendmentBaseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ResolutionChanged {
+                path,
+                unit,
+                base,
+                resolved,
+            } => write!(
+                f,
+                "amendments/{path} is based on {unit} {base}, the locked version, but the \
+                 dependencies now resolve {unit} to {resolved}; a build never changes the locked \
+                 version of an amended unit, and reconciling the amendment to another version \
+                 (`unit update`) is not supported yet, so restore a requirement that {base} \
+                 satisfies"
+            ),
+            Self::DeclarationChanged {
+                path,
+                unit,
+                base,
+                locked,
+                resolved,
+            } => write!(
+                f,
+                "amendments/{path} declares {unit} {base} as its base, but the lockfile locks \
+                 {unit} {locked} and the dependencies resolve it to {resolved}; the declared base \
+                 was edited by hand, so revert it to {locked}"
+            ),
+            Self::NotLocked {
+                path,
+                unit,
+                base,
+                resolved,
+            } => write!(
+                f,
+                "amendments/{path} is based on {unit} {base}, but {unit} is not locked and the \
+                 dependencies resolve it to {resolved}; restore the lockfile that locks {unit} \
+                 to {base}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AmendmentBaseError {}
+
 /// A problem with the lock that a resolution produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LockError {
@@ -180,10 +323,10 @@ impl std::error::Error for LockError {}
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{LockError, LockedUnit, UnitLock, relock};
+    use super::{AmendmentBaseError, LockError, LockedUnit, UnitLock, amendment_bases, relock};
     use crate::domain::{
-        AvailableVersions, Dependencies, ObjectId, Provenance, RegisteredUnit, RegistryIndex,
-        SourceReference, UnitIdentity, Version, resolve,
+        AmendmentDeclaration, AvailableVersions, Dependencies, Description, Manifest, ObjectId,
+        Provenance, RegisteredUnit, RegistryIndex, SourceReference, UnitIdentity, Version, resolve,
     };
 
     fn identity(input: &str) -> UnitIdentity {
@@ -310,6 +453,92 @@ mod tests {
             relocked(&previous, "^1.1", &index).unwrap(),
             lock(&[("@acme/node", "1.1.0", provenance('3', '4'))])
         );
+    }
+
+    /// `@acme/app`, depending on `@acme/node` with `range` and amending its
+    /// `node.txt` at `base`.
+    fn amending(range: &str, base: &str) -> Manifest {
+        Manifest::new(
+            identity("@acme/app"),
+            version("0.1.0"),
+            Description::new("An app.").unwrap(),
+            requirements(range),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::from([(
+                "node.txt".parse().unwrap(),
+                AmendmentDeclaration::new(identity("@acme/node"), version(base)),
+            )]),
+        )
+        .unwrap()
+    }
+
+    fn bases(manifest: &Manifest, previous: &UnitLock) -> Vec<AmendmentBaseError> {
+        let index = index(&provenance('1', '2'));
+        let resolution = resolve(
+            Some(manifest.name()),
+            manifest.dependencies(),
+            &available(&index),
+            &previous.versions(),
+        )
+        .unwrap();
+        amendment_bases(manifest, previous, &resolution)
+    }
+
+    #[test]
+    fn an_amendment_at_the_locked_version_passes() {
+        let previous = lock(&[("@acme/node", "1.0.0", provenance('1', '2'))]);
+        assert_eq!(bases(&amending("^1", "1.0.0"), &previous), []);
+        // Without a lock, a resolution that picks the base is fine too.
+        assert_eq!(
+            bases(&amending("=1.0.0", "1.0.0"), &UnitLock::default()),
+            []
+        );
+    }
+
+    #[test]
+    fn each_cause_of_a_moved_base_is_told_apart() {
+        let path = || "node.txt".parse().unwrap();
+        // The range no longer allows the locked base.
+        let previous = lock(&[("@acme/node", "1.0.0", provenance('1', '2'))]);
+        let errors = bases(&amending("^1.1", "1.0.0"), &previous);
+        assert_eq!(
+            errors,
+            [AmendmentBaseError::ResolutionChanged {
+                path: path(),
+                unit: identity("@acme/node"),
+                base: version("1.0.0"),
+                resolved: version("1.1.0"),
+            }]
+        );
+        assert!(errors[0].to_string().contains("not supported yet"));
+
+        // The declaration was edited; the lock still holds.
+        let errors = bases(&amending("^1", "1.1.0"), &previous);
+        assert_eq!(
+            errors,
+            [AmendmentBaseError::DeclarationChanged {
+                path: path(),
+                unit: identity("@acme/node"),
+                base: version("1.1.0"),
+                locked: version("1.0.0"),
+                resolved: version("1.0.0"),
+            }]
+        );
+        assert!(errors[0].to_string().contains("revert it to 1.0.0"));
+
+        // No lock at all, and the resolution prefers the newest version.
+        let errors = bases(&amending("^1", "1.0.0"), &UnitLock::default());
+        assert_eq!(
+            errors,
+            [AmendmentBaseError::NotLocked {
+                path: path(),
+                unit: identity("@acme/node"),
+                base: version("1.0.0"),
+                resolved: version("1.1.0"),
+            }]
+        );
+        assert!(errors[0].to_string().contains("restore the lockfile"));
     }
 
     #[test]
