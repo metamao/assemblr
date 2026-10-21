@@ -8,20 +8,23 @@
 mod build;
 mod git;
 mod jsonc;
+mod lockfile;
 mod manifest;
 mod registry;
 mod render;
 
 pub use build::{
     AmendFailure, AmendProblem, AmendState, Amended, BuildFailure, BuildLockError, BuildProblem,
-    Built, LockfileError, LockfileOutcome, ManifestFileError, Match, OutputProblem, PublishError,
-    PublishState, PublishedProblem, TemplateError, WriteError, amend_unit, build_unit,
+    Built, LockfileOutcome, ManifestFileError, Match, OutputProblem, PublishError, PublishState,
+    PublishedProblem, TemplateError, WriteError, amend_unit, build_unit,
 };
 pub use git::{
     GitError, GitErrorKind, GitRepository, HeadManifestError, InvalidVersion, ObjectTooLarge,
-    PublishedVersion, ReadSrcError, SrcEntryError, SrcEntryErrorReason, UnitDirectory, VersionTag,
+    PublishedVersion, ReadFileError, ReadSrcError, SrcEntryError, SrcEntryErrorReason,
+    UnitDirectory, VersionTag,
 };
 pub use jsonc::SyntaxError;
+pub use lockfile::{LockfileError, PublishedLockfileError};
 pub use manifest::{
     EditError, FieldPath, IssueKind, JsonKind, ManifestIssue, PathSegment, ReadManifestError,
     declare_amendment, read_manifest,

@@ -22,11 +22,13 @@ pub use store::StorageError;
 use store::Store;
 
 use super::git::{
-    GitError, GitRepository, HeadManifestError, InvalidVersion, ReadSrcError, VersionTag,
+    GitError, GitRepository, HeadManifestError, InvalidVersion, ReadFileError, ReadSrcError,
+    VersionTag,
 };
+use super::lockfile::{PublishedLockfileError, read_published};
 use crate::domain::{
-    Excluded, ObservedTag, ObservedVersion, RegisteredUnit, RegistryError, RegistryIndex,
-    RelativePath, SourceReference, UnitIdentity, Version, declared_identity,
+    Excluded, ObservedTag, ObservedVersion, PublishedAmendmentError, RegisteredUnit, RegistryError,
+    RegistryIndex, SourceReference, UnitIdentity, Version, declared_identity, published_amendments,
 };
 
 /// The environment variable that places the registry under another
@@ -189,12 +191,12 @@ impl Registry {
     }
 }
 
-/// Reads the version tags of `repository`. The `src/` of every valid
-/// version not indexed yet for `unit` is read too, so that a version is
-/// indexed only when its content is a valid published unit. A version that
-/// declares amendments, or holds `amendments/`, is excluded: composing a
-/// published version's amendments is not supported yet, and its amendment
-/// content is not validated, so it is never indexed as if it were.
+/// Reads the version tags of `repository`. The `src/` and `amendments/` of
+/// every valid version not indexed yet for `unit` are read too, so that a
+/// version is indexed only when its content is a valid published unit. A
+/// version with amendments must also carry a lockfile that identifies each
+/// base (see [`published_amendments`]); whether a base's content is the one
+/// this registry records is checked by the build that composes it.
 fn observe(
     repository: &GitRepository,
     unit: Option<&RegisteredUnit>,
@@ -231,15 +233,24 @@ fn observe_tag(
             Err(ReadSrcError::Git(error)) => return Err(error),
             Err(error) => return Ok(Err(TagProblem::Src(Arc::new(error)))),
         }
-        let content = match repository.has_amendments(provenance.commit()) {
-            Ok(content) => content,
+        let copies = match repository.read_amendments(provenance.commit()) {
+            Ok(copies) => copies,
             Err(ReadSrcError::Git(error)) => return Err(error),
-            Err(error) => return Ok(Err(TagProblem::Src(Arc::new(error)))),
+            Err(error) => return Ok(Err(TagProblem::Amendments(Arc::new(error)))),
         };
-        let declared: Vec<RelativePath> =
-            published.manifest().amendments().keys().cloned().collect();
-        if content || !declared.is_empty() {
-            return Ok(Err(TagProblem::Amendments { declared, content }));
+        let manifest = published.manifest();
+        let lock = if manifest.amendments().is_empty() {
+            None
+        } else {
+            match read_published(repository, provenance.commit()) {
+                Ok(lock) => lock,
+                Err(PublishedLockfileError::Read(ReadFileError::Git(error))) => return Err(error),
+                Err(error) => return Ok(Err(TagProblem::Lockfile(Arc::new(error)))),
+            }
+        };
+        let problems = published_amendments(manifest, copies.keys(), lock.as_ref());
+        if !problems.is_empty() {
+            return Ok(Err(TagProblem::InvalidAmendments(problems)));
         }
     }
     Ok(Ok(ObservedVersion::new(
@@ -304,15 +315,14 @@ pub enum TagProblem {
     /// Its `src/` cannot be read as unit files. Never a failure to read
     /// the repository, which fails the source instead.
     Src(Arc<ReadSrcError>),
-    /// It declares amendments or holds `amendments/`. Published amendments
-    /// cannot be composed yet, and are not validated, so the version is not
-    /// indexed.
-    Amendments {
-        /// The amended paths its manifest declares, sorted.
-        declared: Vec<RelativePath>,
-        /// Whether its tree holds `amendments/`.
-        content: bool,
-    },
+    /// Its `amendments/` cannot be read as unit files. Never a failure to
+    /// read the repository, which fails the source instead.
+    Amendments(Arc<ReadSrcError>),
+    /// It declares amendments, but its lockfile, which must identify each
+    /// base, cannot be read.
+    Lockfile(Arc<PublishedLockfileError>),
+    /// Its amendment declarations, copies, and lockfile do not agree.
+    InvalidAmendments(Vec<PublishedAmendmentError>),
 }
 
 impl fmt::Display for TagProblem {
@@ -320,20 +330,17 @@ impl fmt::Display for TagProblem {
         match self {
             Self::Version(invalid) => invalid.fmt(f),
             Self::Src(error) => write!(f, "invalid `src/`: {error}"),
-            Self::Amendments { declared, content } => {
-                if declared.is_empty() {
-                    f.write_str("it holds `amendments/`")?;
-                } else {
-                    let paths: Vec<String> = declared.iter().map(ToString::to_string).collect();
-                    write!(f, "it declares amendments of {}", paths.join(", "))?;
-                    if *content {
-                        f.write_str(" and holds `amendments/`")?;
+            Self::Amendments(error) => write!(f, "invalid `amendments/`: {error}"),
+            Self::Lockfile(error) => write!(f, "it declares amendments, but {error}"),
+            Self::InvalidAmendments(problems) => {
+                f.write_str("its amendments are invalid: ")?;
+                for (index, problem) in problems.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str("; ")?;
                     }
+                    problem.fmt(f)?;
                 }
-                f.write_str(
-                    "; a published version with amendments cannot be composed yet, and is not \
-                     indexed until it can be validated",
-                )
+                Ok(())
             }
         }
     }

@@ -25,10 +25,11 @@ use std::path::{Path, PathBuf};
 
 use super::exclusive::BuildLock;
 use super::{
-    BuildLockError, BuildProblem, Dependencies, LockfileError, MANIFEST, ManifestFileError,
-    lockfile, read_working_manifest_text,
+    BuildLockError, BuildProblem, Dependencies, MANIFEST, ManifestFileError,
+    read_working_manifest_text,
 };
 use crate::adapters::git::{FILE_LIMIT, GitError, GitRepository, ReadSrcError, UnitDirectory};
+use crate::adapters::lockfile::{self, LockfileError};
 use crate::adapters::manifest::{EditError, declare_amendment, read_manifest};
 use crate::adapters::registry::{Registry, StorageError};
 use crate::domain::{

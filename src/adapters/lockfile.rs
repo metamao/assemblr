@@ -5,7 +5,8 @@
 //! it is tracked (see `docs/domain/authoring-workflow.md`). It is CLI
 //! managed: a file of another format, or with unexpected content, is
 //! reported and left as it is, never guessed at. Writing it is part of
-//! publishing a build (see [`super::output`]).
+//! publishing a build (see `super::build::output`). A published version's
+//! lockfile is read from Git at the tagged commit (see [`read_published`]).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -15,10 +16,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+use super::git::{GitRepository, ReadFileError};
 use crate::domain::{LockedUnit, ObjectId, Provenance, UnitIdentity, UnitLock, Version};
 
 /// The lockfile's name, at the unit repository's top level.
-pub(super) const LOCKFILE: &str = "assemblr-lock.json";
+pub(crate) const LOCKFILE: &str = "assemblr-lock.json";
 /// The version of the lockfile's format.
 const FORMAT: u64 = 1;
 /// The largest lockfile read, in bytes: far more than any composition
@@ -26,7 +28,7 @@ const FORMAT: u64 = 1;
 const LOCKFILE_LIMIT: u64 = 8 * 1024 * 1024;
 
 /// Reads the lockfile in `root`, or `None` if there is none yet.
-pub(super) fn read(root: &Path) -> Result<Option<UnitLock>, LockfileError> {
+pub(crate) fn read(root: &Path) -> Result<Option<UnitLock>, LockfileError> {
     let path = root.join(LOCKFILE);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -54,8 +56,23 @@ pub(super) fn read(root: &Path) -> Result<Option<UnitLock>, LockfileError> {
         .map_err(|detail| LockfileError::Invalid { path, detail })
 }
 
+/// Reads the lockfile committed at the root of `commit`'s tree in
+/// `repository`, or `None` if the commit has none.
+pub(crate) fn read_published(
+    repository: &GitRepository,
+    commit: &ObjectId,
+) -> Result<Option<UnitLock>, PublishedLockfileError> {
+    let bytes = repository
+        .read_top_level_file(commit, LOCKFILE, LOCKFILE_LIMIT)
+        .map_err(PublishedLockfileError::Read)?;
+    bytes
+        .as_deref()
+        .map(|bytes| parse(bytes).map_err(PublishedLockfileError::Invalid))
+        .transpose()
+}
+
 /// The lockfile's contents for `lock`.
-pub(super) fn serialize(lock: &UnitLock) -> io::Result<Vec<u8>> {
+pub(crate) fn serialize(lock: &UnitLock) -> io::Result<Vec<u8>> {
     let units: Map<String, Value> = lock
         .units()
         .iter()
@@ -174,6 +191,33 @@ impl std::error::Error for LockfileError {
         match self {
             Self::Io { error, .. } => Some(error),
             _ => None,
+        }
+    }
+}
+
+/// Why a published version's lockfile could not be read.
+#[derive(Debug)]
+pub enum PublishedLockfileError {
+    /// The committed `assemblr-lock.json` could not be read.
+    Read(ReadFileError),
+    /// Its contents are not a lockfile this version of Assemblr reads.
+    Invalid(String),
+}
+
+impl fmt::Display for PublishedLockfileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read(error) => write!(f, "could not read `{LOCKFILE}`: {error}"),
+            Self::Invalid(detail) => write!(f, "`{LOCKFILE}` is not a valid lockfile: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for PublishedLockfileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read(error) => Some(error),
+            Self::Invalid(_) => None,
         }
     }
 }

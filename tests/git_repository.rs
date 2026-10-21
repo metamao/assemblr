@@ -17,9 +17,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use assemblr::adapters::{
-    GitErrorKind, GitRepository, InvalidVersion, ReadSrcError, SrcEntryErrorReason, VersionTag,
+    GitErrorKind, GitRepository, InvalidVersion, ReadFileError, ReadSrcError, SrcEntryErrorReason,
+    VersionTag,
 };
-use assemblr::domain::{FileTree, RelativePath, RelativePathErrorReason, UnitFile, Version};
+use assemblr::domain::{
+    FileTree, ObjectId, RelativePath, RelativePathErrorReason, UnitFile, Version,
+};
 
 #[cfg(windows)]
 const NULL_DEVICE: &str = "NUL";
@@ -481,6 +484,121 @@ fn src_files_are_read_exactly_as_committed() {
                 UnitFile::new(b"#!/bin/sh\necho run\n".to_vec(), true)
             ),
         ])
+    );
+}
+
+#[test]
+fn amendments_are_read_by_the_rules_of_src() {
+    let repo = Repo::new(&scratch("amendments"));
+    let root = dir::<&[u8]>([
+        (b"manifest.jsonc".as_slice(), file(manifest("1.0.0"))),
+        (b"src".as_slice(), dir([("own.txt", file("own"))])),
+        (
+            b"amendments".as_slice(),
+            dir([
+                ("package.json.assemblr.tmpl", file("{}")),
+                ("bin", dir([("run", executable("#!/bin/sh"))])),
+            ]),
+        ),
+    ]);
+    let commit = repo.commit(&root);
+    repo.tag("v1.0.0", &commit);
+
+    assert_eq!(
+        read_amendments(&repo, &commit).unwrap(),
+        FileTree::from([
+            (path("bin/run"), UnitFile::new(b"#!/bin/sh".to_vec(), true)),
+            (
+                path("package.json.assemblr.tmpl"),
+                UnitFile::new(b"{}".to_vec(), false)
+            ),
+        ])
+    );
+    assert_eq!(
+        read_src(&repo, &commit).unwrap(),
+        FileTree::from([(path("own.txt"), UnitFile::new(b"own".to_vec(), false))])
+    );
+
+    // Without `amendments/` there are no copies; an unsupported entry is
+    // reported with the directory it is in.
+    let without = repo.commit(&unit("1.0.0", None));
+    assert_eq!(read_amendments(&repo, &without).unwrap(), FileTree::new());
+    let linked = repo.commit(&dir::<&[u8]>([
+        (b"manifest.jsonc".as_slice(), file(manifest("1.0.0"))),
+        (
+            b"amendments".as_slice(),
+            dir([("escape", link("../manifest.jsonc"))]),
+        ),
+    ]));
+    let error = read_amendments(&repo, &linked).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("`amendments/` has 1 unsupported entry:"),
+        "{message}"
+    );
+    assert!(
+        message.contains("amendments/escape: symbolic links"),
+        "{message}"
+    );
+    let not_a_directory = repo.commit(&dir::<&[u8]>([
+        (b"manifest.jsonc".as_slice(), file(manifest("1.0.0"))),
+        (b"amendments".as_slice(), file("not a directory")),
+    ]));
+    let error = read_amendments(&repo, &not_a_directory).unwrap_err();
+    assert_eq!(error.to_string(), "`amendments` is not a directory");
+}
+
+fn read_amendments(repo: &Repo, commit: &str) -> Result<FileTree, ReadSrcError> {
+    let commit = ObjectId::parse(commit).unwrap();
+    repo.open().read_amendments(&commit)
+}
+
+#[test]
+fn a_top_level_file_is_read_when_present_and_bounded() {
+    let repo = Repo::new(&scratch("top_level_file"));
+    let lockfile = "{\"format\": 1, \"units\": {}}\n";
+    let with = repo.commit(&dir::<&[u8]>([
+        (b"manifest.jsonc".as_slice(), file(manifest("1.0.0"))),
+        (b"assemblr-lock.json".as_slice(), file(lockfile)),
+    ]));
+    let without = repo.commit(&unit("1.0.0", None));
+    let not_a_file = repo.commit(&dir::<&[u8]>([
+        (b"manifest.jsonc".as_slice(), file(manifest("1.0.0"))),
+        (
+            b"assemblr-lock.json".as_slice(),
+            dir([("inside", file("x"))]),
+        ),
+    ]));
+    let read = |commit: &str, limit: u64| {
+        let commit = ObjectId::parse(commit).unwrap();
+        repo.open()
+            .read_top_level_file(&commit, "assemblr-lock.json", limit)
+    };
+
+    assert_eq!(
+        read(&with, 1024).unwrap(),
+        Some(lockfile.as_bytes().to_vec())
+    );
+    assert_eq!(read(&without, 1024).unwrap(), None);
+    let error = read(&not_a_file, 1024).unwrap_err();
+    assert!(
+        matches!(&error, ReadFileError::NotAFile { name } if name == "assemblr-lock.json"),
+        "{error}"
+    );
+    let error = read(&with, 8).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            ReadFileError::TooLarge { name, size, limit: 8 }
+                if name == "assemblr-lock.json" && *size == lockfile.len() as u64
+        ),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("larger than the 8 bytes Assemblr reads"),
+        "{error}"
     );
 }
 

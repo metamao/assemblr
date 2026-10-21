@@ -21,7 +21,10 @@ pub use composition::{
     delivered_path,
 };
 pub use identity::{IdentityError, IdentityErrorReason, Segment, UnitIdentity};
-pub use lock::{AmendmentBaseError, LockError, LockedUnit, UnitLock, amendment_bases, relock};
+pub use lock::{
+    AmendmentBaseError, BaseIntegrityError, LockError, LockedUnit, PublishedAmendmentError,
+    UnitLock, amendment_bases, published_amendments, relock, verify_bases,
+};
 pub use manifest::{AmendmentDeclaration, Manifest, ManifestError, OptionValues};
 pub use parameter::{
     AllowedValues, AllowedValuesError, BlankDescription, Description, OWN, ParameterDefinition,

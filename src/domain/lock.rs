@@ -7,8 +7,15 @@
 //! records each version's provenance, so a locked version whose published
 //! content is no longer the content it was locked to is detected rather than
 //! used.
+//!
+//! A published version's lockfile also identifies the bases of its
+//! amendments: the entry for an amended provider records the base version
+//! with the commit and tree it was published with. [`published_amendments`]
+//! checks that a published version's declarations, copies, and lockfile
+//! agree, and [`verify_bases`] checks each base against the composer's own
+//! registry record (see `docs/domain/amendments-and-composition.md`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use super::identity::UnitIdentity;
@@ -265,6 +272,266 @@ impl fmt::Display for AmendmentBaseError {
 
 impl std::error::Error for AmendmentBaseError {}
 
+/// Checks that a published version's amendment declarations in `manifest`,
+/// its copies under `amendments/` at `copies`, and its lockfile `lock`
+/// agree: every copy is declared, every declaration has a copy, and, when
+/// anything is declared, the lockfile exists and locks each amended provider
+/// at the declared base. These are the properties a version shows on its
+/// own; whether a base's content is the one the composer's registry records
+/// is [`verify_bases`]. Every problem is reported, sorted by path.
+pub fn published_amendments<'a>(
+    manifest: &Manifest,
+    copies: impl IntoIterator<Item = &'a RelativePath>,
+    lock: Option<&UnitLock>,
+) -> Vec<PublishedAmendmentError> {
+    let declared = manifest.amendments();
+    let copies: BTreeSet<&RelativePath> = copies.into_iter().collect();
+    let mut errors: Vec<PublishedAmendmentError> = copies
+        .iter()
+        .filter(|path| !declared.contains_key(*path))
+        .map(|path| PublishedAmendmentError::Undeclared {
+            path: (*path).clone(),
+        })
+        .collect();
+    for (path, declaration) in declared {
+        let unit = declaration.unit();
+        let base = declaration.base();
+        if !copies.contains(path) {
+            errors.push(PublishedAmendmentError::MissingCopy {
+                path: path.clone(),
+                unit: unit.clone(),
+            });
+        }
+        match lock.and_then(|lock| lock.units.get(unit)) {
+            Some(locked) if locked.version == *base => {}
+            Some(locked) => errors.push(PublishedAmendmentError::BaseNotLocked {
+                path: path.clone(),
+                unit: unit.clone(),
+                base: base.clone(),
+                locked: locked.version.clone(),
+            }),
+            None if lock.is_some() => errors.push(PublishedAmendmentError::NotLocked {
+                path: path.clone(),
+                unit: unit.clone(),
+                base: base.clone(),
+            }),
+            None => {}
+        }
+    }
+    if lock.is_none() && !declared.is_empty() {
+        errors.push(PublishedAmendmentError::NoLockfile);
+    }
+    errors.sort_by_key(|error| match error {
+        PublishedAmendmentError::NoLockfile => None,
+        PublishedAmendmentError::Undeclared { path }
+        | PublishedAmendmentError::MissingCopy { path, .. }
+        | PublishedAmendmentError::NotLocked { path, .. }
+        | PublishedAmendmentError::BaseNotLocked { path, .. } => Some(path.clone()),
+    });
+    errors
+}
+
+/// Why a published version's amendments are not consistent with its
+/// manifest and lockfile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishedAmendmentError {
+    /// A copy under `amendments/` that the manifest does not declare.
+    Undeclared {
+        /// The copy's path.
+        path: RelativePath,
+    },
+    /// A declaration whose copy does not exist.
+    MissingCopy {
+        /// The amended path.
+        path: RelativePath,
+        /// The provider the declaration names.
+        unit: UnitIdentity,
+    },
+    /// The version declares amendments but carries no lockfile, so its
+    /// bases are not identified.
+    NoLockfile,
+    /// The lockfile has no entry for an amended provider.
+    NotLocked {
+        /// The amended path.
+        path: RelativePath,
+        /// The provider.
+        unit: UnitIdentity,
+        /// The declared base.
+        base: Version,
+    },
+    /// The lockfile locks an amended provider at a version other than the
+    /// declared base.
+    BaseNotLocked {
+        /// The amended path.
+        path: RelativePath,
+        /// The provider.
+        unit: UnitIdentity,
+        /// The declared base.
+        base: Version,
+        /// The locked version.
+        locked: Version,
+    },
+}
+
+impl fmt::Display for PublishedAmendmentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Undeclared { path } => {
+                write!(f, "amendments/{path} is not declared in its manifest")
+            }
+            Self::MissingCopy { path, unit } => write!(
+                f,
+                "its manifest declares an amendment of {path} from {unit}, but it has no \
+                 amendments/{path}"
+            ),
+            Self::NoLockfile => f.write_str(
+                "it declares amendments but has no assemblr-lock.json, which must identify each \
+                 amendment's base",
+            ),
+            Self::NotLocked { path, unit, base } => write!(
+                f,
+                "amendments/{path} is based on {unit} {base}, but its assemblr-lock.json does not \
+                 lock {unit}"
+            ),
+            Self::BaseNotLocked {
+                path,
+                unit,
+                base,
+                locked,
+            } => write!(
+                f,
+                "amendments/{path} is based on {unit} {base}, but its assemblr-lock.json locks \
+                 {unit} {locked}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PublishedAmendmentError {}
+
+/// Verifies the bases of the amendments that `manifest`, the manifest of
+/// the published version `version` of `amender`, declares: the entry of the
+/// amender's published lockfile `lock` for each provider at the declared
+/// base must identify the same commit and tree as `index` records for that
+/// provider and version. A disagreement is an integrity conflict. A base
+/// the index does not record is not reported: the provider then resolves
+/// to another version, which the composition reports. Errors are sorted by
+/// path.
+pub fn verify_bases(
+    amender: &UnitIdentity,
+    version: &Version,
+    manifest: &Manifest,
+    lock: &UnitLock,
+    index: &RegistryIndex,
+) -> Vec<BaseIntegrityError> {
+    let mut errors = Vec::new();
+    for (path, declaration) in manifest.amendments() {
+        let provider = declaration.unit();
+        let base = declaration.base();
+        let Some(recorded) = index
+            .units()
+            .get(provider)
+            .and_then(|unit| unit.versions().get(base))
+        else {
+            continue;
+        };
+        let Some(locked) = lock
+            .units
+            .get(provider)
+            .filter(|locked| locked.version == *base)
+        else {
+            continue;
+        };
+        if locked.provenance != *recorded {
+            errors.push(BaseIntegrityError {
+                amender: amender.clone(),
+                version: version.clone(),
+                path: path.clone(),
+                provider: provider.clone(),
+                base: base.clone(),
+                published: locked.provenance.clone(),
+                recorded: recorded.clone(),
+            });
+        }
+    }
+    errors
+}
+
+/// An amendment whose base, as the amending unit's published lockfile
+/// identifies it, is not the content the registry records for that version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseIntegrityError {
+    amender: UnitIdentity,
+    version: Version,
+    path: RelativePath,
+    provider: UnitIdentity,
+    base: Version,
+    published: Provenance,
+    recorded: Provenance,
+}
+
+impl BaseIntegrityError {
+    /// The amending unit.
+    pub fn amender(&self) -> &UnitIdentity {
+        &self.amender
+    }
+
+    /// Its published version.
+    pub fn version(&self) -> &Version {
+        &self.version
+    }
+
+    /// The amended path.
+    pub fn path(&self) -> &RelativePath {
+        &self.path
+    }
+
+    /// The provider.
+    pub fn provider(&self) -> &UnitIdentity {
+        &self.provider
+    }
+
+    /// The declared base version.
+    pub fn base(&self) -> &Version {
+        &self.base
+    }
+
+    /// What the amender's lockfile identifies the base as.
+    pub fn published(&self) -> &Provenance {
+        &self.published
+    }
+
+    /// What the registry records for the provider at the base version.
+    pub fn recorded(&self) -> &Provenance {
+        &self.recorded
+    }
+}
+
+impl fmt::Display for BaseIntegrityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "integrity conflict: {} {} amends {} of {} {}, whose content its lockfile identifies \
+             as commit {} (tree {}), but the registry records commit {} (tree {}) for {} {}; a \
+             published version's content must not change, and an amendment is applied only to \
+             its verified base",
+            self.amender,
+            self.version,
+            self.path,
+            self.provider,
+            self.base,
+            self.published.commit(),
+            self.published.tree(),
+            self.recorded.commit(),
+            self.recorded.tree(),
+            self.provider,
+            self.base
+        )
+    }
+}
+
+impl std::error::Error for BaseIntegrityError {}
+
 /// A problem with the lock that a resolution produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LockError {
@@ -323,10 +590,14 @@ impl std::error::Error for LockError {}
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{AmendmentBaseError, LockError, LockedUnit, UnitLock, amendment_bases, relock};
+    use super::{
+        AmendmentBaseError, BaseIntegrityError, LockError, LockedUnit, PublishedAmendmentError,
+        UnitLock, amendment_bases, published_amendments, relock, verify_bases,
+    };
     use crate::domain::{
         AmendmentDeclaration, AvailableVersions, Dependencies, Description, Manifest, ObjectId,
-        Provenance, RegisteredUnit, RegistryIndex, SourceReference, UnitIdentity, Version, resolve,
+        Provenance, RegisteredUnit, RegistryIndex, RelativePath, SourceReference, UnitIdentity,
+        Version, resolve,
     };
 
     fn identity(input: &str) -> UnitIdentity {
@@ -551,6 +822,168 @@ mod tests {
         assert_eq!(
             relocked(&previous, "^1", &index).unwrap(),
             lock(&[("@acme/node", "1.0.0", provenance('1', '2'))])
+        );
+    }
+
+    fn path(text: &str) -> RelativePath {
+        RelativePath::parse(text).unwrap()
+    }
+
+    /// `@acme/app` 0.1.0 depending on `@acme/node` and amending `paths` of
+    /// it at base 1.0.0.
+    fn amender(paths: &[&str]) -> Manifest {
+        let amendments = paths
+            .iter()
+            .map(|amended| {
+                (
+                    path(amended),
+                    AmendmentDeclaration::new(identity("@acme/node"), version("1.0.0")),
+                )
+            })
+            .collect();
+        Manifest::new(
+            identity("@acme/app"),
+            version("0.1.0"),
+            Description::new("An app.").unwrap(),
+            requirements("^1"),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            amendments,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn consistent_published_amendments_have_no_problem() {
+        let manifest = amender(&["bin/run", "package.json.assemblr.tmpl"]);
+        let lock = lock(&[("@acme/node", "1.0.0", provenance('1', '2'))]);
+        let copies = [path("package.json.assemblr.tmpl"), path("bin/run")];
+        assert_eq!(
+            published_amendments(&manifest, copies.iter(), Some(&lock)),
+            []
+        );
+        // Without declarations or copies, no lockfile is needed.
+        assert_eq!(published_amendments(&amender(&[]), [].iter(), None), []);
+    }
+
+    #[test]
+    fn every_inconsistency_of_published_amendments_is_reported_by_path() {
+        let manifest = amender(&["bin/run", "missing.txt", "other.txt"]);
+        let lock = lock(&[("@acme/node", "1.1.0", provenance('3', '4'))]);
+        let copies = [path("stray.txt"), path("bin/run"), path("other.txt")];
+        let node = identity("@acme/node");
+        let not_locked_at_base = |amended: &str| PublishedAmendmentError::BaseNotLocked {
+            path: path(amended),
+            unit: node.clone(),
+            base: version("1.0.0"),
+            locked: version("1.1.0"),
+        };
+        assert_eq!(
+            published_amendments(&manifest, copies.iter(), Some(&lock)),
+            [
+                not_locked_at_base("bin/run"),
+                PublishedAmendmentError::MissingCopy {
+                    path: path("missing.txt"),
+                    unit: node.clone(),
+                },
+                not_locked_at_base("missing.txt"),
+                not_locked_at_base("other.txt"),
+                PublishedAmendmentError::Undeclared {
+                    path: path("stray.txt"),
+                },
+            ]
+        );
+
+        // A lockfile without the provider, and no lockfile at all.
+        let unrelated = self::lock(&[("@acme/other", "1.0.0", provenance('1', '2'))]);
+        let manifest = amender(&["bin/run"]);
+        assert_eq!(
+            published_amendments(&manifest, [path("bin/run")].iter(), Some(&unrelated)),
+            [PublishedAmendmentError::NotLocked {
+                path: path("bin/run"),
+                unit: node.clone(),
+                base: version("1.0.0"),
+            }]
+        );
+        let errors = published_amendments(&manifest, [path("bin/run")].iter(), None);
+        assert_eq!(errors, [PublishedAmendmentError::NoLockfile]);
+        assert!(
+            errors[0].to_string().contains("has no assemblr-lock.json"),
+            "{}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn a_base_is_verified_against_the_registry_record() {
+        let index = index(&provenance('1', '2'));
+        let manifest = amender(&["bin/run", "package.json.assemblr.tmpl"]);
+        let agreeing = lock(&[("@acme/node", "1.0.0", provenance('1', '2'))]);
+        assert_eq!(
+            verify_bases(
+                &identity("@acme/app"),
+                &version("0.1.0"),
+                &manifest,
+                &agreeing,
+                &index
+            ),
+            []
+        );
+
+        let differing = lock(&[("@acme/node", "1.0.0", provenance('5', '6'))]);
+        let errors = verify_bases(
+            &identity("@acme/app"),
+            &version("0.1.0"),
+            &manifest,
+            &differing,
+            &index,
+        );
+        let expected = |amended: &str| BaseIntegrityError {
+            amender: identity("@acme/app"),
+            version: version("0.1.0"),
+            path: path(amended),
+            provider: identity("@acme/node"),
+            base: version("1.0.0"),
+            published: provenance('5', '6'),
+            recorded: provenance('1', '2'),
+        };
+        assert_eq!(
+            errors,
+            [expected("bin/run"), expected("package.json.assemblr.tmpl")]
+        );
+        let message = errors[0].to_string();
+        for part in [
+            "integrity conflict",
+            "@acme/app 0.1.0 amends bin/run of @acme/node 1.0.0",
+            "commit 5555",
+            "records commit 1111",
+        ] {
+            assert!(message.contains(part), "{message}");
+        }
+
+        // A base the index does not record, or that the lockfile does not
+        // lock at the base, is not an integrity conflict here.
+        let other = RegistryIndex::from_units(BTreeMap::new()).unwrap();
+        assert_eq!(
+            verify_bases(
+                &identity("@acme/app"),
+                &version("0.1.0"),
+                &manifest,
+                &differing,
+                &other
+            ),
+            []
+        );
+        let elsewhere = lock(&[("@acme/node", "1.1.0", provenance('5', '6'))]);
+        assert_eq!(
+            verify_bases(
+                &identity("@acme/app"),
+                &version("0.1.0"),
+                &manifest,
+                &elsewhere,
+                &index
+            ),
+            []
         );
     }
 }

@@ -14,7 +14,6 @@
 
 mod amend;
 mod exclusive;
-mod lockfile;
 mod output;
 
 use std::borrow::Cow;
@@ -27,10 +26,10 @@ use std::path::{Path, PathBuf};
 pub use amend::{AmendFailure, AmendProblem, AmendState, Amended, Match, WriteError, amend_unit};
 use exclusive::BuildLock;
 pub use exclusive::BuildLockError;
-pub use lockfile::LockfileError;
 pub use output::{OutputProblem, PublishError, State as PublishState};
 
 use super::git::{GitError, GitRepository, InvalidVersion, MANIFEST_LIMIT, ReadSrcError};
+use super::lockfile::{self, LockfileError};
 use super::manifest::{ReadManifestError, read_manifest};
 use super::registry::{Registry, StorageError};
 use super::render::{Context, RenderError, render};

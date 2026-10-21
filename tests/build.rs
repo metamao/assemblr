@@ -1821,52 +1821,44 @@ fn an_amended_template_s_errors_name_the_copy_and_the_provider() {
 }
 
 #[test]
-fn a_published_version_with_amendments_is_not_indexed_yet() {
+fn a_published_version_with_amendments_is_indexed_once_validated() {
     let fixture = Fixture::new("amend-published");
     let (_node, app) = app_amending_node(&fixture);
     succeeds(amend(&fixture, &app, &["bin/run"]));
     app.publish("0.1.0");
-    // A later version holds `amendments/` without declaring it, and the
-    // one after that is clean.
+    // A later version holds a copy without declaring it.
     app.write(
         "manifest.jsonc",
         &manifest("@acme/app", "0.2.0", &[("@acme/node", "^1")], ""),
     );
     app.publish("0.2.0");
-    app.git(&["rm", "-q", "-r", "amendments"]);
-    app.write(
-        "manifest.jsonc",
-        &manifest("@acme/app", "0.3.0", &[("@acme/node", "^1")], ""),
-    );
-    app.publish("0.3.0");
 
     let output = succeeds(fixture.assemblr(
         &fixture.dir,
         &["registry", "add", app.path.to_str().unwrap()],
     ));
     let err = stderr(&output);
+    assert!(!err.contains("v0.1.0"), "{err}");
     assert!(
         err.contains(
-            "excluded tag v0.1.0, which is not indexed as a published version: it declares \
-             amendments of bin/run and holds `amendments/`; a published version with amendments \
-             cannot be composed yet"
+            "excluded tag v0.2.0, which is not indexed as a published version: its amendments \
+             are invalid: amendments/bin/run is not declared in its manifest"
         ),
         "{err}"
     );
-    assert!(
-        err.contains("excluded tag v0.2.0, which is not indexed as a published version: it holds `amendments/`"),
-        "{err}"
-    );
     let listing = stdout(&fixture.assemblr(&fixture.dir, &["registry", "list"]));
-    assert!(listing.contains("0.3.0"), "{listing}");
-    assert!(!listing.contains("0.1.0"), "{listing}");
+    assert!(listing.contains("0.1.0"), "{listing}");
+    assert!(!listing.contains("0.2.0"), "{listing}");
 
-    // A dependent therefore cannot resolve the amended version.
+    // Composing the published amendments is the next step.
     let consumer = fixture.repo("consumer");
     consumer.write(
         "manifest.jsonc",
         &manifest("@acme/consumer", "0.1.0", &[("@acme/app", "=0.1.0")], ""),
     );
     let err = stderr(&fails(fixture.build(&consumer)));
-    assert!(err.contains("@acme/app"), "{err}");
+    assert!(
+        err.contains("@acme/app 0.1.0 declares amendments of bin/run"),
+        "{err}"
+    );
 }
