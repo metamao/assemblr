@@ -10,11 +10,12 @@ use std::path::{Path, PathBuf};
 
 use super::store::Store;
 use super::{
-    Application, Change, ComposeFailure, ComposeRecovery, Step, WriteStep, apply, recover,
+    Application, Change, ComposeFailure, ComposeRecovery, Step, WriteStep, apply, read_current,
+    recover,
 };
 use crate::adapters::lockfile::serialize_lockfile;
 use crate::domain::{
-    ReconciliationState, RelativePath, Snapshot, SnapshotFile, UnitFile, UnitLock,
+    Current, ReconciliationState, RelativePath, Snapshot, SnapshotFile, UnitFile, UnitLock,
 };
 
 /// A fresh project directory for `test`.
@@ -43,7 +44,12 @@ fn unit_file(text: &str, executable: bool) -> UnitFile {
     UnitFile::new(text.as_bytes().to_vec(), executable)
 }
 
-fn plan_of(files: &[(&str, &str, bool)], changes: BTreeMap<RelativePath, Change>) -> Plan {
+/// The directories of `root` are not created again.
+fn plan_of(
+    root: &Path,
+    files: &[(&str, &str, bool)],
+    changes: BTreeMap<RelativePath, Change>,
+) -> Plan {
     let files: BTreeMap<RelativePath, UnitFile> = files
         .iter()
         .map(|(name, text, executable)| (path(name), unit_file(text, *executable)))
@@ -71,7 +77,8 @@ fn plan_of(files: &[(&str, &str, bool)], changes: BTreeMap<RelativePath, Change>
         .filter_map(|(path, _)| {
             let mut segments: Vec<&str> = path.segments().collect();
             segments.pop();
-            (!segments.is_empty()).then(|| self::path(&segments.join("/")))
+            (!segments.is_empty() && !root.join(segments.join("/")).exists())
+                .then(|| self::path(&segments.join("/")))
         })
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -86,7 +93,7 @@ fn plan_of(files: &[(&str, &str, bool)], changes: BTreeMap<RelativePath, Change>
 }
 
 /// A first composition: two files, one in a new directory.
-fn first() -> Plan {
+fn first(root: &Path) -> Plan {
     let files = [
         ("README.md", "readme\n", false),
         ("bin/run", "#!/bin/sh\n", true),
@@ -95,12 +102,12 @@ fn first() -> Plan {
         .iter()
         .map(|(name, text, executable)| (path(name), Change::Create(unit_file(text, *executable))))
         .collect();
-    plan_of(&files, changes)
+    plan_of(root, &files, changes)
 }
 
 /// A reconciliation over the first composition: `README.md` replaced,
 /// `bin/run` removed, `new.txt` created.
-fn second() -> Plan {
+fn second(root: &Path) -> Plan {
     let changes = BTreeMap::from([
         (
             path("README.md"),
@@ -121,6 +128,7 @@ fn second() -> Plan {
         (path("new.txt"), Change::Create(unit_file("new\n", false))),
     ]);
     plan_of(
+        root,
         &[
             ("README.md", "readme v2\n", false),
             ("new.txt", "new\n", false),
@@ -174,7 +182,7 @@ fn text(root: &Path, name: &str) -> String {
 /// The project after the first composition, applied in full.
 fn composed(test: &str) -> PathBuf {
     let root = project(test);
-    apply_with(&root, &first(), None, 0).unwrap();
+    apply_with(&root, &first(&root), None, 0).unwrap();
     assert!(!exists(&root, ".assemblr/journal.json"));
     root
 }
@@ -182,7 +190,7 @@ fn composed(test: &str) -> PathBuf {
 #[test]
 fn a_failure_before_the_journal_leaves_the_project_untouched() {
     let root = project("before-journal");
-    let plan = first();
+    let plan = first(&root);
     let failure = apply_failing(&root, &plan, Step::Store, 1);
     assert!(matches!(
         failure,
@@ -213,7 +221,7 @@ fn a_failure_before_the_journal_leaves_the_project_untouched() {
 fn a_first_composition_interrupted_among_its_files_or_at_the_lock_is_reverted() {
     for (name, step, n) in [("second-file", Step::Files, 2), ("lock", Step::Lock, 1)] {
         let root = project(name);
-        let plan = first();
+        let plan = first(&root);
         let failure = apply_failing(&root, &plan, step, n);
         assert!(matches!(failure, ComposeFailure::Write { .. }), "{name}");
         let store = Store::new(&root);
@@ -236,7 +244,7 @@ fn a_first_composition_interrupted_among_its_files_or_at_the_lock_is_reverted() 
 #[test]
 fn a_failure_after_the_lock_is_completed_not_reverted() {
     let root = project("finish");
-    let plan = first();
+    let plan = first(&root);
     let failure = apply_failing(&root, &plan, Step::Finish, 1);
     assert!(matches!(
         failure,
@@ -260,7 +268,7 @@ fn a_failure_after_the_lock_is_completed_not_reverted() {
 #[test]
 fn an_edited_file_is_kept_by_a_revert() {
     let root = project("edited");
-    let plan = first();
+    let plan = first(&root);
     apply_failing(&root, &plan, Step::Lock, 1);
     fs::write(root.join("README.md"), "mine").unwrap();
     let store = Store::new(&root);
@@ -281,10 +289,11 @@ fn an_edited_file_is_kept_by_a_revert() {
 
 #[test]
 fn a_reconciliation_interrupted_at_each_file_change_is_reverted_to_the_previous_content() {
-    // The changes apply in path order: README.md, bin/run, new.txt.
+    // Creations and replacements apply in path order, then removals:
+    // README.md replaced, new.txt created, bin/run removed.
     for n in 1..=3 {
         let root = composed(&format!("reconcile-file-{n}"));
-        let plan = second();
+        let plan = second(&root);
         let failure = apply_failing(&root, &plan, Step::Files, n);
         assert!(
             matches!(
@@ -311,8 +320,12 @@ fn a_reconciliation_interrupted_at_each_file_change_is_reverted_to_the_previous_
         };
         assert!(kept.is_empty(), "{n}: {kept:?}");
         // What the interruption had done is undone, nothing more.
-        assert_eq!(restored.len(), n - 1, "{n}: {restored:?}");
-        assert!(removed.is_empty(), "{n}: {removed:?}");
+        let expected_restored: Vec<RelativePath> =
+            (n >= 2).then(|| path("README.md")).into_iter().collect();
+        let expected_removed: Vec<RelativePath> =
+            (n >= 3).then(|| path("new.txt")).into_iter().collect();
+        assert_eq!(restored, expected_restored, "{n}");
+        assert_eq!(removed, expected_removed, "{n}");
         assert_eq!(text(&root, "README.md"), "readme\n", "{n}");
         assert_eq!(text(&root, "bin/run"), "#!/bin/sh\n", "{n}");
         #[cfg(unix)]
@@ -329,11 +342,12 @@ fn a_reconciliation_interrupted_at_each_file_change_is_reverted_to_the_previous_
         assert!(!exists(&root, ".assemblr/journal.json"), "{n}");
         assert!(!exists(&root, ".assemblr/previous"), "{n}");
         // The lock still records the first composition.
+        let identity = first(&root).snapshot.identity();
         assert!(
-            fs::read(root.join("assemblr-lock.json"))
+            String::from_utf8(fs::read(root.join("assemblr-lock.json")).unwrap())
                 .unwrap()
-                .windows(first().snapshot.identity().as_str().len())
-                .any(|w| w == first().snapshot.identity().as_str().as_bytes())
+                .contains(identity.as_str()),
+            "{n}"
         );
     }
 }
@@ -341,7 +355,7 @@ fn a_reconciliation_interrupted_at_each_file_change_is_reverted_to_the_previous_
 #[test]
 fn a_reconciliation_interrupted_at_the_lock_is_reverted_and_after_it_completed() {
     let root = composed("reconcile-lock");
-    let plan = second();
+    let plan = second(&root);
     apply_failing(&root, &plan, Step::Lock, 1);
     let store = Store::new(&root);
     let journal = store.journal().unwrap().unwrap();
@@ -359,6 +373,7 @@ fn a_reconciliation_interrupted_at_the_lock_is_reverted_and_after_it_completed()
     assert!(!exists(&root, "new.txt"));
 
     let root = composed("reconcile-finish");
+    let plan = second(&root);
     apply_failing(&root, &plan, Step::Finish, 1);
     let store = Store::new(&root);
     let journal = store.journal().unwrap().unwrap();
@@ -375,7 +390,7 @@ fn a_reconciliation_interrupted_at_the_lock_is_reverted_and_after_it_completed()
 #[test]
 fn files_edited_during_an_interrupted_reconciliation_are_kept_and_named() {
     let root = composed("reconcile-edited");
-    let plan = second();
+    let plan = second(&root);
     apply_failing(&root, &plan, Step::Lock, 1);
     // The replaced file edited again, the removed path holding something
     // new, the created file edited.
@@ -403,7 +418,7 @@ fn files_edited_during_an_interrupted_reconciliation_are_kept_and_named() {
 fn a_journal_without_actions_is_read_as_a_first_composition_s() {
     let root = composed("old-journal");
     let blob = crate::domain::BlobId::of(b"readme\n");
-    let base = first().snapshot.identity();
+    let base = first(&root).snapshot.identity();
     fs::write(
         root.join(".assemblr/journal.json"),
         format!(
@@ -419,4 +434,53 @@ fn a_journal_without_actions_is_read_as_a_first_composition_s() {
         journal.files[0].1,
         super::JournalEntry::Create { .. }
     ));
+}
+
+#[test]
+fn a_file_created_in_a_directory_another_leaves_finds_the_directory() {
+    // `bin/run` leaves and `bin/zzz` arrives: the removal would empty and
+    // remove `bin/` first in path order, so creations go first.
+    let root = composed("rename");
+    let changes = BTreeMap::from([
+        (
+            path("bin/run"),
+            Change::Remove {
+                previous: b"#!/bin/sh\n".to_vec(),
+                previous_executable: true,
+            },
+        ),
+        (path("bin/zzz"), Change::Create(unit_file("zzz\n", false))),
+    ]);
+    let plan = plan_of(
+        &root,
+        &[
+            ("README.md", "readme\n", false),
+            ("bin/zzz", "zzz\n", false),
+        ],
+        changes,
+    );
+    apply_with(&root, &plan, None, 0).unwrap();
+    assert!(!exists(&root, "bin/run"));
+    assert_eq!(text(&root, "bin/zzz"), "zzz\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_managed_path_behind_a_symbolic_link_is_not_a_file_of_the_project() {
+    let root = composed("symlink");
+    let elsewhere = project("symlink-elsewhere");
+    fs::create_dir(elsewhere.join("config")).unwrap();
+    fs::write(elsewhere.join("config/app.json"), "{}").unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("config"), root.join("config")).unwrap();
+    let base = Snapshot::new(BTreeMap::from([(
+        path("config/app.json"),
+        SnapshotFile::new(b"{}", false),
+    )]));
+    let current = read_current(&root, &base, &Snapshot::default()).unwrap();
+    assert_eq!(
+        current
+            .get(&path("config/app.json"))
+            .map(|file| &file.compared),
+        Some(&Current::Other)
+    );
 }

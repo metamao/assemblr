@@ -40,8 +40,11 @@ records how reconciliation is implemented.
    shared and the project's own changes are already in its text. The
    adapter's `reconcile_json` edits those into the project's text with the
    JSONC editor and checks that the text parses back to the planned value.
-3. **Reading the project.** Only the base's paths are read; the incoming
-   composition's new paths go through the existing-content check. The
+3. **Reading the project.** Only the base's paths are read, and only
+   through real directories: a symbolic link on the way makes the path
+   "not a regular file", so that neither the read nor a later write
+   leaves the project. The incoming composition's new paths go through
+   the existing-content check. The
    executable bit comes from the file system on Unix and is the base's
    elsewhere, since the consumer cannot have changed it there. A file whose
    bytes are not the base's or the incoming content, but are one of them
@@ -59,8 +62,9 @@ records how reconciliation is implemented.
    project's root. The sequence is: store the base; keep the previous
    content of every file to replace or remove under
    `.assemblr/previous/<blob>`; write the journal; create directories;
-   apply the changes in path order; write the lock; remove the journal and
-   `previous/`. Fault injection covers each step.
+   create and replace files in path order, then remove files, since a
+   removal prunes directories a created file may need; write the lock;
+   remove the journal and `previous/`. Fault injection covers each step.
 6. **The journal** keeps format 1. Each entry gains an optional `action`
    (`create`, `modify`, `remove`), and `modify` and `remove` entries the
    previous content's identity and mode; an entry without an action is a
@@ -77,7 +81,8 @@ records how reconciliation is implemented.
    previous mode, and one holding the previous content is left; a removed
    path that is empty gets its previous content back. Anything else is
    kept and named. Stale staging files are removed.
-8. **Ignore rules** are read at every composition for the incoming paths,
+8. **Ignore rules** are read at every composition that writes, for the
+   incoming paths,
    so the lock's `unbased` set follows the rules in force; only newly
    unbased paths are announced. A path that was unbased has no stored
    base, which makes a two-sided change to it a conflict by identity.

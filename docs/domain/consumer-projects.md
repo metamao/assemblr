@@ -225,7 +225,7 @@ it ignores; a project in no repository ignores nothing. An ignored file is
 written to the project, but its content is not stored in the tracked base:
 the lock lists it as unbased, and a warning says a later composition cannot
 reconcile edits to it. Whether a file is unbased is decided when it is
-materialized, from the rules in force then: a file the consumer ignores
+materialized or changed, from the rules in force then: a file the consumer ignores
 since is no longer stored, and one no longer ignored is stored from then
 on. When `.assemblr/` or one of its directories is ignored, a
 warning says the base will not travel with the project, and an edited

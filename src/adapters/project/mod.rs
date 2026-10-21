@@ -686,6 +686,40 @@ fn read_current(
     let mut current = BTreeMap::new();
     for (path, file) in base.files() {
         let target = root.join(path.as_str());
+        let other = CurrentFile {
+            bytes: Vec::new(),
+            executable: false,
+            compared: Current::Other,
+            crlf: false,
+        };
+        // The directories on the way must be real ones: a symbolic link
+        // among them would take a read, and later a write, out of the
+        // project.
+        let mut prefix = root.to_owned();
+        let mut segments: Vec<&str> = path.segments().collect();
+        segments.pop();
+        let mut through_link = false;
+        for segment in segments {
+            prefix.push(segment);
+            match fs::symlink_metadata(&prefix) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => {
+                    through_link = true;
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                Err(error) => {
+                    return Err(ComposeProblem::Io {
+                        path: prefix,
+                        error,
+                    });
+                }
+            }
+        }
+        if through_link {
+            current.insert(path.clone(), other);
+            continue;
+        }
         let metadata = match fs::symlink_metadata(&target) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -697,15 +731,7 @@ fn read_current(
             }
         };
         if !metadata.is_file() {
-            current.insert(
-                path.clone(),
-                CurrentFile {
-                    bytes: Vec::new(),
-                    executable: false,
-                    compared: Current::Other,
-                    crlf: false,
-                },
-            );
+            current.insert(path.clone(), other);
             continue;
         }
         let bytes = fs::read(&target).map_err(|error| ComposeProblem::Io {
@@ -943,7 +969,14 @@ fn apply(
             return Err(write_failed(WriteStep::File(path), error));
         }
     }
-    for (path, change) in changes {
+    // Creations and replacements first, removals last: a removal empties
+    // and removes directories, which a file created later may need.
+    let removal = |change: &Change| matches!(change, Change::Remove { .. });
+    let ordered = changes
+        .iter()
+        .filter(|(_, change)| !removal(change))
+        .chain(changes.iter().filter(|(_, change)| removal(change)));
+    for (path, change) in ordered {
         let target = root.join(path.as_str());
         let done = fault(Step::Files).and_then(|()| match change {
             Change::Create(file) | Change::Modify { file, .. } => put_file(&target, file),
