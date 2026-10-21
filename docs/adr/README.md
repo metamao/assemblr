@@ -32,3 +32,4 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0013](0013-unit-check-and-publish.md) | `unit check` and `unit publish`: shared validation, the committed tree, the tag, and one-source indexing | Accepted |
 | [0014](0014-unit-init.md) | `unit init`: repository discovery and initialization, the scaffold's writes, and the embedded manifest schema | Accepted |
 | [0015](0015-value-merge.md) | The value-level merge of several amendments: the domain engine, the JSONC editor, and the projection and round-trip checks | Accepted |
+| [0016](0016-consumer-compose.md) | The first consumer `compose`: the project root, the lockfile's reconciliation state, the stored base, ignore rules, and the journal | Accepted |

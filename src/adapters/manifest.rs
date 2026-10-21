@@ -11,7 +11,7 @@ use super::jsonc::{self, Json, SyntaxError};
 use crate::domain::{
     self, AllowedValues, AllowedValuesError, AmendmentDeclaration, BlankDescription, Description,
     IdentityError, Manifest, ManifestError, OptionValues, ParameterDefinition, ParameterName,
-    ParameterNameError, ParameterType, ParameterValue, ParameterValueError, RelativePath,
+    ParameterNameError, ParameterType, ParameterValue, ParameterValueError, Project, RelativePath,
     RelativePathError, RequirementError, UnitIdentity, Version, VersionError, VersionRequirement,
 };
 
@@ -25,6 +25,7 @@ pub(crate) const MANIFEST_FIELDS: &[&str] = &[
     "params",
     "amendments",
 ];
+const PROJECT_FIELDS: &[&str] = &["$schema", "dependencies", "options"];
 const PARAMETER_FIELDS: &[&str] = &["type", "description", "default", "allowed"];
 const AMENDMENT_FIELDS: &[&str] = &["unit", "base"];
 const SCALAR: &[JsonKind] = &[JsonKind::String, JsonKind::Integer, JsonKind::Boolean];
@@ -41,6 +42,21 @@ pub fn read_manifest(text: &str) -> Result<Manifest, ReadManifestError> {
     issues.sort_by(|a, b| a.path.cmp(&b.path));
     match manifest {
         Some(manifest) if issues.is_empty() => Ok(manifest),
+        _ => Err(ReadManifestError::Invalid(issues)),
+    }
+}
+
+/// Reads and validates the text of a consumer project's `assemblr.jsonc`,
+/// by the manifest's rules for `dependencies` and `options` (see
+/// `docs/domain/consumer-projects.md`).
+pub fn read_project(text: &str) -> Result<Project, ReadManifestError> {
+    let json = jsonc::parse(text).map_err(ReadManifestError::Syntax)?;
+    let mut reader = Reader::default();
+    let project = reader.project(&json);
+    let mut issues = reader.issues;
+    issues.sort_by(|a, b| a.path.cmp(&b.path));
+    match project {
+        Some(project) if issues.is_empty() => Ok(project),
         _ => Err(ReadManifestError::Invalid(issues)),
     }
 }
@@ -598,6 +614,30 @@ impl Reader {
             amendments,
         )
         .ok()
+    }
+
+    fn project(&mut self, json: &Json) -> Option<Project> {
+        let root = FieldPath::default();
+        let fields = self.fields(&root, json, PROJECT_FIELDS)?;
+        if let Some(schema) = fields.get("$schema") {
+            self.string(&root.key("$schema"), schema);
+        }
+        let dependencies = fields
+            .get("dependencies")
+            .map(|json| self.dependencies(&root.key("dependencies"), json));
+        let options = fields.get("options").map_or_else(BTreeMap::new, |json| {
+            self.options(&root.key("options"), json)
+        });
+        let dependencies = dependencies.unwrap_or_else(|| Some(Dependencies::default()))?;
+        for error in domain::relation_errors(
+            None,
+            &dependencies.declared,
+            options.keys(),
+            std::iter::empty(),
+        ) {
+            self.inconsistent(error);
+        }
+        Project::new(dependencies.requirements, options).ok()
     }
 
     fn inconsistent(&mut self, error: ManifestError) {

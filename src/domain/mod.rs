@@ -12,9 +12,11 @@ mod manifest;
 mod merge;
 mod parameter;
 mod path;
+mod project;
 mod provenance;
 mod registry;
 mod resolution;
+mod snapshot;
 mod update;
 mod version;
 
@@ -40,6 +42,7 @@ pub use parameter::{
     ParameterValueError, ValueKind,
 };
 pub use path::{RelativePath, RelativePathError, RelativePathErrorReason};
+pub use project::{Project, ReconciliationState};
 pub use provenance::{ObjectId, Provenance};
 pub use registry::{
     Change, Excluded, IntegrityChange, InvalidIndex, ObservedTag, ObservedVersion, RegisteredUnit,
@@ -49,6 +52,7 @@ pub use resolution::{
     AvailableVersions, Dependencies, Lock, LockChange, Requirement, Requirer, Resolution,
     ResolutionError, ResolvedGraph, ResolvedUnit, resolve,
 };
+pub use snapshot::{BaseIdentity, BlobId, ListingError, Snapshot, SnapshotFile};
 pub use update::{
     PublishedAmenderError, ReconcileCause, ReconcileError, published_amenders_at_base,
     reconcile_amendments, update_lock,

@@ -65,6 +65,8 @@ fn help_offers_only_implemented_commands() {
     let output = assemblr(&["--help"]);
 
     let stdout = stdout(&output);
+    assert!(stdout.contains("  init "), "{stdout}");
+    assert!(stdout.contains("  compose "), "{stdout}");
     assert!(stdout.contains("  registry "), "{stdout}");
     assert!(stdout.contains("  unit "), "{stdout}");
 

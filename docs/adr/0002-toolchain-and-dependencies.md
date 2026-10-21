@@ -50,6 +50,7 @@ implemented functionality. Current dependencies:
 | `clap` (derive) | CLI argument parsing, `--help`, `--version` |
 | `semver` | Exact versions and version requirements, with Cargo's requirement semantics, the provisional range dialect (OC-15). Wrapped in domain newtypes, so it stays out of the public API. |
 | `serde` (no default features except `std`), `serde_json` | Parsing manifest JSON: a recursion limit, syntax errors with line and column, and a hand-written visitor that keeps duplicate keys so they can be reported. |
+| `sha2` (no default features) | SHA-256 for the identity of a consumer project's reconciliation base and of each stored file (ADR 0016): the owner chose that algorithm on #41. Pure Rust, about ten crates in the tree (`digest`, `generic-array`, `typenum`, `cpufeatures`, `block-buffer`, `crypto-common`, `cfg-if`, `version_check`, `libc` on some targets), MSRV 1.72. Writing a hash function by hand was not considered. |
 
 Manifests are JSONC. `jsonc-parser` was evaluated first. Its releases from
 0.28 on need Rust newer than 1.85, and 0.26.2, which builds on 1.85, has no
