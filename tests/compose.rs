@@ -623,19 +623,23 @@ fn an_interrupted_composition_is_reverted_by_the_next_one() {
 
     // The state an interruption after some files and before the lock
     // leaves: the journal, the store, and part of the files.
+    let base = lockfile(&project)["project"]["base"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     fs::remove_file(project.join("assemblr-lock.json")).unwrap();
     fs::remove_file(project.join("README.md")).unwrap();
     fs::write(project.join("bin/run"), "edited meanwhile").unwrap();
     let blob = |bytes: &[u8]| assemblr::domain::BlobId::of(bytes).to_string();
     let journal = format!(
-        "{{\n  \"format\": 1,\n  \"files\": [\n    {{\"path\": \"README.md\", \"blob\": \"{}\"}},\n    \
-         {{\"path\": \"bin/run\", \"blob\": \"{}\"}},\n    {{\"path\": \"config/app.json\", \"blob\": \"{}\"}}\n  ],\n  \
-         \"directories\": [\"bin\", \"config\"]\n}}\n",
+        "{{\n  \"format\": 1,\n  \"base\": \"{base}\",\n  \"files\": [\n    {{\"path\": \"README.md\", \
+         \"blob\": \"{}\"}},\n    {{\"path\": \"bin/run\", \"blob\": \"{}\"}},\n    {{\"path\": \
+         \"config/app.json\", \"blob\": \"{}\"}}\n  ],\n  \"directories\": [\"bin\", \"config\"]\n}}\n",
         blob(b"node\n"),
         blob(b"#!/bin/sh\necho run\n"),
         blob(b"{\n  \"port\": 3000\n}\n")
     );
-    fs::write(project.join(".assemblr").join("journal.json"), journal).unwrap();
+    fs::write(project.join(".assemblr").join("journal.json"), &journal).unwrap();
 
     // The next compose reverts first: the files still holding what was
     // written go, the edited one stays, the journal goes. The edited file
@@ -664,6 +668,26 @@ fn an_interrupted_composition_is_reverted_by_the_next_one() {
     fs::remove_file(project.join("bin/run")).unwrap();
     fs::remove_dir(project.join("bin")).unwrap();
     succeeds(fixture.compose(&project));
+    assert_eq!(tree(&project), complete);
+
+    // An interruption after the lock was written: the composition is
+    // complete, so the next run removes only the journal and keeps the
+    // files and the lock.
+    fs::write(project.join(".assemblr").join("journal.json"), &journal).unwrap();
+    let output = succeeds(fixture.compose(&project));
+    assert!(
+        stderr(&output).contains(
+            "note: completed a composition that was interrupted earlier, after its files and lock \
+             were written: removed its journal"
+        ),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        stdout(&output).contains("Nothing to compose"),
+        "{}",
+        stdout(&output)
+    );
     assert_eq!(tree(&project), complete);
 }
 

@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use assemblr::adapters::{
-    BuildProblem, ComposeFailure, ComposeProblem, Composed, InitProjectFailure, Registry,
-    StoreError, WriteStep, compose_project, init_project,
+    BuildProblem, ComposeFailure, ComposeProblem, ComposeRecovery, Composed, InitProjectFailure,
+    Registry, StoreError, WriteStep, compose_project, init_project,
 };
 use assemblr::domain::{LockChange, LockError, ResolutionError, UnitIdentity};
 use clap::Args;
@@ -80,11 +80,11 @@ pub(super) fn compose() -> ExitCode {
         }
         Err(failure) => {
             if let ComposeFailure::Rejected {
-                reverted: Some(reverted),
+                recovered: Some(recovered),
                 ..
             } = &failure
             {
-                report_reverted(reverted);
+                report_recovered(recovered);
             }
             let hint = hint(&failure, &root);
             fail(&failure.to_string(), Some(&hint))
@@ -93,8 +93,8 @@ pub(super) fn compose() -> ExitCode {
 }
 
 fn report(composed: &Composed) {
-    if let Some(reverted) = composed.reverted() {
-        report_reverted(reverted);
+    if let Some(recovered) = composed.recovered() {
+        report_recovered(recovered);
     }
     for note in composed.notes() {
         eprintln!("warning: {note}");
@@ -123,26 +123,30 @@ fn report(composed: &Composed) {
     );
 }
 
-fn report_reverted(reverted: &assemblr::adapters::Reverted) {
-    eprintln!(
-        "note: reverted a composition that was interrupted earlier: removed {} file(s) it \
+fn report_recovered(recovered: &ComposeRecovery) {
+    match recovered {
+        ComposeRecovery::Completed => eprintln!(
+            "note: completed a composition that was interrupted earlier, after its files and \
+             lock were written: removed its journal"
+        ),
+        ComposeRecovery::Reverted { removed, kept } => eprintln!(
+            "note: reverted a composition that was interrupted earlier: removed {} file(s) it \
              had written{}",
-        reverted.removed().len(),
-        if reverted.kept().is_empty() {
-            String::new()
-        } else {
-            format!(
-                ", kept {} whose content changed since ({})",
-                reverted.kept().len(),
-                reverted
-                    .kept()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        }
-    );
+            removed.len(),
+            if kept.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", kept {} whose content changed since ({})",
+                    kept.len(),
+                    kept.iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        ),
+    }
 }
 
 fn describe(identity: &UnitIdentity, change: &LockChange) -> String {
@@ -168,8 +172,8 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
                                                          `assemblr compose` reverts what was \
                                                          written and starts over"
                     .to_owned(),
-                WriteStep::Finish => "the composition is complete; remove .assemblr/journal.json \
-                                      by hand, or the next `assemblr compose` will revert it"
+                WriteStep::Finish => "the composition is complete except for its journal; the \
+                                      next `assemblr compose` removes it"
                     .to_owned(),
             };
         }

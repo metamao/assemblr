@@ -240,11 +240,15 @@ nothing is written; a different one is refused explicitly until a later
 increment reconciles it, so the project stays as it was.
 
 **Interrupted compositions.** While the journal exists, a composition was
-interrupted. The next `compose` reverts it before anything else: it removes
-the journaled files whose content is still what was written, keeps those
-whose content changed and names them, removes the directories it created
-when they are empty, removes the journal, and continues with a fresh plan,
-in which a kept file counts as existing content.
+interrupted. The next `compose` recovers from it before anything else. The
+lock is written after every file, so a lock that records the journaled
+composition means it was complete except for the journal's removal: the
+journal is removed and the files and the lock stand. Otherwise the
+composition is reverted: the journaled files whose content is still what
+was written are removed, those whose content changed are kept and named,
+the directories it created are removed when empty, the journal is removed,
+and the composition continues with a fresh plan, in which a kept file counts
+as existing content.
 
 Open:
 

@@ -280,6 +280,10 @@ impl Store {
 /// create, outermost first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Journal {
+    /// The identity of the composition being applied: the lock, written
+    /// after every file, records the same identity, which tells a
+    /// completed composition from an interrupted one.
+    pub(super) base: BaseIdentity,
     pub(super) files: Vec<(RelativePath, BlobId)>,
     pub(super) directories: Vec<RelativePath>,
 }
@@ -298,6 +302,7 @@ impl Journal {
             .collect();
         let mut bytes = serde_json::to_vec_pretty(&json!({
             "format": JOURNAL_FORMAT,
+            "base": self.base.as_str(),
             "files": files,
             "directories": directories,
         }))?;
@@ -319,6 +324,11 @@ impl Journal {
             }
             None => return Err("it has no format number".to_owned()),
         }
+        let base = root
+            .get("base")
+            .and_then(Value::as_str)
+            .and_then(BaseIdentity::parse)
+            .ok_or_else(|| "it has no valid `base` identity".to_owned())?;
         let files = root
             .get("files")
             .and_then(Value::as_array)
@@ -351,7 +361,11 @@ impl Journal {
                     .ok_or_else(|| "a `directories` entry is not a valid path".to_owned())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { files, directories })
+        Ok(Self {
+            base,
+            files,
+            directories,
+        })
     }
 }
 

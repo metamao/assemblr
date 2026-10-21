@@ -216,7 +216,7 @@ fn compose_with(
 ) -> Result<Composed, ComposeFailure> {
     let rejected = |problem| ComposeFailure::Rejected {
         problems: vec![problem],
-        reverted: None,
+        recovered: None,
     };
     let declaration_path = root.join(DECLARATION);
     if fs::symlink_metadata(&declaration_path).is_err() {
@@ -239,24 +239,24 @@ fn compose_with(
         })?;
     let store = Store::new(root);
     let mut problems = Vec::new();
-    let mut reverted = None;
+    let mut recovered = None;
     match store.journal() {
         Ok(None) => {}
-        Ok(Some(journal)) => match revert(root, &store, &journal) {
-            Ok(summary) => reverted = Some(summary),
+        Ok(Some(journal)) => match recover(root, &store, &journal) {
+            Ok(summary) => recovered = Some(summary),
             Err(error) => return Err(rejected(ComposeProblem::Store(error))),
         },
         Err(error) => return Err(rejected(ComposeProblem::Store(error))),
     }
     let rejected = |problem| ComposeFailure::Rejected {
         problems: vec![problem],
-        reverted: reverted.clone(),
+        recovered: recovered.clone(),
     };
     let rejected_all = |problems| ComposeFailure::Rejected {
         problems,
-        reverted: reverted.clone(),
+        recovered: recovered.clone(),
     };
-    let project = read_text(&declaration_path)
+    let project = read_handle(&guard)
         .map_err(|error| ComposeProblem::Io {
             path: declaration_path.clone(),
             error,
@@ -397,7 +397,7 @@ fn compose_with(
                 base: identity,
                 unbased: BTreeSet::new(),
                 notes,
-                reverted,
+                recovered: recovered.clone(),
                 unchanged: true,
             });
         }
@@ -486,83 +486,23 @@ fn compose_with(
     directories.sort();
     directories.dedup();
 
-    // Writing. The store first: content-addressed, so a leftover is
-    // harmless. Then the journal, the files, the lock, and the journal's
-    // removal.
-    let stored: Vec<(&RelativePath, &[u8])> = files
-        .iter()
-        .filter(|(path, _)| !unbased.contains(*path))
-        .map(|(path, file)| (path, file.contents()))
-        .collect();
-    let write_failed = |step: Step, error: io::Error, path: PathBuf| ComposeFailure::Write {
-        step: match step {
-            Step::Store => WriteStep::Store,
-            Step::Journal => WriteStep::Journal,
-            Step::Files => WriteStep::File(path),
-            Step::Lock => WriteStep::Lock,
-            Step::Finish => WriteStep::Finish,
-        },
-        error,
+    // Writing (see `apply`).
+    let application = Application {
+        files: &files,
+        snapshot: &snapshot,
+        unbased: &unbased,
+        lock_bytes: &lock_bytes,
+        directories: &directories,
     };
-    if let Err(error) = fault(Step::Store) {
-        return Err(write_failed(Step::Store, error, PathBuf::new()));
-    }
-    store
-        .write_base(&snapshot, &stored)
-        .map_err(|error| rejected(ComposeProblem::Store(error)))?;
-    if store.restored_attributes() {
+    let restored = apply(root, &store, &application, fault).map_err(|failure| match failure {
+        ComposeFailure::Rejected { problems, .. } => rejected_all(problems),
+        write => write,
+    })?;
+    if restored {
         notes.push(format!(
             "{STATE_DIR}/.gitattributes had been edited and was restored; it keeps version \
              control from converting the stored base"
         ));
-    }
-    let journal = Journal {
-        files: files
-            .keys()
-            .map(|path| (path.clone(), snapshot.files()[path].blob().clone()))
-            .collect(),
-        directories: directories.clone(),
-    };
-    if let Err(error) = fault(Step::Journal) {
-        return Err(write_failed(Step::Journal, error, PathBuf::new()));
-    }
-    store
-        .begin(&journal)
-        .map_err(|error| rejected(ComposeProblem::Store(error)))?;
-    for directory in &directories {
-        let path = root.join(directory.as_str());
-        if let Err(error) = fs::create_dir(&path) {
-            return Err(write_failed(Step::Files, error, path));
-        }
-    }
-    for (path, file) in &files {
-        let target = root.join(path.as_str());
-        let written = fault(Step::Files).and_then(|()| write_file(&target, file));
-        if let Err(error) = written {
-            return Err(write_failed(Step::Files, error, target));
-        }
-    }
-    let staged = root.join(LOCK_STAGING);
-    let lock_path = root.join(LOCKFILE);
-    let locked = fault(Step::Lock)
-        .and_then(|()| {
-            let _ = fs::remove_file(&staged);
-            write_new(&staged, &lock_bytes)
-        })
-        .and_then(|()| fs::rename(&staged, &lock_path));
-    if let Err(error) = locked {
-        let _ = fs::remove_file(&staged);
-        return Err(write_failed(Step::Lock, error, lock_path));
-    }
-    store::sync_dir(root);
-    let finished = fault(Step::Finish).and_then(|()| {
-        store.finish().map_err(|error| match error {
-            StoreError::Io { error, .. } => error,
-            other => io::Error::other(other.to_string()),
-        })
-    });
-    if let Err(error) = finished {
-        return Err(write_failed(Step::Finish, error, PathBuf::new()));
     }
     drop(guard);
     Ok(Composed {
@@ -572,17 +512,131 @@ fn compose_with(
         base: identity,
         unbased,
         notes,
-        reverted: reverted.clone(),
+        recovered: recovered.clone(),
         unchanged: false,
     })
 }
 
-/// Reverts what the interrupted composition `journal` records: each file
-/// whose content is still the planned one is removed, the directories the
-/// composition created are removed when empty, innermost first, and the
-/// journal last. A file with other content is left: it is the consumer's
-/// now.
-fn revert(root: &Path, store: &Store, journal: &Journal) -> Result<Reverted, StoreError> {
+/// What a composition writes into the project.
+struct Application<'a> {
+    files: &'a BTreeMap<RelativePath, UnitFile>,
+    snapshot: &'a Snapshot,
+    unbased: &'a BTreeSet<RelativePath>,
+    lock_bytes: &'a [u8],
+    /// The directories to create, outermost first.
+    directories: &'a [RelativePath],
+}
+
+/// Writes `application` into the project at `root`: the store first,
+/// content-addressed, so a leftover is harmless; then the journal; then
+/// the directories and files; then the lock; then the journal's removal.
+/// Returns whether the store's attributes file had to be restored. A
+/// failure before the journal leaves the project untouched; after it, the
+/// journal records the composition for [`recover`].
+fn apply(
+    root: &Path,
+    store: &Store,
+    application: &Application<'_>,
+    fault: &mut dyn FnMut(Step) -> io::Result<()>,
+) -> Result<bool, ComposeFailure> {
+    let Application {
+        files,
+        snapshot,
+        unbased,
+        lock_bytes,
+        directories,
+    } = *application;
+    let rejected = |problem| ComposeFailure::Rejected {
+        problems: vec![problem],
+        recovered: None,
+    };
+    let write_failed = |step: WriteStep, error: io::Error| ComposeFailure::Write { step, error };
+    let stored: Vec<(&RelativePath, &[u8])> = files
+        .iter()
+        .filter(|(path, _)| !unbased.contains(*path))
+        .map(|(path, file)| (path, file.contents()))
+        .collect();
+    if let Err(error) = fault(Step::Store) {
+        return Err(write_failed(WriteStep::Store, error));
+    }
+    store
+        .write_base(snapshot, &stored)
+        .map_err(|error| rejected(ComposeProblem::Store(error)))?;
+    let journal = Journal {
+        base: snapshot.identity(),
+        files: files
+            .keys()
+            .map(|path| (path.clone(), snapshot.files()[path].blob().clone()))
+            .collect(),
+        directories: directories.to_vec(),
+    };
+    if let Err(error) = fault(Step::Journal) {
+        return Err(write_failed(WriteStep::Journal, error));
+    }
+    store
+        .begin(&journal)
+        .map_err(|error| rejected(ComposeProblem::Store(error)))?;
+    for directory in directories {
+        let path = root.join(directory.as_str());
+        if let Err(error) = fs::create_dir(&path) {
+            return Err(write_failed(WriteStep::File(path), error));
+        }
+    }
+    for (path, file) in files {
+        let target = root.join(path.as_str());
+        let written = fault(Step::Files).and_then(|()| write_file(&target, file));
+        if let Err(error) = written {
+            return Err(write_failed(WriteStep::File(target), error));
+        }
+    }
+    let staged = root.join(LOCK_STAGING);
+    let lock_path = root.join(LOCKFILE);
+    let locked = fault(Step::Lock)
+        .and_then(|()| {
+            let _ = fs::remove_file(&staged);
+            write_new(&staged, lock_bytes)
+        })
+        .and_then(|()| fs::rename(&staged, &lock_path));
+    if let Err(error) = locked {
+        let _ = fs::remove_file(&staged);
+        return Err(write_failed(WriteStep::Lock, error));
+    }
+    store::sync_dir(root);
+    let finished = fault(Step::Finish).and_then(|()| {
+        store.finish().map_err(|error| match error {
+            StoreError::Io { error, .. } => error,
+            other => io::Error::other(other.to_string()),
+        })
+    });
+    if let Err(error) = finished {
+        return Err(write_failed(WriteStep::Finish, error));
+    }
+    Ok(store.restored_attributes())
+}
+
+/// Recovers from the interrupted composition `journal` records. The lock
+/// is written after every file, so a lock that records the journal's base
+/// means the composition was complete except for the journal's removal,
+/// and it is completed: only the journal goes. Otherwise the composition
+/// is reverted: each file whose content is still the planned one is
+/// removed, the directories the composition created are removed when
+/// empty, innermost first, and the journal last. A file with other content
+/// is left: it is the consumer's now.
+fn recover(root: &Path, store: &Store, journal: &Journal) -> Result<ComposeRecovery, StoreError> {
+    if let Ok(Some((
+        _,
+        Lockfile {
+            project: Some(state),
+            ..
+        },
+    ))) = lockfile::read_lockfile(root)
+    {
+        if *state.base() == journal.base {
+            let _ = fs::remove_file(root.join(LOCK_STAGING));
+            store.finish()?;
+            return Ok(ComposeRecovery::Completed);
+        }
+    }
     let mut removed = Vec::new();
     let mut kept = Vec::new();
     for (path, blob) in &journal.files {
@@ -612,7 +666,7 @@ fn revert(root: &Path, store: &Store, journal: &Journal) -> Result<Reverted, Sto
     }
     let _ = fs::remove_file(root.join(LOCK_STAGING));
     store.finish()?;
-    Ok(Reverted { removed, kept })
+    Ok(ComposeRecovery::Reverted { removed, kept })
 }
 
 /// The delivered paths, or their directories, that already exist in the
@@ -676,10 +730,15 @@ fn write_file(target: &Path, file: &UnitFile) -> io::Result<()> {
 
 /// Reads a text file, bounded like a manifest.
 fn read_text(path: &Path) -> io::Result<String> {
+    read_handle(&fs::File::open(path)?)
+}
+
+/// Reads an open text file, bounded like a manifest. The declaration is
+/// read through the handle that holds its lock: on Windows the lock is
+/// mandatory, and another handle could not read the file.
+fn read_handle(file: &fs::File) -> io::Result<String> {
     let mut bytes = Vec::new();
-    fs::File::open(path)?
-        .take(MANIFEST_LIMIT + 1)
-        .read_to_end(&mut bytes)?;
+    file.take(MANIFEST_LIMIT + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MANIFEST_LIMIT {
         return Err(io::Error::other(format!(
             "it is larger than the {MANIFEST_LIMIT} bytes Assemblr reads"
@@ -697,7 +756,7 @@ pub struct Composed {
     base: BaseIdentity,
     unbased: BTreeSet<RelativePath>,
     notes: Vec<String>,
-    reverted: Option<Reverted>,
+    recovered: Option<ComposeRecovery>,
     unchanged: bool,
 }
 
@@ -734,9 +793,9 @@ impl Composed {
         &self.notes
     }
 
-    /// The interrupted composition that was reverted first, if any.
-    pub fn reverted(&self) -> Option<&Reverted> {
-        self.reverted.as_ref()
+    /// The interrupted composition that was recovered from first, if any.
+    pub fn recovered(&self) -> Option<&ComposeRecovery> {
+        self.recovered.as_ref()
     }
 
     /// Whether the project already held this composition, so that nothing
@@ -746,24 +805,21 @@ impl Composed {
     }
 }
 
-/// What reverting an interrupted composition did.
+/// What recovering from an interrupted composition did.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Reverted {
-    removed: Vec<RelativePath>,
-    kept: Vec<RelativePath>,
-}
-
-impl Reverted {
-    /// The files removed, still holding what the interrupted composition
-    /// wrote.
-    pub fn removed(&self) -> &[RelativePath] {
-        &self.removed
-    }
-
-    /// The files kept, because their content is no longer what was written.
-    pub fn kept(&self) -> &[RelativePath] {
-        &self.kept
-    }
+pub enum ComposeRecovery {
+    /// The composition had written its files and its lock; only the
+    /// journal was left, and it was removed.
+    Completed,
+    /// The composition was reverted.
+    Reverted {
+        /// The files removed, still holding what the interrupted
+        /// composition wrote.
+        removed: Vec<RelativePath>,
+        /// The files kept, because their content is no longer what was
+        /// written.
+        kept: Vec<RelativePath>,
+    },
 }
 
 /// Why a composition failed.
@@ -774,11 +830,12 @@ pub enum ComposeFailure {
     Rejected {
         /// The problems.
         problems: Vec<ComposeProblem>,
-        /// The interrupted composition that was reverted first, if any.
-        reverted: Option<Reverted>,
+        /// The interrupted composition that was recovered from first, if
+        /// any.
+        recovered: Option<ComposeRecovery>,
     },
-    /// Writing failed. The journal remains, and the next composition
-    /// reverts what was written.
+    /// Writing failed. After the journal, it remains, and the next
+    /// composition completes or reverts what was written.
     Write {
         /// What failed.
         step: WriteStep,
@@ -799,7 +856,8 @@ pub enum WriteStep {
     File(PathBuf),
     /// Writing the lockfile; the files are written, the journal remains.
     Lock,
-    /// Removing the journal; the composition is complete.
+    /// Removing the journal; the composition is complete, and the next
+    /// composition removes the journal.
     Finish,
 }
 
@@ -937,3 +995,206 @@ impl fmt::Display for ComposeProblem {
 }
 
 impl std::error::Error for ComposeProblem {}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "fixtures are valid by construction")]
+
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    use super::store::Store;
+    use super::{Application, ComposeFailure, ComposeRecovery, Step, WriteStep, apply, recover};
+    use crate::adapters::lockfile::serialize_lockfile;
+    use crate::domain::{
+        ReconciliationState, RelativePath, Snapshot, SnapshotFile, UnitFile, UnitLock,
+    };
+
+    /// A fresh project directory for `test`.
+    fn project(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("assemblr-apply-tests").join(test);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn path(text: &str) -> RelativePath {
+        RelativePath::parse(text).unwrap()
+    }
+
+    /// Two files, one in a new directory, and the lock they belong to.
+    struct Plan {
+        files: BTreeMap<RelativePath, UnitFile>,
+        snapshot: Snapshot,
+        lock_bytes: Vec<u8>,
+        directories: Vec<RelativePath>,
+    }
+
+    fn plan() -> Plan {
+        let files: BTreeMap<RelativePath, UnitFile> = [
+            ("README.md", "readme\n", false),
+            ("bin/run", "#!/bin/sh\n", true),
+        ]
+        .into_iter()
+        .map(|(name, text, executable)| {
+            (
+                path(name),
+                UnitFile::new(text.as_bytes().to_vec(), executable),
+            )
+        })
+        .collect();
+        let snapshot = Snapshot::new(
+            files
+                .iter()
+                .map(|(p, f)| {
+                    (
+                        p.clone(),
+                        SnapshotFile::new(f.contents(), f.is_executable()),
+                    )
+                })
+                .collect(),
+        );
+        let state = ReconciliationState::new(
+            snapshot.identity(),
+            files.keys().cloned().collect(),
+            BTreeSet::new(),
+        );
+        let lock_bytes = serialize_lockfile(&UnitLock::default(), Some(&state)).unwrap();
+        Plan {
+            files,
+            snapshot,
+            lock_bytes,
+            directories: vec![path("bin")],
+        }
+    }
+
+    /// Applies `plan` in `root`, failing at the `n`th occurrence of `step`.
+    fn apply_failing(root: &Path, plan: &Plan, step: Step, n: usize) -> ComposeFailure {
+        let mut seen = 0;
+        let mut fault = |current: Step| {
+            if current == step {
+                seen += 1;
+                if seen == n {
+                    return Err(io::Error::other("injected"));
+                }
+            }
+            Ok(())
+        };
+        let store = Store::new(root);
+        let application = Application {
+            files: &plan.files,
+            snapshot: &plan.snapshot,
+            unbased: &BTreeSet::new(),
+            lock_bytes: &plan.lock_bytes,
+            directories: &plan.directories,
+        };
+        apply(root, &store, &application, &mut fault).unwrap_err()
+    }
+
+    fn exists(root: &Path, name: &str) -> bool {
+        root.join(name).exists()
+    }
+
+    #[test]
+    fn a_failure_before_the_journal_leaves_the_project_untouched() {
+        let root = project("before-journal");
+        let plan = plan();
+        let failure = apply_failing(&root, &plan, Step::Store, 1);
+        assert!(matches!(
+            failure,
+            ComposeFailure::Write {
+                step: WriteStep::Store,
+                ..
+            }
+        ));
+        assert!(!exists(&root, ".assemblr"));
+
+        let failure = apply_failing(&root, &plan, Step::Journal, 1);
+        assert!(matches!(
+            failure,
+            ComposeFailure::Write {
+                step: WriteStep::Journal,
+                ..
+            }
+        ));
+        assert!(exists(&root, ".assemblr/objects"));
+        assert!(!exists(&root, ".assemblr/journal.json"));
+        assert!(!exists(&root, "README.md"));
+        assert!(!exists(&root, "bin"));
+        assert!(Store::new(&root).journal().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_failure_among_the_files_or_at_the_lock_is_reverted() {
+        for (name, step, n) in [("second-file", Step::Files, 2), ("lock", Step::Lock, 1)] {
+            let root = project(name);
+            let plan = plan();
+            let failure = apply_failing(&root, &plan, step, n);
+            assert!(matches!(failure, ComposeFailure::Write { .. }), "{name}");
+            let store = Store::new(&root);
+            let journal = store.journal().unwrap().expect("the journal remains");
+            assert!(!exists(&root, "assemblr-lock.json"), "{name}");
+
+            let recovered = recover(&root, &store, &journal).unwrap();
+            assert!(
+                matches!(&recovered, ComposeRecovery::Reverted { kept, .. } if kept.is_empty()),
+                "{name}: {recovered:?}"
+            );
+            assert!(!exists(&root, "README.md"), "{name}");
+            assert!(!exists(&root, "bin"), "{name}");
+            assert!(!exists(&root, ".assemblr/journal.json"), "{name}");
+            // The store, content-addressed, stays.
+            assert!(exists(&root, ".assemblr/objects"), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_failure_after_the_lock_is_completed_not_reverted() {
+        let root = project("finish");
+        let plan = plan();
+        let failure = apply_failing(&root, &plan, Step::Finish, 1);
+        assert!(matches!(
+            failure,
+            ComposeFailure::Write {
+                step: WriteStep::Finish,
+                ..
+            }
+        ));
+        assert!(exists(&root, "assemblr-lock.json"));
+        let store = Store::new(&root);
+        let journal = store.journal().unwrap().unwrap();
+
+        let recovered = recover(&root, &store, &journal).unwrap();
+        assert_eq!(recovered, ComposeRecovery::Completed);
+        assert_eq!(
+            fs::read_to_string(root.join("README.md")).unwrap(),
+            "readme\n"
+        );
+        assert!(exists(&root, "bin/run"));
+        assert!(exists(&root, "assemblr-lock.json"));
+        assert!(!exists(&root, ".assemblr/journal.json"));
+    }
+
+    #[test]
+    fn an_edited_file_is_kept_by_a_revert() {
+        let root = project("edited");
+        let plan = plan();
+        apply_failing(&root, &plan, Step::Lock, 1);
+        fs::write(root.join("README.md"), "mine").unwrap();
+        let store = Store::new(&root);
+        let journal = store.journal().unwrap().unwrap();
+
+        let recovered = recover(&root, &store, &journal).unwrap();
+        assert_eq!(
+            recovered,
+            ComposeRecovery::Reverted {
+                removed: vec![path("bin/run")],
+                kept: vec![path("README.md")],
+            }
+        );
+        assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), "mine");
+        assert!(!exists(&root, "bin"));
+    }
+}

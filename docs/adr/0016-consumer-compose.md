@@ -69,20 +69,28 @@ This ADR records how they are implemented and what the mechanisms are.
    what Git would do when the consumer commits. The tests therefore build
    their projects in the system's temporary directory, outside this
    repository, whose `target/` is ignored.
-7. **The journal** is `.assemblr/journal.json`: a format number, the planned
-   files with their content identities, and the directories to create. It
-   is written through `journal.json.new` and a rename, after the store and
-   before the files, and removed after the lock. The next `compose` reverts
-   a present journal: files whose bytes still hash to the planned identity
-   are removed, others kept and reported, created directories removed when
-   empty, the journal removed; then the composition is planned afresh, in
-   which a kept file is existing content. A first composition creates
-   files only, so reverting to the pre-composition state needs no copy of
-   anything.
+7. **The journal** is `.assemblr/journal.json`: a format number, the
+   identity of the composition being applied, the planned files with their
+   content identities, and the directories to create. It is written through
+   `journal.json.new` and a rename, after the store and before the files,
+   and removed after the lock. The next `compose` recovers from a present
+   journal. Since the lock is written after every file, a lock whose
+   reconciliation state records the journal's identity proves the
+   composition complete, and only the journal is removed; reverting there
+   would delete the files under a lock that claims them. Otherwise files
+   whose bytes still hash to the planned identity are removed, others kept
+   and reported, created directories removed when empty, the journal
+   removed; then the composition is planned afresh, in which a kept file is
+   existing content. A first composition creates files only, so reverting
+   to the pre-composition state needs no copy of anything. Unit tests
+   inject a failure at each step of the write sequence and check what the
+   recovery does.
 8. **Serialization of compositions.** Compositions of one project run one
    at a time under an exclusive lock on the declaration's file handle
    (`fs4`), which exists in every project and is never written by
-   `compose`, so no lock file is left behind.
+   `compose`, so no lock file is left behind. The declaration is read
+   through that same handle: on Windows the lock is mandatory, and a second
+   handle cannot read the locked file.
 9. **Write order and failure reporting.** Store, journal, directories and
    files (`create_new`, executable bit set on Unix at creation), lock
    through `.assemblr-lock.json.new` and a rename, journal removal. A
@@ -97,7 +105,9 @@ This ADR records how they are implemented and what the mechanisms are.
     existing content, a unit's lockfile, and a unit's manifest; reserved
     paths; a changed declaration refused and a tampered blob, a tampered
     listing, and a missing store each refused by name; an interrupted state
-    constructed on disk and reverted, with an edited file kept; an ignored
+    constructed on disk and reverted, with an edited file kept, and one
+    whose lock is in place completed; unit tests that fail each step of the
+    write sequence and check the recovery; an ignored
     `.env` written but unbased, an ignored `.assemblr/`, and a project with
     no repository; a clone with line-ending conversion.
 

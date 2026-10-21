@@ -41,8 +41,8 @@ pub use manifest::{
 };
 pub use merge::{MergeFailure, MergeNote, Merged};
 pub use project::{
-    ComposeFailure, ComposeProblem, Composed, DECLARATION, InitProjectFailure, ProjectInitialized,
-    Reverted, StoreError, WriteStep, compose_project, init_project,
+    ComposeFailure, ComposeProblem, ComposeRecovery, Composed, DECLARATION, InitProjectFailure,
+    ProjectInitialized, StoreError, WriteStep, compose_project, init_project,
 };
 pub use registry::{
     Added, Indexed, Problem, ReferenceError, Registry, RegistryFailure, StorageError, Synced,
