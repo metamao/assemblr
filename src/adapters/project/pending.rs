@@ -236,18 +236,22 @@ pub(super) fn continue_with(
 /// that waits for the consumer: every file it changed, the marked files
 /// whatever they hold now, and the declaration `add` or `remove` rewrote.
 /// A file edited since that the composition changed without marking it is
-/// kept and named, as in any revert.
+/// kept and named, as in any revert. Refused when the journal is an
+/// interrupted composition's, which `compose` recovers.
 pub fn abort_compose(root: &Path) -> Result<ComposeRecovery, ComposeFailure> {
     let rejected = |problem| ComposeFailure::Rejected {
         problems: vec![problem],
         recovered: None,
     };
     let (guard, store, journal) = open(root).map_err(rejected)?;
-    let resolving = journal
-        .pending
-        .as_ref()
-        .map(|pending| pending.files.clone())
-        .unwrap_or_default();
+    // An interrupted composition is for `compose` to complete or revert,
+    // as `--continue` also says; only a lock that records this one means an
+    // earlier `--continue` got as far as writing it.
+    let resolving = match &journal.pending {
+        Some(pending) => pending.files.clone(),
+        None if lock_records(root, &journal) => Vec::new(),
+        None => return Err(rejected(ComposeProblem::NotPending)),
+    };
     recover(root, &store, &journal, &guard, &resolving)
         .map_err(|error| rejected(ComposeProblem::Store(error)))
 }

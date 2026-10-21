@@ -59,7 +59,10 @@ represented, entered, finalized, and left, on top of the journal of ADR
    consumer's edits to them are the resolution being given up. Every other
    entry follows the revert rules of ADR 0017 point 7, so a file the
    composition changed unmarked and the consumer edited since is kept and
-   named. The declaration is restored through the locked handle.
+   named. The declaration is restored through the locked handle. A journal
+   without the `pending` record, and not completed by the lock, is an
+   interrupted composition: abort refuses it as continue does, and
+   `compose` recovers it.
 7. **Exit status and reporting.** A composition that waits exits 1 after
    printing the counts and the paths, conflicts marked `conflict`, and says
    on stderr to resolve, then `--continue`, or `--abort`. The lock changes
@@ -81,6 +84,16 @@ represented, entered, finalized, and left, on top of the journal of ADR
 - An aborted or interrupted composition leaves its base's objects in the
   store, as an interrupted one already did; collecting unreferenced objects
   is not done.
+- The markers cover the whole file, so the composition's non-conflicting
+  changes to a marked file are not applied to the project's side: the
+  consumer carries them over from the incoming section. This is the cost a
+  line-level merge, or for JSON a marker around only the colliding values,
+  would remove.
+- A clone of a pending project has no journal and a lock that still records
+  the previous composition, so its next `compose` finds the conflict again
+  and wraps the marked file in a second set of markers. The pending state is
+  not portable by design (the journal is transient, ADR 0017 point 6), and
+  the second set is visible and must be removed before `--continue`.
 - A line-level text merge can replace whole-file markers with hunks without
   changing the state machine: only `marked_change` produces the file.
 - A file that legitimately needs a line starting with a marker prefix

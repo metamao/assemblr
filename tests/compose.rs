@@ -1926,3 +1926,46 @@ fn continue_and_abort_exclude_each_other() {
         stderr(&output)
     );
 }
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_clone_of_a_pending_project_marks_the_marked_file_again() {
+    let fixture = Fixture::new("pending-clone");
+    let project = text_conflict(&fixture);
+    fails(fixture.compose(&project));
+
+    // A clone carries the tracked files, not the git-ignored journal.
+    let clone = fixture.dir.join("clone");
+    copy_tree(&project, &clone);
+    fs::remove_file(clone.join(".assemblr/journal.json")).unwrap();
+    fs::remove_dir_all(clone.join(".assemblr/previous")).unwrap();
+
+    // Its lock records the previous composition, and the marked file is
+    // the project's content, so the conflict is found again, around the
+    // markers that are there.
+    let output = fails(fixture.compose(&clone));
+    assert!(
+        stdout(&output).contains("  conflict README.md"),
+        "{}",
+        stdout(&output)
+    );
+    let readme = read(&clone.join("README.md"));
+    assert_eq!(readme.matches("<<<<<<< current").count(), 2, "{readme}");
+
+    // Both sets of markers have to go.
+    fs::write(clone.join("README.md"), "resolved\n").unwrap();
+    succeeds(fixture.assemblr(&clone, &["compose", "--continue"]));
+    assert_eq!(lockfile(&clone)["units"]["@acme/node"]["version"], "1.1.0");
+}

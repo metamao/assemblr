@@ -664,7 +664,9 @@ composition's:
 ```
 
 The markers cover the whole file, and end lines as the project's file
-does. The lock is not written: the journal keeps the lock to write and the
+does. The composition's other changes to that file, for a JSON file the
+values that do not collide, are not applied to the project's side: they are
+in the incoming section, and the consumer carries them over. The lock is not written: the journal keeps the lock to write and the
 files that hold markers. The command reports the files and exits non-zero.
 While resolution is pending, `compose`, `add`, and `remove` refuse, naming
 the files and the two ways out, and change nothing.
@@ -686,11 +688,16 @@ every file the composition changed, the conflicted files whatever they hold
 now, and `assemblr.jsonc` where `add` or `remove` rewrote it. A file the
 composition changed without conflict and the consumer edited since is kept
 and named. The new composition's base stays in the store, unreferenced.
+Like `--continue`, it refuses when the journal is an interrupted
+composition's rather than a waiting one: the next `compose` completes or
+reverts that.
 
 **Recovery.** An interruption while entering the state is reverted by the
 next `compose` like any interrupted composition. The state lives in the
-git-ignored journal, so a clone of a pending project has no journal and
-reconciles its files, markers included, as the project's content.
+git-ignored journal. A clone of a pending project has no journal, and its
+lock still records the previous composition, so its next `compose` finds the
+conflict again, around the markers already in the file, and marks the file a
+second time; every marker must go before `--continue` finishes it.
 
 ## Lock and reconciliation state — Approved
 

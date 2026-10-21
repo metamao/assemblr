@@ -8,7 +8,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::pending::continue_with;
+use super::pending::{abort_compose, continue_with};
 use super::store::Store;
 use super::{
     Application, Change, ComposeFailure, ComposeProblem, ComposeRecovery, DeclarationWrite, Step,
@@ -802,4 +802,27 @@ fn continue_without_a_pending_composition_is_refused() {
         Err(ComposeFailure::Rejected { problems, .. })
             if matches!(problems.as_slice(), [ComposeProblem::NothingPending])
     ));
+}
+
+#[test]
+fn abort_and_continue_leave_an_interrupted_composition_to_compose() {
+    let root = composed("pending-interrupted");
+    let failure = apply_failing(&root, &second(&root), Step::Lock, 1);
+    assert!(matches!(failure, ComposeFailure::Write { .. }));
+    guard(&root);
+    let before = text(&root, "README.md");
+    for failure in [
+        abort_compose(&root).map(|_| ()).unwrap_err(),
+        continue_with(&root, &mut |_| Ok(()))
+            .map(|_| ())
+            .unwrap_err(),
+    ] {
+        assert!(matches!(
+            failure,
+            ComposeFailure::Rejected { problems, .. }
+                if matches!(problems.as_slice(), [ComposeProblem::NotPending])
+        ));
+    }
+    assert_eq!(text(&root, "README.md"), before);
+    assert!(exists(&root, ".assemblr/journal.json"));
 }
