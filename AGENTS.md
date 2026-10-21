@@ -61,12 +61,12 @@ Classify a decision by its consequences, not by how unsure you feel:
    task needs, that contradicts no approved statement and follows the
    approved direction where one exists, and that a later PR could revise
    without breaking published units or persisted state. Decide it, implement
-   it, record it in the decision backlog (§1.2), and cite the entry in the PR
+   it, record it in the decision log (§1.2), and cite the entry in the PR
    and in the domain document's implementation notes. The related open
    contract stays open: a provisional decision is implemented behavior, not
    an approved contract, until the owner settles it.
 3. **Deferred.** A question the task does not need answered. Record it in the
-   backlog as an open question and move on. Do not open an issue for it.
+   decision log as deferred and move on. Do not open an issue for it.
 4. **Blocker.** A decision that sets or changes product direction or the
    trajectory, contradicts or changes an approved statement, commits the
    compatibility of published content or persisted formats, or weakens a
@@ -79,25 +79,31 @@ in a later increment. If it would, decide and record it. An increment the
 trajectory authorizes proceeds from issue preparation through implementation
 and review on this basis. The owner's approval is for merges, for blockers,
 for changes to approved contracts, and for the occasional review of the
-backlog, not for every scope detail.
+decision log, not for every scope detail.
 
-### 1.2 Decision backlog
+### 1.2 Autonomous decision log
 
-The backlog is the single GitHub issue named in §14. It accumulates
-provisional decisions and deferred questions as independently identifiable
-entries, `D-<n>`, one comment each, in the format the issue describes: the
-problem, the decision or open question, the rationale, the alternatives and
-trade-offs, and the implementation reference. It is not a blocker queue:
-nothing waits for a reply there, a PR is reviewable and mergeable while its
-entries are unreviewed, and the owner reviews the backlog occasionally as a
-batch. Only an entry that needs correction produces follow-up work.
+The log is one open GitHub issue titled `[Owner review] Autonomous
+decisions` (§14). Before posting, find the open issue with that title or an
+equivalent one; create it with the canonical title only when none is open,
+and never reopen a closed log. Each entry is one comment, `D-<n>` with the
+next free number, in a casual, scannable form: **Context** (the problem or
+uncertainty), **Decision** (what was actually decided and implemented, or
+explicitly deferred), **Why** (the essential reasoning and trade-offs), and
+**Reference** (issue, PR, or code). State the decision taken, not only the
+question. Add alternatives and external references only when they add
+something. Routine decisions are not logged.
 
-Write an entry when the decision is made, during the increment. Do not write
-one for a status request, a resumed session that only re-establishes state,
-a review round that decides nothing new, or an investigation that ends in an
-intervention issue. Record each decision once: the PR links the entry
-instead of restating it, and an entry cites, never duplicates, an
-intervention issue or a register entry.
+The log is for the owner's occasional, separate review. Nothing waits for a
+reply there, an entry creates no approval requirement, and a PR is
+reviewable and mergeable while its entries are unreviewed. Only an entry
+that needs correction produces follow-up work. Write an entry when the
+decision is made, during the increment, not for a status request, a resumed
+session that only re-establishes state, a review round that decides nothing
+new, or an investigation that ends in an intervention issue. Record each
+decision once: the PR and the issue link the entry instead of restating it,
+and an entry cites, never duplicates, an intervention issue or a register
+entry.
 
 ### 1.3 Authoring experience
 
@@ -347,8 +353,16 @@ rules apply whether or not the hosting platform enforces them.
   `docs/…`, `refactor/…`, `ci/…`, or `chore/…`. Keep each branch to one
   cohesive change.
 - Run the checks in §8 locally before pushing, then push the branch and open
-  a pull request. The description states what changed and why, which checks
-  ran, and any change to `docs/domain/`, ADRs, or open contracts.
+  a pull request. The description is short: what changed, why it matters,
+  what needs attention, the checks that ran, and any change to
+  `docs/domain/`, ADRs, or open contracts. Add detail only where complexity
+  or risk warrants it.
+- **Tone.** PR titles and descriptions, progress comments, review comments,
+  and decision-log entries are casual, clear, concise, and professional:
+  plain English, no boilerplate, no repeated explanations, no file-by-file
+  or test-by-test inventories, no session history. Brevity never hides a
+  risk, a limitation, or an actionable finding. Implementation issues,
+  intervention issues, and investigations keep their full detail.
 - **The owner reviews and merges.** Agents never merge pull requests,
   including their own. Changes to `docs/domain/` need the owner's explicit
   approval.
@@ -490,7 +504,7 @@ Never open a second branch or PR for an issue that already has one.
 
 A merge accepts the merged change and any decision the owner explicitly
 approved as part of the PR. It does not answer questions the PR asked
-separately. Keep each unanswered question visible, in the decision backlog,
+separately. Keep each unanswered question visible, in the decision log,
 the next increment's issue, an intervention issue, or the open-question
 register. Assess whether it blocks a future increment, and never resolve it
 by assumption.
@@ -507,10 +521,10 @@ Escalate only for:
 - a next step that would violate approved constraints.
 
 Do not escalate routine, provisional, or deferred decisions (§1.1): decide
-them or record them in the backlog. Do not escalate speculative doubts.
+them or record them in the decision log. Do not escalate speculative doubts.
 
 **Reuse first.** A request may already live in the increment's issue, its PR,
-an open intervention issue, the decision backlog (§1.2), the open-question
+an open intervention issue, the decision log (§1.2), the open-question
 register (§14), or another active discussion. If it does, keep it there.
 Create an intervention issue only when the blocker must be tracked across
 sessions, affects several increments, or
@@ -580,19 +594,20 @@ be working at the same time.
 - **Owner:** `metamao`, who approves, decides, and merges.
 - **Increments:** sub-issues of #9, in trajectory order. Branches are named
   `feat/<issue>-<slug>`, for example `feat/6-unit-manifest`. The PR says
-  `Closes #N`, lists the checks it ran, any changes to `docs/domain/`,
-  ADRs, or open contracts, and its backlog entries (`D-<n>`, one line each
-  with what was decided and why), and ends with "Findings for later
-  increments".
+  `Closes #N`, names any change to `docs/domain/`, ADRs, or open contracts,
+  links its decision-log entries (`D-<n>`), and ends with "Findings for
+  later increments" when there are any.
 - **Contracts:** approved contracts live in [`docs/domain/`](docs/domain/),
   and open questions in the register
   [`open-contracts.md`](docs/domain/open-contracts.md).
-- **Decision backlog:** [#34](https://github.com/metamao/assemblr/issues/34)
-  (§1.2). Its body gives the entry format; agents post one comment per entry
-  and take the next free `D-<n>`.
+- **Decision log:** [#34](https://github.com/metamao/assemblr/issues/34),
+  titled `[Owner review] Autonomous decisions` (§1.2). One comment per
+  entry, `D-<n>`. If no open issue with that title exists, create one; keep
+  a single active log.
 - **Interventions:** domain questions belong in the register, and their
-  provisional answers and deferred questions in the backlog. A question that
-  blocks the next increment gets an `[Owner decision] Decide OC-<n>: …` issue.
+  provisional answers and deferred questions in the decision log. A question
+  that blocks the next increment gets an `[Owner decision] Decide OC-<n>: …`
+  issue.
 - **Checks:** [`ci.yml`](.github/workflows/ci.yml) runs format, lint, build,
   and test on Linux and Windows, and checks the MSRV.
 - **Automated review:** [`claude-review.yml`](.github/workflows/claude-review.yml)

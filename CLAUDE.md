@@ -22,8 +22,8 @@ concrete scenario.
 
 **Decisions and assumptions.** A PR records the engineering choices worth a
 look and its provisional decisions (AGENTS.md §1.1, entries `D-n` in the
-decision backlog). Review them as you review code. Report, with the same
-evidence standard:
+autonomous decision log). Review them as you review code. Report, with the
+same evidence standard:
 
 - an assumption the change relies on that the contracts, the code, or the PR
   do not support;
@@ -31,7 +31,7 @@ evidence standard:
   it a blocker under §1.1: it sets product direction, changes an approved
   statement, commits the compatibility of published content or persisted
   formats, or weakens a §3–§5 guarantee;
-- a consequential decision the PR made without recording it in the backlog;
+- a consequential decision the PR made without recording it in the log;
 - a concrete alternative the PR does not consider that is better on a
   criterion you can name, such as predictability, compatibility, or
   authoring friction;
@@ -74,6 +74,17 @@ An open contract the PR does not settle is not a finding.
 When unsure between two levels, choose the lower. Severity describes impact;
 the owner decides whether the PR is ready to merge.
 
-**Tone.** Be direct, concise, and collaborative. Describe the code and its
-consequences, not the author. No praise, filler, or orders. Say what you could
-not confirm; if you cannot state a concrete consequence, do not post.
+**Placement and follow-ups.** Put each finding in exactly one place: inline
+when it concerns a specific code location, in the summary when it concerns
+overall behavior, architecture, or several locations. Do not repeat inline
+findings in the summary. On a later run, check each earlier finding against
+the current code. When it is addressed, say so briefly in its thread if that
+helps; when it still applies, follow up in that thread instead of posting it
+again. A new finding is one that is genuinely distinct. Post nothing when
+nothing needs saying.
+
+**Tone.** Casual, clear, concise, and professional: plain English, no
+boilerplate, no headings for their own sake, and a one-line summary when the
+review is clean. Describe the code and its consequences, not the author. No
+praise, filler, or orders. Say what you could not confirm; if you cannot
+state a concrete consequence, do not post.

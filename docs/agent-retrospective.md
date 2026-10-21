@@ -45,8 +45,8 @@ run.
 - Where did you lose time: unclear or contradictory instructions, missing
   documentation, tooling friction, or workflow steps that added no value?
 - What capability, information, or convention was missing?
-- Did the decision tiers (AGENTS.md §1.1), the backlog, escalation, or the
-  automated review fit the situation, or did they get in the way?
+- Did the decision tiers (AGENTS.md §1.1), the decision log, escalation, or
+  the automated review fit the situation, or did they get in the way?
 - What one change to this environment would have helped most?
 
 ## Example
@@ -67,37 +67,11 @@ the first pass, which the acceptance criteria did not cover.
 
 ## Isolation of `.retro/`
 
-The write-only rule is a convention for agents, not a security boundary, and
-nothing in this repository enforces it. Two Claude Code mechanisms were
-tested (Claude Code 2.1.306):
-
-- A `Read(./.retro/**)` deny rule in `permissions.deny` also blocks the
-  `Write` and `Edit` tools on those paths, so no entry can be created. It is
-  not usable.
-- A `PreToolUse` hook that denies `Read`, `Glob`, `Grep`, and `Bash` calls
-  whose input names `.retro`, while leaving `Write` and `Edit` alone, works:
-  entries are created and edited, and direct reads through those tools are
-  refused. It does not cover indirect access, such as `find`, `grep -r` run
-  from the repository root, or a script that opens the files without naming
-  the directory.
-
-This repository keeps `.claude/settings.json` out of version control, so the
-hook is an optional local setting. To enable it, merge this into that file:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Read|Glob|Grep|Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "t=$(jq -r '[.tool_input.file_path, .tool_input.path, .tool_input.pattern, .tool_input.command] | map(select(. != null)) | join(\" \")'); if printf '%s' \"$t\" | grep -Eq '(^|[^[:alnum:]])\\.retro(/|$|[[:space:]])'; then jq -n '{hookSpecificOutput:{hookEventName:\"PreToolUse\",permissionDecision:\"deny\",permissionDecisionReason:\"Retrospectives are write-only for agents: .retro/ entries are not read in a session.\"}}'; fi; exit 0"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+The write-only rule is a convention for agents, not an enforced boundary,
+and the owner has decided not to enforce it for now. Two Claude Code
+mechanisms were tested (Claude Code 2.1.306): a `Read(./.retro/**)` deny
+rule also blocks the `Write` and `Edit` tools on those paths, so no entry
+could be created; a `PreToolUse` hook that denies `Read`, `Glob`, `Grep`,
+and `Bash` calls naming `.retro` lets `Write` and `Edit` through but does
+not cover indirect access such as `find`, `grep -r`, or scripts. Neither is
+installed. Revisit only with a concrete need and a reliable mechanism.

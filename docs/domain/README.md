@@ -60,7 +60,12 @@ it as an open contract instead.
 Only the owner's acceptance makes a recommendation binding or usable as a
 default. A recommendation the owner has not accepted, for example one made in
 research, an experiment, or a review, is not a requirement, even when it
-appears in an open contract's context.
+appears in an open contract's context. An agent may implement a
+**provisional decision** on an open point within its delegated authority
+([AGENTS.md §1.1](../../AGENTS.md#11-decisions-autonomy-by-default-escalation-by-exception)),
+recorded in the autonomous decision log. That is neither approval nor
+resolution: the behavior stays provisional, the open contract stays open, and
+only the owner's decision makes it approved.
 
 ## Scope
 
