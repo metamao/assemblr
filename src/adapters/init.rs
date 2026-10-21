@@ -168,7 +168,10 @@ pub fn init_unit(
         done.directory_created = true;
     }
     if done.git != GitOutcome::Adopted {
-        init_repository(&directory).map_err(InitFailure::Git)?;
+        init_repository(&directory).map_err(|error| InitFailure::Init {
+            error,
+            done: Box::new(done.clone()),
+        })?;
     }
     let steps: [(&str, Planned, Option<&str>); 3] = [
         (MANIFEST, manifest, None),
@@ -430,8 +433,16 @@ pub enum InitFailure {
     /// The directory is the top level of a linked worktree, whose `.git` is
     /// a file.
     LinkedWorkTree(PathBuf),
-    /// Git could not be run, or failed.
+    /// Git could not be run, or failed, while looking for a repository.
     Git(GitError),
+    /// Git could not initialize the repository. `done` says what was
+    /// written before.
+    Init {
+        /// Why.
+        error: GitError,
+        /// What was done before.
+        done: Box<Initialized>,
+    },
     /// `manifest.jsonc` exists and is not UTF-8 text.
     ManifestNotUtf8(PathBuf),
     /// `manifest.jsonc` exists and is not a valid manifest.
@@ -512,6 +523,11 @@ impl fmt::Display for InitFailure {
                 path.display()
             ),
             Self::Git(error) => error.fmt(f),
+            Self::Init { error, done } => write!(
+                f,
+                "could not initialize a Git repository in {}: {error}",
+                done.directory().display()
+            ),
             Self::ManifestNotUtf8(path) => write!(f, "{} is not UTF-8 text", path.display()),
             Self::InvalidManifest { path, error } => write!(
                 f,

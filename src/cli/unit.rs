@@ -173,7 +173,7 @@ fn describe_initialized(initialized: &Initialized) -> String {
 /// What remains after a failed initialization, and what the author can do.
 fn init_hint(failure: &InitFailure) -> String {
     match failure {
-        InitFailure::Write { done, .. } => {
+        InitFailure::Write { done, .. } | InitFailure::Init { done, .. } => {
             let mut state = Vec::new();
             if done.directory_created() {
                 state.push("the directory was created");
@@ -195,9 +195,14 @@ fn init_hint(failure: &InitFailure) -> String {
             } else {
                 format!("written so far: {}", state.join(", "))
             };
+            let git = if matches!(failure, InitFailure::Init { .. }) {
+                "; Assemblr needs Git installed and on the PATH"
+            } else {
+                ""
+            };
             format!(
-                "{written}; fix the problem and run the same command again, which completes \
-                 the scaffold"
+                "{written}{git}; fix the problem and run the same command again, which \
+                 completes the scaffold"
             )
         }
         InitFailure::Inside { top_level, .. } => format!(

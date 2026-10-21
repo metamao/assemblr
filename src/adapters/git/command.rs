@@ -17,12 +17,16 @@ const NULL_DEVICE: &str = "NUL";
 #[cfg(not(windows))]
 const NULL_DEVICE: &str = "/dev/null";
 
-pub(super) const ENVIRONMENT: [(&str, &str); 6] = [
+pub(super) const ENVIRONMENT: [(&str, &str); 8] = [
     // Ignore the user's and the system's configuration, so a read does not
     // depend on the machine. The repository's own configuration still
     // applies, which is why the arguments below override parts of it.
     ("GIT_CONFIG_NOSYSTEM", "1"),
     ("GIT_CONFIG_GLOBAL", NULL_DEVICE),
+    // Git's messages are read in places, such as repository discovery, so
+    // they must not depend on the user's locale.
+    ("LC_ALL", "C"),
+    ("LANGUAGE", "C"),
     // Never fetch a missing object, as a partial clone would: that reaches
     // the network and runs the transport the repository configures. Git
     // before 2.45 ignores the first setting, and the second, which allows

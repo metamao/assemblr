@@ -24,7 +24,11 @@ JSON Schema is produced and tested.
    directory, or in its nearest existing ancestor when it does not exist
    yet, with ADR 0006's environment and arguments but **without** `GIT_DIR`,
    so Git searches the parents as it does for the user. "Not a git
-   repository" on stderr means none; any other failure is an error. The top
+   repository" on stderr means none; any other failure is an error. Since
+   that reads one of Git's messages, the shared read environment now also
+   sets `LC_ALL=C` and `LANGUAGE=C`, extending ADR 0006, so no read depends
+   on the author's locale; CI installs no other locale, so this is not
+   exercised there. The top
    level is compared with the directory through `fs::canonicalize` on both,
    which absorbs Git's forward slashes on Windows and symbolic links in the
    path. The outcomes are: no repository (initialize), the directory is the

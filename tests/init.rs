@@ -258,7 +258,7 @@ fn init_adopts_the_top_level_of_an_existing_repository() {
         stdout(&output).contains(&format!(
             "created the directory, a Git repository (nested in the repository at {}), \
              manifest.jsonc",
-            fs::canonicalize(&plain).unwrap().display()
+            git(&plain, &["rev-parse", "--show-toplevel"])
         )),
         "{}",
         stdout(&output)
