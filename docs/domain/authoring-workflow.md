@@ -76,23 +76,24 @@ Open:
 
 `unit amend` creates an amendment from a dependency's file. It:
 
-- locates the dependency's file **recursively by filename**;
+- locates the dependency's file **recursively by filename**, searching the
+  `src/` trees of the unit's **direct dependencies**, each at its version in
+  the [unit lock state](#unit-lock-state--approved);
 - **fails** if no file matches;
 - uses the file when **exactly one** matches;
 - **fails on ambiguity** and reports every matching path;
 - accepts an unambiguous **relative path** when a filename is not enough;
-- creates an **editable full-file copy**;
-- records the copy's **exact base provenance**;
+- creates an **editable full-file copy** at `amendments/<path>`;
+- records the copy's **exact base provenance** in the manifest: the
+  dependency's identity and the locked version (see
+  [amendments-and-composition.md](amendments-and-composition.md#layout-and-declaration));
 - never **silently overwrites** an existing amendment.
 
 Open:
 
-- Whether an amendment's base is a file of the dependency itself or the
-  dependency's composed output, including files and amendments from its own
-  dependencies. This decides how amendments stack across a dependency chain
-  and what their provenance records, as well as which file tree the lookup
-  searches. **OC-20.**
-- Amendment layout and declaration syntax. **OC-2**, **OC-3.**
+- The declaration's schema and syntax. **OC-2.**
+- Whether `unit amend` requires a current unit lockfile or may resolve and
+  write one. **OC-46.**
 
 ## Check — Approved
 
@@ -104,7 +105,10 @@ Open:
   of every dependency are satisfied through the dependency chain (see
   [parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved));
 - dependency resolution;
-- amendment validity and availability of each historical base;
+- amendment validity: each amendment targets a direct dependency that
+  provides the path, its declared base version is the locked version, the
+  lockfile identifies that version's content, and the historical base is
+  available;
 - merge validity;
 - an **effective, non-redundant contribution**.
 
@@ -286,7 +290,9 @@ Decided by the owner for the first `unit build` (OC-46):
 - `unit build` creates it, and rewrites it when resolution changes it, for
   example when a dependency is added to or removed from the manifest, or a
   range is changed so that a locked version no longer satisfies it. Each
-  change is reported. When nothing changes, the file is not touched.
+  change is reported. When nothing changes, the file is not touched. A
+  change to the locked version of a unit the author amends is the exception:
+  the build fails instead (below).
 - A locked version that the registry now records with other content than
   the lockfile does is rejected, never used or silently relocked.
 - Deleting the lockfile is not an integrity-preserving repair. It discards
@@ -295,10 +301,26 @@ Decided by the owner for the first `unit build` (OC-46):
 - A lockfile that is not one Assemblr wrote, for example one with
   unresolved merge conflicts, is reported and left as it is.
 
+The lockfile and amendments:
+
+- The lockfile entry for a unit that the author amends is the **content
+  identity of the amendment's base**: the declared base version, with the
+  commit and tree it was published with. The lockfile is tracked, so it is
+  published with the unit, and dependents and consumers verify bases against
+  it (see
+  [amendments-and-composition.md](amendments-and-composition.md#base-identity-and-verification)).
+- Changing the locked version of a unit that an amendment is based on is an
+  explicit [update](#update--approved), never a side effect of a build. When
+  the resolution of `unit build` would change that version, for example after
+  a range edit, the build fails and changes nothing, naming the amendments
+  concerned. The diagnostic distinguishes the two causes: the dependency's
+  resolved version changed, which `unit update` reconciles, or the declared
+  base version was edited by hand, which reverting the edit fixes.
+
 Open:
 
-- How the unit lockfile relates to the base provenance that amendments
-  record. **OC-46**, with **OC-20.**
+- Which other operations write the lockfile, including whether `unit amend`
+  requires a current lockfile or may write one. **OC-46.**
 
 ## Update — Approved
 
@@ -309,6 +331,11 @@ because a new version becomes available.
 [unit lock state](#unit-lock-state--approved), and reconciles the unit's
 amendments from their historical base to the newer dependency version.
 
+- Reconciliation works on the **source templates**: the base at the old
+  version, the amendment copy, and the base at the new version. The result is
+  a new editable copy that keeps its template expressions. The declared base
+  version and the lock change together with it (see
+  [amendments-and-composition.md](amendments-and-composition.md#template-contexts--approved)).
 - Changing the **resolved version** of a dependency and changing its declared
   SemVer **range** are separate concerns.
 - Assemblr **never widens a declared range automatically**. Changing a range is
@@ -325,6 +352,8 @@ Open:
   follows the resolution policy, which is not yet decided. **OC-16.**
 - The command surface for updating a version and for changing a range.
   **OC-7**, **OC-27.**
+- How reconciliation conflicts are presented to the author, and how the
+  update is completed or abandoned. **OC-53.**
 
 ## Testing: native validation vs functional correctness — Approved
 
@@ -353,7 +382,9 @@ tag version must match the manifest version at the tagged commit exactly (see
 `unit publish`:
 
 1. validates the manifest and identity;
-2. resolves and verifies dependencies and amendments;
+2. resolves and verifies dependencies and amendments, including that the
+   unit lockfile the published version will carry identifies the content of
+   every amendment base;
 3. verifies that the required parameters of its direct dependencies are
    satisfied by defaults, its `options`, or mappings from its own parameters,
    and that those of transitive dependencies are satisfied through the

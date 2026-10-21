@@ -42,21 +42,79 @@ The term **amendment** is approved and replaces the earlier term *fragment*.
 Amendments are created with `unit amend` and reconciled with `unit update`
 (see [authoring-workflow.md](authoring-workflow.md)).
 
+### The base
+
+- An amendment's base is a file in the **`src/`** of the unit that provides
+  it, at an exact published version of that unit. It is never the composed
+  output of that unit, so it never includes amendments made by other units.
+- Amendments that several units make to the same file are combined **side by
+  side** against that original (see
+  [merge semantics](#merge-semantics--approved)).
+- A unit therefore cannot independently override a value that another unit
+  **added or changed through an amendment**: that value is not in its base,
+  and setting it to a different value is a conflict. Whether identical
+  contributions from several amenders are compatible or conflict is
+  **OC-10**. A unit that wants such a value to be configurable exposes it as a
+  parameter of its own, which other units set through `options`. Changing a
+  value from another unit's `src/` is an ordinary amendment.
+- Amendments that build on a dependency's composed output, including that
+  dependency's own amendments, are outside Alpha.
+
+### Target
+
+- An amendment targets a **direct dependency** of the amending unit: an
+  identity declared in its own `dependencies`, which provides the file's path
+  in its `src/`. Amending a file of a transitive dependency, or of any other
+  identity, is an error.
+
+### Layout and declaration
+
+- An amendment copy lives at **`amendments/<path>`**, where `<path>` is the
+  file's path in the provider's `src/`, with the same path rules (see
+  [units.md](units.md#src-unit-files)). An amendment changes a file's content,
+  never its path.
+- The amending unit's own `src/` must not hold a file at the same path. That
+  is a path collision.
+- The manifest declares each amendment by its path, with the identity of the
+  target unit and the **exact base version**. The declared version must equal
+  the version of that unit in the
+  [unit lock state](authoring-workflow.md#unit-lock-state--approved).
+- Amendments change **content only**. They do not delete, rename, or create
+  files, and they do not change a file's executable bit; the provider's bit
+  stands.
+
+### Base identity and verification
+
+- The exact content of a base is identified through the amending unit's unit
+  lockfile: its entry for the target unit records the base version together
+  with the commit and tree that version was published with (see
+  [authoring-workflow.md](authoring-workflow.md#unit-lock-state--approved)).
+  The lockfile is tracked, so a published version of the amending unit carries
+  it. A published version with amendments carries a lockfile consistent with
+  its declarations.
+- Whoever composes an amendment, a dependent unit's build or a consumer
+  project, verifies the base: the amending unit's lockfile entry for the
+  declared version is compared with the composer's own registry record for
+  that unit and version. If they agree, the base is verified. If they differ,
+  that is an **integrity conflict**: the composition fails and changes
+  nothing (see
+  [registries-and-discovery.md](registries-and-discovery.md#integrity-and-snapshots--approved)).
+  If the version or its content is unavailable, see **OC-9**.
+- **Verifying a base is distinct from comparing it with the resolved
+  version.** A composition may resolve the target unit to a version other
+  than the declared base; the unit lockfile does not determine what
+  dependents and consumers resolve. That is normal, never an integrity
+  violation. The amendment's changes are derived against its verified base
+  and applied to the file at the resolved version, and incompatible changes
+  are reported (**OC-10**). Only when the resolved version equals the base is
+  the result simply the amended copy.
+
 Open:
 
-- The manifest syntax for declaring amendments. No earlier experimental
-  syntax, such as `extends` or a `merges` field, is canonical. **OC-2.**
-- The on-disk layout and naming of amendment copies, and how provenance
-  metadata is stored. **OC-3.**
-- Whether an amendment can delete an entire dependency file, or only change its
-  content. **OC-19.**
+- The manifest schema and syntax for declaring amendments. No earlier
+  experimental syntax, such as `extends` or a `merges` field, is canonical.
+  **OC-2.**
 - Behavior when a base's historical Git objects are unavailable. **OC-9.**
-- Whether an amendment's base is a file of the dependency itself (amendments
-  from different units are then combined side by side against the original) or
-  the dependency's composed output (an amendment then builds on its
-  dependency's own amendments), and what provenance each model requires. This
-  determines whether a unit can refine a value that one of its dependencies
-  already amended. **OC-20.**
 - Whether conflicts between units' contributions in a consumer composition are
   resolved like conflicts with consumer modifications. **OC-47.**
 
@@ -65,17 +123,39 @@ Open:
 Research established that values belonging to the original dependency must be
 kept distinct from values owned by the amending unit.
 
+- A file is rendered as a deterministic function of its source and its
+  **context**. A unit file's context is the resolved parameter values of the
+  unit that provides it (see
+  [parameters-and-options.md](parameters-and-options.md#rendering--approved-direction-details-open)).
 - The namespace **`own.*`** is reserved for the amending author's **own**
-  context.
+  context. `own` is not a valid parameter name, and it is defined only when an
+  amendment copy is rendered. Rendering unit files needs only that
+  reservation; the behavior below is a requirement on amendment composition.
+- An amendment copy is rendered with its base's context, the provider's
+  resolved parameter values, plus `own`: the amending unit's own resolved
+  parameter values, the same values its `src/` files see.
 - The original copy and the amended copy are rendered against **compatible
   base contexts** before changes are derived, so that the derived changes
-  reflect the author's edits and not differences between contexts.
+  reflect the author's edits and not differences between contexts. Expressions
+  inherited from the provider render identically on both sides; what remains
+  is the author's edit, with the composition's `own` values.
+- An amendment copy is interpolated exactly when its base file is. The rule
+  that selects files for interpolation applies to the provider's file, and
+  the copy inherits the outcome.
+- **Composing and updating are distinct operations.** A composition derives
+  and applies changes on **rendered** content, with the composition's own
+  contexts. `unit update` reconciles the **source templates**, the base at the
+  old version, the copy, and the base at the new version, so that the copy
+  keeps its template expressions, including `own.*` and content inside
+  template conditions that a particular composition disables.
 
 Open:
 
-- The exact rendering protocol for originals and amendments, consistent with
-  the requirements above, including exactly what the `own.*` context contains.
-  **OC-5.**
+- The contexts used to render a base, and the file at the resolved version,
+  when the resolved version of the provider is not the base version, for
+  example when their parameters differ. **OC-52.**
+- The template engine, syntax, escaping, non-text files, and the rule that
+  selects files for interpolation. **OC-5.**
 
 ## Merge semantics — Approved
 
@@ -127,7 +207,9 @@ Open:
 Open:
 
 - The manifest representation of list identity hints. **OC-4.**
-- Production merge algorithms and adapter selection. **OC-10.**
+- Production merge algorithms and adapter selection, including how an
+  amendment is applied to a provider version other than its base, and whether
+  results stay stable across Assemblr versions. **OC-10.**
 
 ### Composition, builds, and reconciliation
 

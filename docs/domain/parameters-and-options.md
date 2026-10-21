@@ -42,6 +42,11 @@ Each parameter has:
 Values supplied for a parameter, and its default, are validated against its
 type and allowed values.
 
+The name `own` is **reserved** for the amending author's template context
+(see
+[amendments-and-composition.md](amendments-and-composition.md#template-contexts--approved)).
+It is not a valid parameter name. The syntax of other names is **OC-50**.
+
 Requiredness follows from the default alone:
 
 - A parameter **without a default is required**.
@@ -76,7 +81,23 @@ Parameters must not:
 
 ### Rendering — Approved direction, details Open
 
+The rules below are approved. The engine, the syntax, and the other items
+listed as open are not.
+
 - Rendering **must be deterministic**.
+- Rendering is a **pure function of one file**: its source text and its
+  context. No other file, and no state outside the context, takes part.
+- A unit file's **context** is the resolved parameter values of the unit that
+  provides it. Amendment copies additionally see `own`, the amending unit's
+  own values (see
+  [amendments-and-composition.md](amendments-and-composition.md#template-contexts--approved)).
+  `own` is reserved and is defined only there; a reference to it elsewhere is
+  an undefined reference.
+- A reference to an **undefined value is a rendering error**. It never
+  renders as empty text.
+- Whether a file is interpolated is decided by the rule in OC-5, applied to
+  the providing unit's file. An amendment copy of that file inherits the
+  outcome.
 - The expected direction is a mechanism compatible with Jinja-style
   templating. This is provisional. The engine and syntax are not yet chosen.
 - If the selected template mechanism supports conditional content, it must not
