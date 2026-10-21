@@ -492,7 +492,13 @@ fn compose_with(
             }
             (Action::Merge { executable }, Some(file), Some(held)) => {
                 match merge_file(&store, &base, path, held, file) {
-                    Ok(bytes) => {
+                    Ok((bytes, not_carried)) => {
+                        notes.extend(not_carried.into_iter().map(|what| {
+                            format!(
+                                "{path}: {what} in the composition is not in your file; the \
+                                 merge carries members and values, not comments or order"
+                            )
+                        }));
                         changes.insert(
                             path.clone(),
                             Change::Modify {
@@ -540,26 +546,53 @@ fn compose_with(
         Err(problem) => problems.push(problem),
     }
     // Which delivered files the project's version control ignores: their
-    // base is not stored, since the store is tracked. The rules are read
-    // at every composition: a file the consumer ignored since is no longer
-    // stored, and one no longer ignored is stored from now on.
+    // base is not stored, since the store is tracked. Only the project's
+    // own rules, its `.gitignore` files, decide that, because the lock
+    // records it and every clone must lock the same way. The rules are read
+    // at every composition: a file the project ignored since is no longer
+    // stored, and one it no longer ignores is stored from now on.
     let path_texts: Vec<&str> = files.keys().map(RelativePath::as_str).collect();
     let mut probe = path_texts.clone();
     let directories_of_store = store.directories();
     probe.extend(directories_of_store.iter().map(String::as_str));
-    let ignored = match ignore::ignored(root, &probe) {
-        Ok(ignored) => ignored,
+    let ignores = match ignore::ignored(root, &probe) {
+        Ok(ignores) => ignores,
         Err(error) => {
             problems.push(ComposeProblem::Ignore(error));
-            BTreeSet::new()
+            ignore::Ignores::default()
         }
     };
+    // The consumer's own rules (`.git/info/exclude`, the global excludes)
+    // keep a file out of version control on their machine only. Such a
+    // file is not unbased for everyone, so storing its content would put
+    // into the tracked base what the consumer chose to keep out, and
+    // leaving it unstored would lock this project differently here than
+    // elsewhere. A file the base already stores stays stored: that was
+    // settled before, and nothing new enters the store.
+    let already_stored =
+        |path: &RelativePath| base.files().contains_key(path) && !previously_unbased.contains(path);
+    let locally_ignored: Vec<(RelativePath, String)> = files
+        .keys()
+        .filter(|path| !ignores.is_project(path))
+        .filter(|path| !already_stored(path))
+        .filter_map(|path| {
+            ignores.local(path).map(|rule| {
+                (
+                    path.clone(),
+                    format!("pattern {:?} in {}", rule.pattern(), rule.source()),
+                )
+            })
+        })
+        .collect();
+    if !locally_ignored.is_empty() {
+        problems.push(ComposeProblem::LocallyIgnored(locally_ignored));
+    }
     if !problems.is_empty() {
         return Err(rejected_all(problems));
     }
     let unbased: BTreeSet<RelativePath> = files
         .keys()
-        .filter(|path| ignore::is_ignored(&ignored, path))
+        .filter(|path| ignores.is_project(path))
         .cloned()
         .collect();
     for path in &unbased {
@@ -567,17 +600,25 @@ fn compose_with(
             continue;
         }
         notes.push(format!(
-            "{path} is ignored by the project's version control, so its reconciliation base is \
-             not stored; a later composition cannot reconcile edits to it"
+            "{path} is ignored by the project's .gitignore, so its reconciliation base is not \
+             stored; a later composition cannot reconcile edits to it"
         ));
+    }
+    for path in files.keys() {
+        if previously_unbased.contains(path) && !unbased.contains(path) {
+            notes.push(format!(
+                "{path} is no longer ignored by the project's .gitignore, so its composed content \
+                 is stored in the tracked base from now on"
+            ));
+        }
     }
     if let Some(directory) = directories_of_store
         .iter()
-        .find(|directory| ignored.contains(*directory))
+        .find(|directory| ignores.any(directory))
     {
         notes.push(format!(
-            "{directory} is ignored by the project's version control, so the reconciliation \
-             base will not travel with the project; a clone cannot reconcile later compositions"
+            "{directory} is ignored by the project's version control, so the reconciliation base will \
+             not travel with the project; a clone cannot reconcile later compositions"
         ));
     }
     let state = ReconciliationState::new(
@@ -827,7 +868,7 @@ fn merge_file(
     path: &RelativePath,
     held: &CurrentFile,
     incoming: &UnitFile,
-) -> Result<Vec<u8>, FileConflictKind> {
+) -> Result<(Vec<u8>, Vec<String>), FileConflictKind> {
     let Some(base_file) = base.files().get(path) else {
         return Err(FileConflictKind::Unmergeable("it has no base".to_owned()));
     };
@@ -843,7 +884,7 @@ fn merge_file(
     let current_text = text(&held.bytes, "the project's file")?;
     let incoming_text = text(incoming.contents(), "the composed file")?;
     match reconcile_json(&base_text, &current_text, &incoming_text) {
-        Ok(text) => Ok(text.into_bytes()),
+        Ok(reconciled) => Ok((reconciled.text.into_bytes(), reconciled.notes)),
         Err(ReconcileFailure::Conflicts(conflicts)) => Err(FileConflictKind::Values(conflicts)),
         Err(other) => Err(FileConflictKind::Unmergeable(other.to_string())),
     }
@@ -1456,6 +1497,9 @@ pub enum ComposeProblem {
     Existing(Vec<RelativePath>),
     /// The project's ignore rules could not be read.
     Ignore(IgnoreError),
+    /// Delivered files that only the consumer's own Git rules ignore, and
+    /// that the base would store for the first time.
+    LocallyIgnored(Vec<(RelativePath, String)>),
     /// The project and the declared composition changed the same files
     /// in ways that need the consumer.
     Conflicts(Vec<FileConflict>),
@@ -1579,6 +1623,22 @@ impl fmt::Display for ComposeProblem {
                 Ok(())
             }
             Self::Ignore(error) => error.fmt(f),
+            Self::LocallyIgnored(paths) => {
+                write!(
+                    f,
+                    "the composition would store the content of {} file(s) that only your own Git \
+                     rules ignore, not the project's .gitignore, in the tracked base:",
+                    paths.len()
+                )?;
+                for (path, rule) in paths {
+                    write!(
+                        f,
+                        "
+  {path} ({rule})"
+                    )?;
+                }
+                Ok(())
+            }
             Self::Conflicts(conflicts) => {
                 write!(
                     f,

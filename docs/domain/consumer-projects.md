@@ -213,24 +213,42 @@ composition error and not a pending-resolution state (**OC-47** stays
 open); a delivered path that already holds content Assemblr did not
 materialize, or whose directory on the way is a file or a symbolic link,
 naming every such path (**OC-44** stays open; composing over existing
-content is not supported yet); a delivered path Assemblr reserves for
+content is not supported yet); a delivered file that only the consumer's own
+Git rules ignore and that the base would store for the first time (see
+below); a delivered path Assemblr reserves for
 itself: `assemblr.jsonc`, `assemblr-lock.json`, and anything under
 `.assemblr/` (part of **OC-48**); a stored base that does not verify
 against the lock; a lockfile that is a unit's, without reconciliation
 state; a directory holding `manifest.jsonc`.
 
 **Ignored files.** Before writing, the composition asks the project's Git,
-with the consumer's own configuration and read-only, which delivered paths
-it ignores; a project in no repository ignores nothing. An ignored file is
-written to the project, but its content is not stored in the tracked base:
-the lock lists it as unbased, and a warning says a later composition cannot
-reconcile edits to it. Whether a file is unbased is decided when it is
-materialized or changed, from the rules in force then: a file the consumer ignores
-since is no longer stored, and one no longer ignored is stored from then
-on. When `.assemblr/` or one of its directories is ignored, a
-warning says the base will not travel with the project, and an edited
-`.assemblr/.gitattributes` is restored and reported. Nothing is staged, and
-content is never scanned for secrets.
+read-only, which delivered paths it ignores, and which rule decides. Only
+the project's own rules, its `.gitignore` files, decide what is unbased,
+because the lock records it and every clone of the project must lock the
+same way (decision log D-16, which revises D-11 and D-15). A file a
+`.gitignore` ignores is written to the project, but its content is not
+stored in the tracked base: the lock lists it as unbased, and a warning says
+a later composition cannot reconcile edits to it. A `!` pattern in a
+`.gitignore` re-includes a file over any rule of the machine. A project in
+no repository ignores nothing. Whether a file is unbased is decided at every
+composition that writes, from the project's rules in force then: a file the
+project ignores since is no longer stored, and one it no longer ignores is
+stored from then on, which a note announces.
+
+The consumer's own rules, `.git/info/exclude` and the user's global
+excludes, belong to one machine. They never decide the lock. They are the
+consumer's safety preference, so a composition does not override them
+either: a delivered file that only they ignore, and whose content the base
+would store for the first time, is refused before anything is written,
+naming the file, the pattern, and where it is written. The way out is
+stated in the diagnostic: the project's `.gitignore` can ignore the file
+(unbased for everyone) or re-include it with a `!` pattern (stored for
+everyone), or the consumer removes their own rule. A file the base already
+stores stays stored when a local rule appears later, since nothing new
+enters the store. When `.assemblr/` or one of its directories is ignored by
+any rule, a warning says the base will not travel with the project, and an
+edited `.assemblr/.gitattributes` is restored and reported. Nothing is
+staged, and content is never scanned for secrets.
 
 **Repeating `compose`.** On a project composed before, the stored base is
 verified against the lock first; a missing, corrupted, or unverifiable base
@@ -487,7 +505,10 @@ removed. `.assemblr/.gitignore`, which the store writes and restores like
 `.gitattributes`, keeps the journal and the previous content out of version
 control: a clone of an interrupted project has no journal, and its files
 are the project's content. The report names every path created, modified,
-merged, and removed, and every locked version that changed.
+merged, and removed, and every locked version that changed. What the
+composition changed in a merged JSON or JSONC file beyond values, a member
+order or a comment, is not edited into the project's text, which keeps its own
+layout; a note names the file and what was not carried.
 
 ### Removal — Approved
 

@@ -816,6 +816,11 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
                  written, and reformatting that file conventionally works around it"
                     .to_owned()
             }
+            Some(MergeFailure::RoundTrip { .. }) => {
+                "this is a defect in Assemblr's merge, not in the copy; nothing was written, and \
+                 the copy and the provider's file at its base are what a report needs"
+                    .to_owned()
+            }
             Some(MergeFailure::Conflicts(_)) => "the amendments of one file must agree: change \
                                                  the copies so that no two amenders set one \
                                                  value differently, or expose the value as a \

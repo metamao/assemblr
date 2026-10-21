@@ -31,6 +31,7 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0012](0012-unit-update.md) | `unit update`: resolving with a partial lock, rewriting bases in place, and the update journal | Accepted |
 | [0013](0013-unit-check-and-publish.md) | `unit check` and `unit publish`: shared validation, the committed tree, the tag, and one-source indexing | Accepted |
 | [0014](0014-unit-init.md) | `unit init`: repository discovery and initialization, the scaffold's writes, and the embedded manifest schema | Accepted |
-| [0015](0015-value-merge.md) | The value-level merge of several amendments: the domain engine, the JSONC editor, and the projection and round-trip checks | Accepted |
-| [0016](0016-consumer-compose.md) | The first consumer `compose`: the project root, the lockfile's reconciliation state, the stored base, ignore rules, and the journal | Accepted, points 7 and 9 extended by 0017 |
-| [0017](0017-consumer-reconciliation.md) | Consumer reconciliation: the per-path three-way decision, the value merge onto the project's text, the journal of changes, and recovery | Accepted |
+| [0015](0015-value-merge.md) | The value-level merge of several amendments: the domain engine, the JSONC editor, and the projection and round-trip checks | Accepted, point 6 clarified by 0018 |
+| [0016](0016-consumer-compose.md) | The first consumer `compose`: the project root, the lockfile's reconciliation state, the stored base, ignore rules, and the journal | Accepted, points 7 and 9 extended by 0017, point 6 revised by 0018 |
+| [0017](0017-consumer-reconciliation.md) | Consumer reconciliation: the per-path three-way decision, the value merge onto the project's text, the journal of changes, and recovery | Accepted, point 8 revised by 0018 |
+| [0018](0018-ignore-classification-and-merge-integrity.md) | Which ignore rules decide the lock, and what a failed merge check is | Accepted |

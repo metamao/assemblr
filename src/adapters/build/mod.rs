@@ -47,10 +47,10 @@ use super::registry::{Registry, StorageError};
 use super::render::{Context, RenderError, render};
 use crate::domain::{
     AmendmentBaseError, AvailableVersions, BaseIntegrityError, CompositionError, ContributionError,
-    FileTree, LockChange, LockError, Manifest, ObjectId, ParameterName, ParameterValues,
-    PublishedAmendmentError, RelativePath, Requirer, ResolutionError, Root, TEMPLATE_SUFFIX,
-    UnitContent, UnitFile, UnitIdentity, UnitLock, Version, amendment_bases, compose,
-    contribution_problems, published_amendments, relock, resolve, verify_bases,
+    FileTree, LockChange, LockError, Manifest, MergeFormat, ObjectId, ParameterName,
+    ParameterValues, PublishedAmendmentError, RelativePath, Requirer, ResolutionError, Root,
+    TEMPLATE_SUFFIX, UnitContent, UnitFile, UnitIdentity, UnitLock, Version, amendment_bases,
+    compose, contribution_problems, published_amendments, relock, resolve, verify_bases,
 };
 
 /// The unit's manifest, at the repository's top level.
@@ -521,6 +521,10 @@ pub(crate) fn render_files(
                 .map(|locked| locked.version().clone())
         };
         // Renders one side: the provider's file, or an amender's copy.
+        // `quiet` renders without reporting: the base of a single copy is
+        // rendered only to compare, and a base that does not render is
+        // not that build's problem.
+        let quiet = std::cell::Cell::new(false);
         let mut side = |bytes: &[u8], amender: Option<&UnitIdentity>| -> Option<Vec<u8>> {
             if !composed.is_template() {
                 return Some(bytes.to_vec());
@@ -533,7 +537,9 @@ pub(crate) fn render_files(
                 error,
             };
             let Ok(text) = std::str::from_utf8(bytes) else {
-                problems.push(template(TemplateError::NotUtf8));
+                if !quiet.get() {
+                    problems.push(template(TemplateError::NotUtf8));
+                }
                 return None;
             };
             let values = values_of(provider);
@@ -544,14 +550,43 @@ pub(crate) fn render_files(
             match render(text, &context) {
                 Ok(rendered) => Some(rendered.into_bytes()),
                 Err(errors) => {
-                    problems.extend(errors.into_iter().map(TemplateError::Render).map(template));
+                    if !quiet.get() {
+                        problems
+                            .extend(errors.into_iter().map(TemplateError::Render).map(template));
+                    }
                     None
                 }
             }
         };
         let delivered = match composed.amendments() {
             [] => side(composed.contents(), None),
-            [(amender, copy)] => side(copy.contents(), Some(amender)),
+            [(amender, copy)] => {
+                let delivered = side(copy.contents(), Some(amender));
+                // The unit's own copy takes the file's place whole, but a
+                // second amender would make a merge of it, which carries
+                // members and values only: say so to its author now.
+                if Some(*amender) == built && MergeFormat::of_path(path).is_some() {
+                    quiet.set(true);
+                    let base = side(composed.contents(), None);
+                    quiet.set(false);
+                    if let (Some(base), Some(copy)) = (
+                        base.as_deref().and_then(utf8),
+                        delivered.as_deref().and_then(utf8),
+                    ) {
+                        for note in super::merge::unshared_notes(base, amender, copy) {
+                            let super::merge::MergeNote::NotCarried { what, .. } = note;
+                            notes.push(format!(
+                                "amendments/{} of {amender}: if another unit amends src/{} of \
+                                 {provider} too, {what} of this copy is not carried; the merge \
+                                 carries members and values, not comments or order",
+                                composed.source(),
+                                composed.source()
+                            ));
+                        }
+                    }
+                }
+                delivered
+            }
             amendments => {
                 let base = side(composed.contents(), None);
                 let copies: Vec<Option<(&UnitIdentity, Vec<u8>)>> = amendments

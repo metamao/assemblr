@@ -14,16 +14,19 @@
 //!   hold exactly the planned value, so that a layout the editor misjudged
 //!   is a refusal, never a silently different file;
 //! - the **round-trip guard** replays each amender's own operations on its
-//!   base and compares the result with its copy, layout aside; what differs
-//!   is something the value model cannot carry, a comment or a member
-//!   order, and is reported as a note rather than dropped in silence.
+//!   base and requires its copy's value, member order aside. A copy whose
+//!   operations do not reproduce it means the derivation is wrong, so the
+//!   composition is refused (see [`MergeFailure::RoundTrip`]). What the
+//!   value model cannot carry on purpose, a comment or a member order, is
+//!   different: it is reported as a note, never dropped in silence.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
 use super::jsonc_edit::{EditError, ValueError, apply, comments_of, parse_value};
 use crate::domain::{
-    Conflict, Contributor, Operation, UnitIdentity, Value, combine, derive, merge_values, plan,
+    Conflict, Contributor, Derived, Operation, UnitIdentity, Value, combine, derive, merge_values,
+    plan,
 };
 
 /// Composes `copies`, each amender's rendered copy, onto `base`, the
@@ -45,41 +48,11 @@ pub(crate) fn merge_json(
             error,
         })?;
         let derived = derive(&base_value, &copy_value);
-        for path in &derived.reordered {
-            notes.push(MergeNote::NotCarried {
-                amender: (*amender).clone(),
-                what: format!(
-                    "the order of the members of {}",
-                    crate::domain::show_path(path)
-                ),
-            });
-        }
+        notes.extend(not_carried(amender, base, copy, &derived));
         // The guard: the amender's operations alone, replayed on its base,
         // must give its copy's value, member order aside, which the
         // operations do not carry and is reported above.
-        let own = BTreeMap::from([((*amender).clone(), derived.operations.clone())]);
-        let replayed = combine(&own)
-            .and_then(|combined| plan(&base_value, combined))
-            .ok()
-            .map(|plan| plan.result);
-        if replayed.map(|value| sorted(&value)) != Some(sorted(&copy_value)) {
-            notes.push(MergeNote::NotCarried {
-                amender: (*amender).clone(),
-                what: "its operations do not reproduce its copy".to_owned(),
-            });
-        }
-        // Comments the copy adds are not values, and the merged file is the
-        // provider's text: they are reported, never dropped in silence.
-        let base_comments = comments_of(base);
-        for comment in comments_of(copy) {
-            if !base_comments.contains(&comment) {
-                let shown: String = comment.chars().take(60).collect();
-                notes.push(MergeNote::NotCarried {
-                    amender: (*amender).clone(),
-                    what: format!("the comment {shown:?}"),
-                });
-            }
-        }
+        round_trip(amender, &base_value, &copy_value, &derived.operations)?;
         sets.insert((*amender).clone(), derived.operations);
     }
     let combined = combine(&sets).map_err(MergeFailure::Conflicts)?;
@@ -100,6 +73,87 @@ pub(crate) fn merge_json(
     notes.sort();
     notes.dedup();
     Ok(Merged { text, notes })
+}
+
+/// What the value model cannot carry from `copy`, an amender's rendered
+/// copy of `base`: the order of members it changes and the comments it
+/// adds. They are reported, never dropped in silence.
+fn not_carried(
+    amender: &UnitIdentity,
+    base: &str,
+    copy: &str,
+    derived: &Derived,
+) -> Vec<MergeNote> {
+    let mut notes = Vec::new();
+    for path in &derived.reordered {
+        notes.push(MergeNote::NotCarried {
+            amender: amender.clone(),
+            what: format!(
+                "the order of the members of {}",
+                crate::domain::show_path(path)
+            ),
+        });
+    }
+    // Comments the copy adds are not values, and the merged file is the
+    // provider's text.
+    let base_comments = comments_of(base);
+    for comment in comments_of(copy) {
+        if !base_comments.contains(&comment) {
+            let shown: String = comment.chars().take(60).collect();
+            notes.push(MergeNote::NotCarried {
+                amender: amender.clone(),
+                what: format!("the comment {shown:?}"),
+            });
+        }
+    }
+    notes
+}
+
+/// What a merge would not carry from `copy`, the rendered copy of
+/// `amender` of `base`, if another unit amended the same file too. A copy
+/// alone takes the file's place byte for byte, so nothing is lost until a
+/// second amender joins; the unit's author hears of it early, from their
+/// own build or check, rather than only when a consumer composes. Sides
+/// that are not JSON have nothing to report here.
+pub(crate) fn unshared_notes(base: &str, amender: &UnitIdentity, copy: &str) -> Vec<MergeNote> {
+    let (Ok(base_value), Ok(copy_value)) = (parse_value(base), parse_value(copy)) else {
+        return Vec::new();
+    };
+    let derived = derive(&base_value, &copy_value);
+    let mut notes = not_carried(amender, base, copy, &derived);
+    notes.sort();
+    notes.dedup();
+    notes
+}
+
+/// Requires that `operations`, the ones derived from `copy` against
+/// `base`, give `copy` back when replayed on `base` alone, member order
+/// aside. They always do unless the derivation is wrong, and a wrong
+/// derivation must never end in a successful composition: the file would
+/// not hold what the copy asked for.
+fn round_trip(
+    amender: &UnitIdentity,
+    base: &Value,
+    copy: &Value,
+    operations: &[Operation],
+) -> Result<(), MergeFailure> {
+    let own = BTreeMap::from([(amender.clone(), operations.to_vec())]);
+    let detail = match combine(&own).and_then(|combined| plan(base, combined)) {
+        Ok(planned) if sorted(&planned.result) == sorted(copy) => return Ok(()),
+        Ok(planned) => format!(
+            "replayed on its base they give {}, not {}",
+            planned.result.brief(),
+            copy.brief()
+        ),
+        Err(conflicts) => {
+            let shown: Vec<String> = conflicts.iter().map(ToString::to_string).collect();
+            format!("replaying them on its base fails: {}", shown.join("; "))
+        }
+    };
+    Err(MergeFailure::RoundTrip {
+        amender: amender.clone(),
+        detail,
+    })
 }
 
 /// `value` with every object's members sorted by key, for a comparison
@@ -184,6 +238,17 @@ pub enum MergeFailure {
     Edit(EditError),
     /// The edited text does not hold the planned value.
     Projection { detail: String },
+    /// The operations derived from an amender's copy do not reproduce its
+    /// value when replayed on its base. That is a defect in the
+    /// derivation, never something the copy can fix, and it is an error
+    /// because composing with it would write a file the copy did not ask
+    /// for.
+    RoundTrip {
+        /// The amender whose copy is not reproduced.
+        amender: UnitIdentity,
+        /// What differs.
+        detail: String,
+    },
 }
 
 impl fmt::Display for MergeFailure {
@@ -209,6 +274,12 @@ impl fmt::Display for MergeFailure {
                 f,
                 "the merged file was refused by the projection check: {detail}"
             ),
+            Self::RoundTrip { amender, detail } => write!(
+                f,
+                "the operations derived from the copy of {amender} do not reproduce its value \
+                 ({detail}); the composition was refused rather than written without part of the \
+                 copy"
+            ),
         }
     }
 }
@@ -223,7 +294,7 @@ pub(crate) fn reconcile_json(
     base: &str,
     current: &str,
     incoming: &str,
-) -> Result<String, ReconcileFailure> {
+) -> Result<Reconciled, ReconcileFailure> {
     let read = |text: &str, side: Option<Contributor>| {
         parse_value(text).map_err(|error| ReconcileFailure::Unreadable { side, error })
     };
@@ -232,6 +303,28 @@ pub(crate) fn reconcile_json(
     let incoming_value = read(incoming, Some(Contributor::Incoming))?;
     let planned = merge_values(&base_value, &current_value, &incoming_value)
         .map_err(ReconcileFailure::Conflicts)?;
+    // What the composition changed beyond values is not edited into the
+    // project's text, which keeps its own layout: said, not dropped.
+    let derived = derive(&base_value, &incoming_value);
+    let mut notes: Vec<String> = derived
+        .reordered
+        .iter()
+        .map(|path| {
+            format!(
+                "the order of the members of {}",
+                crate::domain::show_path(path)
+            )
+        })
+        .collect();
+    let base_comments = comments_of(base);
+    for comment in comments_of(incoming) {
+        if !base_comments.contains(&comment) {
+            let shown: String = comment.chars().take(60).collect();
+            notes.push(format!("the comment {shown:?}"));
+        }
+    }
+    notes.sort();
+    notes.dedup();
     let text = apply(current, &planned.edits).map_err(ReconcileFailure::Edit)?;
     let written = parse_value(&text).map_err(|error| ReconcileFailure::Projection {
         detail: error.to_string(),
@@ -245,7 +338,18 @@ pub(crate) fn reconcile_json(
             ),
         });
     }
-    Ok(text)
+    Ok(Reconciled { text, notes })
+}
+
+/// A project's file reconciled with the composition's changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reconciled {
+    /// The project's text with the composition's changes edited in.
+    pub(crate) text: String,
+    /// What the composition changed that the value model cannot carry, a
+    /// member order or a comment, and that the project's file therefore
+    /// does not have.
+    pub(crate) notes: Vec<String>,
 }
 
 /// Why a consumer's file cannot be reconciled by the value merge.
@@ -302,8 +406,9 @@ impl std::error::Error for ReconcileFailure {}
 mod tests {
     #![allow(clippy::unwrap_used, reason = "fixtures are valid by construction")]
 
-    use super::{MergeFailure, MergeNote, merge_json};
-    use crate::domain::UnitIdentity;
+    use super::{MergeFailure, MergeNote, merge_json, round_trip};
+    use crate::adapters::jsonc_edit::parse_value;
+    use crate::domain::{UnitIdentity, derive};
 
     fn identity(input: &str) -> UnitIdentity {
         input.parse().unwrap()
@@ -407,5 +512,44 @@ mod tests {
                 .to_string()
                 .contains("the provider's file cannot be read as JSON")
         );
+    }
+
+    #[test]
+    fn a_derivation_that_does_not_reproduce_its_copy_is_an_error_not_a_note() {
+        let (base, copy) = (
+            parse_value(BASE).unwrap(),
+            parse_value(&BASE.replace("wrangler dev", "wrangler dev --local")).unwrap(),
+        );
+        let amender = identity("@acme/a");
+        let derived = derive(&base, &copy);
+        // The derivation itself reproduces the copy.
+        assert_eq!(
+            round_trip(&amender, &base, &copy, &derived.operations),
+            Ok(())
+        );
+
+        // A derivation that lost an operation does not, and the guard
+        // refuses it by name instead of letting a file without the change
+        // be composed.
+        let error = round_trip(&amender, &base, &copy, &[]).unwrap_err();
+        assert!(
+            matches!(&error, MergeFailure::RoundTrip { amender: named, .. } if *named == amender)
+        );
+        let text = error.to_string();
+        assert!(
+            text.contains(
+                "the operations derived from the copy of @acme/a do not reproduce its value"
+            ),
+            "{text}"
+        );
+
+        // A comment or a member order, which no operation carries on
+        // purpose, stays a note and never reaches the guard as a failure.
+        let reordered = BASE.replace(
+            "    \"dev\": \"wrangler dev\",\n    \"deploy\": \"wrangler deploy\"\n",
+            "    \"deploy\": \"wrangler deploy\",\n    \"dev\": \"wrangler dev\"\n",
+        );
+        let merged = merge_json(BASE, &[(&amender, &reordered)]).unwrap();
+        assert_eq!(merged.notes().len(), 1);
     }
 }

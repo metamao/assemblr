@@ -257,15 +257,40 @@ composition:
   [reconciliation details](consumer-projects.md#reconciliation-details--approved)
   implements provisionally.
 
-Implementation notes (provisional, decision log D-6 to D-8):
+Implementation notes (provisional, decision log D-6 to D-8, corrected by the
+review recorded in the decision log):
 
-- Object member order carries no meaning in JSON, so members that several
-  amenders add at the same place are placed in a fixed order, by amender
-  identity, which never changes the document's value; a format where order
-  means something gets a conflict under OC-12 when it is supported.
+- Object member order carries no meaning in the JSON grammar, so members
+  that several amenders add at the same place are placed in a fixed order,
+  by amender identity, which never changes the document's value. It can
+  change what a program does with the file: Node reads the conditions of a
+  `package.json` `exports` in order and takes the first that matches. For
+  such objects the placement is an invented order, which the rule above
+  prefers to report as a conflict.
+
+  **Known limitation.** The merge does not preserve the meaning of member
+  order where a consumer of the JSON gives it one. When several units
+  amend one object, the order of their insertions, and a copy's reordering
+  of existing members, are not guaranteed to carry the semantics a program
+  such as Node attaches to them. Warnings and regression tests describe
+  today's behavior; they do not resolve the problem. The owner decided to
+  keep the generic behavior for now: no technology-specific rules in the
+  engine, no new manifest metadata, and no conflict for every same-anchor
+  insertion, which would refuse the common case of two units adding a
+  script each, without evidence from real projects. **OC-12 stays open** and
+  the model is revisited when Assemblr is evaluated on real projects. A
+  format where order means something gets a conflict when it is supported.
 - What the value model cannot carry from a copy, a comment the copy adds or
   a member order it changes, is reported as a warning naming the amender,
-  and the composition proceeds with the provider's layout.
+  and the composition proceeds with the provider's layout. A copy alone
+  takes the file's place whole, so its author is told by `unit check` and
+  `unit build` what a second amender would make the merge drop, instead of
+  hearing of it only from the consumers who compose it; a consumer merging
+  a new version into an edited file is told the same of the composition's
+  own changes.
+- A copy whose derived operations do not reproduce its value when replayed
+  on its base is not a formatting matter but a defect in the derivation, and
+  it is an error naming the amender, never a warning.
 - The format is recognized by the delivered file's extension, `.json` or
   `.jsonc`, after the template suffix is removed.
 
