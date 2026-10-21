@@ -178,7 +178,9 @@ fn init_hint(failure: &InitFailure) -> String {
             if done.directory_created() {
                 state.push("the directory was created");
             }
-            if *done.git() != GitOutcome::Adopted {
+            // On `Init`, the repository is what failed; `done.git()` holds
+            // the plan, not an outcome.
+            if matches!(failure, InitFailure::Write { .. }) && *done.git() != GitOutcome::Adopted {
                 state.push("the Git repository was initialized");
             }
             for (name, outcome) in [

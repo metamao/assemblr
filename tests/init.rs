@@ -248,6 +248,17 @@ fn init_adopts_the_top_level_of_an_existing_repository() {
     assert_eq!(read(&unit.join(".gitignore")), "*.log\n/build/\n");
     assert_eq!(git(&unit, &["log", "--oneline"]).lines().count(), 1);
 
+    // Bytes that are not UTF-8, such as a Latin-1 pattern, are kept as
+    // they are when `/build/` is appended.
+    let latin = fixture.dir.join("latin");
+    fs::create_dir(&latin).unwrap();
+    fs::write(latin.join(".gitignore"), b"caf\xe9.log").unwrap();
+    succeeds(fixture.init(&latin, &["@acme/latin"]));
+    assert_eq!(
+        fs::read(latin.join(".gitignore")).unwrap(),
+        b"caf\xe9.log\n/build/\n"
+    );
+
     // Inside a repository that is not a unit's, the unit gets its own
     // nested repository, and the note says so.
     let plain = fixture.dir.join("plain");

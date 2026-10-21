@@ -99,7 +99,7 @@ pub fn init_unit(
 
     // The files, as they are now.
     let manifest = match read_file(&directory.join(MANIFEST))? {
-        None => Planned::Create(manifest_text(identity, &description)),
+        None => Planned::Create(manifest_text(identity, &description).into_bytes()),
         Some(bytes) => {
             let text = String::from_utf8(bytes)
                 .map_err(|_| InitFailure::ManifestNotUtf8(directory.join(MANIFEST)))?;
@@ -117,12 +117,12 @@ pub fn init_unit(
         }
     };
     let schema = match read_file(&directory.join(MANIFEST_SCHEMA))? {
-        None => Planned::Create(manifest_schema().to_owned()),
+        None => Planned::Create(manifest_schema().as_bytes().to_vec()),
         Some(bytes) if bytes == manifest_schema().as_bytes() => Planned::Keep,
-        Some(_) => Planned::Replace(manifest_schema().to_owned()),
+        Some(_) => Planned::Replace(manifest_schema().as_bytes().to_vec()),
     };
     let gitignore = match read_file(&directory.join(GITIGNORE))? {
-        None => Planned::Create(format!("{IGNORE_BUILD}\n")),
+        None => Planned::Create(format!("{IGNORE_BUILD}\n").into_bytes()),
         Some(bytes) if ignores_build(&bytes) => Planned::Keep,
         Some(bytes) => {
             let mut text = bytes;
@@ -136,7 +136,9 @@ pub fn init_unit(
             }
             text.extend_from_slice(IGNORE_BUILD.as_bytes());
             text.extend_from_slice(newline);
-            Planned::Replace(String::from_utf8_lossy(&text).into_owned())
+            // The existing bytes are kept as they are, whatever their
+            // encoding; only the new line is added.
+            Planned::Replace(text)
         }
     };
     for name in [SCHEMA_NEW, GITIGNORE_NEW] {
@@ -198,12 +200,12 @@ pub fn init_unit(
 fn apply(planned: Planned, path: &Path, staged: Option<&Path>) -> io::Result<FileOutcome> {
     match planned {
         Planned::Keep => Ok(FileOutcome::Kept),
-        Planned::Create(text) => {
-            create_new(path, text.as_bytes())?;
+        Planned::Create(bytes) => {
+            create_new(path, &bytes)?;
             Ok(FileOutcome::Created)
         }
-        Planned::Replace(text) => {
-            replace(staged.unwrap_or(path), path, text.as_bytes())?;
+        Planned::Replace(bytes) => {
+            replace(staged.unwrap_or(path), path, &bytes)?;
             Ok(FileOutcome::Replaced)
         }
     }
@@ -212,8 +214,8 @@ fn apply(planned: Planned, path: &Path, staged: Option<&Path>) -> io::Result<Fil
 /// What `unit init` plans for one file.
 enum Planned {
     Keep,
-    Create(String),
-    Replace(String),
+    Create(Vec<u8>),
+    Replace(Vec<u8>),
 }
 
 /// The nearest existing ancestor of `path`, or the root.
