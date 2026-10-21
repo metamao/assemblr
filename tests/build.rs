@@ -469,6 +469,7 @@ fn a_rejected_build_reports_every_problem_and_changes_nothing() {
         "supplying development values is not supported yet",
         "path collision: node.txt from @acme/app, node.txt from @acme/node",
         "hint: the build was rejected; build/ and assemblr-lock.json were not changed",
+        "remove one of the dependencies from the manifest",
     ] {
         assert!(stderr.contains(expected), "{expected:?} in {stderr}");
     }
