@@ -1546,6 +1546,65 @@ fn amend_never_overwrites_a_copy_and_completes_an_interrupted_run() {
     assert!(!app.path.join("amendments/bin/run").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn amend_never_writes_through_a_symbolic_link() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new("amend-links");
+    let (_node, app) = app_amending_node(&fixture);
+    let outside = fixture.dir.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let before = app.read("manifest.jsonc");
+
+    // `amendments/` itself, then a directory under it, as links out of the
+    // unit: nothing is written there.
+    symlink(&outside, app.path.join("amendments")).unwrap();
+    let err = stderr(&fails(amend(&fixture, &app, &["bin/run"])));
+    assert!(
+        err.contains("amendments exists and is not a directory"),
+        "{err}"
+    );
+    assert!(err.contains("outside the unit"), "{err}");
+    fs::remove_file(app.path.join("amendments")).unwrap();
+    fs::create_dir_all(app.path.join("amendments")).unwrap();
+    symlink(&outside, app.path.join("amendments/bin")).unwrap();
+    let err = stderr(&fails(amend(&fixture, &app, &["bin/run"])));
+    assert!(
+        err.contains("amendments/bin exists and is not a directory"),
+        "{err}"
+    );
+    assert_eq!(files(&outside), []);
+    fs::remove_file(app.path.join("amendments/bin")).unwrap();
+
+    // A link at the copy's own path is not a copy.
+    fs::create_dir_all(app.path.join("amendments/bin")).unwrap();
+    symlink(outside.join("run"), app.path.join("amendments/bin/run")).unwrap();
+    let err = stderr(&fails(amend(&fixture, &app, &["bin/run"])));
+    assert!(
+        err.contains("amendments/bin/run exists and is not a regular file"),
+        "{err}"
+    );
+    fs::remove_dir_all(app.path.join("amendments")).unwrap();
+
+    // The reserved staging name, as a link to a file that must survive.
+    let target = outside.join("target.txt");
+    fs::write(&target, "keep me").unwrap();
+    symlink(&target, app.path.join(".assemblr-manifest.jsonc.new")).unwrap();
+    let err = stderr(&fails(amend(&fixture, &app, &["bin/run"])));
+    assert!(
+        err.contains(".assemblr-manifest.jsonc.new exists; the name is reserved"),
+        "{err}"
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), "keep me");
+    assert!(!app.path.join("amendments").exists());
+    assert_eq!(app.read("manifest.jsonc"), before);
+    fs::remove_file(app.path.join(".assemblr-manifest.jsonc.new")).unwrap();
+
+    // With the links gone, the same command works, creating the directories.
+    succeeds(amend(&fixture, &app, &["bin/run"]));
+    assert!(app.path.join("amendments/bin/run").is_file());
+}
+
 #[test]
 fn amend_keeps_the_manifest_s_comments_and_formatting() {
     let fixture = Fixture::new("amend-manifest");

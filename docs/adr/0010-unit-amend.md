@@ -67,13 +67,19 @@ out of the index until they can be composed.
    otherwise nothing is written and the error carries the member to add by
    hand. This is the whole editor: it adds one member and nothing else.
 6. **Writing and recovery.** Nothing is written until every check has
-   passed. The copy is created first, with `create_new`, in directories the
-   command creates, and flushed; an existing file is never truncated. The
-   manifest is then written to `.assemblr-manifest.jsonc.new` beside it,
-   flushed, and renamed over `manifest.jsonc`; that name is reserved. If the
-   copy cannot be created, nothing changed. If the manifest cannot be
-   written, the copy is removed again; if even that fails, the error says
-   the copy exists undeclared. An interruption between the two steps leaves
+   passed, and no write follows a symbolic link (AGENTS.md §5): `amendments/`
+   and every directory of the copy's path under it must be a real directory
+   or not exist yet, the copy's own path must be free or hold an unmodified
+   copy, and nothing may exist at the staging path. The copy is created
+   first, with `create_new`, in directories the command creates one at a
+   time with `create_dir`, and flushed; an existing file is never truncated.
+   The manifest is then written to `.assemblr-manifest.jsonc.new` beside it,
+   also `create_new`, flushed, and renamed over `manifest.jsonc`; that name
+   is reserved, and anything found there is reported, never replaced. If
+   the copy cannot be created, it and the directories created for it are
+   removed, and nothing changed. If the manifest cannot be written, the
+   staged file and the copy are removed again; if the copy cannot be
+   removed, the error says it exists undeclared. An interruption between the two steps leaves
    the same state, which `unit build` reports as an undeclared copy. Running
    the same `unit amend` again detects a copy whose bytes are still the
    provider's file and completes the amendment by declaring it; a copy with

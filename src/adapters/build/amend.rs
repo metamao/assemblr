@@ -222,6 +222,21 @@ pub fn amend_unit(
     let copy_path = root
         .join(UnitDirectory::Amendments.as_str())
         .join(found.path.as_str());
+    // Every directory between the top level and the copy must be a real
+    // directory, or not exist yet: a symbolic link would take the copy out
+    // of the unit. The directories that do not exist are created, and
+    // removed again if the amendment is not completed.
+    let missing = match real_directories(root, &found.path) {
+        Ok(missing) => missing,
+        Err(DirectoryProblem::NotADirectory(path)) => {
+            problems.push(AmendProblem::NotADirectory { path });
+            Vec::new()
+        }
+        Err(DirectoryProblem::Unreadable(path, error)) => {
+            problems.push(AmendProblem::Unreadable { path, error });
+            Vec::new()
+        }
+    };
     let keep = match existing_copy(&copy_path, &base) {
         Ok(keep) => keep,
         Err(problem) => {
@@ -229,6 +244,12 @@ pub fn amend_unit(
             false
         }
     };
+    let staged = root.join(MANIFEST_NEW);
+    if fs::symlink_metadata(&staged).is_ok() {
+        problems.push(AmendProblem::StagingOccupied {
+            path: staged.clone(),
+        });
+    }
     if !problems.is_empty() {
         return Err(AmendFailure::Rejected(problems));
     }
@@ -238,18 +259,25 @@ pub fn amend_unit(
     let created = if keep {
         None
     } else {
-        write_copy(&copy_path, &base).map_err(|error| {
-            AmendFailure::Write(WriteError {
-                path: copy_path.clone(),
+        if let Err(error) = write_copy(&copy_path, &base, &missing) {
+            // The copy was never completed: nothing of it stays.
+            let _ = fs::remove_file(&copy_path);
+            remove_directories(&missing);
+            return Err(AmendFailure::Write(WriteError {
+                path: copy_path,
                 error,
                 state: AmendState::Unchanged,
-            })
-        })?;
+            }));
+        }
         Some(copy_path.as_path())
     };
-    if let Err(error) = write_manifest(root, edited.as_bytes()) {
+    if let Err(error) = write_manifest(root, &staged, edited.as_bytes()) {
+        let _ = fs::remove_file(&staged);
         let state = match created.map(fs::remove_file) {
-            None | Some(Ok(())) => AmendState::Unchanged,
+            None | Some(Ok(())) => {
+                remove_directories(&missing);
+                AmendState::Unchanged
+            }
             Some(Err(_)) => AmendState::CopyWithoutDeclaration,
         };
         return Err(AmendFailure::Write(WriteError {
@@ -262,6 +290,44 @@ pub fn amend_unit(
         found,
         kept_existing: keep,
     })
+}
+
+/// Checks that `amendments/` and the directories of `path` under it are
+/// real directories where they exist, and returns the ones that do not
+/// exist yet, outermost first.
+fn real_directories(root: &Path, path: &RelativePath) -> Result<Vec<PathBuf>, DirectoryProblem> {
+    let mut segments: Vec<&str> = path.segments().collect();
+    segments.pop();
+    let mut directory = root.join(UnitDirectory::Amendments.as_str());
+    let mut missing = Vec::new();
+    for segment in std::iter::once(None).chain(segments.into_iter().map(Some)) {
+        if let Some(segment) = segment {
+            directory.push(segment);
+        }
+        match fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Err(DirectoryProblem::NotADirectory(directory)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                missing.push(directory.clone());
+            }
+            Err(error) => return Err(DirectoryProblem::Unreadable(directory, error)),
+        }
+    }
+    Ok(missing)
+}
+
+/// Why a directory of the copy's path cannot be written into.
+enum DirectoryProblem {
+    NotADirectory(PathBuf),
+    Unreadable(PathBuf, io::Error),
+}
+
+/// Removes the directories `created`, innermost first, as far as they are
+/// empty. Best effort: a directory that cannot be removed is harmless.
+fn remove_directories(created: &[PathBuf]) {
+    for directory in created.iter().rev() {
+        let _ = fs::remove_dir(directory);
+    }
 }
 
 /// What the author asked for: a filename to search for, or a path.
@@ -318,10 +384,11 @@ fn existing_copy(path: &Path, base: &[u8]) -> Result<bool, fn(RelativePath) -> A
     }
 }
 
-/// Creates the copy, new, and flushes it.
-fn write_copy(path: &Path, contents: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+/// Creates the copy, new, in the directories `missing`, which it creates
+/// one at a time and never through a link, and flushes it.
+fn write_copy(path: &Path, contents: &[u8], missing: &[PathBuf]) -> io::Result<()> {
+    for directory in missing {
+        fs::create_dir(directory)?;
     }
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -331,14 +398,16 @@ fn write_copy(path: &Path, contents: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
-/// Replaces `manifest.jsonc` with `contents` through a temporary file.
-fn write_manifest(root: &Path, contents: &[u8]) -> io::Result<()> {
-    let staged = root.join(MANIFEST_NEW);
-    let mut file = fs::File::create(&staged)?;
+/// Replaces `manifest.jsonc` with `contents` through the new file `staged`.
+fn write_manifest(root: &Path, staged: &Path, contents: &[u8]) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(staged)?;
     file.write_all(contents)?;
     file.sync_all()?;
     drop(file);
-    fs::rename(&staged, root.join(MANIFEST))
+    fs::rename(staged, root.join(MANIFEST))
 }
 
 /// A file found in a provider's `src/` at its locked version.
@@ -533,6 +602,26 @@ pub enum AmendProblem {
         /// The path.
         path: RelativePath,
     },
+    /// `amendments/`, or a directory of the copy's path under it, exists
+    /// and is not a real directory, for example a symbolic link, which
+    /// could take the copy out of the unit.
+    NotADirectory {
+        /// The entry.
+        path: PathBuf,
+    },
+    /// Something exists at the reserved path the edited manifest is staged
+    /// at.
+    StagingOccupied {
+        /// The path.
+        path: PathBuf,
+    },
+    /// A directory of the copy's path could not be examined.
+    Unreadable {
+        /// The entry.
+        path: PathBuf,
+        /// Why.
+        error: io::Error,
+    },
     /// The unit's own `src/` holds the path, which would collide with the
     /// amended file.
     OwnSrc {
@@ -629,6 +718,22 @@ impl fmt::Display for AmendProblem {
             Self::CopyNotAFile { path } => {
                 write!(f, "amendments/{path} exists and is not a regular file")
             }
+            Self::NotADirectory { path } => write!(
+                f,
+                "{} exists and is not a directory; a symbolic link or a file there could take \
+                 the copy outside the unit",
+                path.display()
+            ),
+            Self::Unreadable { path, error } => {
+                write!(f, "could not read {}: {error}", path.display())
+            }
+            Self::StagingOccupied { path } => write!(
+                f,
+                "{} exists; the name is reserved for the edited manifest before it replaces \
+                 `manifest.jsonc`, so remove it if an earlier `unit amend` left it, and \
+                 otherwise move it away",
+                path.display()
+            ),
             Self::OwnSrc { path } => write!(
                 f,
                 "src/{path} of the unit itself would collide with the amended file; a unit \
