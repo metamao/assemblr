@@ -266,11 +266,20 @@ review recorded in the decision log):
   change what a program does with the file: Node reads the conditions of a
   `package.json` `exports` in order and takes the first that matches. For
   such objects the placement is an invented order, which the rule above
-  prefers to report as a conflict. A conflict for every same-anchor
-  insertion would refuse the common case of two units adding a script each,
-  so the placement stays until the owner settles OC-12, which the register
-  records as needing a decision. A format where order means something gets
-  a conflict when it is supported.
+  prefers to report as a conflict.
+
+  **Known limitation.** The merge does not preserve the meaning of member
+  order where a consumer of the JSON gives it one. When several units
+  amend one object, the order of their insertions, and a copy's reordering
+  of existing members, are not guaranteed to carry the semantics a program
+  such as Node attaches to them. Warnings and regression tests describe
+  today's behavior; they do not resolve the problem. The owner decided to
+  keep the generic behavior for now: no technology-specific rules in the
+  engine, no new manifest metadata, and no conflict for every same-anchor
+  insertion, which would refuse the common case of two units adding a
+  script each, without evidence from real projects. **OC-12 stays open** and
+  the model is revisited when Assemblr is evaluated on real projects. A
+  format where order means something gets a conflict when it is supported.
 - What the value model cannot carry from a copy, a comment the copy adds or
   a member order it changes, is reported as a warning naming the amender,
   and the composition proceeds with the provider's layout. A copy alone

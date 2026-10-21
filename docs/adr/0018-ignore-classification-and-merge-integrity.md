@@ -83,5 +83,6 @@ reproduce its copy, but the implementation only warned when they did not.
   The parser skips records it does not understand, and a unit test covers
   the shape.
 - Order-sensitive JSON, such as Node's `exports`, is not changed by this ADR.
-  The invented order between two units' insertions at one anchor is OC-12,
-  which needs an owner decision.
+  The invented order between two units' insertions at one anchor is OC-12.
+  The owner decided to keep the generic behavior and record it as a known
+  limitation; the entry stays open and is revisited with real projects.
