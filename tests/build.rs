@@ -464,7 +464,7 @@ fn a_rejected_build_reports_every_problem_and_changes_nothing() {
     let output = fails(fixture.build(&app));
     let stderr = stderr(&output);
     for expected in [
-        "amendments/node/node.txt of @acme/app is not declared in the manifest",
+        "amendments/node/node.txt is not declared in the manifest",
         "@acme/app declares required parameters without defaults: `appName`",
         "supplying development values is not supported yet",
         "path collision: node.txt from @acme/app, node.txt from @acme/node",
@@ -533,7 +533,7 @@ fn an_empty_amendments_directory_or_ignored_files_in_it_do_not_block_a_build() {
     app.write("amendments/package.json", "{}");
     let stderr = stderr(&fails(fixture.build(&app)));
     assert!(
-        stderr.contains("amendments/package.json of @acme/app is not declared"),
+        stderr.contains("amendments/package.json is not declared"),
         "{stderr}"
     );
     assert!(!stderr.contains(".swp"), "{stderr}");
@@ -1746,7 +1746,7 @@ fn every_amendment_problem_rejects_the_build_and_changes_nothing() {
          no src/config/app.yaml; its file is the template src/config/app.yaml.assemblr.tmpl",
         "amendments/missing.txt amends a file that @acme/node 1.0.0 does not provide: it has no \
          src/missing.txt",
-        "amendments/stray.txt of @acme/app is not declared in the manifest",
+        "amendments/stray.txt is not declared in the manifest",
         "hint: the build was rejected; build/ and assemblr-lock.json were not changed",
     ] {
         assert!(err.contains(expected), "{expected:?} in {err}");
@@ -1820,53 +1820,293 @@ fn an_amended_template_s_errors_name_the_copy_and_the_provider() {
     );
 }
 
-#[test]
-fn a_published_version_with_amendments_is_not_indexed_yet() {
-    let fixture = Fixture::new("amend-published");
-    let (_node, app) = app_amending_node(&fixture);
-    succeeds(amend(&fixture, &app, &["bin/run"]));
+/// `@acme/app` 0.1.0 published and registered, amending `config/app.yaml`
+/// (with `copy` as the template copy) and `bin/run` of `@acme/node` 1.0.0.
+fn published_amender(fixture: &Fixture, copy: &str) -> (Repo, Repo) {
+    let (node, app) = app_amending_node(fixture);
+    succeeds(amend(fixture, &app, &["app.yaml"]));
+    succeeds(amend(fixture, &app, &["bin/run"]));
+    app.write("amendments/config/app.yaml.assemblr.tmpl", copy);
+    app.write("amendments/bin/run", "#!/bin/sh\necho amended\n");
     app.publish("0.1.0");
-    // A later version holds `amendments/` without declaring it, and the
-    // one after that is clean.
+    fixture.register(&app);
+    (node, app)
+}
+
+/// An unpublished `@acme/consumer` with these dependencies and extra
+/// manifest fields, and one file of its own.
+fn consumer(fixture: &Fixture, name: &str, dependencies: &[(&str, &str)], extra: &str) -> Repo {
+    let repo = fixture.repo(name);
+    repo.write(
+        "manifest.jsonc",
+        &manifest("@acme/consumer", "0.1.0", dependencies, extra),
+    );
+    repo.write("src/consumer.txt", "consumer");
+    repo
+}
+
+#[test]
+fn a_dependent_builds_with_the_amendments_a_transitive_dependency_publishes() {
+    let fixture = Fixture::new("published-amendments");
+    let (node, app) = published_amender(&fixture, "port: {{ port }}\nname: {{ own.title }}\n");
+    // A later version of the amender holds a copy it does not declare.
     app.write(
         "manifest.jsonc",
         &manifest("@acme/app", "0.2.0", &[("@acme/node", "^1")], ""),
     );
     app.publish("0.2.0");
-    app.git(&["rm", "-q", "-r", "amendments"]);
-    app.write(
-        "manifest.jsonc",
-        &manifest("@acme/app", "0.3.0", &[("@acme/node", "^1")], ""),
-    );
-    app.publish("0.3.0");
-
-    let output = succeeds(fixture.assemblr(
-        &fixture.dir,
-        &["registry", "add", app.path.to_str().unwrap()],
+    let err = stderr(&succeeds(
+        fixture.assemblr(&fixture.dir, &["registry", "sync"]),
     ));
-    let err = stderr(&output);
     assert!(
         err.contains(
-            "excluded tag v0.1.0, which is not indexed as a published version: it declares \
-             amendments of bin/run and holds `amendments/`; a published version with amendments \
-             cannot be composed yet"
+            "excluded tag v0.2.0, which is not indexed as a published version: its amendments \
+             are invalid: amendments/bin/run is not declared in its manifest"
         ),
         "{err}"
     );
+
+    // The consumer depends on the amender only; the provider is transitive.
+    // The amended template is rendered with the provider's values and the
+    // amender's values in this composition as `own`.
+    let consumer = consumer(
+        &fixture,
+        "consumer",
+        &[("@acme/app", "^0.1")],
+        r#", "options": {"@acme/app": {"title": "Consumer"}}"#,
+    );
+    let output = succeeds(fixture.build(&consumer));
+    assert!(stdout(&output).contains("6 file(s)"), "{}", stdout(&output));
+    assert_eq!(
+        consumer.build_files(),
+        pairs(&[
+            ("README.md", "node\n"),
+            ("app.txt", "app"),
+            ("bin/run", "#!/bin/sh\necho amended\n"),
+            ("config/README.md", "node config\n"),
+            ("config/app.yaml", "port: 80\nname: Consumer\n"),
+            ("consumer.txt", "consumer"),
+        ])
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(consumer.path.join("build/bin/run"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "{mode:o}");
+    }
+
+    // Once the provider publishes a newer version, a fresh dependent
+    // resolves to it, and the amendment cannot be applied; the locked
+    // dependent keeps building.
+    node.write("manifest.jsonc", &manifest("@acme/node", "1.1.0", &[], ""));
+    node.publish("1.1.0");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    let fresh = self::consumer(&fixture, "fresh", &[("@acme/app", "^0.1")], "");
+    let err = stderr(&fails(fixture.build(&fresh)));
+    for expected in [
+        "@acme/app 0.1.0 amends src/bin/run of @acme/node based on @acme/node 1.0.0, but \
+         @acme/node resolved to 1.1.0; an amendment is applied only to its base version, and \
+         applying it to another version is not supported yet",
+        "@acme/app 0.1.0 amends src/config/app.yaml.assemblr.tmpl of @acme/node",
+        "hint: the build was rejected; build/ and assemblr-lock.json were not changed",
+    ] {
+        assert!(err.contains(expected), "{expected:?} in {err}");
+    }
+    assert!(!fresh.path.join("build").exists());
+    assert!(!fresh.path.join("assemblr-lock.json").exists());
+    succeeds(fixture.build(&consumer));
+}
+
+#[test]
+fn several_amenders_of_one_provider_file_are_refused() {
+    let fixture = Fixture::new("several-amenders");
+    let (_node, _app) = published_amender(&fixture, "port: {{ port }}\n");
+    let consumer = consumer(
+        &fixture,
+        "consumer",
+        &[("@acme/app", "^0.1"), ("@acme/node", "=1.0.0")],
+        "",
+    );
+    succeeds(fixture.build(&consumer));
+    let build = consumer.build_files();
+    let lockfile = consumer.read("assemblr-lock.json");
+    let manifest_text = consumer.read("manifest.jsonc");
+
+    // `unit amend` refuses the file a locked dependency already amends, and
+    // still amends the provider's other files.
+    let err = stderr(&fails(amend(&fixture, &consumer, &["bin/run"])));
     assert!(
-        err.contains("excluded tag v0.2.0, which is not indexed as a published version: it holds `amendments/`"),
+        err.contains(
+            "src/bin/run of @acme/node is already amended by @acme/app 0.1.0, a locked \
+             dependency, based on @acme/node 1.0.0; several amenders of one file are not \
+             supported yet"
+        ),
         "{err}"
     );
-    let listing = stdout(&fixture.assemblr(&fixture.dir, &["registry", "list"]));
-    assert!(listing.contains("0.3.0"), "{listing}");
-    assert!(!listing.contains("0.1.0"), "{listing}");
+    assert!(err.contains("hint: nothing was changed"), "{err}");
+    assert!(!consumer.path.join("amendments").exists());
+    assert_eq!(consumer.read("manifest.jsonc"), manifest_text);
+    succeeds(amend(&fixture, &consumer, &["config/README.md"]));
 
-    // A dependent therefore cannot resolve the amended version.
-    let consumer = fixture.repo("consumer");
+    // Declared by hand, the build refuses both amenders and changes nothing.
     consumer.write(
         "manifest.jsonc",
-        &manifest("@acme/consumer", "0.1.0", &[("@acme/app", "=0.1.0")], ""),
+        &manifest(
+            "@acme/consumer",
+            "0.1.0",
+            &[("@acme/app", "^0.1"), ("@acme/node", "=1.0.0")],
+            r#", "amendments": {
+                "config/README.md": {"unit": "@acme/node", "base": "1.0.0"},
+                "bin/run": {"unit": "@acme/node", "base": "1.0.0"}
+            }"#,
+        ),
     );
+    consumer.write("amendments/bin/run", "#!/bin/sh\necho consumer\n");
     let err = stderr(&fails(fixture.build(&consumer)));
-    assert!(err.contains("@acme/app"), "{err}");
+    assert!(
+        err.contains(
+            "src/bin/run of @acme/node 1.0.0 is amended by this unit, @acme/app 0.1.0; several \
+             amenders of one file are not supported yet, and no amender takes precedence, so \
+             the file is not amended"
+        ),
+        "{err}"
+    );
+    assert_eq!(consumer.build_files(), build);
+    assert_eq!(consumer.read("assemblr-lock.json"), lockfile);
+
+    // Two published amenders of one file are refused together.
+    let other = fixture.repo("other");
+    other.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/other",
+            "0.1.0",
+            &[("@acme/node", "=1.0.0")],
+            r#", "amendments": {"bin/run": {"unit": "@acme/node", "base": "1.0.0"}}"#,
+        ),
+    );
+    other.write("src/other.txt", "other");
+    other.write("amendments/bin/run", "#!/bin/sh\necho other\n");
+    succeeds(fixture.build(&other));
+    other.publish("0.1.0");
+    fixture.register(&other);
+    let both = self::consumer(
+        &fixture,
+        "both",
+        &[("@acme/app", "^0.1"), ("@acme/other", "^0.1")],
+        "",
+    );
+    let err = stderr(&fails(fixture.build(&both)));
+    assert!(
+        err.contains(
+            "src/bin/run of @acme/node 1.0.0 is amended by @acme/app 0.1.0, @acme/other 0.1.0"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn files_of_distinct_providers_with_the_same_name_are_amended_independently() {
+    let fixture = Fixture::new("same-name-providers");
+    let (_node, _app) = published_amender(&fixture, "port: {{ port }}\n");
+    let tools = fixture.repo("tools");
+    tools.write("manifest.jsonc", &manifest("@acme/tools", "1.0.0", &[], ""));
+    tools.write("src/tools/run", "#!/bin/sh\necho tools\n");
+    tools.publish("1.0.0");
+    fixture.register(&tools);
+    let consumer = consumer(
+        &fixture,
+        "consumer",
+        &[
+            ("@acme/app", "^0.1"),
+            ("@acme/node", "=1.0.0"),
+            ("@acme/tools", "^1"),
+        ],
+        "",
+    );
+    succeeds(fixture.build(&consumer));
+
+    // Both providers have a `run`; only the one `@acme/app` amends is
+    // refused.
+    let err = stderr(&fails(amend(&fixture, &consumer, &["run"])));
+    assert!(err.contains("\"run\" matches 2 files"), "{err}");
+    let err = stderr(&fails(amend(
+        &fixture,
+        &consumer,
+        &["run", "--unit", "@acme/node"],
+    )));
+    assert!(err.contains("already amended by @acme/app 0.1.0"), "{err}");
+    succeeds(amend(
+        &fixture,
+        &consumer,
+        &["run", "--unit", "@acme/tools"],
+    ));
+    consumer.write("amendments/tools/run", "#!/bin/sh\necho consumer tools\n");
+    succeeds(fixture.build(&consumer));
+    let files = consumer.build_files();
+    assert!(
+        files.contains(&("bin/run".to_owned(), "#!/bin/sh\necho amended\n".to_owned())),
+        "{files:?}"
+    );
+    assert!(
+        files.contains(&(
+            "tools/run".to_owned(),
+            "#!/bin/sh\necho consumer tools\n".to_owned()
+        )),
+        "{files:?}"
+    );
+}
+
+#[test]
+fn a_base_the_amender_s_lockfile_misidentifies_is_an_integrity_conflict() {
+    let fixture = Fixture::new("base-integrity");
+    let (node, app) = app_amending_node(&fixture);
+    succeeds(amend(&fixture, &app, &["bin/run"]));
+    // The lockfile names another tree for the base before publication.
+    let tree = node.rev("v1.0.0^{tree}");
+    let lockfile = app.read("assemblr-lock.json");
+    assert!(lockfile.contains(&tree), "{lockfile}");
+    app.write(
+        "assemblr-lock.json",
+        &lockfile.replace(&tree, &"0".repeat(40)),
+    );
+    app.publish("0.1.0");
+    fixture.register(&app);
+
+    let consumer = consumer(&fixture, "consumer", &[("@acme/app", "^0.1")], "");
+    let err = stderr(&fails(fixture.build(&consumer)));
+    for expected in [
+        "integrity conflict: @acme/app 0.1.0 amends bin/run of @acme/node 1.0.0, whose content \
+         its lockfile identifies as commit",
+        &format!("(tree {})", "0".repeat(40)),
+        &format!(
+            "but the registry records commit {} (tree {tree})",
+            node.rev("v1.0.0")
+        ),
+        "hint: the build was rejected; build/ and assemblr-lock.json were not changed; \
+         published versions never change",
+    ] {
+        assert!(err.contains(expected), "{expected:?} in {err}");
+    }
+    assert!(!consumer.path.join("build").exists());
+    assert!(!consumer.path.join("assemblr-lock.json").exists());
+}
+
+#[test]
+fn a_published_amender_s_template_errors_name_its_version() {
+    let fixture = Fixture::new("published-render");
+    let (_node, _app) = published_amender(&fixture, "port: {{ port }}\nname: {{ own.nope }}\n");
+    let consumer = consumer(&fixture, "consumer", &[("@acme/app", "^0.1")], "");
+    let err = stderr(&fails(fixture.build(&consumer)));
+    assert!(
+        err.contains(
+            "amendments/config/app.yaml.assemblr.tmpl of @acme/app 0.1.0 (a copy of template \
+             src/config/app.yaml.assemblr.tmpl of @acme/node), line 2, column 7: undefined \
+             reference `own.nope`; the amending unit's parameters are `own.title`"
+        ),
+        "{err}"
+    );
 }

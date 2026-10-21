@@ -231,17 +231,23 @@ For unit authoring, composition output goes to `build/`, which is rebuilt from
 scratch and needs no reconciliation history (see
 [authoring-workflow.md](authoring-workflow.md#build--approved)).
 
-**Implemented so far.** A unit's build applies the unit's own amendments,
-whose providers resolve to the declared bases by construction of the
-[unit lock state](authoring-workflow.md#unit-lock-state--approved); with the
-base and the resolved version equal, the result is the rendered copy, and no
-change is derived. The cases that need the open decisions above fail
-explicitly and change nothing (standing default D2): a dependency whose
-published version declares amendments is not composed, and such a version is
-not indexed (see
-[registries-and-discovery.md](registries-and-discovery.md#invalid-versions-and-failed-sources--approved)),
-so no file has more than one amender yet, and no amendment is applied to a
-provider version other than its base.
+**Implemented so far.** A unit's build applies the amendments of every unit
+in its composition: its own, whose providers resolve to the declared bases
+by construction of the
+[unit lock state](authoring-workflow.md#unit-lock-state--approved), and
+those that its resolved dependencies publish, direct or transitive, when the
+provider resolves to the declared base. The direct-dependency restriction
+binds the amender to the provider, not the amender to the unit being built.
+A published amender's bases are verified against the composer's registry
+record before composition, as approved above. With the base and the resolved
+version equal, the result is the rendered copy, and no change is derived.
+The cases that need the open decisions above fail explicitly, naming each
+amender, its version, the provider, the base, and the resolved version, and
+change nothing (standing default D2): an amendment whose provider resolves
+to a version other than its base is not applied, and a provider file that
+several units amend, in any combination of the unit being built and
+published amenders, is not amended by any of them. No merge, re-basing, or
+ordering is performed.
 
 Consumer projects reconcile downstream modifications with three inputs: the
 **reconciliation base** (the previously materialized composition), **current**

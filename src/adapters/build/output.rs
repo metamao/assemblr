@@ -32,7 +32,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use super::exclusive::BuildLock;
-use super::lockfile::{LOCKFILE, serialize};
+use crate::adapters::lockfile::{LOCKFILE, serialize};
 use crate::domain::{RelativePath, UnitFile, UnitLock};
 
 /// The build's output directory, at the repository's top level.
@@ -464,7 +464,7 @@ mod tests {
         publish_with,
     };
     use crate::adapters::build::exclusive::BuildLock;
-    use crate::adapters::build::lockfile::{LOCKFILE, read};
+    use crate::adapters::lockfile::{LOCKFILE, read};
     use crate::domain::{
         FileTree, LockedUnit, ObjectId, Provenance, RelativePath, UnitFile, UnitLock,
     };

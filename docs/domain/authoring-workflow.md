@@ -114,8 +114,13 @@ either before or after the amendment.
 
 **What it refuses, changing nothing:** a `--unit` that is not a direct
 dependency; a path the unit's own `src/` holds, which would collide; a path
-the manifest already declares; and a file at `amendments/<path>` whose
-content differs from the provider's file, or that is not a regular file.
+the manifest already declares; a file of the same provider that a locked
+dependency, direct or transitive, already amends, naming that amender and
+its version, since several amenders of one file are not supported yet; and a
+file at `amendments/<path>` whose content differs from the provider's file,
+or that is not a regular file. A file of another provider with the same name
+is a different file, and delivered-path collisions are found by the build
+as usual.
 
 **Writing.** Everything is decided before anything is written. The copy is
 created first, as a new file, and the manifest is replaced afterwards: the
@@ -225,7 +230,9 @@ stdout. Diagnostics, and changes to the unit lockfile, go to stderr.
 - amendment validity: each declared provider is a direct dependency that
   provides the path in its `src/` at the locked version, the declared base is
   the locked version, the copy exists, and no copy is undeclared (see
-  below);
+  below); for the amendments that resolved dependencies publish, each base
+  is verified against the registry record and the provider resolves to it,
+  and no provider file has more than one amender;
 - rendering of the templates of the unit and of its dependencies, amended
   copies included (see
   [parameters-and-options.md](parameters-and-options.md#rendering--approved)).
@@ -272,22 +279,29 @@ unit that provides each one, and delivered without the suffix (see
 Every rendering problem is reported with its file and position, and a build
 with any is rejected before `build/` or the lockfile changes.
 
-**Amendments.** A build applies the unit's own amendments. `amendments/` is
-read by the same rules as `src/`, including the path rules and the rejection
-of symbolic links; an empty `amendments/`, or one holding only ignored
-files, is no amendment. Each declared copy takes the place of the provider's
-file: it is delivered at the provider's delivered path with the provider's
-executable bit, and it is rendered exactly when the provider's file is, with
-the provider's values and the unit's own as `own` (see
+**Amendments.** A build applies the unit's own amendments and those its
+resolved dependencies publish. The unit's `amendments/` is read by the same
+rules as `src/`, including the path rules and the rejection of symbolic
+links; an empty `amendments/`, or one holding only ignored files, is no
+amendment. A published version's `amendments/` and lockfile are read from
+Git at the indexed commit, by the same rules. Each declared copy takes the
+place of the provider's file: it is delivered at the provider's delivered
+path with the provider's executable bit, and it is rendered exactly when the
+provider's file is, with the provider's values and the amending unit's own
+as `own`, the values that unit has in this build (see
 [amendments-and-composition.md](amendments-and-composition.md#template-contexts--approved)).
 Every amendment that cannot be applied is reported with the others: a
 declared base other than the locked version (see
 [unit lock state](#unit-lock-state--approved)), a path the provider does
 not have at that version, naming the provider's template or plain file when
 only the suffix differs, a declaration without a copy, and a copy without a
-declaration. The unit's own `src/` file at an amended path is a path
-collision. A dependency whose published version declares amendments is
-refused: composing published amendments is not supported yet.
+declaration. For a published amender, its lockfile's identity of each base
+is compared with the registry record for the provider at that version, and a
+disagreement is an integrity conflict; a provider resolved to a version
+other than the base, and a provider file that several units amend, are
+reported as not supported yet, naming each amender and version (see
+[amendments-and-composition.md](amendments-and-composition.md#composition-builds-and-reconciliation)).
+The unit's own `src/` file at an amended path is a path collision.
 
 **`build/`.**
 

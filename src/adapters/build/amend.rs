@@ -25,10 +25,11 @@ use std::path::{Path, PathBuf};
 
 use super::exclusive::BuildLock;
 use super::{
-    BuildLockError, BuildProblem, Dependencies, LockfileError, MANIFEST, ManifestFileError,
-    lockfile, read_working_manifest_text,
+    BuildLockError, BuildProblem, Dependencies, MANIFEST, ManifestFileError,
+    read_working_manifest_text,
 };
 use crate::adapters::git::{FILE_LIMIT, GitError, GitRepository, ReadSrcError, UnitDirectory};
+use crate::adapters::lockfile::{self, LockfileError};
 use crate::adapters::manifest::{EditError, declare_amendment, read_manifest};
 use crate::adapters::registry::{Registry, StorageError};
 use crate::domain::{
@@ -166,18 +167,19 @@ pub fn amend_unit(
         .keys()
         .filter(|identity| unit.is_none_or(|unit| unit == *identity))
         .collect();
-    let trees = dependencies
-        .read_src(&lock, searched.iter().copied())
+    let contents = dependencies
+        .read_content(&lock, searched.iter().copied())
         .map_err(|found| {
             AmendFailure::Rejected(found.into_iter().map(AmendProblem::Build).collect())
         })?;
 
     let mut matches = Vec::new();
     for identity in &searched {
-        let (Some(tree), Some(locked)) = (trees.get(*identity), lock.units().get(*identity)) else {
+        let (Some(content), Some(locked)) = (contents.get(*identity), lock.units().get(*identity))
+        else {
             continue;
         };
-        for path in tree.keys().filter(|path| wanted.matches(path)) {
+        for path in content.files.keys().filter(|path| wanted.matches(path)) {
             matches.push(Match {
                 unit: (*identity).clone(),
                 version: locked.version().clone(),
@@ -200,9 +202,9 @@ pub fn amend_unit(
             }));
         }
     };
-    let base = trees
+    let base = contents
         .get(&found.unit)
-        .and_then(|tree| tree.get(&found.path))
+        .and_then(|content| content.files.get(&found.path))
         .map(|file| file.contents().to_vec())
         .unwrap_or_default();
     let declaration = AmendmentDeclaration::new(found.unit.clone(), found.version.clone());
@@ -211,6 +213,27 @@ pub fn amend_unit(
         problems.push(AmendProblem::AlreadyDeclared {
             path: found.path.clone(),
             unit: existing.unit().clone(),
+            base: existing.base().clone(),
+        });
+    }
+    // A locked dependency, direct or transitive, that already amends the
+    // same file of the same provider would make the build refuse both
+    // amenders, so the copy is not created.
+    for (identity, locked) in lock.units() {
+        let key = (identity.clone(), locked.version().clone());
+        let Some(existing) = dependencies
+            .manifests
+            .get(&key)
+            .and_then(|manifest| manifest.amendments().get(&found.path))
+            .filter(|existing| *existing.unit() == found.unit)
+        else {
+            continue;
+        };
+        problems.push(AmendProblem::AmendedByDependency {
+            path: found.path.clone(),
+            provider: found.unit.clone(),
+            amender: identity.clone(),
+            version: locked.version().clone(),
             base: existing.base().clone(),
         });
     }
@@ -591,6 +614,21 @@ pub enum AmendProblem {
         /// The declared base.
         base: Version,
     },
+    /// A locked dependency's published version already amends the same
+    /// file of the same provider, and several amenders of one file are not
+    /// supported yet.
+    AmendedByDependency {
+        /// The path.
+        path: RelativePath,
+        /// The provider.
+        provider: UnitIdentity,
+        /// The dependency that amends it.
+        amender: UnitIdentity,
+        /// Its locked version.
+        version: Version,
+        /// The base its amendment declares.
+        base: Version,
+    },
     /// A file at `amendments/<path>` exists with other content than the
     /// provider's file, and is never overwritten.
     CopyExists {
@@ -709,6 +747,18 @@ impl fmt::Display for AmendProblem {
             Self::AlreadyDeclared { path, unit, base } => write!(
                 f,
                 "the manifest already declares an amendment of {path} from {unit} {base}"
+            ),
+            Self::AmendedByDependency {
+                path,
+                provider,
+                amender,
+                version,
+                base,
+            } => write!(
+                f,
+                "src/{path} of {provider} is already amended by {amender} {version}, a locked \
+                 dependency, based on {provider} {base}; several amenders of one file are not \
+                 supported yet, so the file cannot be amended here"
             ),
             Self::CopyExists { path } => write!(
                 f,

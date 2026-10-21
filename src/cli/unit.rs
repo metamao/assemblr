@@ -234,6 +234,12 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
         BuildProblem::AmendmentBase(_) => {
             "a build never changes the locked version of an amended unit".to_owned()
         }
+        BuildProblem::BaseIntegrity(_) => "published versions never change: either the \
+                                           provider's tag was moved and its source registered \
+                                           again, or the amender was published against other \
+                                           content; run `assemblr registry sync` to check the \
+                                           registered repositories"
+            .to_owned(),
         BuildProblem::Resolution(ResolutionError::Unavailable { .. }) => {
             "run `assemblr registry sync` to index newly published versions".to_owned()
         }

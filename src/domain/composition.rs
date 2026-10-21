@@ -36,18 +36,22 @@
 //!
 //! # Amendments
 //!
-//! The unit being built may amend files of its direct dependencies: its
-//! manifest declares each amended path with the provider and the exact base
-//! version, and the edited copy lives at `amendments/<path>` (see
-//! `docs/domain/amendments-and-composition.md`). The copy takes the place of
-//! the provider's file, at the provider's delivered path and with the
-//! provider's executable bit, and it is a template exactly when the
+//! Any member may amend files of its direct dependencies: the unit being
+//! built from its working tree, and a resolved unit from its published
+//! version. Its manifest declares each amended path with the provider and
+//! the exact base version, and the edited copy lives at `amendments/<path>`
+//! (see `docs/domain/amendments-and-composition.md`). The copy takes the
+//! place of the provider's file, at the provider's delivered path and with
+//! the provider's executable bit, and it is a template exactly when the
 //! provider's file is. The provider must resolve to the declared base: that
 //! is the one case in which the result is simply the copy, and the only one
 //! supported so far. A declaration whose copy is missing, a copy that is not
-//! declared, and a copy of a file the provider does not have are errors. A
-//! dependency whose published version declares amendments is refused
-//! explicitly: composing published amendments is not supported yet.
+//! declared, and a copy of a file the provider does not have are errors.
+//! One file of one provider may be amended by one member only: when several
+//! members declare the same provider file, none is applied, the file stays
+//! the provider's, and the members are reported together, since combining
+//! contributions to one file is not supported yet (OC-12). Whether a base
+//! is the content the registry records is verified by the build, not here.
 //!
 //! Every problem is reported, in the order [`compose`] documents.
 
@@ -164,14 +168,17 @@ pub enum Root<'a> {
 /// 3. requirements naming undeclared parameters or holding invalid values;
 /// 4. options conflicts;
 /// 5. missing required values;
-/// 6. dependencies whose published versions declare amendments;
-/// 7. amendments that cannot be applied, and copies that are not declared;
+/// 6. provider files that several members amend, by provider and path;
+/// 7. amendments that cannot be applied, and copies that are not declared,
+///    by amender and then path;
 /// 8. templates whose delivered path is invalid;
 /// 9. path collisions.
 ///
 /// A parameter whose requirements are invalid is not also reported as
-/// missing or conflicting. An amendment that cannot be applied leaves the
-/// provider's file in place, so collisions are still found.
+/// missing or conflicting, and a declaration of a provider file that
+/// several members amend is not also checked on its own. An amendment that
+/// cannot be applied leaves the provider's file in place, so collisions are
+/// still found.
 pub fn compose<'a>(
     graph: &ResolvedGraph,
     root: Root<'a>,
@@ -406,19 +413,24 @@ pub enum CompositionError {
         /// directly, and the root when it may configure this unit.
         responsible: Vec<Requirer>,
     },
-    /// A dependency's published version declares amendments. Composing a
-    /// dependency's amendments is not supported yet.
-    PublishedAmendments {
-        /// The dependency.
+    /// Several members amend the same file of the same provider. Combining
+    /// their contributions is not supported yet, and no amender takes
+    /// precedence, so none is applied.
+    SeveralAmenders {
+        /// The amended path.
+        path: RelativePath,
+        /// The provider.
         unit: UnitIdentity,
         /// Its resolved version.
         version: Version,
-        /// The paths it amends, sorted.
-        paths: Vec<RelativePath>,
+        /// The amenders, ordered: the root first, then by identity.
+        amenders: Vec<Requirer>,
     },
     /// An amendment's declared base is not the version its provider
     /// resolved to, so the copy cannot be applied.
     AmendmentBase {
+        /// The amending member.
+        amender: Requirer,
         /// The amended path.
         path: RelativePath,
         /// The provider.
@@ -431,6 +443,8 @@ pub enum CompositionError {
     /// The provider's `src/` at the resolved version has no file at the
     /// amended path.
     AmendmentNotProvided {
+        /// The amending member.
+        amender: Requirer,
         /// The amended path.
         path: RelativePath,
         /// The provider.
@@ -444,20 +458,20 @@ pub enum CompositionError {
     },
     /// A declared amendment has no copy under `amendments/`.
     AmendmentMissingCopy {
+        /// The amending member.
+        amender: Requirer,
         /// The amended path.
         path: RelativePath,
-        /// The amending unit.
-        unit: UnitIdentity,
         /// The provider the declaration names.
         provider: UnitIdentity,
     },
     /// A copy under `amendments/` is not declared in the manifest, so its
     /// base is unknown.
     AmendmentUndeclared {
+        /// The member holding the copy.
+        amender: Requirer,
         /// The copy's path under `amendments/`.
         path: RelativePath,
-        /// The unit holding the copy.
-        unit: UnitIdentity,
     },
     /// A template whose path without [`TEMPLATE_SUFFIX`] is not a valid
     /// path, so it cannot be delivered.
@@ -567,36 +581,57 @@ impl fmt::Display for CompositionError {
                 )?;
                 write_list(f, responsible)
             }
-            Self::PublishedAmendments {
+            Self::SeveralAmenders {
+                path,
                 unit,
                 version,
-                paths,
+                amenders,
             } => {
-                write!(f, "{unit} {version} declares amendments of ")?;
-                write_list(f, paths)?;
-                f.write_str("; composing a dependency's amendments is not supported yet")
+                write!(f, "src/{path} of {unit} {version} is amended by ")?;
+                write_list(f, amenders.iter().map(amender_name))?;
+                f.write_str(
+                    "; several amenders of one file are not supported yet, and no amender takes \
+                     precedence, so the file is not amended",
+                )
             }
             Self::AmendmentBase {
+                amender,
                 path,
                 unit,
                 base,
                 resolved,
-            } => write!(
-                f,
-                "amendments/{path} is based on {unit} {base}, but {unit} resolved to {resolved}; \
-                 an amendment is applied only to its base version"
-            ),
+            } => match amender {
+                Requirer::Root => write!(
+                    f,
+                    "amendments/{path} is based on {unit} {base}, but {unit} resolved to \
+                     {resolved}; an amendment is applied only to its base version"
+                ),
+                Requirer::Unit(..) => write!(
+                    f,
+                    "{amender} amends src/{path} of {unit} based on {unit} {base}, but {unit} \
+                     resolved to {resolved}; an amendment is applied only to its base version, \
+                     and applying it to another version is not supported yet"
+                ),
+            },
             Self::AmendmentNotProvided {
+                amender,
                 path,
                 unit,
                 version,
                 similar,
             } => {
-                write!(
-                    f,
-                    "amendments/{path} amends a file that {unit} {version} does not provide: it \
-                     has no src/{path}"
-                )?;
+                match amender {
+                    Requirer::Root => write!(
+                        f,
+                        "amendments/{path} amends a file that {unit} {version} does not \
+                         provide: it has no src/{path}"
+                    )?,
+                    Requirer::Unit(..) => write!(
+                        f,
+                        "amendments/{path} of {amender} amends a file that {unit} {version} \
+                         does not provide: it has no src/{path}"
+                    )?,
+                }
                 match similar {
                     Some(similar) if similar.as_str().ends_with(TEMPLATE_SUFFIX) => write!(
                         f,
@@ -612,21 +647,35 @@ impl fmt::Display for CompositionError {
                 }
             }
             Self::AmendmentMissingCopy {
+                amender,
                 path,
-                unit,
                 provider,
-            } => write!(
-                f,
-                "the manifest of {unit} declares an amendment of {path} from {provider}, but \
-                 amendments/{path} does not exist; restore the copy, or remove the declaration \
-                 and run `assemblr unit amend` again"
-            ),
-            Self::AmendmentUndeclared { path, unit } => write!(
-                f,
-                "amendments/{path} of {unit} is not declared in the manifest, so its base is \
-                 unknown; if an `assemblr unit amend` was interrupted, run it again, and \
-                 otherwise declare the copy in `amendments` or delete it"
-            ),
+            } => match amender {
+                Requirer::Root => write!(
+                    f,
+                    "the manifest declares an amendment of {path} from {provider}, but \
+                     amendments/{path} does not exist; restore the copy, or remove the \
+                     declaration and run `assemblr unit amend` again"
+                ),
+                Requirer::Unit(..) => write!(
+                    f,
+                    "the manifest of {amender} declares an amendment of {path} from {provider}, \
+                     but its published version has no amendments/{path}"
+                ),
+            },
+            Self::AmendmentUndeclared { amender, path } => match amender {
+                Requirer::Root => write!(
+                    f,
+                    "amendments/{path} is not declared in the manifest, so its base is unknown; \
+                     if an `assemblr unit amend` was interrupted, run it again, and otherwise \
+                     declare the copy in `amendments` or delete it"
+                ),
+                Requirer::Unit(..) => write!(
+                    f,
+                    "amendments/{path} of {amender} is not declared in its manifest, so its \
+                     base is unknown"
+                ),
+            },
             Self::InvalidDeliveredPath { path, unit, error } => write!(
                 f,
                 "{path} from {unit} is a template, but without `{TEMPLATE_SUFFIX}` its path is \
@@ -662,6 +711,15 @@ impl fmt::Display for CompositionError {
 }
 
 impl std::error::Error for CompositionError {}
+
+/// How an amending member is named in diagnostics: the unit being built is
+/// "this unit", and a resolved unit is its identity and version.
+fn amender_name(amender: &Requirer) -> String {
+    match amender {
+        Requirer::Root => "this unit".to_owned(),
+        Requirer::Unit(..) => amender.to_string(),
+    }
+}
 
 fn write_list<T: fmt::Display>(
     f: &mut fmt::Formatter<'_>,
@@ -957,20 +1015,43 @@ type Applied<'a> = BTreeMap<(&'a UnitIdentity, &'a RelativePath), (&'a UnitIdent
 fn amendments<'a>(
     members: &BTreeMap<&'a UnitIdentity, Member<'a>>,
 ) -> (Applied<'a>, Vec<CompositionError>) {
+    // The members amending each provider file. Members are ordered by
+    // identity, and the root is the unit being built, so this order is
+    // deterministic too.
+    let mut amenders: BTreeMap<(&UnitIdentity, &RelativePath), Vec<&Requirer>> = BTreeMap::new();
+    for member in members.values() {
+        for (path, declaration) in member.manifest.amendments() {
+            amenders
+                .entry((declaration.unit(), path))
+                .or_default()
+                .push(&member.requirer);
+        }
+    }
+    let mut several = Vec::new();
+    let mut contested = BTreeSet::new();
+    for ((provider, path), requirers) in &amenders {
+        let (Some(member), true) = (members.get(provider), requirers.len() > 1) else {
+            continue;
+        };
+        let mut requirers: Vec<Requirer> = requirers.iter().map(|r| (*r).clone()).collect();
+        requirers.sort();
+        several.push(CompositionError::SeveralAmenders {
+            path: (*path).clone(),
+            unit: (*provider).clone(),
+            version: member.manifest.version().clone(),
+            amenders: requirers,
+        });
+        contested.insert((*provider, *path));
+    }
+
     let mut applied = Applied::new();
-    let mut published = Vec::new();
     let mut problems = Vec::new();
     for member in members.values() {
         let declared = member.manifest.amendments();
-        if member.requirer != Requirer::Root && !declared.is_empty() {
-            published.push(CompositionError::PublishedAmendments {
-                unit: member.identity.clone(),
-                version: member.manifest.version().clone(),
-                paths: declared.keys().cloned().collect(),
-            });
-            continue;
-        }
         for (path, declaration) in declared {
+            if contested.contains(&(declaration.unit(), path)) {
+                continue;
+            }
             if let Some(problem) = amendment(members, member, path, declaration, &mut applied) {
                 problems.push(problem);
             }
@@ -981,13 +1062,13 @@ fn amendments<'a>(
                 .keys()
                 .filter(|path| !declared.contains_key(*path))
                 .map(|path| CompositionError::AmendmentUndeclared {
+                    amender: member.requirer.clone(),
                     path: path.clone(),
-                    unit: member.identity.clone(),
                 }),
         );
     }
-    published.extend(problems);
-    (applied, published)
+    several.extend(problems);
+    (applied, several)
 }
 
 /// Records the amendment of `path` that `member` declares, or why it cannot
@@ -1005,6 +1086,7 @@ fn amendment<'a>(
     let resolved = provider.manifest.version();
     if resolved != declaration.base() {
         return Some(CompositionError::AmendmentBase {
+            amender: member.requirer.clone(),
             path: path.clone(),
             unit: provider.identity.clone(),
             base: declaration.base().clone(),
@@ -1019,6 +1101,7 @@ fn amendment<'a>(
             .flatten()
             .find(|candidate| provider.files.contains_key(candidate));
         return Some(CompositionError::AmendmentNotProvided {
+            amender: member.requirer.clone(),
             path: path.clone(),
             unit: provider.identity.clone(),
             version: resolved.clone(),
@@ -1027,8 +1110,8 @@ fn amendment<'a>(
     }
     let Some(copy) = member.amendments.get(path) else {
         return Some(CompositionError::AmendmentMissingCopy {
+            amender: member.requirer.clone(),
             path: path.clone(),
-            unit: member.identity.clone(),
             provider: provider.identity.clone(),
         });
     };
@@ -2337,37 +2420,41 @@ mod tests {
             errors,
             [
                 CompositionError::AmendmentBase {
+                    amender: Requirer::Root,
                     path: path("bin/run"),
                     unit: identity("@metamao/node"),
                     base: version("1.0.0"),
                     resolved: version("1.1.0"),
                 },
                 CompositionError::AmendmentNotProvided {
+                    amender: Requirer::Root,
                     path: path("bin/run.assemblr.tmpl"),
                     unit: identity("@metamao/node"),
                     version: version("1.1.0"),
                     similar: Some(path("bin/run")),
                 },
                 CompositionError::AmendmentNotProvided {
+                    amender: Requirer::Root,
                     path: path("missing.txt"),
                     unit: identity("@metamao/node"),
                     version: version("1.1.0"),
                     similar: None,
                 },
                 CompositionError::AmendmentNotProvided {
+                    amender: Requirer::Root,
                     path: path("package.json"),
                     unit: identity("@metamao/node"),
                     version: version("1.1.0"),
                     similar: Some(path("package.json.assemblr.tmpl")),
                 },
                 CompositionError::AmendmentMissingCopy {
+                    amender: Requirer::Root,
                     path: path("package.json.assemblr.tmpl"),
-                    unit: identity("@metamao/app"),
                     provider: identity("@metamao/node"),
                 },
                 CompositionError::AmendmentUndeclared {
+                    amender: Requirer::Root,
                     path: path("stray.txt"),
-                    unit: identity("@metamao/app"),
                 },
                 CompositionError::PathCollision {
                     files: vec![
@@ -2402,28 +2489,188 @@ mod tests {
         assert!(messages[5].contains("not declared"), "{}", messages[5]);
     }
 
+    /// `@metamao/amender` 1.0.0, a published unit amending two files of
+    /// `@metamao/node` 1.0.0.
+    fn amender() -> Spec {
+        Spec::new("@metamao/amender", "1.0.0")
+            .depends("@metamao/node", "=1.0.0")
+            .amends("bin/run", "@metamao/node", "1.0.0")
+            .copy("bin/run", "#!/bin/sh\necho amended by amender")
+            .amends("package.json.assemblr.tmpl", "@metamao/node", "1.0.0")
+            .copy(
+                "package.json.assemblr.tmpl",
+                "{ \"name\": \"{{ own.name }}\" }",
+            )
+            .file("amender.txt")
+    }
+
     #[test]
-    fn a_dependency_s_published_amendments_are_refused() {
+    fn a_dependency_s_published_amendments_are_applied_at_the_base() {
+        // The amender is a transitive dependency: the root depends on it
+        // only through `@metamao/web`.
+        let web = Spec::new("@metamao/web", "1.0.0")
+            .depends("@metamao/amender", "^1")
+            .file("web.txt");
+        let built = Spec::new("@metamao/app", "0.1.0")
+            .depends("@metamao/web", "^1")
+            .file("index.ts");
+        let mut published = provider();
+        published.push(amender());
+        published.push(web);
+        let composed = run(&For::Build(built), &published, &[]).unwrap();
+        let files: Vec<(&str, &str, &[u8], bool)> = composed
+            .files
+            .iter()
+            .map(|(file, unit, contents, executable)| {
+                (
+                    file.as_str(),
+                    unit.as_str(),
+                    contents.as_slice(),
+                    *executable,
+                )
+            })
+            .collect();
+        assert_eq!(
+            files,
+            [
+                (
+                    "amender.txt",
+                    "@metamao/amender",
+                    b"@metamao/amender amender.txt".as_slice(),
+                    false
+                ),
+                (
+                    "bin/run",
+                    "@metamao/node",
+                    b"#!/bin/sh\necho amended by amender".as_slice(),
+                    true
+                ),
+                (
+                    "index.ts",
+                    "@metamao/app",
+                    b"@metamao/app index.ts".as_slice(),
+                    false
+                ),
+                (
+                    "package.json",
+                    "@metamao/node",
+                    b"{ \"name\": \"{{ own.name }}\" }".as_slice(),
+                    false
+                ),
+                (
+                    "web.txt",
+                    "@metamao/web",
+                    b"@metamao/web web.txt".as_slice(),
+                    false
+                ),
+            ]
+        );
+        assert_eq!(
+            composed.amended,
+            [
+                ("bin/run".to_owned(), "@metamao/amender".to_owned()),
+                ("package.json".to_owned(), "@metamao/amender".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_published_amendment_of_another_version_than_its_base_is_refused() {
+        // The root requires 1.1.0, so the amender's base 1.0.0 is not the
+        // resolved version.
         let amender = Spec::new("@metamao/amender", "1.0.0")
             .depends("@metamao/node", "^1")
-            .amends("bin/run", "@metamao/node", "1.1.0")
-            .amends("package.json.assemblr.tmpl", "@metamao/node", "1.1.0")
+            .amends("bin/run", "@metamao/node", "1.0.0")
+            .copy("bin/run", "#!/bin/sh\necho amended")
             .file("amender.txt");
         let built = Spec::new("@metamao/app", "0.1.0")
             .depends("@metamao/amender", "^1")
-            .depends("@metamao/node", "^1");
+            .depends("@metamao/node", "^1.1");
         let mut published = provider();
         published.push(amender);
         let errors = run(&For::Build(built), &published, &[]).unwrap_err();
         assert_eq!(
             errors,
-            [CompositionError::PublishedAmendments {
-                unit: identity("@metamao/amender"),
-                version: version("1.0.0"),
-                paths: vec![path("bin/run"), path("package.json.assemblr.tmpl")],
+            [CompositionError::AmendmentBase {
+                amender: Requirer::Unit(identity("@metamao/amender"), version("1.0.0")),
+                path: path("bin/run"),
+                unit: identity("@metamao/node"),
+                base: version("1.0.0"),
+                resolved: version("1.1.0"),
             }]
         );
-        assert!(errors[0].to_string().contains("not supported yet"));
+        let message = errors[0].to_string();
+        for part in [
+            "@metamao/amender 1.0.0 amends src/bin/run of @metamao/node based on @metamao/node 1.0.0",
+            "resolved to 1.1.0",
+            "not supported yet",
+        ] {
+            assert!(message.contains(part), "{message}");
+        }
+    }
+
+    #[test]
+    fn several_amenders_of_one_provider_file_are_refused_together() {
+        // The root and a published unit amend `bin/run`; two published
+        // units amend `package.json.assemblr.tmpl`. Neither file is
+        // amended, and a file only one member amends still is.
+        let other = Spec::new("@metamao/other", "1.0.0")
+            .depends("@metamao/node", "=1.0.0")
+            .amends("package.json.assemblr.tmpl", "@metamao/node", "1.0.0")
+            .copy("package.json.assemblr.tmpl", "{}")
+            .amends("README.md", "@metamao/node", "1.0.0")
+            .copy("README.md", "amended readme")
+            .file("other.txt");
+        let built = Spec::new("@metamao/app", "0.1.0")
+            .depends("@metamao/amender", "^1")
+            .depends("@metamao/other", "^1")
+            .depends("@metamao/node", "=1.0.0")
+            .amends("bin/run", "@metamao/node", "1.0.0")
+            .copy("bin/run", "#!/bin/sh\necho amended by app")
+            .file("index.ts");
+        let mut published = provider();
+        published[0] = published[0].clone().file("README.md");
+        published.push(amender());
+        published.push(other);
+        let errors = run(&For::Build(built), &published, &[]).unwrap_err();
+        assert_eq!(
+            errors,
+            [
+                CompositionError::SeveralAmenders {
+                    path: path("bin/run"),
+                    unit: identity("@metamao/node"),
+                    version: version("1.0.0"),
+                    amenders: vec![
+                        Requirer::Root,
+                        Requirer::Unit(identity("@metamao/amender"), version("1.0.0")),
+                    ],
+                },
+                CompositionError::SeveralAmenders {
+                    path: path("package.json.assemblr.tmpl"),
+                    unit: identity("@metamao/node"),
+                    version: version("1.0.0"),
+                    amenders: vec![
+                        Requirer::Unit(identity("@metamao/amender"), version("1.0.0")),
+                        Requirer::Unit(identity("@metamao/other"), version("1.0.0")),
+                    ],
+                },
+            ]
+        );
+        let message = errors[0].to_string();
+        for part in [
+            "src/bin/run of @metamao/node 1.0.0 is amended by this unit, @metamao/amender 1.0.0",
+            "not supported yet",
+            "no amender takes precedence",
+        ] {
+            assert!(message.contains(part), "{message}");
+        }
+        assert!(
+            errors[1]
+                .to_string()
+                .contains("amended by @metamao/amender 1.0.0, @metamao/other 1.0.0"),
+            "{}",
+            errors[1]
+        );
     }
 
     #[test]
@@ -2890,6 +3137,8 @@ mod tests {
                 .option("@metamao/node", "packageManager", text("pnpm"))
                 .option("@metamao/node", "colour", text("blue"))
                 .option("@metamao/db", "port", text("5432"))
+                .amends("README.md", "@metamao/node", "1.0.0")
+                .copy("README.md", "api readme")
                 .file("README.md")
                 .file("docs"),
             Spec::new("@metamao/web", "1.0.0")
@@ -2897,6 +3146,9 @@ mod tests {
                 .depends("@metamao/db", "^1")
                 .option("@metamao/node", "packageManager", text("bun"))
                 .amends("README.md", "@metamao/node", "1.0.0")
+                .copy("README.md", "web readme")
+                .amends("missing.txt", "@metamao/node", "1.0.0")
+                .copy("stray.txt", "stray")
                 .file("readme.md")
                 .file("docs/index.md")
                 .file("notes..assemblr.tmpl"),
@@ -2937,12 +3189,14 @@ mod tests {
                 CompositionError::MissingValue {
                     unit, parameter, ..
                 } => format!("missing {unit} {parameter}"),
-                CompositionError::PublishedAmendments { unit, .. } => format!("published {unit}"),
-                CompositionError::AmendmentBase { path, .. }
-                | CompositionError::AmendmentNotProvided { path, .. }
-                | CompositionError::AmendmentMissingCopy { path, .. }
-                | CompositionError::AmendmentUndeclared { path, .. } => {
-                    format!("amendment {path}")
+                CompositionError::SeveralAmenders { unit, path, .. } => {
+                    format!("several {unit} {path}")
+                }
+                CompositionError::AmendmentBase { amender, path, .. }
+                | CompositionError::AmendmentNotProvided { amender, path, .. }
+                | CompositionError::AmendmentMissingCopy { amender, path, .. }
+                | CompositionError::AmendmentUndeclared { amender, path, .. } => {
+                    format!("amendment {amender} {path}")
                 }
                 CompositionError::InvalidDeliveredPath { path, unit, .. } => {
                     format!("undeliverable {path} {unit}")
@@ -2960,7 +3214,9 @@ mod tests {
                 "undeclared @metamao/web theme the root",
                 "conflict @metamao/node packageManager",
                 "missing @metamao/db url",
-                "published @metamao/web",
+                "several @metamao/node README.md",
+                "amendment @metamao/web 1.0.0 missing.txt",
+                "amendment @metamao/web 1.0.0 stray.txt",
                 "undeliverable notes..assemblr.tmpl @metamao/web",
                 "collision README.md from @metamao/api",
                 "nested docs from @metamao/api",

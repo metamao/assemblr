@@ -26,4 +26,5 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0007](0007-local-registry-storage.md) | Local registry storage, replacement, and locking | Accepted |
 | [0008](0008-unit-build.md) | Unit builds: working-tree reading, the unit lockfile, and publishing `build/` | Accepted |
 | [0009](0009-rendering.md) | Rendering templates with a purpose-built interpolator | Accepted |
-| [0010](0010-unit-amend.md) | `unit amend`: the search, the manifest edit, and recovery; amendments in a build | Accepted |
+| [0010](0010-unit-amend.md) | `unit amend`: the search, the manifest edit, and recovery; amendments in a build | Accepted, point 8 superseded by 0011 |
+| [0011](0011-published-amendments.md) | Published amendments: reading them, validating them at index time, and composing them at the base | Accepted |

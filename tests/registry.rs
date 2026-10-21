@@ -524,6 +524,142 @@ fn sync_indexes_new_versions_and_excludes_new_invalid_tags() {
     assert_eq!(fs::read(index_file(&data)).unwrap(), before);
 }
 
+/// A manifest of `@acme/app` at `version` depending on `@acme/node` and
+/// amending `paths` of it at base 1.0.0.
+fn amender_manifest(version: &str, paths: &[&str]) -> String {
+    let amendments: Vec<String> = paths
+        .iter()
+        .map(|path| format!(r#""{path}": {{"unit": "@acme/node", "base": "1.0.0"}}"#))
+        .collect();
+    format!(
+        r#"{{"name": "@acme/app", "version": "{version}", "description": "An app.",
+            "dependencies": {{"@acme/node": "^1"}}, "amendments": {{{}}}}}"#,
+        amendments.join(", ")
+    )
+}
+
+/// A lockfile locking `@acme/node` at `version`, with the commit and tree
+/// of `node`'s tag `v<version>`.
+fn lockfile(node: &Repo, version: &str) -> String {
+    format!(
+        r#"{{"format": 1, "units": {{"@acme/node": {{"commit": "{}", "tree": "{}", "version": "{version}"}}}}}}"#,
+        node.rev(&format!("v{version}^{{commit}}")),
+        node.rev(&format!("v{version}^{{tree}}"))
+    )
+}
+
+/// A registered `@acme/node` with 1.0.0 and 1.1.0, and an `@acme/app`
+/// whose 0.1.0 amends `README.md` of `@acme/node` 1.0.0 consistently.
+fn node_and_amender(dir: &Path, data: &Path) -> (Repo, Repo) {
+    let node = Repo::new(dir, "node");
+    node.publish("@acme/node", "1.0.0");
+    node.publish("@acme/node", "1.1.0");
+    succeeds(assemblr(data, dir, &["registry", "add", "node"]));
+    let app = Repo::new(dir, "app");
+    app.write("manifest.jsonc", &amender_manifest("0.1.0", &["README.md"]));
+    app.write("src/app.txt", "app\n");
+    app.write("amendments/README.md", "amended\n");
+    app.write("assemblr-lock.json", &lockfile(&node, "1.0.0"));
+    app.git(&["add", "-A"]);
+    app.git(&["commit", "-q", "-m", "0.1.0"]);
+    app.git(&["tag", "v0.1.0"]);
+    (node, app)
+}
+
+#[test]
+fn a_version_with_consistent_amendments_is_indexed_and_inconsistent_ones_are_excluded() {
+    let dir = scratch("published_amendments");
+    let data = dir.join("data");
+    let (node, app) = node_and_amender(&dir, &data);
+    // 0.2.0: a declaration without a copy, a copy without a declaration,
+    // and a lockfile that locks the provider elsewhere.
+    app.write(
+        "manifest.jsonc",
+        &amender_manifest("0.2.0", &["README.md", "missing.txt"]),
+    );
+    app.write("amendments/stray.txt", "stray\n");
+    app.write("assemblr-lock.json", &lockfile(&node, "1.1.0"));
+    app.git(&["add", "-A"]);
+    app.git(&["commit", "-q", "-m", "0.2.0"]);
+    app.git(&["tag", "v0.2.0"]);
+    // 0.3.0: no lockfile.
+    app.write("manifest.jsonc", &amender_manifest("0.3.0", &["README.md"]));
+    app.git(&["rm", "-q", "amendments/stray.txt", "assemblr-lock.json"]);
+    app.git(&["add", "-A"]);
+    app.git(&["commit", "-q", "-m", "0.3.0"]);
+    app.git(&["tag", "v0.3.0"]);
+    // 0.4.0: a lockfile that is not one.
+    app.write("manifest.jsonc", &amender_manifest("0.4.0", &["README.md"]));
+    app.write("assemblr-lock.json", "not json");
+    app.git(&["add", "-A"]);
+    app.git(&["commit", "-q", "-m", "0.4.0"]);
+    app.git(&["tag", "v0.4.0"]);
+    // 0.5.0: a symbolic link under `amendments/`.
+    app.write("manifest.jsonc", &amender_manifest("0.5.0", &["README.md"]));
+    app.write("assemblr-lock.json", &lockfile(&node, "1.0.0"));
+    app.git(&["add", "-A"]);
+    let blob = app.git(&["hash-object", "-w", "--stdin", "--path", "x"]);
+    app.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("120000,{blob},amendments/link"),
+    ]);
+    app.git(&["commit", "-q", "-m", "0.5.0"]);
+    app.git(&["tag", "v0.5.0"]);
+
+    let output = succeeds(assemblr(&data, &dir, &["registry", "add", "app"]));
+
+    let stderr = stderr(&output);
+    for expected in [
+        "excluded tag v0.2.0, which is not indexed as a published version: its amendments are \
+         invalid: amendments/README.md is based on @acme/node 1.0.0, but its assemblr-lock.json \
+         locks @acme/node 1.1.0; its manifest declares an amendment of missing.txt from \
+         @acme/node, but it has no amendments/missing.txt; amendments/missing.txt is based on \
+         @acme/node 1.0.0, but its assemblr-lock.json locks @acme/node 1.1.0; \
+         amendments/stray.txt is not declared in its manifest",
+        "excluded tag v0.3.0, which is not indexed as a published version: its amendments are \
+         invalid: it declares amendments but has no assemblr-lock.json",
+        "excluded tag v0.4.0, which is not indexed as a published version: it declares \
+         amendments, but `assemblr-lock.json` is not a valid lockfile: ",
+        "excluded tag v0.5.0, which is not indexed as a published version: invalid \
+         `amendments/`: `amendments/` has 1 unsupported entry:",
+        "amendments/link: symbolic links",
+    ] {
+        assert!(stderr.contains(expected), "{expected:?} in {stderr}");
+    }
+    assert!(!stderr.contains("v0.1.0"), "{stderr}");
+    let listing = list_json(&data, &dir);
+    assert_eq!(versions(&listing, 0), ["0.1.0"]);
+    assert_eq!(
+        listing["units"][0]["versions"][0]["commit"],
+        app.rev("v0.1.0^{commit}")
+    );
+}
+
+#[test]
+fn an_indexed_version_with_amendments_keeps_its_integrity() {
+    let dir = scratch("published_amendments_integrity");
+    let data = dir.join("data");
+    let (_node, app) = node_and_amender(&dir, &data);
+    succeeds(assemblr(&data, &dir, &["registry", "add", "app"]));
+    let recorded = app.rev("v0.1.0");
+    let before = fs::read(index_file(&data)).unwrap();
+
+    // The tag moves to a commit whose copy differs.
+    app.write("amendments/README.md", "changed\n");
+    app.git(&["add", "-A"]);
+    app.git(&["commit", "-q", "-m", "change the copy"]);
+    app.git(&["tag", "-f", "v0.1.0"]);
+
+    let output = fails(assemblr(&data, &dir, &["registry", "sync"]));
+    let stderr = stderr(&output);
+    for expected in ["integrity conflict", "tag v0.1.0 moved", &recorded] {
+        assert!(stderr.contains(expected), "{expected}: {stderr}");
+    }
+    assert_eq!(fs::read(index_file(&data)).unwrap(), before);
+}
+
 /// Two registered units, `@acme/node` with 1.0.0 indexed and `@acme/web`,
 /// which has published 1.0.0 since.
 fn registered_pair(dir: &Path, data: &Path) -> (Repo, Repo) {

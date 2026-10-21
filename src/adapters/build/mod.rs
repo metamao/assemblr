@@ -8,13 +8,16 @@
 //! unit's `manifest.jsonc`, `src/`, and `amendments/` from its working tree,
 //! resolves its dependencies from the registry index under the unit
 //! lockfile, reads each resolved version's content from Git at the commit
-//! the index records, and composes the result. Every problem found along the
-//! way is reported, and then nothing is written. Only a build without
-//! problems is published, together with its lockfile (see [`output`]).
+//! the index records, and composes the result. A resolved version that
+//! declares amendments is read with its `amendments/` and its lockfile, and
+//! each base the lockfile identifies is verified against the registry index
+//! before composition (see `docs/domain/amendments-and-composition.md`).
+//! Every problem found along the way is reported, and then nothing is
+//! written. Only a build without problems is published, together with its
+//! lockfile (see [`output`]).
 
 mod amend;
 mod exclusive;
-mod lockfile;
 mod output;
 
 use std::borrow::Cow;
@@ -27,18 +30,19 @@ use std::path::{Path, PathBuf};
 pub use amend::{AmendFailure, AmendProblem, AmendState, Amended, Match, WriteError, amend_unit};
 use exclusive::BuildLock;
 pub use exclusive::BuildLockError;
-pub use lockfile::LockfileError;
 pub use output::{OutputProblem, PublishError, State as PublishState};
 
 use super::git::{GitError, GitRepository, InvalidVersion, MANIFEST_LIMIT, ReadSrcError};
+use super::lockfile::{self, LockfileError, PublishedLockfileError};
 use super::manifest::{ReadManifestError, read_manifest};
 use super::registry::{Registry, StorageError};
 use super::render::{Context, RenderError, render};
 use crate::domain::{
-    AmendmentBaseError, AvailableVersions, CompositionError, FileTree, LockChange, LockError,
-    Manifest, ObjectId, ParameterName, ParameterValues, RelativePath, ResolutionError, Root,
-    TEMPLATE_SUFFIX, UnitContent, UnitFile, UnitIdentity, UnitLock, Version, amendment_bases,
-    compose, relock, resolve,
+    AmendmentBaseError, AvailableVersions, BaseIntegrityError, CompositionError, FileTree,
+    LockChange, LockError, Manifest, ObjectId, ParameterName, ParameterValues,
+    PublishedAmendmentError, RelativePath, Requirer, ResolutionError, Root, TEMPLATE_SUFFIX,
+    UnitContent, UnitFile, UnitIdentity, UnitLock, Version, amendment_bases, compose,
+    published_amendments, relock, resolve, verify_bases,
 };
 
 /// The unit's manifest, at the repository's top level.
@@ -188,8 +192,8 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
             path
         })
         .collect();
-    let trees = match dependencies.read_src(&lock, lock.units().keys()) {
-        Ok(trees) => trees,
+    let contents = match dependencies.read_content(&lock, lock.units().keys()) {
+        Ok(contents) => contents,
         Err(found) => {
             problems.extend(found);
             return Err(BuildFailure::Rejected(problems));
@@ -199,18 +203,28 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
         return Err(BuildFailure::Rejected(problems));
     };
 
-    let no_amendments = FileTree::new();
+    // Each published amender's bases are verified against the index here,
+    // whatever else the composition finds: a disagreement is an integrity
+    // conflict in its own right.
     let mut units = BTreeMap::new();
     for (identity, locked) in lock.units() {
         let key = (identity.clone(), locked.version().clone());
-        if let (Some(manifest), Some(files)) =
-            (dependencies.manifests.get(&key), trees.get(identity))
-        {
-            units.insert(
-                identity.clone(),
-                UnitContent::new(manifest, files, &no_amendments),
+        let (Some(manifest), Some(content)) =
+            (dependencies.manifests.get(&key), contents.get(identity))
+        else {
+            continue;
+        };
+        if let Some(published) = &content.lock {
+            problems.extend(
+                verify_bases(identity, locked.version(), manifest, published, &index)
+                    .into_iter()
+                    .map(BuildProblem::BaseIntegrity),
             );
         }
+        units.insert(
+            identity.clone(),
+            UnitContent::new(manifest, &content.files, &content.amendments),
+        );
     }
     let root_content = UnitContent::new(manifest, &src, &amendments);
     let composition = compose(
@@ -229,7 +243,11 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
                     // the cause, from the lock.
                     .filter(|error| match error {
                         CompositionError::MissingValue { unit, .. } => unit != manifest.name(),
-                        CompositionError::AmendmentBase { path, .. } => !moved.contains(path),
+                        CompositionError::AmendmentBase {
+                            amender: Requirer::Root,
+                            path,
+                            ..
+                        } => !moved.contains(path),
                         _ => true,
                     })
                     .map(BuildProblem::Composition),
@@ -263,6 +281,11 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
             unit: composed.unit().clone(),
             path: composed.source().clone(),
             amended_by: composed.amended_by().cloned(),
+            published: composed
+                .amended_by()
+                .filter(|amender| *amender != manifest.name())
+                .and_then(|amender| lock.units().get(amender))
+                .map(|locked| locked.version().clone()),
             error,
         };
         let Ok(text) = std::str::from_utf8(composed.contents()) else {
@@ -447,45 +470,97 @@ impl Dependencies {
         }
     }
 
-    /// Reads the `src/` files of the locked versions of `identities`.
-    fn read_src<'a>(
+    /// Reads the content of the locked versions of `identities`: the
+    /// `src/` files of each, and, for a version whose manifest declares
+    /// amendments, its `amendments/` copies and its lockfile, which must
+    /// identify each base.
+    fn read_content<'a>(
         &self,
         lock: &UnitLock,
         identities: impl IntoIterator<Item = &'a UnitIdentity>,
-    ) -> Result<BTreeMap<UnitIdentity, FileTree>, Vec<BuildProblem>> {
-        let mut trees = BTreeMap::new();
+    ) -> Result<BTreeMap<UnitIdentity, PublishedContent>, Vec<BuildProblem>> {
+        let mut contents = BTreeMap::new();
         let mut problems = Vec::new();
         for identity in identities {
             let Some(locked) = lock.units().get(identity) else {
                 continue;
             };
             let key = (identity.clone(), locked.version().clone());
-            let (Some(repository), Some(commit)) =
-                (self.repositories.get(identity), self.commits.get(&key))
-            else {
+            let (Some(repository), Some(commit), Some(manifest)) = (
+                self.repositories.get(identity),
+                self.commits.get(&key),
+                self.manifests.get(&key),
+            ) else {
                 continue;
             };
+            let source = |error| BuildProblem::Source {
+                unit: identity.clone(),
+                error,
+            };
+            let published = |problem| BuildProblem::Published {
+                unit: identity.clone(),
+                version: locked.version().clone(),
+                problem,
+            };
+            let mut content = PublishedContent::default();
             match repository.read_src(commit) {
-                Ok(files) => {
-                    trees.insert(identity.clone(), files);
-                }
-                Err(ReadSrcError::Git(error)) => problems.push(BuildProblem::Source {
-                    unit: identity.clone(),
-                    error,
-                }),
-                Err(error) => problems.push(BuildProblem::Published {
-                    unit: identity.clone(),
-                    version: locked.version().clone(),
-                    problem: PublishedProblem::Src(error),
-                }),
+                Ok(files) => content.files = files,
+                Err(ReadSrcError::Git(error)) => problems.push(source(error)),
+                Err(error) => problems.push(published(PublishedProblem::Src(error))),
             }
+            if manifest.amendments().is_empty() {
+                contents.insert(identity.clone(), content);
+                continue;
+            }
+            match repository.read_amendments(commit) {
+                Ok(copies) => content.amendments = copies,
+                Err(ReadSrcError::Git(error)) => problems.push(source(error)),
+                Err(error) => problems.push(published(PublishedProblem::Amendments(error))),
+            }
+            match lockfile::read_published(repository, commit) {
+                Ok(lock) => content.lock = lock,
+                Err(PublishedLockfileError::Read(super::git::ReadFileError::Git(error))) => {
+                    problems.push(source(error));
+                }
+                Err(error) => problems.push(published(PublishedProblem::Lockfile(error))),
+            }
+            // The copies are checked by the composition; the lockfile must
+            // identify every base before any base can be verified.
+            let bases: Vec<PublishedAmendmentError> =
+                published_amendments(manifest, content.amendments.keys(), content.lock.as_ref())
+                    .into_iter()
+                    .filter(|problem| {
+                        matches!(
+                            problem,
+                            PublishedAmendmentError::NoLockfile
+                                | PublishedAmendmentError::NotLocked { .. }
+                                | PublishedAmendmentError::BaseNotLocked { .. }
+                        )
+                    })
+                    .collect();
+            if !bases.is_empty() {
+                problems.push(published(PublishedProblem::Bases(bases)));
+            }
+            contents.insert(identity.clone(), content);
         }
         if problems.is_empty() {
-            Ok(trees)
+            Ok(contents)
         } else {
             Err(problems)
         }
     }
+}
+
+/// A published version's content, as the build composes it.
+#[derive(Debug, Default)]
+struct PublishedContent {
+    /// Its `src/` files.
+    files: FileTree,
+    /// Its `amendments/` copies; empty unless its manifest declares
+    /// amendments.
+    amendments: FileTree,
+    /// Its lockfile, read only when its manifest declares amendments.
+    lock: Option<UnitLock>,
 }
 
 /// A successful build.
@@ -633,6 +708,9 @@ pub enum BuildProblem {
     Lock(LockError),
     /// The resolution would move an amended unit away from its base.
     AmendmentBase(AmendmentBaseError),
+    /// A published amender's lockfile identifies a base as other content
+    /// than the registry records for that version.
+    BaseIntegrity(BaseIntegrityError),
     /// The unit and its dependencies cannot be composed.
     Composition(CompositionError),
     /// A template cannot be rendered.
@@ -644,6 +722,9 @@ pub enum BuildProblem {
         /// The unit whose copy at `amendments/<path>` is rendered instead
         /// of the provider's file, if the template is amended.
         amended_by: Option<UnitIdentity>,
+        /// That unit's published version, when it is not the unit being
+        /// built.
+        published: Option<Version>,
         /// What is wrong.
         error: TemplateError,
     },
@@ -685,19 +766,26 @@ impl fmt::Display for BuildProblem {
             Self::Resolution(error) => error.fmt(f),
             Self::Lock(error) => error.fmt(f),
             Self::AmendmentBase(error) => error.fmt(f),
+            Self::BaseIntegrity(error) => error.fmt(f),
             Self::Composition(error) => error.fmt(f),
             Self::Template {
                 unit,
                 path,
                 amended_by,
+                published,
                 error,
             } => {
-                match amended_by {
-                    Some(amender) => write!(
+                match (amended_by, published) {
+                    (Some(amender), Some(version)) => write!(
+                        f,
+                        "amendments/{path} of {amender} {version} (a copy of template src/{path} \
+                         of {unit})"
+                    )?,
+                    (Some(amender), None) => write!(
                         f,
                         "amendments/{path} of {amender} (a copy of template src/{path} of {unit})"
                     )?,
-                    None => write!(f, "template src/{path} of {unit}")?,
+                    (None, _) => write!(f, "template src/{path} of {unit}")?,
                 }
                 match error {
                     TemplateError::NotUtf8 => write!(
@@ -732,6 +820,12 @@ pub enum PublishedProblem {
     NotIndexed,
     /// Its `src/` cannot be read as unit files.
     Src(ReadSrcError),
+    /// Its `amendments/` cannot be read as unit files.
+    Amendments(ReadSrcError),
+    /// It declares amendments, but its lockfile cannot be read.
+    Lockfile(PublishedLockfileError),
+    /// Its lockfile does not identify the base of each amendment.
+    Bases(Vec<PublishedAmendmentError>),
 }
 
 impl fmt::Display for PublishedProblem {
@@ -743,6 +837,18 @@ impl fmt::Display for PublishedProblem {
                  indexed",
             ),
             Self::Src(error) => write!(f, "invalid `src/`: {error}"),
+            Self::Amendments(error) => write!(f, "invalid `amendments/`: {error}"),
+            Self::Lockfile(error) => write!(f, "it declares amendments, but {error}"),
+            Self::Bases(problems) => {
+                f.write_str("its lockfile does not identify the base of each amendment: ")?;
+                for (index, problem) in problems.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str("; ")?;
+                    }
+                    problem.fmt(f)?;
+                }
+                Ok(())
+            }
         }
     }
 }
