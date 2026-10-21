@@ -15,6 +15,9 @@ serde = { version = "1.0.229", default-features = false, features = ["std"] }
 serde_json = "1.0.154"
 unicode-normalization = "0.1.26"
 
+[dev-dependencies]
+regex-lite = "0.1.9"
+
 [lints.rust]
 unsafe_code = "forbid"
 unreachable_pub = "warn"

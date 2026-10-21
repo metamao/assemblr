@@ -9,14 +9,16 @@
 //! not apply, so a file the build composed is never left out of the
 //! publication as "ignored".
 //!
-//! Creating the tag is the one Git command Assemblr runs that writes, and
-//! the one that runs with the author's own Git configuration and identity:
-//! the tag is the author's, in the author's repository. Network access and
-//! prompts stay disabled, and the repository is still named explicitly.
+//! Creating the tag and initializing a repository for `unit init` are the
+//! Git commands Assemblr runs that write, and the ones that run with the
+//! author's own Git configuration and identity: the tag and the repository
+//! are the author's. Network access and prompts stay disabled, and the
+//! repository is still named explicitly where one exists.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use super::command::discovery_command;
 use super::{GitError, GitErrorKind, GitRepository};
 use crate::domain::ObjectId;
 
@@ -157,4 +159,108 @@ impl GitRepository {
         }
         Ok(())
     }
+}
+
+/// What Git finds when it looks for a repository from a directory, as it
+/// does for the user: upwards through the parents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Discovered {
+    /// The directory is inside the working tree whose top level this is,
+    /// or is that top level.
+    WorkingTree {
+        /// The top level, as Git reports it.
+        top_level: PathBuf,
+    },
+    /// The directory is in a bare repository.
+    Bare,
+    /// No repository.
+    None,
+}
+
+/// Looks for the repository `directory` is in, with the read environment of
+/// ADR 0006 and no repository named, so that Git searches the parents.
+pub fn discover_repository(directory: &Path) -> Result<Discovered, GitError> {
+    let run = |args: &[&str]| -> Result<Result<Vec<u8>, String>, GitError> {
+        let output = discovery_command(directory, args)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| GitError {
+                repository: directory.to_owned(),
+                kind: GitErrorKind::Unavailable(error),
+            })?;
+        if output.status.success() {
+            return Ok(Ok(output.stdout));
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if stderr.contains("not a git repository") {
+            return Ok(Err(stderr));
+        }
+        Err(GitError {
+            repository: directory.to_owned(),
+            kind: GitErrorKind::Failed {
+                command: format!("git {}", args.join(" ")),
+                status: output.status,
+                stderr,
+            },
+        })
+    };
+    let Ok(bare) = run(&["rev-parse", "--is-bare-repository"])? else {
+        return Ok(Discovered::None);
+    };
+    if bare.trim_ascii() == b"true" {
+        return Ok(Discovered::Bare);
+    }
+    let args = ["rev-parse", "--show-toplevel"];
+    let Ok(top_level) = run(&args)? else {
+        return Ok(Discovered::None);
+    };
+    let top_level = std::str::from_utf8(&top_level)
+        .ok()
+        .map(|path| path.trim_end_matches(['\r', '\n']))
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| GitError {
+            repository: directory.to_owned(),
+            kind: GitErrorKind::UnexpectedOutput {
+                command: format!("git {}", args.join(" ")),
+                detail: format!("unexpected path {:?}", String::from_utf8_lossy(&top_level)),
+            },
+        })?;
+    Ok(Discovered::WorkingTree {
+        top_level: PathBuf::from(top_level),
+    })
+}
+
+/// Initializes a repository in `directory`, which must exist and be in no
+/// repository, with the author's own Git configuration, so that settings
+/// such as the default branch name are the author's. Nothing is committed.
+pub fn init_repository(directory: &Path) -> Result<(), GitError> {
+    let args = ["init", "--quiet"];
+    let mut command = Command::new("git");
+    for variable in LOCATION_VARIABLES {
+        command.env_remove(variable);
+    }
+    let output = command
+        .current_dir(directory)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ALLOW_PROTOCOL", "none")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .arg("--no-pager")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| GitError {
+            repository: directory.to_owned(),
+            kind: GitErrorKind::Unavailable(error),
+        })?;
+    if !output.status.success() {
+        return Err(GitError {
+            repository: directory.to_owned(),
+            kind: GitErrorKind::Failed {
+                command: format!("git {}", args.join(" ")),
+                status: output.status,
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            },
+        });
+    }
+    Ok(())
 }

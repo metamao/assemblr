@@ -25,6 +25,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
+pub use authoring::{Discovered, discover_repository, init_repository};
 use command::{Object, Objects};
 use object::{EntryKind, TreeEntry, commit_tree, parse_tree};
 

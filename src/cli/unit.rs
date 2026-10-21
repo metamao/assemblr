@@ -9,9 +9,10 @@ use std::process::ExitCode;
 
 use assemblr::adapters::{
     AmendFailure, AmendProblem, AmendState, BuildFailure, BuildProblem, Built, CheckFailure,
-    CheckProblem, IndexOutcome, LockfileOutcome, ManifestFileError, PublishFailure, PublishProblem,
-    PublishState, Published, RecoveryError, Registry, TagProblem, UpdateFailure, UpdateProblem,
-    UpdateState, Updated, amend_unit, build_unit, check_unit, publish_unit, update_unit,
+    CheckProblem, FileOutcome, GitOutcome, IndexOutcome, InitFailure, Initialized, LockfileOutcome,
+    ManifestFileError, PublishFailure, PublishProblem, PublishState, Published, RecoveryError,
+    Registry, TagProblem, UpdateFailure, UpdateProblem, UpdateState, Updated, amend_unit,
+    build_unit, check_unit, init_unit, publish_unit, update_unit,
 };
 use assemblr::domain::{
     ContributionError, Excluded, IntegrityChange, LockChange, LockError, RegistryError,
@@ -21,6 +22,9 @@ use clap::{Args, Subcommand};
 
 #[derive(Debug, Subcommand)]
 pub(super) enum UnitCommand {
+    /// Create a unit's scaffold: its Git repository, `manifest.jsonc`, the
+    /// manifest's JSON Schema, and `.gitignore`.
+    Init(InitArgs),
     /// Compose the unit in the current directory with its published
     /// dependencies into `build/`.
     Build,
@@ -37,6 +41,20 @@ pub(super) enum UnitCommand {
     /// ranges allow, in `assemblr-lock.json`, carrying the unit's
     /// amendments over.
     Update(UpdateArgs),
+}
+
+#[derive(Debug, Args)]
+pub(super) struct InitArgs {
+    /// The unit's identity, such as `@owner/unit`.
+    #[arg(value_parser = UnitIdentity::parse)]
+    identity: UnitIdentity,
+    /// The unit's directory, created if it does not exist. Defaults to the
+    /// current directory.
+    directory: Option<PathBuf>,
+    /// The manifest's description. Defaults to a placeholder that names the
+    /// unit.
+    #[arg(long, value_name = "TEXT")]
+    description: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -60,11 +78,140 @@ pub(super) struct AmendArgs {
 
 pub(super) fn run(command: UnitCommand) -> ExitCode {
     match command {
+        UnitCommand::Init(args) => init(&args),
         UnitCommand::Build => build(),
         UnitCommand::Check => check(),
         UnitCommand::Publish => publish(),
         UnitCommand::Amend(args) => amend(&args),
         UnitCommand::Update(args) => update(&args),
+    }
+}
+
+fn init(args: &InitArgs) -> ExitCode {
+    let directory = args.directory.clone().unwrap_or_else(|| PathBuf::from("."));
+    match init_unit(&directory, &args.identity, args.description.as_deref()) {
+        Ok(initialized) => {
+            println!("{}", describe_initialized(&initialized));
+            println!(
+                "Next: add files under src/, declare dependencies in manifest.jsonc, and run \
+                 `assemblr unit build`."
+            );
+            ExitCode::SUCCESS
+        }
+        Err(failure) => fail(&failure.to_string(), Some(&init_hint(&failure))),
+    }
+}
+
+/// One line saying what `unit init` created, replaced, or found in place.
+fn describe_initialized(initialized: &Initialized) -> String {
+    let mut created = Vec::new();
+    let mut replaced = Vec::new();
+    let mut kept = Vec::new();
+    if initialized.directory_created() {
+        created.push("the directory");
+    }
+    let nested;
+    match initialized.git() {
+        GitOutcome::Initialized => created.push("a Git repository"),
+        GitOutcome::Nested { within } => {
+            nested = format!(
+                "a Git repository (nested in the repository at {})",
+                within.display()
+            );
+            created.push(&nested);
+        }
+        GitOutcome::Adopted => kept.push("the Git repository"),
+    }
+    for (name, outcome, refreshed) in [
+        ("manifest.jsonc", initialized.manifest(), "manifest.jsonc"),
+        (
+            "manifest.schema.json",
+            initialized.schema(),
+            "manifest.schema.json (refreshed)",
+        ),
+        (
+            ".gitignore",
+            initialized.gitignore(),
+            ".gitignore (/build/ added)",
+        ),
+    ] {
+        match outcome {
+            FileOutcome::Created => created.push(name),
+            FileOutcome::Replaced => replaced.push(refreshed),
+            FileOutcome::Kept => kept.push(name),
+        }
+    }
+    let list = |items: &[&str]| items.join(", ");
+    let mut parts = Vec::new();
+    if !created.is_empty() {
+        parts.push(format!("created {}", list(&created)));
+    }
+    if !replaced.is_empty() {
+        parts.push(format!("replaced {}", list(&replaced)));
+    }
+    let fresh = initialized.manifest() == FileOutcome::Created;
+    if !kept.is_empty() {
+        parts.push(format!(
+            "{} {}",
+            if fresh { "kept" } else { "already in place:" },
+            list(&kept)
+        ));
+    }
+    format!(
+        "{} {} in {}: {}.",
+        if fresh {
+            "Initialized"
+        } else {
+            "Completed the scaffold of"
+        },
+        initialized.identity(),
+        initialized.directory().display(),
+        parts.join("; ")
+    )
+}
+
+/// What remains after a failed initialization, and what the author can do.
+fn init_hint(failure: &InitFailure) -> String {
+    match failure {
+        InitFailure::Write { done, .. } => {
+            let mut state = Vec::new();
+            if done.directory_created() {
+                state.push("the directory was created");
+            }
+            if *done.git() != GitOutcome::Adopted {
+                state.push("the Git repository was initialized");
+            }
+            for (name, outcome) in [
+                ("manifest.jsonc", done.manifest()),
+                ("manifest.schema.json", done.schema()),
+                (".gitignore", done.gitignore()),
+            ] {
+                if outcome != FileOutcome::Kept {
+                    state.push(name);
+                }
+            }
+            let written = if state.is_empty() {
+                "nothing was written".to_owned()
+            } else {
+                format!("written so far: {}", state.join(", "))
+            };
+            format!(
+                "{written}; fix the problem and run the same command again, which completes \
+                 the scaffold"
+            )
+        }
+        InitFailure::Inside { top_level, .. } => format!(
+            "initialize the unit in a directory outside {}",
+            top_level.display()
+        ),
+        InitFailure::OtherIdentity { declared, .. } => format!(
+            "to work on {declared}, run `assemblr unit init {declared}`; for a new unit, choose \
+             another directory"
+        ),
+        InitFailure::Git(_) => {
+            "nothing was changed; Assemblr needs Git installed and on the PATH".to_owned()
+        }
+        _ => "nothing was changed".to_owned(),
     }
 }
 

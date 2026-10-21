@@ -79,7 +79,9 @@ fn help_offers_only_implemented_commands() {
         .collect();
     assert_eq!(
         commands,
-        ["build", "check", "publish", "amend", "update", "help"],
+        [
+            "init", "build", "check", "publish", "amend", "update", "help"
+        ],
         "{help}"
     );
 
@@ -91,4 +93,9 @@ fn help_offers_only_implemented_commands() {
     let output = assemblr(&["unit", "update", "--help"]);
     let help = self::stdout(&output);
     assert!(help.contains("[IDENTITY]..."), "{help}");
+
+    let output = assemblr(&["unit", "init", "--help"]);
+    let help = self::stdout(&output);
+    assert!(help.contains("<IDENTITY> [DIRECTORY]"), "{help}");
+    assert!(help.contains("--description <TEXT>"), "{help}");
 }

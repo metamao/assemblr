@@ -1,0 +1,143 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Assemblr unit manifest",
+  "description": "Editor assistance for manifest.jsonc. Assemblr's own validation is authoritative: rules a schema cannot express, such as cross-field consistency, are still enforced by Assemblr. This file is written by `assemblr unit init`; run it again after upgrading Assemblr to refresh it.",
+  "type": "object",
+  "required": ["name", "version", "description"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Points editors at this schema. Editor support only."
+    },
+    "name": {
+      "$ref": "#/definitions/identity",
+      "description": "The unit's identity, `@owner/unit-name`: lowercase ASCII letters, digits, and single hyphens between them, in each segment."
+    },
+    "version": {
+      "$ref": "#/definitions/version",
+      "description": "The unit's exact SemVer version. Publication tags it as `v<version>`."
+    },
+    "description": {
+      "$ref": "#/definitions/text",
+      "description": "A human-readable description of the unit."
+    },
+    "dependencies": {
+      "type": "object",
+      "description": "The units this unit composes, by identity, each with a SemVer requirement such as `^1.2`.",
+      "propertyNames": { "$ref": "#/definitions/identity" },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1,
+        "description": "A SemVer requirement, such as `^1.2`, `~1.4`, or `=2.0.0`."
+      }
+    },
+    "options": {
+      "type": "object",
+      "description": "Values this unit requires for the parameters of its direct dependencies, by dependency identity.",
+      "propertyNames": { "$ref": "#/definitions/identity" },
+      "additionalProperties": {
+        "type": "object",
+        "description": "The required values, by parameter name.",
+        "propertyNames": { "$ref": "#/definitions/parameterName" },
+        "additionalProperties": { "$ref": "#/definitions/value" }
+      }
+    },
+    "params": {
+      "type": "object",
+      "description": "The unit's public configuration parameters, by name.",
+      "propertyNames": { "$ref": "#/definitions/parameterName" },
+      "additionalProperties": { "$ref": "#/definitions/parameter" }
+    },
+    "amendments": {
+      "type": "object",
+      "description": "The unit's amendments, by the amended file's path in the provider's `src/`, which is the copy's path under `amendments/`.",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[^/]+(/[^/]+)*$"
+      },
+      "additionalProperties": { "$ref": "#/definitions/amendment" }
+    }
+  },
+  "definitions": {
+    "identity": {
+      "type": "string",
+      "pattern": "^@[a-z0-9]+(-[a-z0-9]+)*/[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "text": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "parameterName": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+      "not": { "const": "own" }
+    },
+    "value": {
+      "type": ["string", "integer", "boolean"]
+    },
+    "parameter": {
+      "type": "object",
+      "description": "A parameter definition. A parameter without a default is required from consumers.",
+      "required": ["type", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["string", "integer", "boolean"],
+          "description": "The parameter's type."
+        },
+        "description": {
+          "$ref": "#/definitions/text",
+          "description": "What the parameter configures."
+        },
+        "default": {
+          "$ref": "#/definitions/value",
+          "description": "The value used when a consumer supplies none. Its presence makes the parameter optional."
+        },
+        "allowed": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "The values a string parameter accepts, which makes it an enumerated string. Only with `\"type\": \"string\"`."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "string" } } },
+          "then": { "properties": { "default": { "type": "string" } } },
+          "else": { "properties": { "allowed": false } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "integer" } } },
+          "then": { "properties": { "default": { "type": "integer" } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "boolean" } } },
+          "then": { "properties": { "default": { "type": "boolean" } } }
+        }
+      ]
+    },
+    "amendment": {
+      "type": "object",
+      "description": "The provenance of an amendment copy.",
+      "required": ["unit", "base"],
+      "additionalProperties": false,
+      "properties": {
+        "unit": {
+          "$ref": "#/definitions/identity",
+          "description": "The direct dependency that provides the amended file."
+        },
+        "base": {
+          "$ref": "#/definitions/version",
+          "description": "The exact version of that dependency the copy was taken from: its locked version."
+        }
+      }
+    }
+  }
+}

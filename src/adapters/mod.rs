@@ -7,11 +7,13 @@
 
 mod build;
 mod git;
+mod init;
 mod jsonc;
 mod lockfile;
 mod manifest;
 mod registry;
 mod render;
+mod schema;
 
 pub use build::{
     AmendFailure, AmendProblem, AmendState, Amended, BuildFailure, BuildLockError, BuildProblem,
@@ -22,10 +24,11 @@ pub use build::{
     build_unit, check_unit, publish_unit, update_unit,
 };
 pub use git::{
-    GitError, GitErrorKind, GitRepository, HeadManifestError, InvalidVersion, ObjectTooLarge,
-    PublishedVersion, ReadFileError, ReadSrcError, SrcEntryError, SrcEntryErrorReason,
-    UnitDirectory, VersionTag,
+    Discovered, GitError, GitErrorKind, GitRepository, HeadManifestError, InvalidVersion,
+    ObjectTooLarge, PublishedVersion, ReadFileError, ReadSrcError, SrcEntryError,
+    SrcEntryErrorReason, UnitDirectory, VersionTag, discover_repository, init_repository,
 };
+pub use init::{FileOutcome, GitOutcome, InitFailure, Initialized, Step as InitStep, init_unit};
 pub use jsonc::SyntaxError;
 pub use lockfile::{LockfileError, PublishedLockfileError};
 pub use manifest::{
@@ -37,3 +40,4 @@ pub use registry::{
     TagProblem, local_reference,
 };
 pub use render::{Context as RenderContext, RenderError, RenderErrorKind, render};
+pub use schema::{MANIFEST_SCHEMA, MANIFEST_SCHEMA_REFERENCE, manifest_schema};
