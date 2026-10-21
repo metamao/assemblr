@@ -1,6 +1,6 @@
 # 0017: Consumer reconciliation: the per-path three-way decision, the value merge onto the project's text, the journal of changes, and recovery
 
-- **Status:** Accepted, point 8 revised by 0018
+- **Status:** Accepted, point 8 revised by 0018, the refusal of text conflicts replaced by 0020
 - **Date:** 2026-10-21
 
 ## Context
@@ -109,6 +109,6 @@ records how reconciliation is implemented.
   it would make `Mergeability::Format` mergeable for text.
 - `.assemblr/.gitignore` is a tracked file of the consumer's project, like
   `.gitattributes`.
-- Until the pending-resolution state exists, a conflict stops the whole
-  composition; the consumer resolves it by making the file the composed
-  content, restoring it, or changing the declaration.
+- A conflict between text stops the whole composition only until ADR 0020;
+  other conflicts still do, and the consumer resolves them by making the
+  file the composed content, restoring it, or changing the declaration.

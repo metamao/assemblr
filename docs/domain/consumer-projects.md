@@ -526,13 +526,13 @@ each as a mode and a content identity.
 - The executable bit is reconciled like content.
 - A managed path that is not a regular file is a conflict.
 
-**Conflicts are refused.** A composition with any conflict is refused
-before anything is written, naming every conflicting path and why; the
-project, its lock, and its base stay as they were (standing default D2).
-Resolving conflicts in the project, the pending-resolution state of
-[conflict resolution](#conflict-resolution--approved), is a later
-increment. A conflict between units' contributions remains a composition
-error (OC-47).
+**Conflicts.** A conflict between text the consumer and the composition
+both changed is left in the file for the consumer to resolve (see
+[pending-resolution details](#pending-resolution-details--approved)). A
+composition with any other conflict is refused before anything is written,
+naming every conflicting path and why; the project, its lock, and its base
+stay as they were (standing default D2). A conflict between units'
+contributions remains a composition error (OC-47).
 
 **Line endings.** A project file that differs from its base, or from the
 incoming file, only by CRLF line endings throughout counts as that content:
@@ -619,13 +619,78 @@ Rules:
 Open:
 
 - Conflict presentation and the mechanisms behind the pending-resolution
-  state. **OC-37.**
+  state beyond text conflicts, and a line-level presentation of them.
+  **OC-37.**
 - Whether conflicts **between units' contributions**, for example an amendment
   that cannot be applied to the dependency version the consumer resolved, are
   resolved in the pending-resolution state like conflicts with consumer
   modifications, or are composition errors; and, if they are resolved in
   place, what the incoming composition and the next reconciliation base are.
   **OC-47.**
+
+### Pending-resolution details — Approved
+
+Decided for the pending-resolution state under AGENTS.md §1.1 (decision log
+D-18) and accepted by the owner with the merge of the pull request that
+implements it. They decide the presentation and the mechanism of OC-37 and
+the grammar of OC-7 for `compose`; both entries stay open.
+
+**Commands.** `assemblr compose --continue` and `assemblr compose --abort`,
+mutually exclusive, run at the project's top level.
+
+**What can be left in a file.** A conflict between text that both the
+consumer and the composition changed: a file of a format with no merge, or
+the values of a JSON or JSONC file that collide. The base, the project's
+file, and the composition's file must be UTF-8 text. A composition with any
+other conflict (file modes, a file one side deleted and the other changed,
+a file the composition removes and the consumer edited, a path that is not a
+regular file, a base that is not stored, non-text content) is refused whole,
+as above, so a project never holds marked and refused conflicts together.
+
+**Entering the state.** Everything that does not conflict is applied, as in
+any reconciliation, `assemblr.jsonc` included when `add` or `remove`
+rewrote it. Each conflicted file stays at its normal path, holding between
+conflict markers the project's content, the reconciliation base's, and the
+composition's:
+
+```text
+<<<<<<< current (your file)
+...
+||||||| base (the last composition)
+...
+=======
+...
+>>>>>>> incoming (the declared composition)
+```
+
+The markers cover the whole file, and end lines as the project's file
+does. The lock is not written: the journal keeps the lock to write and the
+files that hold markers. The command reports the files and exits non-zero.
+While resolution is pending, `compose`, `add`, and `remove` refuse, naming
+the files and the two ways out, and change nothing.
+
+**Resolving.** The consumer edits each file with their own tools to the
+content they want. Nothing marks a file resolved but the absence of a line
+starting `<<<<<<< current` or `>>>>>>> incoming`; a file the consumer
+deleted counts as resolved.
+
+**`--continue`** refuses while any file holds such a line, listing every
+such file and leaving the project unchanged. Otherwise it writes the lock
+and removes the journal. The reconciliation base is the composition, and
+the consumer's resolution is their own content over it, so a later
+`compose` keeps it as it keeps any consumer edit. An interrupted
+`--continue` is completed by the next one.
+
+**`--abort`** restores the project to what it held before the operation:
+every file the composition changed, the conflicted files whatever they hold
+now, and `assemblr.jsonc` where `add` or `remove` rewrote it. A file the
+composition changed without conflict and the consumer edited since is kept
+and named. The new composition's base stays in the store, unreferenced.
+
+**Recovery.** An interruption while entering the state is reverted by the
+next `compose` like any interrupted composition. The state lives in the
+git-ignored journal, so a clone of a pending project has no journal and
+reconciles its files, markers included, as the project's content.
 
 ## Lock and reconciliation state — Approved
 
@@ -684,10 +749,12 @@ Open:
 
 - Regeneration of a missing base from the lock as a verified fallback, and
   how long bases are kept. **OC-8.**
-- The pending-resolution state, continue, and abort. **OC-37.** The
-  journal and the recovery of an interrupted composition are described in
-  [composition details](#composition-details--approved) and
-  [reconciliation details](#reconciliation-details--approved).
+- The pending-resolution state for conflicts that are not between text,
+  and for removal of the objects a given-up composition leaves in the store.
+  **OC-37.** The journal and the recovery of an interrupted composition are
+  described in [composition details](#composition-details--approved),
+  [reconciliation details](#reconciliation-details--approved), and
+  [pending-resolution details](#pending-resolution-details--approved).
 - Portability of a lockfile between machines: what happens when the source a
   lock records for a unit differs from the source registered for that identity
   on another machine, and what a lock records for a unit obtained through a

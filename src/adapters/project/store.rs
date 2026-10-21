@@ -19,7 +19,11 @@
 //! an interrupted composition: the next one completes it when the lock is
 //! in place and reverts it otherwise. The previous bytes of the files a
 //! composition replaces or removes wait under `previous/` until it
-//! completes. The journal and `previous/` are the project's transient
+//! completes. A journal with a `pending` record belongs to a composition
+//! that is written except for its lock, which waits, kept under
+//! `previous/`, for the consumer to resolve the conflicts marked in some
+//! files (`compose --continue` or `--abort`). The journal and `previous/`
+//! are the project's transient
 //! state, which the directory's own `.gitignore` keeps out of version
 //! control: the consumer's edits never enter the tracked store.
 

@@ -21,7 +21,8 @@ enum Command {
     /// Initialize a consumer project: create its `assemblr.jsonc`.
     Init(project::InitArgs),
     /// Compose the consumer project in the current directory from the
-    /// units its `assemblr.jsonc` declares.
+    /// units its `assemblr.jsonc` declares, or settle a composition that
+    /// left conflicts in files with `--continue` or `--abort`.
     Compose(project::ComposeArgs),
     /// Select a unit in `assemblr.jsonc` and compose the project.
     Add(project::AddArgs),
