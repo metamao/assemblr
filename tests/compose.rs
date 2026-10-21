@@ -420,7 +420,14 @@ fn the_first_compose_materializes_the_files_the_lock_and_the_base() {
         "{listing}"
     );
     assert!(listing.contains(" README.md\n"), "{listing}");
-    assert!(listing.contains("100755 "), "{listing}");
+    // The fixture marks `bin/run` executable where the file system can.
+    #[cfg(unix)]
+    assert!(
+        listing
+            .lines()
+            .any(|line| line.starts_with("100755 ") && line.ends_with(" bin/run")),
+        "{listing}"
+    );
     let blobs: Vec<_> = tree(&state.join("objects"));
     assert_eq!(blobs.len(), 4);
     assert!(blobs.iter().any(|(_, bytes)| bytes == b"node\n"));
