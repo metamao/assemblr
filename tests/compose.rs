@@ -1681,3 +1681,30 @@ fn a_sequence_of_adds_equals_one_compose_of_the_final_declaration() {
         assert_eq!(read(&project.join("web.txt")), "web\n");
     }
 }
+
+#[test]
+fn add_and_remove_refuse_a_read_only_declaration_before_writing_anything() {
+    let fixture = Fixture::new("read-only");
+    registry(&fixture);
+    let project = initialized(&fixture, "shop");
+    succeeds(add(&fixture, &project, "@acme/node"));
+    let path = project.join("assemblr.jsonc");
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&path, permissions.clone()).unwrap();
+    let before = tree(&project);
+
+    let err = stderr(&fails(add(&fixture, &project, "@acme/web")));
+    assert!(err.contains("assemblr.jsonc is read-only"), "{err}");
+    let err = stderr(&fails(remove(&fixture, &project, "@acme/node")));
+    assert!(err.contains("assemblr.jsonc is read-only"), "{err}");
+    assert_eq!(tree(&project), before);
+    // A plain composition still works on it.
+    succeeds(fixture.compose(&project));
+
+    #[allow(clippy::permissions_set_readonly_false, reason = "a fixture, restored")]
+    {
+        permissions.set_readonly(false);
+        fs::set_permissions(&path, permissions).unwrap();
+    }
+}

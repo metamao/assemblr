@@ -303,6 +303,15 @@ fn compose_with(
                 error,
             })
         })?;
+    // `add` and `remove` write the declaration, so a read-only one is
+    // refused before anything else happens, not after the files are.
+    if edit.is_some()
+        && fs::metadata(&declaration_path).is_ok_and(|metadata| metadata.permissions().readonly())
+    {
+        return Err(rejected(ComposeProblem::CannotEdit(format!(
+            "{DECLARATION} is read-only"
+        ))));
+    }
     let store = Store::new(root);
     let mut problems = Vec::new();
     let mut recovered = None;
