@@ -34,7 +34,31 @@ assemblr init my-prod-app
 
 Open:
 
-- The initial contents and full schema of `assemblr.jsonc`. **OC-36.**
+- The initial contents and full schema of `assemblr.jsonc`. **OC-36.** The
+  initial contents are decided provisionally (decision log D-9); see
+  [initialization details](#initialization-details--approved).
+
+### Initialization details — Approved
+
+Decided for the first `assemblr init` under AGENTS.md §1.1 (decision log
+D-9) and accepted by the owner with PR #42.
+
+**Command.** `assemblr init [<directory>]`. The directory defaults to the
+current one and is created, parents included, when it does not exist. It
+writes `assemblr.jsonc` with empty `dependencies` and `options`:
+
+```jsonc
+{
+  "dependencies": {},
+  "options": {}
+}
+```
+
+It creates nothing else and runs nothing: no Git repository, no files, no
+lock. An existing declaration is never overwritten: a readable one means
+the project is initialized already and the command changes nothing; one
+Assemblr cannot read is an error. A directory holding `manifest.jsonc` is a
+unit's repository, not a consumer project, and is refused.
 
 ## Project configuration — Approved
 
@@ -160,12 +184,72 @@ assemblr add @metamao/neonpg-drizzle
 
 Both workflows produce the same composition from the same declaration.
 
+### Composition details — Approved
+
+Decided for the first `assemblr compose` under AGENTS.md §1.1 (decision log
+D-10 to D-12) and accepted by the owner with PR #42. They cover a project
+composed for the first time; reconciling a project that was composed before
+is a later increment.
+
+**Command.** `assemblr compose`, with no arguments, run at the project's top
+level, which holds `assemblr.jsonc`. The result goes to stdout; diagnostics,
+and what the composition could not carry or store, go to stderr. It never
+fetches, runs no external program, and makes no commit.
+
+**What it does.** It reads the declaration, resolves the explicit
+selections from the local registry under the [lock](#lock-and-reconciliation-state--approved),
+and validates and composes the result as a unit build does, with the
+project as the root and its `options` as the root's values: parameters,
+option conflicts, path collisions, amendments including several of one
+JSON file, and rendering. Then it writes, in this order, the
+reconciliation base to `.assemblr/`, a journal of the files it is about to
+create, the files themselves, each created new in directories it creates,
+with its executable bit, and the lock; and removes the journal. Every
+version locked and every file written is reported.
+
+**What it refuses, writing nothing:** a problem a unit build would report,
+with the same wording; a conflict between units' contributions, which is a
+composition error and not a pending-resolution state (**OC-47** stays
+open); a delivered path that already holds content Assemblr did not
+materialize, or whose directory on the way is a file or a symbolic link,
+naming every such path (**OC-44** stays open; composing over existing
+content is not supported yet); a delivered path Assemblr reserves for
+itself: `assemblr.jsonc`, `assemblr-lock.json`, and anything under
+`.assemblr/` (part of **OC-48**); a stored base that does not verify
+against the lock; a lockfile that is a unit's, without reconciliation
+state; a directory holding `manifest.jsonc`.
+
+**Ignored files.** Before writing, the composition asks the project's Git,
+with the consumer's own configuration and read-only, which delivered paths
+it ignores; a project in no repository ignores nothing. An ignored file is
+written to the project, but its content is not stored in the tracked base:
+the lock lists it as unbased, and a warning says a later composition cannot
+reconcile edits to it. When `.assemblr/` itself is ignored, a warning says
+the base will not travel with the project. Nothing is staged, and content
+is never scanned for secrets.
+
+**Repeating `compose`.** On a project composed before, the stored base is
+verified against the lock first; a missing, corrupted, or unverifiable base
+is an explicit failure that writes nothing and says to restore `.assemblr/`
+from version control. Then the declaration is composed and compared with
+the base by identity: the same composition means nothing to compose, and
+nothing is written; a different one is refused explicitly until a later
+increment reconciles it, so the project stays as it was.
+
+**Interrupted compositions.** While the journal exists, a composition was
+interrupted. The next `compose` reverts it before anything else: it removes
+the journaled files whose content is still what was written, keeps those
+whose content changed and names them, removes the directories it created
+when they are empty, removes the journal, and continues with a fresh plan,
+in which a kept file counts as existing content.
+
 Open:
 
 - Exact grammar, including how `add` accepts a version requirement or
   parameter values, the exact requirement `add` records, how `remove` treats a
   unit that is not an explicit selection, and what happens to a removed unit's
-  `options` entry. **OC-7.**
+  `options` entry. **OC-7.** The grammar of `init` and `compose` is decided
+  provisionally above.
 - Explicit update operations for a consumer project. **OC-38.**
 
 ## Explicit and transitive dependencies — Approved
@@ -298,11 +382,16 @@ Rules:
 Open:
 
 - How a composition treats a path that already holds content Assemblr did not
-  materialize, for example in an existing project. **OC-44.**
+  materialize, for example in an existing project. **OC-44.** The first
+  `compose` refuses it (decision log D-10); see
+  [composition details](#composition-details--approved).
 - File-system semantics of contributed files, including executable bits,
   symbolic links, binary content, line endings, paths that differ only in
   case, and paths reserved for Assemblr's own files such as `assemblr.jsonc`
-  and the lockfile. **OC-48.**
+  and the lockfile. **OC-48.** The first `compose` writes bytes and the
+  executable bit as composed, never through a symbolic link, and reserves
+  `assemblr.jsonc`, `assemblr-lock.json`, and `.assemblr/` (decision log
+  D-10).
 
 ## Reconciliation — Approved
 
@@ -420,11 +509,49 @@ repository.
 - Lock state is independent of registry synchronization (see
   [registries-and-discovery.md](registries-and-discovery.md#integrity-and-snapshots--approved)).
 
+### The lockfile and the stored base — Approved
+
+Decided by the owner on #41 (OC-8) for consumer projects, and implemented
+by the first `compose`:
+
+- **The lockfile** is `assemblr-lock.json` at the project's top level. It
+  is the unit lockfile's format, `format: 1` with `units` recording each
+  resolved unit's `version`, `commit`, and `tree`, plus a `project` member
+  holding the **reconciliation state**: its own `format` (1), `base`, the
+  identity of the reconciliation base, `managed`, every path the
+  composition manages, sorted, and `unbased`, the managed paths whose base
+  is not stored. A unit's lockfile never has `project`, and a consumer's
+  always does, so the two are unambiguous and one reader serves both. The
+  lock records no source references (OC-49).
+- **The base's identity** is SHA-256 over a canonical, versioned listing of
+  the materialized files: the line `assemblr-base-v1`, then one line per
+  file, `<mode> <sha256 of the content> <path>`, in path order, modes
+  `100644` or `100755`, `\n` line ends. The identity is written
+  `sha256-v1:<hex>`, so that a later algorithm or listing format is
+  distinguishable. It depends on the files' bytes, modes, and paths only,
+  never on the consumer's Git configuration, operating system, or checkout.
+- **The base is stored in the project**, under `.assemblr/`, as tracked,
+  content-addressed state: each file's bytes once under `objects/`, named
+  by their SHA-256, and each base's listing under `bases/`, named by its
+  identity's digits. Modes live in the listing, not in the file system, and
+  `.assemblr/.gitattributes` marks everything there binary (`* -text`), so
+  that a checkout cannot convert line endings or drop bits. The store is
+  written before the project's files, is never garbage-collected, and is
+  verified, listing and blobs, against the lock before any later
+  composition uses it.
+- **Recovery.** The stored base is authoritative; a base that is missing or
+  does not verify is an explicit failure, never replaced by regeneration
+  or by the project's current content. Regeneration from the locked inputs
+  may be offered later only when its identity matches the recorded one.
+
 Open:
 
-- The lock schema, the representation and storage of historical bases, and
-  how bases are reconstructed. **OC-8.**
-- The application journal and recovery mechanism. **OC-37.**
+- Regeneration of a missing base from the lock as a verified fallback, and
+  how long bases are kept. **OC-8.**
+- The pending-resolution state, continue, abort, and recovery after an
+  interrupted application of changes to existing files. **OC-37.** The
+  journal of a first composition is described in
+  [composition details](#composition-details--approved).
 - Portability of a lockfile between machines: what happens when the source a
   lock records for a unit differs from the source registered for that identity
   on another machine, and what a lock records for a unit obtained through a

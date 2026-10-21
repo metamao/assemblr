@@ -13,6 +13,7 @@ mod jsonc_edit;
 mod lockfile;
 mod manifest;
 mod merge;
+mod project;
 mod registry;
 mod render;
 mod schema;
@@ -33,12 +34,16 @@ pub use git::{
 pub use init::{FileOutcome, GitOutcome, InitFailure, Initialized, Step as InitStep, init_unit};
 pub use jsonc::SyntaxError;
 pub use jsonc_edit::{EditError as JsonEditError, ValueError};
-pub use lockfile::{LockfileError, PublishedLockfileError};
+pub use lockfile::{Lockfile, LockfileError, PublishedLockfileError};
 pub use manifest::{
     EditError, FieldPath, IssueKind, JsonKind, ManifestIssue, PathSegment, ReadManifestError,
-    declare_amendment, read_manifest, rebase_amendments,
+    declare_amendment, read_manifest, read_project, rebase_amendments,
 };
 pub use merge::{MergeFailure, MergeNote, Merged};
+pub use project::{
+    ComposeFailure, ComposeProblem, Composed, DECLARATION, InitProjectFailure, ProjectInitialized,
+    Reverted, StoreError, WriteStep, compose_project, init_project,
+};
 pub use registry::{
     Added, Indexed, Problem, ReferenceError, Registry, RegistryFailure, StorageError, Synced,
     TagProblem, local_reference,

@@ -41,7 +41,7 @@ use crate::domain::{
 // a silent truncation.
 
 /// The largest `manifest.jsonc`, in bytes.
-pub(super) const MANIFEST_LIMIT: u64 = 1024 * 1024;
+pub(crate) const MANIFEST_LIMIT: u64 = 1024 * 1024;
 /// The largest commit object, in bytes.
 const COMMIT_LIMIT: u64 = 1024 * 1024;
 /// The largest directory listing (tree object), in bytes.

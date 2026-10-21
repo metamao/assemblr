@@ -264,6 +264,120 @@ pub(super) struct Validated {
     pub(super) notes: Vec<String>,
 }
 
+/// The resolved, verified dependencies of a root: a unit, or a consumer
+/// project when `name` is `None`.
+pub(crate) struct Resolved {
+    pub(crate) resolution: crate::domain::Resolution,
+    pub(crate) lock: UnitLock,
+    dependencies: Dependencies,
+    contents: BTreeMap<UnitIdentity, PublishedContent>,
+}
+
+impl Resolved {
+    /// The content of every locked unit, for composition, after each
+    /// published amender's bases were verified against the index.
+    pub(crate) fn units(&self) -> BTreeMap<UnitIdentity, UnitContent<'_>> {
+        let mut units = BTreeMap::new();
+        for (identity, locked) in self.lock.units() {
+            let key = (identity.clone(), locked.version().clone());
+            let (Some(manifest), Some(content)) = (
+                self.dependencies.manifests.get(&key),
+                self.contents.get(identity),
+            ) else {
+                continue;
+            };
+            units.insert(
+                identity.clone(),
+                UnitContent::new(manifest, &content.files, &content.amendments),
+            );
+        }
+        units
+    }
+
+    /// The locked version and `src/` files of each locked unit.
+    pub(super) fn providers(&self) -> BTreeMap<&UnitIdentity, (&Version, &FileTree)> {
+        self.lock
+            .units()
+            .iter()
+            .filter_map(|(identity, locked)| {
+                let content = self.contents.get(identity)?;
+                Some((identity, (locked.version(), &content.files)))
+            })
+            .collect()
+    }
+}
+
+/// Resolves `requirements` from `index` under `previous`, reads every
+/// locked version's content, and verifies each published amender's bases.
+/// Every problem is added to `problems`, and the result is given only when
+/// resolution and reading succeeded; base problems are reported alongside
+/// a result, for the composition to report with its own.
+pub(crate) fn resolve_graph(
+    name: Option<&UnitIdentity>,
+    requirements: &crate::domain::Dependencies,
+    previous: &UnitLock,
+    index: &crate::domain::RegistryIndex,
+    problems: &mut Vec<BuildProblem>,
+) -> Option<Resolved> {
+    let dependencies = match Dependencies::read_for(index, name, requirements) {
+        Ok(dependencies) => dependencies,
+        Err(found) => {
+            problems.extend(found);
+            return None;
+        }
+    };
+    let resolution = match resolve(
+        name,
+        requirements,
+        &dependencies.available,
+        &previous.versions(),
+    ) {
+        Ok(resolution) => resolution,
+        Err(errors) => {
+            problems.extend(errors.into_iter().map(BuildProblem::Resolution));
+            return None;
+        }
+    };
+    let lock = match relock(previous, &resolution, index) {
+        Ok(lock) => lock,
+        Err(errors) => {
+            problems.extend(errors.into_iter().map(BuildProblem::Lock));
+            return None;
+        }
+    };
+    let contents = match dependencies.read_content(&lock, lock.units().keys()) {
+        Ok(contents) => contents,
+        Err(found) => {
+            problems.extend(found);
+            return None;
+        }
+    };
+    // Each published amender's bases are verified against the index here,
+    // whatever else the composition finds: a disagreement is an integrity
+    // conflict in its own right.
+    for (identity, locked) in lock.units() {
+        let key = (identity.clone(), locked.version().clone());
+        let (Some(manifest), Some(content)) =
+            (dependencies.manifests.get(&key), contents.get(identity))
+        else {
+            continue;
+        };
+        if let Some(published) = &content.lock {
+            problems.extend(
+                verify_bases(identity, locked.version(), manifest, published, index)
+                    .into_iter()
+                    .map(BuildProblem::BaseIntegrity),
+            );
+        }
+    }
+    Some(Resolved {
+        resolution,
+        lock,
+        dependencies,
+        contents,
+    })
+}
+
 /// Runs every validation that gates a build on `inputs` (see
 /// `docs/domain/authoring-workflow.md`): development values, resolution
 /// under the lock against `index`, the lock's integrity, the amendment
@@ -297,36 +411,19 @@ pub(super) fn validate(
             parameters,
         });
     }
-    let dependencies = match Dependencies::read(index, manifest) {
-        Ok(dependencies) => dependencies,
-        Err(found) => {
-            problems.extend(found);
-            return validation;
-        }
-    };
-    let resolution = match resolve(
+    let Some(resolved) = resolve_graph(
         Some(manifest.name()),
         manifest.dependencies(),
-        &dependencies.available,
-        &previous.versions(),
-    ) {
-        Ok(resolution) => resolution,
-        Err(errors) => {
-            problems.extend(errors.into_iter().map(BuildProblem::Resolution));
-            return validation;
-        }
-    };
-    let lock = match relock(previous, &resolution, index) {
-        Ok(lock) => lock,
-        Err(errors) => {
-            problems.extend(errors.into_iter().map(BuildProblem::Lock));
-            return validation;
-        }
+        previous,
+        index,
+        problems,
+    ) else {
+        return validation;
     };
     // A build never moves an amended unit away from its base. The cause is
     // told apart here, with the previous lock; the composition below would
     // only see that the base and the resolved version differ.
-    let moved: BTreeSet<RelativePath> = amendment_bases(manifest, previous, &resolution)
+    let moved: BTreeSet<RelativePath> = amendment_bases(manifest, previous, &resolved.resolution)
         .into_iter()
         .map(|error| {
             let path = match &error {
@@ -338,52 +435,15 @@ pub(super) fn validate(
             path
         })
         .collect();
-    let contents = match dependencies.read_content(&lock, lock.units().keys()) {
-        Ok(contents) => contents,
-        Err(found) => {
-            problems.extend(found);
-            return validation;
-        }
-    };
-
-    // Each published amender's bases are verified against the index here,
-    // whatever else the composition finds: a disagreement is an integrity
-    // conflict in its own right.
-    let mut units = BTreeMap::new();
-    for (identity, locked) in lock.units() {
-        let key = (identity.clone(), locked.version().clone());
-        let (Some(manifest), Some(content)) =
-            (dependencies.manifests.get(&key), contents.get(identity))
-        else {
-            continue;
-        };
-        if let Some(published) = &content.lock {
-            problems.extend(
-                verify_bases(identity, locked.version(), manifest, published, index)
-                    .into_iter()
-                    .map(BuildProblem::BaseIntegrity),
-            );
-        }
-        units.insert(
-            identity.clone(),
-            UnitContent::new(manifest, &content.files, &content.amendments),
-        );
-    }
     let (Some(src), Some(amendments)) = (src, amendments) else {
         return validation;
     };
-    let providers: BTreeMap<&UnitIdentity, (&Version, &FileTree)> = lock
-        .units()
-        .iter()
-        .filter_map(|(identity, locked)| {
-            let content = contents.get(identity)?;
-            Some((identity, (locked.version(), &content.files)))
-        })
-        .collect();
-    validation.contribution = contribution_problems(manifest, src, amendments, &providers);
+    validation.contribution =
+        contribution_problems(manifest, src, amendments, &resolved.providers());
+    let units = resolved.units();
     let root_content = UnitContent::new(manifest, src, amendments);
     let composition = compose(
-        resolution.graph(),
+        resolved.resolution.graph(),
         Root::Unit(root_content),
         &units,
         &BTreeMap::new(),
@@ -410,15 +470,44 @@ pub(super) fn validate(
             return validation;
         }
     };
+    let Some(rendered) = render_files(
+        &composition,
+        &resolved.lock,
+        Some(manifest.name()),
+        problems,
+    ) else {
+        return validation;
+    };
+    validation.result = Some(Validated {
+        lock: resolved.lock,
+        changes: resolved.resolution.changes().clone(),
+        files: rendered.files,
+        notes: rendered.notes,
+    });
+    validation
+}
 
-    // Templates are rendered with the parameter values of the unit that
-    // provides each one, plus the amending unit's values as `own` for a
-    // copy. One copy takes the provider's file's place; several are
-    // combined on the rendered content (see `super::merge`). Every
-    // template's problems are reported, by delivered path and then
-    // position.
+/// The rendered files of a composition.
+pub(crate) struct Rendered {
+    pub(crate) files: Vec<(RelativePath, UnitFile)>,
+    pub(crate) notes: Vec<String>,
+}
+
+/// Renders every file of `composition`: templates with the parameter
+/// values of the unit that provides each one, plus the amending unit's
+/// values as `own` for a copy. One copy takes the provider's file's place;
+/// several are combined on the rendered content (see `super::merge`).
+/// Every problem is reported, by delivered path and then position, and the
+/// files are given only when there was none. `built` is the unit being
+/// built, whose amendments are not published versions.
+pub(crate) fn render_files(
+    composition: &crate::domain::Composition<'_>,
+    lock: &UnitLock,
+    built: Option<&UnitIdentity>,
+    problems: &mut Vec<BuildProblem>,
+) -> Option<Rendered> {
     let no_values = ParameterValues::new();
-    let values_of = |unit: &UnitIdentity| values_of(&composition, &no_values, unit);
+    let values_of = |unit: &UnitIdentity| values_of(composition, &no_values, unit);
     let mut files: Vec<(RelativePath, UnitFile)> = Vec::new();
     let mut notes = Vec::new();
     let mut failed = false;
@@ -426,7 +515,7 @@ pub(super) fn validate(
         let executable = composed.is_executable();
         let provider = composed.unit();
         let published_version = |amender: &UnitIdentity| {
-            (amender != manifest.name())
+            (Some(amender) != built)
                 .then(|| lock.units().get(amender))
                 .flatten()
                 .map(|locked| locked.version().clone())
@@ -475,10 +564,12 @@ pub(super) fn validate(
                     (Some(base), Some(copies)) => {
                         let merge = || BuildProblem::Merge {
                             unit: provider.clone(),
-                            version: lock.units().get(provider).map_or_else(
-                                || manifest.version().clone(),
-                                |locked| locked.version().clone(),
-                            ),
+                            // An amended file's provider is a locked
+                            // dependency: the root is never amended.
+                            version: lock
+                                .units()
+                                .get(provider)
+                                .map(|locked| locked.version().clone()),
                             path: composed.source().clone(),
                             // By identity, as the conflicts name them.
                             amenders: amendments
@@ -531,15 +622,9 @@ pub(super) fn validate(
         }
     }
     if failed {
-        return validation;
+        return None;
     }
-    validation.result = Some(Validated {
-        lock,
-        changes: resolution.changes().clone(),
-        files,
-        notes,
-    });
-    validation
+    Some(Rendered { files, notes })
 }
 
 /// The effective values of `unit` in `composition`, or none.
@@ -579,6 +664,16 @@ impl Dependencies {
         index: &crate::domain::RegistryIndex,
         root: &Manifest,
     ) -> Result<Self, Vec<BuildProblem>> {
+        Self::read_for(index, Some(root.name()), root.dependencies())
+    }
+
+    /// [`read`](Self::read) for a root that is a consumer project (`name`
+    /// is `None`) or a unit, with its direct `requirements`.
+    pub(super) fn read_for(
+        index: &crate::domain::RegistryIndex,
+        name: Option<&UnitIdentity>,
+        requirements: &crate::domain::Dependencies,
+    ) -> Result<Self, Vec<BuildProblem>> {
         let mut dependencies = Self {
             available: AvailableVersions::new(),
             manifests: BTreeMap::new(),
@@ -586,10 +681,10 @@ impl Dependencies {
             commits: BTreeMap::new(),
         };
         let mut problems = Vec::new();
-        let mut pending: BTreeSet<UnitIdentity> = root.dependencies().keys().cloned().collect();
+        let mut pending: BTreeSet<UnitIdentity> = requirements.keys().cloned().collect();
         let mut seen = BTreeSet::new();
         while let Some(identity) = pending.pop_first() {
-            if !seen.insert(identity.clone()) || identity == *root.name() {
+            if !seen.insert(identity.clone()) || Some(&identity) == name {
                 continue;
             }
             let Some(unit) = index.units().get(&identity) else {
@@ -943,8 +1038,8 @@ pub enum BuildProblem {
     Merge {
         /// The provider.
         unit: UnitIdentity,
-        /// Its resolved version.
-        version: Version,
+        /// Its resolved version, when it is locked.
+        version: Option<Version>,
         /// The amended path in its `src/`.
         path: RelativePath,
         /// The amenders, by identity.
@@ -1026,9 +1121,12 @@ impl fmt::Display for BuildProblem {
                 failure,
             } => {
                 let amenders: Vec<String> = amenders.iter().map(ToString::to_string).collect();
+                let version = version
+                    .as_ref()
+                    .map_or_else(String::new, |version| format!(" {version}"));
                 write!(
                     f,
-                    "src/{path} of {unit} {version} is amended by {}, and the amendments cannot \
+                    "src/{path} of {unit}{version} is amended by {}, and the amendments cannot \
                      be combined: ",
                     amenders.join(", ")
                 )?;

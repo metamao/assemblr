@@ -1,5 +1,6 @@
 //! Argument parsing and dispatch.
 
+mod project;
 mod registry;
 mod unit;
 
@@ -17,6 +18,11 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Initialize a consumer project: create its `assemblr.jsonc`.
+    Init(project::InitArgs),
+    /// Compose the consumer project in the current directory from the
+    /// units its `assemblr.jsonc` declares.
+    Compose,
     /// Manage the local registry of unit repositories.
     #[command(subcommand)]
     Registry(registry::RegistryCommand),
@@ -28,6 +34,8 @@ enum Command {
 /// Parses the arguments and runs the command.
 pub(crate) fn run() -> ExitCode {
     match Cli::parse().command {
+        Command::Init(args) => project::init(&args),
+        Command::Compose => project::compose(),
         Command::Registry(command) => registry::run(command),
         Command::Unit(command) => unit::run(command),
     }

@@ -588,7 +588,10 @@ Open:
 
 - Packaging, cache, snapshot, and lock-state formats and locations, including
   how lock state and snapshots record and verify content identity and how
-  long historical snapshots are retained. **OC-8.**
+  long historical snapshots are retained. **OC-8.** Decided by the owner for
+  consumer projects (#41): the lockfile, the base's identity, and the stored
+  base are in
+  [consumer-projects.md](consumer-projects.md#the-lockfile-and-the-stored-base--approved).
 
 ## Removal — Approved
 
