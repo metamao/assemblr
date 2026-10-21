@@ -188,8 +188,8 @@ Both workflows produce the same composition from the same declaration.
 
 Decided for the first `assemblr compose` under AGENTS.md §1.1 (decision log
 D-10 to D-12) and accepted by the owner with PR #42. They cover a project
-composed for the first time; reconciling a project that was composed before
-is a later increment.
+composed for the first time; a project composed before is reconciled as
+[reconciliation details](#reconciliation-details--approved) describes.
 
 **Command.** `assemblr compose`, with no arguments, run at the project's top
 level, which holds `assemblr.jsonc`. The result goes to stdout; diagnostics,
@@ -225,8 +225,9 @@ it ignores; a project in no repository ignores nothing. An ignored file is
 written to the project, but its content is not stored in the tracked base:
 the lock lists it as unbased, and a warning says a later composition cannot
 reconcile edits to it. Whether a file is unbased is decided when it is
-materialized; a later change to the ignore rules does not move it between
-the two sets. When `.assemblr/` or one of its directories is ignored, a
+materialized, from the rules in force then: a file the consumer ignores
+since is no longer stored, and one no longer ignored is stored from then
+on. When `.assemblr/` or one of its directories is ignored, a
 warning says the base will not travel with the project, and an edited
 `.assemblr/.gitattributes` is restored and reported. Nothing is staged, and
 content is never scanned for secrets.
@@ -236,19 +237,22 @@ verified against the lock first; a missing, corrupted, or unverifiable base
 is an explicit failure that writes nothing and says to restore `.assemblr/`
 from version control. Then the declaration is composed and compared with
 the base by identity: the same composition means nothing to compose, and
-nothing is written; a different one is refused explicitly until a later
-increment reconciles it, so the project stays as it was.
+nothing is written, whatever the consumer did to the files since; a
+different one is reconciled with the project (see
+[reconciliation details](#reconciliation-details--approved)).
 
 **Interrupted compositions.** While the journal exists, a composition was
 interrupted. The next `compose` recovers from it before anything else. The
 lock is written after every file, so a lock that records the journaled
 composition means it was complete except for the journal's removal: the
 journal is removed and the files and the lock stand. Otherwise the
-composition is reverted: the journaled files whose content is still what
-was written are removed, those whose content changed are kept and named,
-the directories it created are removed when empty, the journal is removed,
-and the composition continues with a fresh plan, in which a kept file counts
-as existing content.
+composition is reverted, file by file: one it created whose content is
+still what was written is removed, one it replaced or removed is put back
+to its previous content when the path holds what was written, or nothing,
+and one whose content is neither is kept and named. The directories it
+created are removed when empty, the journal and the previous content are
+removed, and the composition continues with a fresh plan, in which a kept
+file counts as the project's content.
 
 Open:
 
@@ -398,7 +402,8 @@ Open:
   and the lockfile. **OC-48.** The first `compose` writes bytes and the
   executable bit as composed, never through a symbolic link, and reserves
   `assemblr.jsonc`, `assemblr-lock.json`, and `.assemblr/` (decision log
-  D-10).
+  D-10). A project file that differs from its base only by CRLF line
+  endings counts as unchanged (decision log D-15).
 
 ## Reconciliation — Approved
 
@@ -422,8 +427,67 @@ Composition reconciles three inputs:
   same reconciliation, which applies to every contributed file alike.
 - Repeating `compose` without relevant changes does not rewrite the project.
 
-The production reconciliation strategy, including whether and how Git takes
-part in it, is not decided (**OC-10**).
+The reconciliation strategy is decided provisionally in
+[reconciliation details](#reconciliation-details--approved); Git takes no
+part in it. **OC-10** stays open until the owner settles it.
+
+### Reconciliation details — Approved
+
+Decided for the first reconciliation under AGENTS.md §1.1 (decision log
+D-13 to D-15) and implemented by `compose` on a project composed before.
+They decide the consumer side of OC-10, which the merge-engine decision
+left to the consumer lifecycle; the entry stays open.
+
+**Per path, three-way, without Git.** Every path of the reconciliation
+base and of the incoming composition is decided on its own from three
+inputs: the base, what the project holds there now, and the incoming file,
+each as a mode and a content identity.
+
+- A side that did not change the file yields to the side that did: an
+  incoming change to a file the consumer did not touch replaces it; a
+  consumer's edit to a file the composition does not change stays; the same
+  change on both sides is one change.
+- A file that leaves the composition is removed when the project holds the
+  base's content, and its directories are removed when they become empty.
+  One the consumer edited is a conflict.
+- A file the consumer deleted stays deleted when the composition does not
+  change it, which is reported; one the composition changes is a conflict.
+- A new file of the composition is created; content already at its path is
+  refused as existing content (OC-44).
+- A file both sides changed is merged when it is JSON or JSONC and its base
+  is stored: the changes each side made against the base are derived with
+  the [merge engine](amendments-and-composition.md#the-merge-engine--approved),
+  the changes that collide are conflicts, and the composition's own changes
+  are edited into the project's text, whose layout and comments stay. Any
+  other file both sides changed, a text file, a binary file, or one whose
+  base is not stored, is a conflict.
+- The executable bit is reconciled like content.
+- A managed path that is not a regular file is a conflict.
+
+**Conflicts are refused.** A composition with any conflict is refused
+before anything is written, naming every conflicting path and why; the
+project, its lock, and its base stay as they were (standing default D2).
+Resolving conflicts in the project, the pending-resolution state of
+[conflict resolution](#conflict-resolution--approved), is a later
+increment. A conflict between units' contributions remains a composition
+error (OC-47).
+
+**Line endings.** A project file that differs from its base, or from the
+incoming file, only by CRLF line endings throughout counts as that content:
+a checkout that converts line endings is not an edit. What is written to
+such a file keeps CRLF line endings, and a note says so.
+
+**What is written.** The new base is stored, the previous content of every
+file to replace or remove is kept under `.assemblr/previous/`, the journal
+is written, the files are created, replaced, and removed, each written
+beside its path and renamed into place so that a path holds either its
+previous or its new content, the lock is written with the new base,
+managed, and unbased sets, and the journal and the previous content are
+removed. `.assemblr/.gitignore`, which the store writes and restores like
+`.gitattributes`, keeps the journal and the previous content out of version
+control: a clone of an interrupted project has no journal, and its files
+are the project's content. The report names every path created, modified,
+merged, and removed, and every locked version that changed.
 
 ### Removal — Approved
 
@@ -555,10 +619,10 @@ Open:
 
 - Regeneration of a missing base from the lock as a verified fallback, and
   how long bases are kept. **OC-8.**
-- The pending-resolution state, continue, abort, and recovery after an
-  interrupted application of changes to existing files. **OC-37.** The
-  journal of a first composition is described in
-  [composition details](#composition-details--approved).
+- The pending-resolution state, continue, and abort. **OC-37.** The
+  journal and the recovery of an interrupted composition are described in
+  [composition details](#composition-details--approved) and
+  [reconciliation details](#reconciliation-details--approved).
 - Portability of a lockfile between machines: what happens when the source a
   lock records for a unit differs from the source registered for that identity
   on another machine, and what a lock records for a unit obtained through a

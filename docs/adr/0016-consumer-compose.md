@@ -1,6 +1,6 @@
 # 0016: The first consumer `compose`: the project root, the lockfile's reconciliation state, the stored base, ignore rules, and the journal
 
-- **Status:** Accepted
+- **Status:** Accepted, points 7 and 9 extended by 0017
 - **Date:** 2026-10-21
 
 ## Context
