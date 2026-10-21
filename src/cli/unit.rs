@@ -463,6 +463,7 @@ fn build() -> ExitCode {
     match build_unit(&root, &registry) {
         Ok(built) => {
             report_lockfile(&built);
+            warn_notes(built.notes());
             if let Some((path, error)) = built.leftover() {
                 eprintln!(
                     "warning: could not delete the previous build at {}: {error}; the next \
@@ -498,6 +499,7 @@ fn check() -> ExitCode {
     };
     match check_unit(&root, &registry) {
         Ok(checked) => {
+            warn_notes(checked.notes());
             println!(
                 "Checked {} {}: no problems; a build delivers {} file(s), with {} dependenc{}.",
                 checked.unit(),
@@ -581,8 +583,16 @@ fn publish() -> ExitCode {
     }
 }
 
+/// Reports on stderr what a composition could not carry.
+fn warn_notes(notes: &[String]) {
+    for note in notes {
+        eprintln!("warning: {note}");
+    }
+}
+
 /// Reports a publication: the tag on stdout, and the registry's part.
 fn report_published(published: &Published) {
+    warn_notes(published.notes());
     let commit = published.provenance().commit().as_str();
     let short = commit.get(..12).unwrap_or(commit);
     if published.already_published() {
@@ -782,6 +792,11 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
                                            again, or the amender was published against other \
                                            content; run `assemblr registry sync` to check the \
                                            registered repositories"
+            .to_owned(),
+        BuildProblem::Merge { .. } => "the amendments of one file must agree: change the \
+                                       copies so that no two amenders set one value \
+                                       differently, or expose the value as a parameter of \
+                                       the provider"
             .to_owned(),
         BuildProblem::Resolution(ResolutionError::Unavailable { .. }) => {
             "run `assemblr registry sync` to index newly published versions".to_owned()

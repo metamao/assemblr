@@ -1,0 +1,709 @@
+//! Several amendments of one JSON or JSONC file, composed by the real
+//! binary: `unit build` of a unit whose dependencies amend the same provider
+//! file, and of the unit together with them.
+//!
+//! The scenarios are written from the contracts and from the milestone's
+//! files: a `package.json` whose `scripts` and `dependencies` several units
+//! extend, and a `wrangler.jsonc` with comments and a `d1_databases` list.
+//! Every test gives the binary its own registry and home.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a fixture that cannot be built fails the test"
+)]
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+
+#[cfg(windows)]
+const NULL_DEVICE: &str = "NUL";
+#[cfg(not(windows))]
+const NULL_DEVICE: &str = "/dev/null";
+
+struct Fixture {
+    dir: PathBuf,
+    data: PathBuf,
+    home: PathBuf,
+}
+
+impl Fixture {
+    fn new(test: &str) -> Self {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join("merge")
+            .join(test);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        let fixture = Self {
+            data: dir.join("data"),
+            home: dir.join("home"),
+            dir,
+        };
+        fs::create_dir_all(&fixture.data).unwrap();
+        fs::create_dir_all(&fixture.home).unwrap();
+        fixture
+    }
+
+    fn repo(&self, name: &str) -> Repo {
+        git(&self.dir, &["init", "-q", name]);
+        Repo {
+            path: self.dir.join(name),
+        }
+    }
+
+    fn assemblr(&self, dir: &Path, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_assemblr"))
+            .current_dir(dir)
+            .env("ASSEMBLR_DATA_DIR", &self.data)
+            .env("HOME", &self.home)
+            .env("USERPROFILE", &self.home)
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    fn register(&self, repo: &Repo) {
+        let path = repo.path.to_str().unwrap();
+        succeeds(self.assemblr(&self.dir, &["registry", "add", path]));
+    }
+
+    fn build(&self, repo: &Repo) -> Output {
+        self.assemblr(&repo.path, &["unit", "build"])
+    }
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let mut command = Command::new("git");
+    for (name, _) in std::env::vars_os() {
+        if name
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("GIT_")
+        {
+            command.env_remove(name);
+        }
+    }
+    let output = command
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", NULL_DEVICE)
+        .env("GIT_AUTHOR_NAME", "Author")
+        .env("GIT_AUTHOR_EMAIL", "author@example.com")
+        .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_NAME", "Author")
+        .env("GIT_COMMITTER_EMAIL", "author@example.com")
+        .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+        .args(["-c", "core.autocrlf=false", "-c", "init.defaultBranch=main"])
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// A manifest with these dependencies and extra top-level fields.
+fn manifest(name: &str, version: &str, dependencies: &[(&str, &str)], extra: &str) -> String {
+    let dependencies: Vec<String> = dependencies
+        .iter()
+        .map(|(identity, range)| format!(r#""{identity}": "{range}""#))
+        .collect();
+    format!(
+        r#"{{"name": "{name}", "version": "{version}", "description": "A unit.",
+            "dependencies": {{{}}}{extra}}}"#,
+        dependencies.join(", ")
+    )
+}
+
+/// The `amendments` member for copies of `file` from `provider` at `base`.
+fn amending(files: &[&str], provider: &str, base: &str) -> String {
+    let entries: Vec<String> = files
+        .iter()
+        .map(|file| format!(r#""{file}": {{"unit": "{provider}", "base": "{base}"}}"#))
+        .collect();
+    format!(", \"amendments\": {{{}}}", entries.join(", "))
+}
+
+struct Repo {
+    path: PathBuf,
+}
+
+impl Repo {
+    fn git(&self, args: &[&str]) -> String {
+        git(&self.path, args)
+    }
+
+    fn write(&self, path: &str, contents: &str) {
+        let path = self.path.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn read(&self, path: &str) -> String {
+        fs::read_to_string(self.path.join(path)).unwrap()
+    }
+
+    /// Commits everything and tags it `v<version>`.
+    fn publish(&self, version: &str) {
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-q", "--allow-empty", "-m", version]);
+        self.git(&["tag", &format!("v{version}")]);
+    }
+
+    fn lockfile_for(&self, provider: &Repo, identity: &str, version: &str) -> String {
+        let tag = format!("v{version}");
+        format!(
+            "{{\n  \"format\": 1,\n  \"units\": {{\n    \"{identity}\": {{\n      \"commit\": \
+             \"{}\",\n      \"tree\": \"{}\",\n      \"version\": \"{version}\"\n    }}\n  }}\n}}\n",
+            provider.git(&["rev-parse", &tag]),
+            provider.git(&["rev-parse", &format!("{tag}^{{tree}}")])
+        )
+    }
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn succeeds(output: Output) -> Output {
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    output
+}
+
+fn fails(output: Output) -> Output {
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    output
+}
+
+const PACKAGE: &str = "{\n  \"name\": \"worker\",\n  \"private\": true,\n  \"scripts\": {\n    \
+                       \"dev\": \"wrangler dev\",\n    \"deploy\": \"wrangler deploy\"\n  },\n  \
+                       \"dependencies\": {\n    \"hono\": \"^4\"\n  },\n  \"files\": [\"dist\"]\n}\n";
+
+const WRANGLER: &str = "{\n  // The worker's name.\n  \"name\": \"{{ name }}\",\n  \
+                        \"compatibility_date\": \"2026-01-01\",\n  \"d1_databases\": [\n    { \
+                        \"binding\": \"DB\", \"database_name\": \"main\" },\n  ],\n}\n";
+
+/// A provider `@acme/worker` 1.0.0 with `package.json` and the template
+/// `wrangler.jsonc`, registered; `@acme/db` and `@acme/api` published with
+/// the given copies, registered; and an unbuilt `@acme/app` depending on
+/// both. Each amender's copy is a function of the provider's file.
+fn scenario(
+    fixture: &Fixture,
+    db_copies: &[(&str, &str)],
+    api_copies: &[(&str, &str)],
+) -> (Repo, Repo) {
+    let worker = fixture.repo("worker");
+    worker.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/worker",
+            "1.0.0",
+            &[],
+            r#", "params": {"name": {"type": "string", "description": "The name.", "default": "worker"}}"#,
+        ),
+    );
+    worker.write("src/package.json", PACKAGE);
+    worker.write("src/wrangler.jsonc.assemblr.tmpl", WRANGLER);
+    worker.publish("1.0.0");
+    fixture.register(&worker);
+    for (name, copies) in [("db", db_copies), ("api", api_copies)] {
+        let unit = fixture.repo(name);
+        let files: Vec<&str> = copies.iter().map(|(file, _)| *file).collect();
+        unit.write(
+            "manifest.jsonc",
+            &manifest(
+                &format!("@acme/{name}"),
+                "1.0.0",
+                &[("@acme/worker", "=1.0.0")],
+                &amending(&files, "@acme/worker", "1.0.0"),
+            ),
+        );
+        for (file, contents) in copies {
+            unit.write(&format!("amendments/{file}"), contents);
+        }
+        unit.write(&format!("src/{name}.txt"), name);
+        unit.write(
+            "assemblr-lock.json",
+            &unit.lockfile_for(&worker, "@acme/worker", "1.0.0"),
+        );
+        unit.publish("1.0.0");
+        fixture.register(&unit);
+    }
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[
+                ("@acme/db", "^1"),
+                ("@acme/api", "^1"),
+                ("@acme/worker", "=1.0.0"),
+            ],
+            "",
+        ),
+    );
+    app.write("src/app.txt", "app");
+    (worker, app)
+}
+
+#[test]
+fn independent_amendments_of_package_json_compose_with_the_provider_s_layout() {
+    let fixture = Fixture::new("independent");
+    let db = PACKAGE
+        .replace("    \"hono\": \"^4\"\n", "    \"drizzle-orm\": \"^0.44\",\n    \"hono\": \"^4\"\n")
+        .replace(
+            "  \"files\": [\"dist\"]\n",
+            "  \"files\": [\"dist\"],\n  \"devDependencies\": {\n    \"drizzle-kit\": \"^0.31\"\n  }\n",
+        );
+    let api = PACKAGE
+        .replace(
+            "    \"deploy\": \"wrangler deploy\"\n",
+            "    \"deploy\": \"wrangler deploy\",\n    \"test\": \"vitest\"\n",
+        )
+        .replace("  \"private\": true,\n", "");
+    let (_worker, app) = scenario(
+        &fixture,
+        &[("package.json", &db)],
+        &[("package.json", &api)],
+    );
+
+    let output = succeeds(fixture.build(&app));
+    assert!(
+        stdout(&output).contains("with 3 dependencies"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(!stderr(&output).contains("warning"), "{}", stderr(&output));
+    assert_eq!(
+        app.read("build/package.json"),
+        "{\n  \"name\": \"worker\",\n  \"scripts\": {\n    \"dev\": \"wrangler dev\",\n    \
+         \"deploy\": \"wrangler deploy\",\n    \"test\": \"vitest\"\n  },\n  \"dependencies\": {\n    \
+         \"drizzle-orm\": \"^0.44\",\n    \"hono\": \"^4\"\n  },\n  \"files\": [\"dist\"],\n  \
+         \"devDependencies\": {\n    \"drizzle-kit\": \"^0.31\"\n  }\n}\n"
+    );
+    // The template is rendered for the provider and delivered once.
+    assert!(
+        app.read("build/wrangler.jsonc")
+            .contains("\"name\": \"worker\"")
+    );
+
+    // The unit's own amendment joins the published ones, with its `own`
+    // values, and `unit check` agrees with the build.
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[
+                ("@acme/db", "^1"),
+                ("@acme/api", "^1"),
+                ("@acme/worker", "=1.0.0"),
+            ],
+            &format!(
+                "{}, \"params\": {{\"title\": {{\"type\": \"string\", \"description\": \"T.\", \
+                 \"default\": \"My App\"}}}}",
+                amending(
+                    &["package.json", "wrangler.jsonc.assemblr.tmpl"],
+                    "@acme/worker",
+                    "1.0.0"
+                )
+            ),
+        ),
+    );
+    app.write(
+        "amendments/package.json",
+        &PACKAGE.replace("\"name\": \"worker\"", "\"name\": \"app\""),
+    );
+    app.write(
+        "amendments/wrangler.jsonc.assemblr.tmpl",
+        &WRANGLER.replace(
+            "  \"compatibility_date\": \"2026-01-01\",\n",
+            "  \"compatibility_date\": \"2026-01-01\",\n  \"vars\": { \"TITLE\": \"{{ own.title }}\" },\n",
+        ),
+    );
+    succeeds(fixture.build(&app));
+    assert!(
+        app.read("build/package.json")
+            .starts_with("{\n  \"name\": \"app\",\n  \"scripts\"")
+    );
+    assert!(
+        app.read("build/wrangler.jsonc")
+            .contains("\"vars\": { \"TITLE\": \"My App\" }")
+    );
+    succeeds(fixture.assemblr(&app.path, &["unit", "check"]));
+}
+
+#[test]
+fn identical_contributions_merge_and_different_ones_refuse_the_build_naming_both() {
+    let fixture = Fixture::new("conflict");
+    let bump = |to: &str| PACKAGE.replace("\"hono\": \"^4\"", &format!("\"hono\": \"{to}\""));
+    let (_worker, app) = scenario(
+        &fixture,
+        &[("package.json", &bump("^4.1"))],
+        &[("package.json", &bump("^4.1"))],
+    );
+    succeeds(fixture.build(&app));
+    assert!(
+        app.read("build/package.json")
+            .contains("\"hono\": \"^4.1\"")
+    );
+
+    let fixture = Fixture::new("conflict-different");
+    let (_worker, app) = scenario(
+        &fixture,
+        &[("package.json", &bump("^4.2"))],
+        &[("package.json", &bump("^4.1"))],
+    );
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(
+        err.contains(
+            "error: src/package.json of @acme/worker 1.0.0 is amended by @acme/api, @acme/db, and the \
+             amendments cannot be combined: the amendments conflict:\nerror:   /dependencies/hono: \
+             @acme/api changes \"^4\" to \"^4.1\"; @acme/db changes \"^4\" to \"^4.2\""
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("build/ and assemblr-lock.json were not changed"),
+        "{err}"
+    );
+    assert!(
+        err.contains("the amendments of one file must agree"),
+        "{err}"
+    );
+    assert!(!app.path.join("build").exists());
+    // The same refusal from `unit check`.
+    let check = stderr(&fails(fixture.assemblr(&app.path, &["unit", "check"])));
+    assert!(
+        check.contains("/dependencies/hono: @acme/api changes"),
+        "{check}"
+    );
+}
+
+#[test]
+fn a_value_one_amender_adds_cannot_be_changed_by_another_and_removals_conflict_with_edits() {
+    let fixture = Fixture::new("flat");
+    let engines = |node: &str| {
+        PACKAGE.replace(
+            "  \"files\": [\"dist\"]\n",
+            &format!("  \"files\": [\"dist\"],\n  \"engines\": {{ \"node\": \"{node}\" }}\n"),
+        )
+    };
+    let (_worker, app) = scenario(
+        &fixture,
+        &[("package.json", &engines(">=22"))],
+        &[("package.json", &engines(">=24"))],
+    );
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(
+        err.contains("/engines/node: @acme/api adds \">=24\"; @acme/db adds \">=22\""),
+        "{err}"
+    );
+
+    let fixture = Fixture::new("flat-remove");
+    let removed = PACKAGE.replace(
+        "  \"scripts\": {\n    \"dev\": \"wrangler dev\",\n    \"deploy\": \"wrangler deploy\"\n  },\n",
+        "",
+    );
+    let changed = PACKAGE.replace("\"wrangler dev\"", "\"wrangler dev --local\"");
+    let (_worker, app) = scenario(
+        &fixture,
+        &[("package.json", &removed)],
+        &[("package.json", &changed)],
+    );
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(
+        err.contains(
+            "/scripts: @acme/db removes {\"dev\":\"wrangler dev\",\"deploy\":\"wrangler…, while \
+             @acme/api edits /scripts/dev inside it"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn lists_are_whole_values_and_jsonc_comments_and_trailing_commas_survive() {
+    let fixture = Fixture::new("lists");
+    let audit = WRANGLER.replace(
+        "    { \"binding\": \"DB\", \"database_name\": \"main\" },\n",
+        "    { \"binding\": \"DB\", \"database_name\": \"main\" },\n    { \"binding\": \"AUDIT\", \
+         \"database_name\": \"audit\" },\n",
+    );
+    let flags = WRANGLER.replace(
+        "  \"compatibility_date\": \"2026-01-01\",\n",
+        "  \"compatibility_date\": \"2026-01-01\",\n  \"compatibility_flags\": [\"nodejs_compat\"],\n",
+    );
+    let (_worker, app) = scenario(
+        &fixture,
+        &[("wrangler.jsonc.assemblr.tmpl", &audit)],
+        &[("wrangler.jsonc.assemblr.tmpl", &flags)],
+    );
+    succeeds(fixture.build(&app));
+    assert_eq!(
+        app.read("build/wrangler.jsonc"),
+        "{\n  // The worker's name.\n  \"name\": \"worker\",\n  \"compatibility_date\": \
+         \"2026-01-01\",\n  \"compatibility_flags\": [\"nodejs_compat\"],\n  \"d1_databases\": [\n    \
+         {\n      \"binding\": \"DB\",\n      \"database_name\": \"main\"\n    },\n    {\n      \
+         \"binding\": \"AUDIT\",\n      \"database_name\": \"audit\"\n    }\n  ],\n}\n"
+    );
+
+    // Two different changes inside one list are not merged.
+    let fixture = Fixture::new("lists-conflict");
+    let other = WRANGLER.replace(
+        "    { \"binding\": \"DB\", \"database_name\": \"main\" },\n",
+        "    { \"binding\": \"DB\", \"database_name\": \"main\" },\n    { \"binding\": \"CACHE\", \
+         \"database_name\": \"cache\" },\n",
+    );
+    let (_worker, app) = scenario(
+        &fixture,
+        &[("wrangler.jsonc.assemblr.tmpl", &audit)],
+        &[("wrangler.jsonc.assemblr.tmpl", &other)],
+    );
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(err.contains("/d1_databases: @acme/api changes"), "{err}");
+    assert!(err.contains("@acme/db changes"), "{err}");
+}
+
+#[test]
+fn what_a_copy_carries_beyond_values_is_reported_and_the_build_succeeds() {
+    let fixture = Fixture::new("notes");
+    let commented = PACKAGE.replace(
+        "    \"hono\": \"^4\"\n",
+        "    // Pinned until the next major.\n    \"hono\": \"^4\",\n    \"zod\": \"^3\"\n",
+    );
+    let reordered = PACKAGE.replace(
+        "    \"dev\": \"wrangler dev\",\n    \"deploy\": \"wrangler deploy\"\n",
+        "    \"deploy\": \"wrangler deploy\",\n    \"dev\": \"wrangler dev\"\n",
+    );
+    let (_worker, app) = scenario(
+        &fixture,
+        &[("package.json", &commented)],
+        &[("package.json", &reordered)],
+    );
+    let output = succeeds(fixture.build(&app));
+    let err = stderr(&output);
+    assert!(
+        err.contains(
+            "warning: src/package.json of @acme/worker: not carried from the copy of @acme/api: the \
+             order of the members of /scripts"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "warning: src/package.json of @acme/worker: not carried from the copy of @acme/db: the \
+             comment \"// Pinned until the next major.\""
+        ),
+        "{err}"
+    );
+    let built = app.read("build/package.json");
+    assert!(built.contains("\"zod\": \"^3\""), "{built}");
+    assert!(!built.contains("Pinned"), "{built}");
+    assert!(
+        built.contains("\"dev\": \"wrangler dev\",\n    \"deploy\""),
+        "{built}"
+    );
+}
+
+#[test]
+fn the_result_does_not_depend_on_declaration_or_registration_order() {
+    let db = PACKAGE.replace(
+        "    \"hono\": \"^4\"\n",
+        "    \"drizzle-orm\": \"^0.44\",\n    \"hono\": \"^4\"\n",
+    );
+    let api = PACKAGE.replace(
+        "    \"hono\": \"^4\"\n",
+        "    \"hono\": \"^4\",\n    \"zod\": \"^3\"\n",
+    );
+    let fixture = Fixture::new("order-a");
+    let (_worker, app) = scenario(
+        &fixture,
+        &[("package.json", &db)],
+        &[("package.json", &api)],
+    );
+    succeeds(fixture.build(&app));
+    let first = app.read("build/package.json");
+
+    // The dependencies declared in the other order, the amenders registered
+    // in the other order, and the copies swapped between amenders.
+    let fixture = Fixture::new("order-b");
+    let (_worker, app) = scenario(
+        &fixture,
+        &[("package.json", &api)],
+        &[("package.json", &db)],
+    );
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[
+                ("@acme/worker", "=1.0.0"),
+                ("@acme/api", "^1"),
+                ("@acme/db", "^1"),
+            ],
+            "",
+        ),
+    );
+    succeeds(fixture.build(&app));
+    assert_eq!(app.read("build/package.json"), first);
+    assert!(
+        first.contains("\"drizzle-orm\": \"^0.44\",\n    \"hono\": \"^4\",\n    \"zod\": \"^3\""),
+        "{first}"
+    );
+}
+
+#[test]
+fn unsupported_cases_keep_refusing_with_their_reason() {
+    // A YAML file with two amenders is refused for every amender.
+    let fixture = Fixture::new("yaml");
+    let worker = fixture.repo("worker");
+    worker.write(
+        "manifest.jsonc",
+        &manifest("@acme/worker", "1.0.0", &[], ""),
+    );
+    worker.write("src/compose.yaml", "services:\n  web:\n    image: app\n");
+    worker.publish("1.0.0");
+    fixture.register(&worker);
+    for (name, port) in [("db", "5432"), ("api", "8080")] {
+        let unit = fixture.repo(name);
+        unit.write(
+            "manifest.jsonc",
+            &manifest(
+                &format!("@acme/{name}"),
+                "1.0.0",
+                &[("@acme/worker", "=1.0.0")],
+                &amending(&["compose.yaml"], "@acme/worker", "1.0.0"),
+            ),
+        );
+        unit.write(
+            "amendments/compose.yaml",
+            &format!("services:\n  web:\n    image: app\n    ports: [\"{port}\"]\n"),
+        );
+        unit.write(
+            "assemblr-lock.json",
+            &unit.lockfile_for(&worker, "@acme/worker", "1.0.0"),
+        );
+        unit.publish("1.0.0");
+        fixture.register(&unit);
+    }
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[("@acme/db", "^1"), ("@acme/api", "^1")],
+            "",
+        ),
+    );
+    app.write("src/app.txt", "app");
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(
+        err.contains(
+            "src/compose.yaml of @acme/worker 1.0.0 is amended by @acme/api 1.0.0, @acme/db 1.0.0; \
+             several amendments of one file are combined for JSON and JSONC files only"
+        ),
+        "{err}"
+    );
+
+    // A copy that is not valid JSON is refused naming its amender, and a
+    // copy with a duplicate key too.
+    let fixture = Fixture::new("invalid-copy");
+    let (_worker, app) = scenario(
+        &fixture,
+        &[("package.json", "{ \"name\": \"worker\", ")],
+        &[(
+            "package.json",
+            &PACKAGE.replace(
+                "\"private\": true,",
+                "\"private\": true,\n  \"private\": false,",
+            ),
+        )],
+    );
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(err.contains("the copy of @acme/api cannot be read as JSON: the object at / has the key \"private\" twice"), "{err}");
+
+    let fixture = Fixture::new("invalid-copy-syntax");
+    let (_worker, app) = scenario(
+        &fixture,
+        &[("package.json", "{ \"name\": \"worker\", ")],
+        &[("package.json", PACKAGE)],
+    );
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(
+        err.contains("the copy of @acme/db cannot be read as JSON: it is not valid JSONC"),
+        "{err}"
+    );
+}
+
+#[test]
+fn crlf_providers_keep_their_line_endings_and_single_amenders_are_unchanged() {
+    let fixture = Fixture::new("crlf");
+    let crlf = PACKAGE.replace('\n', "\r\n");
+    let db = crlf.replace(
+        "    \"hono\": \"^4\"\r\n",
+        "    \"drizzle-orm\": \"^0.44\",\r\n    \"hono\": \"^4\"\r\n",
+    );
+    let api = crlf.replace("\"wrangler dev\"", "\"wrangler dev --local\"");
+    let (worker, app) = scenario(
+        &fixture,
+        &[("package.json", &db)],
+        &[("package.json", &api)],
+    );
+    // The provider's file itself in CRLF.
+    worker.write("src/package.json", &crlf);
+    worker.git(&["add", "-A"]);
+    worker.git(&["commit", "-q", "-m", "crlf"]);
+    worker.write("manifest.jsonc", &manifest("@acme/worker", "1.0.1", &[], r#", "params": {"name": {"type": "string", "description": "The name.", "default": "worker"}}"#));
+    worker.publish("1.0.1");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    // The amenders' base is 1.0.0, whose file is LF: so the base is LF and
+    // the merge keeps the base's endings. Build against 1.0.0 as declared.
+    succeeds(fixture.build(&app));
+    let built = app.read("build/package.json");
+    assert!(
+        built.contains("\"drizzle-orm\": \"^0.44\",\n    \"hono\": \"^4\""),
+        "{built}"
+    );
+    assert!(built.contains("\"wrangler dev --local\""), "{built}");
+    assert!(!built.contains('\r'), "{built:?}");
+
+    // One amender of a file is the copy itself, byte for byte.
+    let fixture = Fixture::new("single");
+    let (_worker, app) = scenario(
+        &fixture,
+        &[(
+            "package.json",
+            &PACKAGE.replace("\"private\": true", "\"private\": false"),
+        )],
+        &[],
+    );
+    succeeds(fixture.build(&app));
+    assert_eq!(
+        app.read("build/package.json"),
+        PACKAGE.replace("\"private\": true", "\"private\": false")
+    );
+}

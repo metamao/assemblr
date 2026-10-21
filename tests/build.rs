@@ -1969,8 +1969,8 @@ fn several_amenders_of_one_provider_file_are_refused() {
     assert!(
         err.contains(
             "src/bin/run of @acme/node 1.0.0 is amended by this unit, @acme/app 0.1.0; several \
-             amenders of one file are not supported yet, and no amender takes precedence, so \
-             the file is not amended"
+             amendments of one file are combined for JSON and JSONC files only, and no amender \
+             takes precedence, so the file is not amended"
         ),
         "{err}"
     );

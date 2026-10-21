@@ -184,6 +184,7 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
         dependencies: lock.units().len(),
         lockfile,
         changes: validated.changes,
+        notes: validated.notes,
         leftover: published.leftover,
     })
 }
@@ -258,6 +259,9 @@ pub(super) struct Validated {
     pub(super) changes: BTreeMap<UnitIdentity, LockChange>,
     /// The composed files, rendered, by delivered path.
     pub(super) files: Vec<(RelativePath, UnitFile)>,
+    /// What the composition reports without failing: parts of amendment
+    /// copies the merge could not carry, each naming the file.
+    pub(super) notes: Vec<String>,
 }
 
 /// Runs every validation that gates a build on `inputs` (see
@@ -408,52 +412,119 @@ pub(super) fn validate(
     };
 
     // Templates are rendered with the parameter values of the unit that
-    // provides each one, plus the amending unit's values as `own` for an
-    // amended one. Every template's problems are reported, by delivered path
-    // and then position.
+    // provides each one, plus the amending unit's values as `own` for a
+    // copy. One copy takes the provider's file's place; several are
+    // combined on the rendered content (see `super::merge`). Every
+    // template's problems are reported, by delivered path and then
+    // position.
     let no_values = ParameterValues::new();
+    let values_of = |unit: &UnitIdentity| values_of(&composition, &no_values, unit);
     let mut files: Vec<(RelativePath, UnitFile)> = Vec::new();
+    let mut notes = Vec::new();
     let mut failed = false;
     for (path, composed) in composition.files() {
         let executable = composed.is_executable();
-        if !composed.is_template() {
-            files.push((
-                path.clone(),
-                UnitFile::new(composed.contents().to_vec(), executable),
-            ));
-            continue;
-        }
-        let template = |error| BuildProblem::Template {
-            unit: composed.unit().clone(),
-            path: composed.source().clone(),
-            amended_by: composed.amended_by().cloned(),
-            published: composed
-                .amended_by()
-                .filter(|amender| *amender != manifest.name())
-                .and_then(|amender| lock.units().get(amender))
-                .map(|locked| locked.version().clone()),
-            error,
+        let provider = composed.unit();
+        let published_version = |amender: &UnitIdentity| {
+            (amender != manifest.name())
+                .then(|| lock.units().get(amender))
+                .flatten()
+                .map(|locked| locked.version().clone())
         };
-        let Ok(text) = std::str::from_utf8(composed.contents()) else {
-            problems.push(template(TemplateError::NotUtf8));
-            failed = true;
-            continue;
-        };
-        let values_of = |unit| composition.values().get(unit).unwrap_or(&no_values);
-        let values = values_of(composed.unit());
-        let context = match composed.amended_by() {
-            Some(amender) => Context::amended(values, values_of(amender)),
-            None => Context::new(values),
-        };
-        match render(text, &context) {
-            Ok(rendered) => files.push((
-                path.clone(),
-                UnitFile::new(rendered.into_bytes(), executable),
-            )),
-            Err(errors) => {
-                failed = true;
-                problems.extend(errors.into_iter().map(TemplateError::Render).map(template));
+        // Renders one side: the provider's file, or an amender's copy.
+        let mut side = |bytes: &[u8], amender: Option<&UnitIdentity>| -> Option<Vec<u8>> {
+            if !composed.is_template() {
+                return Some(bytes.to_vec());
             }
+            let template = |error| BuildProblem::Template {
+                unit: provider.clone(),
+                path: composed.source().clone(),
+                amended_by: amender.cloned(),
+                published: amender.and_then(published_version),
+                error,
+            };
+            let Ok(text) = std::str::from_utf8(bytes) else {
+                problems.push(template(TemplateError::NotUtf8));
+                return None;
+            };
+            let values = values_of(provider);
+            let context = match amender {
+                Some(amender) => Context::amended(values, values_of(amender)),
+                None => Context::new(values),
+            };
+            match render(text, &context) {
+                Ok(rendered) => Some(rendered.into_bytes()),
+                Err(errors) => {
+                    problems.extend(errors.into_iter().map(TemplateError::Render).map(template));
+                    None
+                }
+            }
+        };
+        let delivered = match composed.amendments() {
+            [] => side(composed.contents(), None),
+            [(amender, copy)] => side(copy.contents(), Some(amender)),
+            amendments => {
+                let base = side(composed.contents(), None);
+                let copies: Vec<Option<(&UnitIdentity, Vec<u8>)>> = amendments
+                    .iter()
+                    .map(|(amender, copy)| {
+                        side(copy.contents(), Some(amender)).map(|text| (*amender, text))
+                    })
+                    .collect();
+                match (base, copies.into_iter().collect::<Option<Vec<_>>>()) {
+                    (Some(base), Some(copies)) => {
+                        let merge = || BuildProblem::Merge {
+                            unit: provider.clone(),
+                            version: lock.units().get(provider).map_or_else(
+                                || manifest.version().clone(),
+                                |locked| locked.version().clone(),
+                            ),
+                            path: composed.source().clone(),
+                            amenders: amendments
+                                .iter()
+                                .map(|(amender, _)| (*amender).clone())
+                                .collect(),
+                            failure: None,
+                        };
+                        let sides: Option<(&str, Vec<(&UnitIdentity, &str)>)> = utf8(&base)
+                            .and_then(|base| {
+                                copies
+                                    .iter()
+                                    .map(|(amender, copy)| utf8(copy).map(|copy| (*amender, copy)))
+                                    .collect::<Option<Vec<_>>>()
+                                    .map(|copies| (base, copies))
+                            });
+                        match sides {
+                            None => {
+                                problems.push(merge());
+                                None
+                            }
+                            Some((base, copies)) => match super::merge::merge_json(base, &copies) {
+                                Ok(merged) => {
+                                    notes.extend(merged.notes().iter().map(|note| {
+                                        format!("src/{} of {provider}: {note}", composed.source())
+                                    }));
+                                    Some(merged.into_text().into_bytes())
+                                }
+                                Err(failure) => {
+                                    let mut problem = merge();
+                                    if let BuildProblem::Merge { failure: slot, .. } = &mut problem
+                                    {
+                                        *slot = Some(failure);
+                                    }
+                                    problems.push(problem);
+                                    None
+                                }
+                            },
+                        }
+                    }
+                    _ => None,
+                }
+            }
+        };
+        match delivered {
+            Some(bytes) => files.push((path.clone(), UnitFile::new(bytes, executable))),
+            None => failed = true,
         }
     }
     if failed {
@@ -463,8 +534,23 @@ pub(super) fn validate(
         lock,
         changes: resolution.changes().clone(),
         files,
+        notes,
     });
     validation
+}
+
+/// The effective values of `unit` in `composition`, or none.
+fn values_of<'c>(
+    composition: &'c crate::domain::Composition<'_>,
+    none: &'c ParameterValues,
+    unit: &UnitIdentity,
+) -> &'c ParameterValues {
+    composition.values().get(unit).unwrap_or(none)
+}
+
+/// `bytes` as text, if they are UTF-8.
+fn utf8(bytes: &[u8]) -> Option<&str> {
+    std::str::from_utf8(bytes).ok()
 }
 
 /// The published versions a resolution may choose from, read from the
@@ -693,6 +779,7 @@ pub struct Built {
     dependencies: usize,
     lockfile: LockfileOutcome,
     changes: BTreeMap<UnitIdentity, LockChange>,
+    notes: Vec<String>,
     leftover: Option<(PathBuf, io::Error)>,
 }
 
@@ -725,6 +812,12 @@ impl Built {
     /// How the resolution differs from the previous lockfile, by identity.
     pub fn changes(&self) -> &BTreeMap<UnitIdentity, LockChange> {
         &self.changes
+    }
+
+    /// What the composition reports without failing: parts of amendment
+    /// copies the merge could not carry, each naming the file.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
     }
 
     /// The previous build, if it was replaced but could not be deleted, and
@@ -843,6 +936,19 @@ pub enum BuildProblem {
     BaseIntegrity(BaseIntegrityError),
     /// The unit and its dependencies cannot be composed.
     Composition(CompositionError),
+    /// Several amendments of one provider file cannot be combined.
+    Merge {
+        /// The provider.
+        unit: UnitIdentity,
+        /// Its resolved version.
+        version: Version,
+        /// The amended path in its `src/`.
+        path: RelativePath,
+        /// The amenders, in requirer order.
+        amenders: Vec<UnitIdentity>,
+        /// Why, or `None` when a rendered side is not UTF-8 text.
+        failure: Option<super::merge::MergeFailure>,
+    },
     /// A template cannot be rendered.
     Template {
         /// The unit whose `src/` provides the template.
@@ -909,6 +1015,25 @@ impl fmt::Display for BuildProblem {
             Self::AmendmentBase(error) => error.fmt(f),
             Self::BaseIntegrity(error) => error.fmt(f),
             Self::Composition(error) => error.fmt(f),
+            Self::Merge {
+                unit,
+                version,
+                path,
+                amenders,
+                failure,
+            } => {
+                let amenders: Vec<String> = amenders.iter().map(ToString::to_string).collect();
+                write!(
+                    f,
+                    "src/{path} of {unit} {version} is amended by {}, and the amendments cannot \
+                     be combined: ",
+                    amenders.join(", ")
+                )?;
+                match failure {
+                    Some(failure) => failure.fmt(f),
+                    None => f.write_str("a rendered side is not UTF-8 text, which a JSON file is"),
+                }
+            }
             Self::Template {
                 unit,
                 path,

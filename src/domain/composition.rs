@@ -62,6 +62,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use super::identity::UnitIdentity;
 use super::manifest::{AmendmentDeclaration, Manifest, OptionValues};
+use super::merge::MergeFormat;
 use super::parameter::{ParameterName, ParameterValue, ParameterValueError};
 use super::path::{RelativePath, RelativePathError};
 use super::resolution::{Requirer, ResolvedGraph};
@@ -219,14 +220,16 @@ impl<'a> Composition<'a> {
 }
 
 /// A file in the composed tree and the unit that contributed it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposedFile<'a> {
     unit: &'a UnitIdentity,
     source: &'a RelativePath,
     contents: &'a [u8],
     executable: bool,
     template: bool,
-    amended_by: Option<&'a UnitIdentity>,
+    /// The copies that amend the file, by amender, in requirer order: the
+    /// unit being built first, then by identity.
+    amendments: Vec<(&'a UnitIdentity, &'a UnitFile)>,
 }
 
 impl<'a> ComposedFile<'a> {
@@ -242,9 +245,9 @@ impl<'a> ComposedFile<'a> {
         self.source
     }
 
-    /// The bytes to deliver, or, for a template, the source to render with
-    /// the providing unit's parameter values. For an amended file these are
-    /// the copy's bytes.
+    /// The provider's bytes: the bytes to deliver, or, for a template, the
+    /// source to render with the providing unit's parameter values. An
+    /// amended file's copies are [`amendments`](Self::amendments).
     pub fn contents(&self) -> &'a [u8] {
         self.contents
     }
@@ -260,11 +263,13 @@ impl<'a> ComposedFile<'a> {
         self.template
     }
 
-    /// The unit whose amendment copy the contents come from, if the file is
-    /// amended. A template amended by a unit is rendered with that unit's
-    /// values as `own`, in addition to the provider's.
-    pub fn amended_by(&self) -> Option<&'a UnitIdentity> {
-        self.amended_by
+    /// The copies that amend the file, with their amenders, in a fixed
+    /// order. One copy takes the file's place; several are combined by the
+    /// merge, on rendered content, by the composer. A copy of a template is
+    /// rendered with its amender's values as `own`, in addition to the
+    /// provider's.
+    pub fn amendments(&self) -> &[(&'a UnitIdentity, &'a UnitFile)] {
+        &self.amendments
     }
 }
 
@@ -413,9 +418,9 @@ pub enum CompositionError {
         /// directly, and the root when it may configure this unit.
         responsible: Vec<Requirer>,
     },
-    /// Several members amend the same file of the same provider. Combining
-    /// their contributions is not supported yet, and no amender takes
-    /// precedence, so none is applied.
+    /// Several members amend the same file of the same provider, and the
+    /// file is not one whose amendments can be combined (JSON and JSONC
+    /// are). No amender takes precedence, so none is applied.
     SeveralAmenders {
         /// The amended path.
         path: RelativePath,
@@ -590,8 +595,8 @@ impl fmt::Display for CompositionError {
                 write!(f, "src/{path} of {unit} {version} is amended by ")?;
                 write_list(f, amenders.iter().map(amender_name))?;
                 f.write_str(
-                    "; several amenders of one file are not supported yet, and no amender takes \
-                     precedence, so the file is not amended",
+                    "; several amendments of one file are combined for JSON and JSONC files only, \
+                     and no amender takes precedence, so the file is not amended",
                 )
             }
             Self::AmendmentBase {
@@ -1006,9 +1011,10 @@ fn responsible(
     responsible.into_iter().collect()
 }
 
-/// The amendments that apply: for each provider's file, the amending unit
-/// and the copy that takes the file's place.
-type Applied<'a> = BTreeMap<(&'a UnitIdentity, &'a RelativePath), (&'a UnitIdentity, &'a UnitFile)>;
+/// The amendments that apply: for each provider's file, the amending units
+/// and their copies, in requirer order.
+type Applied<'a> =
+    BTreeMap<(&'a UnitIdentity, &'a RelativePath), Vec<(Requirer, &'a UnitIdentity, &'a UnitFile)>>;
 
 /// The amendments the members declare that can be applied, and every
 /// problem with the others, in the documented order.
@@ -1033,6 +1039,13 @@ fn amendments<'a>(
         let (Some(member), true) = (members.get(provider), requirers.len() > 1) else {
             continue;
         };
+        // Several amendments of one file are combined by the composer when
+        // the delivered file's format allows it (OC-10); otherwise none
+        // applies.
+        let delivered = delivered_path(path).ok().flatten();
+        if MergeFormat::of_path(delivered.as_ref().unwrap_or(path)).is_some() {
+            continue;
+        }
         let mut requirers: Vec<Requirer> = requirers.iter().map(|r| (*r).clone()).collect();
         requirers.sort();
         several.push(CompositionError::SeveralAmenders {
@@ -1068,6 +1081,9 @@ fn amendments<'a>(
         );
     }
     several.extend(problems);
+    for copies in applied.values_mut() {
+        copies.sort_by(|a, b| a.0.cmp(&b.0));
+    }
     (applied, several)
 }
 
@@ -1115,7 +1131,11 @@ fn amendment<'a>(
             provider: provider.identity.clone(),
         });
     };
-    applied.insert((provider.identity, path), (member.identity, copy));
+    applied.entry((provider.identity, path)).or_default().push((
+        member.requirer.clone(),
+        member.identity,
+        copy,
+    ));
     None
 }
 
@@ -1149,19 +1169,24 @@ fn compose_files<'a>(
                     unit: member.identity.clone(),
                     delivered: delivered.clone(),
                 });
-            let (contents, amended_by) = match applied.get(&(member.identity, path)) {
-                Some((amender, copy)) => (copy.contents(), Some(*amender)),
-                None => (file.contents(), None),
-            };
+            let amendments = applied
+                .get(&(member.identity, path))
+                .map(|copies| {
+                    copies
+                        .iter()
+                        .map(|(_, amender, copy)| (*amender, *copy))
+                        .collect()
+                })
+                .unwrap_or_default();
             files.insert(
                 delivered,
                 ComposedFile {
                     unit: member.identity,
                     source: path,
-                    contents,
+                    contents: file.contents(),
                     executable: file.is_executable(),
                     template,
-                    amended_by,
+                    amendments,
                 },
             );
         }
@@ -1535,10 +1560,16 @@ mod tests {
                 .files()
                 .iter()
                 .map(|(file, composed)| {
+                    // One copy takes the file's place, as the build
+                    // delivers it; several are the merge's business.
+                    let contents = match composed.amendments() {
+                        [(_, copy)] => copy.contents(),
+                        _ => composed.contents(),
+                    };
                     (
                         file.to_string(),
                         composed.unit().to_string(),
-                        composed.contents().to_vec(),
+                        contents.to_vec(),
                         composed.is_executable(),
                     )
                 })
@@ -1552,10 +1583,11 @@ mod tests {
             amended: composition
                 .files()
                 .iter()
-                .filter_map(|(file, composed)| {
+                .flat_map(|(file, composed)| {
                     composed
-                        .amended_by()
-                        .map(|amender| (file.to_string(), amender.to_string()))
+                        .amendments()
+                        .iter()
+                        .map(|(amender, _)| (file.to_string(), amender.to_string()))
                 })
                 .collect(),
         })
@@ -2611,9 +2643,11 @@ mod tests {
 
     #[test]
     fn several_amenders_of_one_provider_file_are_refused_together() {
-        // The root and a published unit amend `bin/run`; two published
-        // units amend `package.json.assemblr.tmpl`. Neither file is
-        // amended, and a file only one member amends still is.
+        // The root and a published unit amend `bin/run`, a text file, which
+        // is refused for every amender; two published units amend
+        // `package.json.assemblr.tmpl`, a JSON file, whose copies are
+        // carried for the merge; and a file only one member amends still
+        // takes that copy.
         let other = Spec::new("@metamao/other", "1.0.0")
             .depends("@metamao/node", "=1.0.0")
             .amends("package.json.assemblr.tmpl", "@metamao/node", "1.0.0")
@@ -2632,45 +2666,60 @@ mod tests {
         published[0] = published[0].clone().file("README.md");
         published.push(amender());
         published.push(other);
-        let errors = run(&For::Build(built), &published, &[]).unwrap_err();
+        let errors = run(&For::Build(built.clone()), &published, &[]).unwrap_err();
         assert_eq!(
             errors,
-            [
-                CompositionError::SeveralAmenders {
-                    path: path("bin/run"),
-                    unit: identity("@metamao/node"),
-                    version: version("1.0.0"),
-                    amenders: vec![
-                        Requirer::Root,
-                        Requirer::Unit(identity("@metamao/amender"), version("1.0.0")),
-                    ],
-                },
-                CompositionError::SeveralAmenders {
-                    path: path("package.json.assemblr.tmpl"),
-                    unit: identity("@metamao/node"),
-                    version: version("1.0.0"),
-                    amenders: vec![
-                        Requirer::Unit(identity("@metamao/amender"), version("1.0.0")),
-                        Requirer::Unit(identity("@metamao/other"), version("1.0.0")),
-                    ],
-                },
-            ]
+            [CompositionError::SeveralAmenders {
+                path: path("bin/run"),
+                unit: identity("@metamao/node"),
+                version: version("1.0.0"),
+                amenders: vec![
+                    Requirer::Root,
+                    Requirer::Unit(identity("@metamao/amender"), version("1.0.0")),
+                ],
+            }]
         );
         let message = errors[0].to_string();
         for part in [
             "src/bin/run of @metamao/node 1.0.0 is amended by this unit, @metamao/amender 1.0.0",
-            "not supported yet",
+            "combined for JSON and JSONC files only",
             "no amender takes precedence",
         ] {
             assert!(message.contains(part), "{message}");
         }
-        assert!(
-            errors[1]
-                .to_string()
-                .contains("amended by @metamao/amender 1.0.0, @metamao/other 1.0.0"),
-            "{}",
-            errors[1]
+
+        // Without the text file's amenders, the JSON file's copies are both
+        // carried, in requirer order, with the provider's own contents.
+        let built = Spec::new("@metamao/app", "0.1.0")
+            .depends("@metamao/amender", "^1")
+            .depends("@metamao/other", "^1")
+            .depends("@metamao/node", "=1.0.0")
+            .amends("package.json.assemblr.tmpl", "@metamao/node", "1.0.0")
+            .copy("package.json.assemblr.tmpl", "{ \"app\": true }")
+            .file("index.ts");
+        let composed = run(&For::Build(built), &published, &[]).unwrap();
+        assert_eq!(
+            composed.amended,
+            [
+                ("README.md".to_owned(), "@metamao/other".to_owned()),
+                ("bin/run".to_owned(), "@metamao/amender".to_owned()),
+                ("package.json".to_owned(), "@metamao/app".to_owned()),
+                ("package.json".to_owned(), "@metamao/amender".to_owned()),
+                ("package.json".to_owned(), "@metamao/other".to_owned()),
+            ]
         );
+        let package = composed
+            .files
+            .iter()
+            .find(|(file, _, _, _)| file == "package.json")
+            .unwrap();
+        assert_eq!(package.2, b"@metamao/node package.json.assemblr.tmpl");
+        let readme = composed
+            .files
+            .iter()
+            .find(|(file, _, _, _)| file == "README.md")
+            .unwrap();
+        assert_eq!(readme.2, b"amended readme");
     }
 
     #[test]

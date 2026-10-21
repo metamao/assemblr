@@ -390,9 +390,13 @@ only the suffix differs, a declaration without a copy, and a copy without a
 declaration. For a published amender, its lockfile's identity of each base
 is compared with the registry record for the provider at that version, and a
 disagreement is an integrity conflict; a provider resolved to a version
-other than the base, and a provider file that several units amend, are
-reported as not supported yet, naming each amender and version (see
-[amendments-and-composition.md](amendments-and-composition.md#composition-builds-and-reconciliation)).
+other than the base is reported as not supported yet, naming each amender
+and version. A JSON or JSONC file that several units amend is composed by
+the merge engine, and a conflict between the amendments rejects the build
+naming the path and every amender; what a copy carries beyond values is
+reported as a warning. A file of any other format that several units amend
+is not amended by any of them, and the build is rejected (see
+[amendments-and-composition.md](amendments-and-composition.md#the-merge-engine--approved)).
 The unit's own `src/` file at an amended path is a path collision.
 
 **`build/`.**

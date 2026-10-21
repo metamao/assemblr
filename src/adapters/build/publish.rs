@@ -253,6 +253,9 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
         provenance,
         already,
         index: IndexOutcome::NotRegistered,
+        notes: publishable
+            .map(|publishable| publishable.notes)
+            .unwrap_or_default(),
     };
     let source = match registration {
         Registration::Here { source } => source,
@@ -300,6 +303,7 @@ pub struct Published {
     provenance: Provenance,
     already: bool,
     index: IndexOutcome,
+    notes: Vec<String>,
 }
 
 impl Published {
@@ -332,6 +336,12 @@ impl Published {
     /// What happened to the registry index.
     pub fn index(&self) -> &IndexOutcome {
         &self.index
+    }
+
+    /// What the composition reports without failing: parts of amendment
+    /// copies the merge could not carry, each naming the file.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
     }
 }
 
