@@ -79,40 +79,70 @@ Parameters must not:
 - execute commands;
 - act as a secrets-management mechanism.
 
-### Rendering — Approved direction, details Open
+### Rendering — Approved
 
-The rules below are approved. The engine, the syntax, and the other items
-listed as open are not.
+Rendering replaces the references in a unit's **templates** with the unit's
+resolved parameter values. The rules below are approved; the items listed
+as open are not.
 
+- **Templates are selected explicitly.** A `src/` file whose name ends in
+  `.assemblr.tmpl` is a template: it is delivered at its path without that
+  suffix, rendered. Every other file is delivered byte for byte, so files
+  whose own syntax resembles the template syntax, such as Angular templates
+  (`{{ value }}`) or GitHub Actions workflows (`${{ value }}`), need nothing
+  (see [units.md](units.md#templates)).
 - Rendering **must be deterministic**.
 - Rendering is a **pure function of one file**: its source text and its
-  context. No other file, and no state outside the context, takes part.
+  context. No other file, and no state outside the context, takes part. A
+  template cannot include or import anything, and it cannot reach the file
+  system, the environment, the clock, or a shell.
 - A unit file's **context** is the resolved parameter values of the unit that
   provides it. Amendment copies additionally see `own`, the amending unit's
   own values (see
   [amendments-and-composition.md](amendments-and-composition.md#template-contexts--approved)).
   `own` is reserved and is defined only there; a reference to it elsewhere is
   an undefined reference.
+- **Syntax.** A reference is `{{ name }}`, naming a parameter of the unit,
+  with ASCII whitespace allowed inside the braces. `{{ own.name }}` names
+  the amending author's context. The escape `{{ "{{" }}` produces a literal
+  `{{`. That is the whole grammar: there is no control flow, no filter, no
+  expression, no include, and no other literal. Any other construct that
+  opens with `{{`, `{%`, or `{#`, and any opener that is never closed, is a
+  **rendering error**; nothing is passed through. A `}}` on its own is
+  ordinary text. The grammar is a subset of Jinja's, so a richer engine
+  could render the same templates identically later; none is planned for
+  Alpha.
 - A reference to an **undefined value is a rendering error**. It never
   renders as empty text.
-- Whether a file is interpolated is decided by the rule in OC-5, applied to
-  the providing unit's file. An amendment copy of that file inherits the
-  outcome.
-- The expected direction is a mechanism compatible with Jinja-style
-  templating. This is provisional. The engine and syntax are not yet chosen.
-- If the selected template mechanism supports conditional content, it must not
-  **silently discard intended changes**. Research found that changes hidden by
-  disabled template conditions can disappear silently (see
-  [amendments-and-composition.md](amendments-and-composition.md#evidence-non-normative)).
+- **Values render as text**: a string, including an enumerated string, as
+  its characters, unchanged; an integer in decimal; a boolean as `true` or
+  `false`. Rendering does **no** quoting and no format-specific escaping,
+  for JSON, YAML, HTML, shell, or any other format. The template author
+  writes the quotes, and a value containing quotes, newlines, or `{{` is
+  inserted as it is. Inserted text is never rendered again.
+- Outside its references a template is copied **byte for byte**: line
+  endings, and a trailing newline or its absence, are preserved.
+- A template must be **UTF-8 text**; one that is not is a rendering error.
+  Files that are not templates are never inspected.
+- Rendering errors are **collected**: every independently detectable problem
+  in every template is reported with its file, line, column, and construct,
+  ordered by delivered path and then position. In `unit build` they gate the
+  build, and `build/` and the unit lockfile are not changed (see
+  [authoring-workflow.md](authoring-workflow.md#build-details--approved)).
+- Whether a file is rendered is decided by the suffix of the providing
+  unit's file. An amendment copy of that file inherits the outcome.
 
 Open:
 
-- The template engine, interpolation syntax, escaping, the handling of non-text
-  files, and the detailed rendering rules. **OC-5.**
-- How a file is selected for template interpolation, so that files whose own
-  syntax resembles the template syntax, such as Angular templates
-  (`{{ value }}`) or GitHub Actions workflows (`${{ value }}`), are delivered
-  intact. Part of **OC-5.**
+- Whether constructs beyond references, such as conditional content or
+  filters, are ever supported, and with which engine. If conditional content
+  is ever added, it must not **silently discard intended changes**: research
+  found that changes hidden by disabled template conditions can disappear
+  silently (see
+  [amendments-and-composition.md](amendments-and-composition.md#evidence-non-normative)).
+  **OC-5.**
+- The contexts used when an amendment is applied to a provider version other
+  than its base. **OC-52.**
 
 ## Dependency options
 

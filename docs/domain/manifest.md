@@ -122,8 +122,8 @@ Other provisional rules:
 
 - **Parameter names** start with an ASCII letter and continue with ASCII
   letters, digits, or underscores, such as `appName` or `node_compat`. Names
-  stay usable in any template syntax chosen later (OC-5), and the rule can be
-  widened compatibly. **OC-50.** Approved, not provisional: `own` is reserved
+  are usable in the template syntax (OC-5), and the rule can be widened
+  compatibly. **OC-50.** Approved, not provisional: `own` is reserved
   for the amending author's context and is not a valid parameter name (see
   [parameters-and-options.md](parameters-and-options.md#declaration--approved)).
 - **JSONC.** Comments (`//` and `/* */`) and trailing commas after a value are

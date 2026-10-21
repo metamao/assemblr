@@ -126,7 +126,7 @@ kept distinct from values owned by the amending unit.
 - A file is rendered as a deterministic function of its source and its
   **context**. A unit file's context is the resolved parameter values of the
   unit that provides it (see
-  [parameters-and-options.md](parameters-and-options.md#rendering--approved-direction-details-open)).
+  [parameters-and-options.md](parameters-and-options.md#rendering--approved)).
 - The namespace **`own.*`** is reserved for the amending author's **own**
   context. `own` is not a valid parameter name, and it is defined only when an
   amendment copy is rendered. Rendering unit files needs only that
@@ -139,9 +139,10 @@ kept distinct from values owned by the amending unit.
   reflect the author's edits and not differences between contexts. Expressions
   inherited from the provider render identically on both sides; what remains
   is the author's edit, with the composition's `own` values.
-- An amendment copy is interpolated exactly when its base file is. The rule
-  that selects files for interpolation applies to the provider's file, and
-  the copy inherits the outcome.
+- An amendment copy is rendered exactly when its base file is. A template is
+  selected by the `.assemblr.tmpl` suffix of the provider's file (see
+  [units.md](units.md#templates)), and the copy at `amendments/<path>` keeps
+  that path, suffix included, so it inherits the outcome.
 - **Composing and updating are distinct operations.** A composition derives
   and applies changes on **rendered** content, with the composition's own
   contexts. `unit update` reconciles the **source templates**, the base at the
@@ -154,8 +155,10 @@ Open:
 - The contexts used to render a base, and the file at the resolved version,
   when the resolved version of the provider is not the base version, for
   example when their parameters differ. **OC-52.**
-- The template engine, syntax, escaping, non-text files, and the rule that
-  selects files for interpolation. **OC-5.**
+- Whether template constructs beyond references, such as conditional
+  content, are ever supported (see
+  [parameters-and-options.md](parameters-and-options.md#rendering--approved)).
+  **OC-5.**
 
 ## Merge semantics — Approved
 
