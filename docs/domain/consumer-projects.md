@@ -50,7 +50,7 @@ Its API deliberately resembles a unit's [`manifest.jsonc`](manifest.md):
 | `options` | Parameter values the consumer supplies to its explicitly selected units. |
 
 `dependencies` and `options` use the manifest's approved serialization (see
-[manifest.md](manifest.md#serialization-of-dependencies-options-and-params--approved)).
+[manifest.md](manifest.md#serialization-of-dependencies-options-params-and-amendments--approved)).
 `assemblr.jsonc` has **no** `params` field. Example (versions are
 illustrative):
 

@@ -229,9 +229,10 @@ low-level merge operations. Assemblr derives the changes. See
   must not hold the same path.
 - An amendment changes a file's content only. It never deletes or renames a
   file, and never changes its executable bit.
-- Each amendment is declared in the manifest with the dependency's identity
-  and the exact base version.
-
-Open:
-
-- The manifest schema and syntax of the declaration. **OC-2.**
+- Each amendment is declared in the manifest's `amendments` map, under its
+  path, with the dependency's identity and the exact base version (see
+  [manifest.md](manifest.md#serialization-of-dependencies-options-params-and-amendments--approved)).
+  A copy that is not declared, and a declaration without a copy, are both
+  errors: an undeclared copy has no base.
+- `unit amend` creates the copy and the declaration (see
+  [authoring-workflow.md](authoring-workflow.md#amend--approved)).

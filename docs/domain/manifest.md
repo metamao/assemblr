@@ -26,31 +26,36 @@ These fields make up the accepted conceptual vocabulary:
 | `dependencies` | Owner-qualified identities with SemVer ranges. | [dependencies.md](dependencies.md) |
 | `params` | The unit's public configuration contract. | [parameters-and-options.md](parameters-and-options.md#parameters) |
 | `options` | Strict requirements imposed on dependency parameters. | [parameters-and-options.md](parameters-and-options.md#dependency-options) |
-| amendment declarations | Declare amendments and their provenance. | [amendments-and-composition.md](amendments-and-composition.md) |
+| `amendments` | Declares the unit's amendments and their provenance. | [amendments-and-composition.md](amendments-and-composition.md#layout-and-declaration) |
 
 The **meaning** of each field above is approved. An amendment declaration
 names the amended path, the direct dependency that provides it, and the exact
 base version (see
 [amendments-and-composition.md](amendments-and-composition.md#layout-and-declaration)).
-The declaration's field name and syntax are **Open (OC-2)**. Do not treat
-earlier experimental syntax, such as `extends` or a `merges` field, as
+Earlier experimental syntax, such as `extends` or a `merges` field, is not
 canonical.
 
-## Serialization of `dependencies`, `options`, and `params` — Approved
+## Serialization of `dependencies`, `options`, `params`, and `amendments` — Approved
 
-These three fields are **maps**:
+These four fields are **maps**:
 
 | Field | Keys | Values |
 |-------|------|--------|
 | `dependencies` | Unit identities (`@owner/unit-name`) | A SemVer requirement string |
 | `options` | Identities of the unit's **direct** dependencies | A map from parameter name to the value required for that parameter |
 | `params` | Parameter names | The parameter's typed definition: its type, its description, an optional default, and optional allowed values |
+| `amendments` | Amended paths: the file's path in the provider's `src/`, which is the copy's path under `amendments/` | An object with `unit`, the identity of the **direct** dependency that provides the file, and `base`, the exact version the copy was taken from, as a string |
 
 - An option value or a default is written as the JSON value of the parameter's
   type: a string or an enumerated string as a JSON string, an integer as a JSON
   integer, and a boolean as a JSON boolean.
 - Every key of `options` must also be a key of `dependencies` (see
   [parameters-and-options.md](parameters-and-options.md#rules--approved)).
+- Every `unit` of an amendment must be a key of `dependencies`, and every
+  amended path follows the `src/` path rules (see
+  [units.md](units.md#src-unit-files)). `base` is an exact version, not a
+  requirement, and it must equal that dependency's locked version (see
+  [amendments-and-composition.md](amendments-and-composition.md#layout-and-declaration)).
 - A parameter definition has no `required` property. Requiredness follows from
   the presence of a default (see
   [parameters-and-options.md](parameters-and-options.md#declaration--approved)).
@@ -77,6 +82,9 @@ fixed (**OC-45**), so that definition is elided:
   },
   "params": {
     "appName": { /* type, description, optional default, optional allowed values */ }
+  },
+  "amendments": {
+    "wrangler.toml.assemblr.tmpl": { "unit": "@metamao/cloudflare-worker", "base": "2.1.0" }
   }
 }
 ```
@@ -87,7 +95,7 @@ Open:
   **OC-45.** A provisional default is described below.
 - How an option value mapped from the unit's own parameter is written.
   **OC-39.**
-- Amendment declarations (**OC-2**) and list identity hints (**OC-4**).
+- List identity hints (**OC-4**).
 
 ## Parameter definitions and manifest text — Recommended (provisional)
 

@@ -214,6 +214,12 @@ For unit repositories, the checks are classified as follows:
   excluded and reported, and the operation continues. Content is validated
   when a version is first indexed, so an indexed version is a valid published
   artifact, not only a valid manifest.
+- **Version-level, until published amendments are composed:** a newly
+  discovered version whose manifest declares amendments, or whose tree holds
+  `amendments/`. Its amendment content is not validated yet, and a composition
+  cannot apply it, so it is excluded and reported rather than indexed as a
+  valid published artifact. The increment that composes published amendments
+  replaces this rule with the validation of amendments (OC-33).
 - **Source-level**: a repository that cannot be read; valid versions that
   declare different unit identities, or an identity other than the one the
   source is registered for; a source conflict; two or more published versions

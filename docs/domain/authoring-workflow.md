@@ -89,11 +89,45 @@ Open:
   [amendments-and-composition.md](amendments-and-composition.md#layout-and-declaration));
 - never **silently overwrites** an existing amendment.
 
-Open:
+### Amend details — Approved
 
-- The declaration's schema and syntax. **OC-2.**
-- Whether `unit amend` requires a current unit lockfile or may resolve and
-  write one. **OC-46.**
+These were decided by the owner for the first amendments increment.
+
+**Command.** `assemblr unit amend <file> [--unit <identity>]`, run at the
+repository's top level as `unit build` is. `<file>` without a `/` is a file
+name, matched against the name of every file in the `src/` trees searched;
+with a `/` it is a path in that `src/`, matched exactly. Either form matches
+a template by its source name or by its delivered name, without
+`.assemblr.tmpl`: `config/package.json` and `package.json` both find
+`config/package.json.assemblr.tmpl`. The copy always keeps the source path,
+suffix included. `--unit` restricts the search to one direct dependency;
+without it, every direct dependency is searched. Several matches are
+reported, each by its path and provider, and never resolved by preference.
+The result goes to stdout; diagnostics go to stderr.
+
+**The lockfile.** `unit amend` requires a unit lockfile that records the
+current resolution: it resolves the dependencies under the lockfile as a
+build does, and fails when there is no lockfile or the resolution would
+change it, saying to run `unit build` first. It never writes the lockfile.
+It takes the same lock as a build, so a concurrent build sees the manifest
+either before or after the amendment.
+
+**What it refuses, changing nothing:** a `--unit` that is not a direct
+dependency; a path the unit's own `src/` holds, which would collide; a path
+the manifest already declares; and a file at `amendments/<path>` whose
+content differs from the provider's file, or that is not a regular file.
+
+**Writing.** Everything is decided before anything is written. The copy is
+created first, as a new file, and the manifest is replaced afterwards: the
+declaration is inserted into the manifest's text, so comments and formatting
+survive, and the edited text is read back and must describe exactly the
+manifest plus the declaration before it replaces `manifest.jsonc` through a
+temporary file and a rename. When the manifest cannot be edited safely, the
+command fails before writing and prints the member to add by hand. When the
+manifest cannot be written, the copy is removed again. An interruption
+between the two steps leaves a copy that is not declared: `unit build`
+reports it, and running the same `unit amend` again completes it, keeping
+the copy, as long as its content is still the provider's file.
 
 ## Check — Approved
 
@@ -186,7 +220,12 @@ stdout. Diagnostics, and changes to the unit lockfile, go to stderr.
 - dependency resolution, under the [unit lock state](#unit-lock-state--approved);
 - `src/` path validity and path collisions, on delivered paths (see
   [units.md](units.md#src-unit-files));
-- rendering of the templates of the unit and of its dependencies (see
+- amendment validity: each declared provider is a direct dependency that
+  provides the path in its `src/` at the locked version, the declared base is
+  the locked version, the copy exists, and no copy is undeclared (see
+  below);
+- rendering of the templates of the unit and of its dependencies, amended
+  copies included (see
   [parameters-and-options.md](parameters-and-options.md#rendering--approved)).
 
 The effective-contribution check (OC-11) does not gate a build; it gates
@@ -231,10 +270,22 @@ unit that provides each one, and delivered without the suffix (see
 Every rendering problem is reported with its file and position, and a build
 with any is rejected before `build/` or the lockfile changes.
 
-**Amendments.** A build cannot apply amendments yet. It fails when
-`amendments/` has content, selected by the same rules as `src/`, and lists
-it. An empty `amendments/`, or one holding only ignored files, does not
-prevent a build.
+**Amendments.** A build applies the unit's own amendments. `amendments/` is
+read by the same rules as `src/`, including the path rules and the rejection
+of symbolic links; an empty `amendments/`, or one holding only ignored
+files, is no amendment. Each declared copy takes the place of the provider's
+file: it is delivered at the provider's delivered path with the provider's
+executable bit, and it is rendered exactly when the provider's file is, with
+the provider's values and the unit's own as `own` (see
+[amendments-and-composition.md](amendments-and-composition.md#template-contexts--approved)).
+Every amendment that cannot be applied is reported with the others: a
+declared base other than the locked version (see
+[unit lock state](#unit-lock-state--approved)), a path the provider does
+not have at that version, naming the provider's template or plain file when
+only the suffix differs, a declaration without a copy, and a copy without a
+declaration. The unit's own `src/` file at an amended path is a path
+collision. A dependency whose published version declares amendments is
+refused: composing published amendments is not supported yet.
 
 **`build/`.**
 
@@ -327,10 +378,12 @@ The lockfile and amendments:
   resolved version changed, which `unit update` reconciles, or the declared
   base version was edited by hand, which reverting the edit fixes.
 
+`unit amend` reads the lockfile and never writes it (see
+[amend details](#amend-details--approved)).
+
 Open:
 
-- Which other operations write the lockfile, including whether `unit amend`
-  requires a current lockfile or may write one. **OC-46.**
+- Which other operations write the lockfile. **OC-46.**
 
 ## Update — Approved
 
