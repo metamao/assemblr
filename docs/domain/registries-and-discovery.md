@@ -522,9 +522,13 @@ explicitly, through registration and synchronization.
 regenerate a catalog's metadata index.
 
 - `unit publish` updates the local registry index automatically when the unit
-  is **already registered**. It never registers a previously unknown unit, and
-  it never pushes commits or tags to a remote (see
-  [authoring-workflow.md](authoring-workflow.md#publication--approved)).
+  is **already registered**: when the registry records the publishing
+  repository's reference as the source of the unit's identity, it reads that
+  source again and indexes the new version under the synchronization rules.
+  A unit registered from another reference becomes discoverable when that
+  source is synchronized. `unit publish` never registers a previously
+  unknown unit, and it never pushes commits or tags to a remote (see
+  [authoring-workflow.md](authoring-workflow.md#publication-details--approved)).
 - If publication succeeds but the index update fails, Assemblr reports that
   partial outcome explicitly. `registry sync` recovers.
 - `search` and `info` operate on indexed metadata. They never fetch remote

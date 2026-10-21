@@ -69,8 +69,9 @@ Open:
 - The SemVer range dialect. **OC-15.**
 - The consumer lockfile's format and location (**OC-8**). The unit
   lockfile is `assemblr-lock.json` (see
-  [unit lock state](authoring-workflow.md#unit-lock-state--approved)); which
-  operations beyond `unit build` write it is still open (**OC-46**).
+  [unit lock state](authoring-workflow.md#unit-lock-state--approved)),
+  written by `unit build` and `unit update`; whether `unit publish` writes
+  it is decided provisionally as "no" (**OC-46**).
 
 ## Pre-releases and build metadata — Approved
 

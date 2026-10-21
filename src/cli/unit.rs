@@ -383,6 +383,11 @@ fn check_advice(problem: &CheckProblem, root: &Path, command: &str) -> Option<St
             root.display()
         ),
         CheckProblem::Build(problem) => return advice(problem, root),
+        CheckProblem::NoLockfile | CheckProblem::LockfileStale { .. } if command == "publish" => {
+            "run `assemblr unit build`, which writes the lockfile, then commit it and publish \
+             again"
+                .to_owned()
+        }
         CheckProblem::NoLockfile | CheckProblem::LockfileStale { .. } => {
             "run `assemblr unit build`, which writes the lockfile, and check the result".to_owned()
         }

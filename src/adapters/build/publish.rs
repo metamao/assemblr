@@ -203,10 +203,10 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
             Some(registered) if *registered == identity => Registration::Here { source },
             Some(registered) => {
                 problems.push(PublishProblem::RegisteredAs {
-                    source: source.clone(),
+                    source,
                     registered: registered.clone(),
                 });
-                Registration::Here { source }
+                Registration::None
             }
             None => match index.units().get(&identity) {
                 Some(unit) => Registration::Elsewhere {
