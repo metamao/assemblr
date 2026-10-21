@@ -235,12 +235,19 @@ fn comma_after(strict: &str, text: &str, at: usize) -> Option<usize> {
     let bytes = strict.as_bytes();
     while index < bytes.len() && matches!(bytes[index], b' ' | b'\t' | b'\n' | b'\r') {
         // A blanked trailing comma, or a blanked comment, is spaces in
-        // `strict` but not in `text`: the comma counts, a comment ends the
-        // search.
-        match text.as_bytes()[index] {
-            b',' => return Some(index + 1),
-            byte if byte != bytes[index] => return None,
-            _ => index += 1,
+        // `strict` but not in `text`: the comma counts, and a comment is
+        // skipped by its own syntax.
+        let rest = &text[index..];
+        if rest.starts_with(',') {
+            return Some(index + 1);
+        } else if rest.starts_with("//") {
+            index += rest.find('\n').unwrap_or(rest.len());
+        } else if rest.starts_with("/*") {
+            index += rest.find("*/").map_or(rest.len(), |end| end + 2);
+        } else if text.as_bytes()[index] != bytes[index] {
+            return None;
+        } else {
+            index += 1;
         }
     }
     (text.as_bytes().get(index) == Some(&b',')).then_some(index + 1)
@@ -723,6 +730,16 @@ mod tests {
         assert_eq!(text, "{ \"b\": 2 }");
         let text = edited("{ \"a\": 1, \"b\": 2 }", &[Edit::Delete { path: p("/b") }]);
         assert_eq!(text, "{ \"a\": 1 }");
+    }
+
+    #[test]
+    fn a_comment_between_a_value_and_its_comma_is_stepped_over() {
+        let text = "{\n  \"a\": 1 /* one */,\n  \"b\": 2\n}\n";
+        let result = edited(text, &[insert("/", "k", s("v"), Some("a"))]);
+        assert_eq!(
+            result,
+            "{\n  \"a\": 1 /* one */,\n  \"k\": \"v\",\n  \"b\": 2\n}\n"
+        );
     }
 
     #[test]

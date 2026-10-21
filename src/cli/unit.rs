@@ -10,9 +10,9 @@ use std::process::ExitCode;
 use assemblr::adapters::{
     AmendFailure, AmendProblem, AmendState, BuildFailure, BuildProblem, Built, CheckFailure,
     CheckProblem, FileOutcome, GitOutcome, IndexOutcome, InitFailure, Initialized, LockfileOutcome,
-    ManifestFileError, PublishFailure, PublishProblem, PublishState, Published, RecoveryError,
-    Registry, TagProblem, UpdateFailure, UpdateProblem, UpdateState, Updated, amend_unit,
-    build_unit, check_unit, init_unit, publish_unit, update_unit,
+    ManifestFileError, MergeFailure, PublishFailure, PublishProblem, PublishState, Published,
+    RecoveryError, Registry, TagProblem, UpdateFailure, UpdateProblem, UpdateState, Updated,
+    amend_unit, build_unit, check_unit, init_unit, publish_unit, update_unit,
 };
 use assemblr::domain::{
     ContributionError, Excluded, IntegrityChange, LockChange, LockError, RegistryError,
@@ -793,11 +793,23 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
                                            content; run `assemblr registry sync` to check the \
                                            registered repositories"
             .to_owned(),
-        BuildProblem::Merge { .. } => "the amendments of one file must agree: change the \
-                                       copies so that no two amenders set one value \
-                                       differently, or expose the value as a parameter of \
-                                       the provider"
-            .to_owned(),
+        BuildProblem::Merge { failure, .. } => match failure {
+            Some(MergeFailure::Unreadable { .. }) | None => {
+                "every side of a merge must be a JSON document: fix the copy, or the \
+                 provider's file, so that it reads as JSON"
+                    .to_owned()
+            }
+            Some(MergeFailure::Edit(_) | MergeFailure::Projection { .. }) => {
+                "the provider's file has a layout the merge could not edit safely; nothing was \
+                 written, and reformatting that file conventionally works around it"
+                    .to_owned()
+            }
+            Some(MergeFailure::Conflicts(_)) => "the amendments of one file must agree: change \
+                                                 the copies so that no two amenders set one \
+                                                 value differently, or expose the value as a \
+                                                 parameter of the provider"
+                .to_owned(),
+        },
         BuildProblem::Resolution(ResolutionError::Unavailable { .. }) => {
             "run `assemblr registry sync` to index newly published versions".to_owned()
         }

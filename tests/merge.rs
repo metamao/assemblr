@@ -213,6 +213,16 @@ fn scenario(
     db_copies: &[(&str, &str)],
     api_copies: &[(&str, &str)],
 ) -> (Repo, Repo) {
+    scenario_with(fixture, PACKAGE, db_copies, api_copies)
+}
+
+/// [`scenario`] with the provider's `package.json` given.
+fn scenario_with(
+    fixture: &Fixture,
+    package: &str,
+    db_copies: &[(&str, &str)],
+    api_copies: &[(&str, &str)],
+) -> (Repo, Repo) {
     let worker = fixture.repo("worker");
     worker.write(
         "manifest.jsonc",
@@ -223,7 +233,7 @@ fn scenario(
             r#", "params": {"name": {"type": "string", "description": "The name.", "default": "worker"}}"#,
         ),
     );
-    worker.write("src/package.json", PACKAGE);
+    worker.write("src/package.json", package);
     worker.write("src/wrangler.jsonc.assemblr.tmpl", WRANGLER);
     worker.publish("1.0.0");
     fixture.register(&worker);
@@ -668,42 +678,26 @@ fn crlf_providers_keep_their_line_endings_and_single_amenders_are_unchanged() {
         "    \"drizzle-orm\": \"^0.44\",\r\n    \"hono\": \"^4\"\r\n",
     );
     let api = crlf.replace("\"wrangler dev\"", "\"wrangler dev --local\"");
-    let (worker, app) = scenario(
+    let (_worker, app) = scenario_with(
         &fixture,
+        &crlf,
         &[("package.json", &db)],
         &[("package.json", &api)],
-    );
-    // The provider's file itself in CRLF.
-    worker.write("src/package.json", &crlf);
-    worker.git(&["add", "-A"]);
-    worker.git(&["commit", "-q", "-m", "crlf"]);
-    worker.write("manifest.jsonc", &manifest("@acme/worker", "1.0.1", &[], r#", "params": {"name": {"type": "string", "description": "The name.", "default": "worker"}}"#));
-    worker.publish("1.0.1");
-    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
-    // The amenders' base is 1.0.0, whose file is LF: so the base is LF and
-    // the merge keeps the base's endings. Build against 1.0.0 as declared.
-    succeeds(fixture.build(&app));
-    let built = app.read("build/package.json");
-    assert!(
-        built.contains("\"drizzle-orm\": \"^0.44\",\n    \"hono\": \"^4\""),
-        "{built}"
-    );
-    assert!(built.contains("\"wrangler dev --local\""), "{built}");
-    assert!(!built.contains('\r'), "{built:?}");
-
-    // One amender of a file is the copy itself, byte for byte.
-    let fixture = Fixture::new("single");
-    let (_worker, app) = scenario(
-        &fixture,
-        &[(
-            "package.json",
-            &PACKAGE.replace("\"private\": true", "\"private\": false"),
-        )],
-        &[],
     );
     succeeds(fixture.build(&app));
     assert_eq!(
         app.read("build/package.json"),
-        PACKAGE.replace("\"private\": true", "\"private\": false")
+        crlf.replace(
+            "    \"hono\": \"^4\"\r\n",
+            "    \"drizzle-orm\": \"^0.44\",\r\n    \"hono\": \"^4\"\r\n",
+        )
+        .replace("\"wrangler dev\"", "\"wrangler dev --local\"")
     );
+
+    // One amender of a file is the copy itself, byte for byte.
+    let fixture = Fixture::new("single");
+    let copy = PACKAGE.replace("\"private\": true", "\"private\": false");
+    let (_worker, app) = scenario(&fixture, &[("package.json", &copy)], &[]);
+    succeeds(fixture.build(&app));
+    assert_eq!(app.read("build/package.json"), copy);
 }
