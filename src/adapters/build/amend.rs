@@ -39,7 +39,7 @@ use crate::domain::{
 
 /// Where the edited manifest is written before it replaces `manifest.jsonc`.
 /// The name is reserved beside the manifest.
-const MANIFEST_NEW: &str = ".assemblr-manifest.jsonc.new";
+pub(super) const MANIFEST_NEW: &str = ".assemblr-manifest.jsonc.new";
 
 /// Amends `file` of one of the direct dependencies of the unit whose
 /// repository's top level is `root`, or of `unit` alone when it is given.
@@ -75,6 +75,11 @@ pub fn amend_unit(
         .map_err(|error| rejected(AmendProblem::Repository(error)))?;
     let _guard =
         BuildLock::acquire(&git_dir).map_err(|error| rejected(AmendProblem::BuildLock(error)))?;
+    match super::update::interrupted(&git_dir) {
+        Ok(None) => {}
+        Ok(Some(journal)) => return Err(rejected(AmendProblem::UpdateInterrupted { journal })),
+        Err(error) => return Err(rejected(AmendProblem::GitDirectory(error))),
+    }
 
     let mut problems = Vec::new();
     let wanted = match Wanted::parse(file) {
@@ -561,6 +566,15 @@ pub enum AmendProblem {
     /// The lock that keeps builds and amendments of the unit from running at
     /// the same time could not be taken.
     BuildLock(BuildLockError),
+    /// The repository's Git directory could not be examined for the record
+    /// of an interrupted update.
+    GitDirectory(io::Error),
+    /// An update of the unit was interrupted, and only `unit update`
+    /// completes it.
+    UpdateInterrupted {
+        /// The record of the update.
+        journal: PathBuf,
+    },
     /// The working tree's `src/` holds something a unit file cannot be.
     Src(ReadSrcError),
     /// The lockfile cannot be read.
@@ -676,6 +690,17 @@ impl fmt::Display for AmendProblem {
             Self::Manifest(error) => error.fmt(f),
             Self::Repository(error) => error.fmt(f),
             Self::BuildLock(error) => error.fmt(f),
+            Self::GitDirectory(error) => write!(
+                f,
+                "could not examine the repository's Git directory for an interrupted update: \
+                 {error}"
+            ),
+            Self::UpdateInterrupted { journal } => write!(
+                f,
+                "an update of this unit was interrupted and not completed, as {} records; run \
+                 `assemblr unit update` to complete it first",
+                journal.display()
+            ),
             Self::Src(error) => error.fmt(f),
             Self::Lockfile(error) => error.fmt(f),
             Self::NoLockfile => f.write_str(

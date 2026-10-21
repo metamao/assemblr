@@ -42,7 +42,7 @@ const STAGING: &str = ".assemblr-build.new";
 /// Where the previous build waits while the new one is put in place.
 const RETIRED: &str = ".assemblr-build.old";
 /// Where a new lockfile is written before it replaces the old one.
-const LOCK_STAGING: &str = ".assemblr-lock.json.new";
+pub(super) const LOCK_STAGING: &str = ".assemblr-lock.json.new";
 
 /// Checks, before anything is written, that each path a build replaces or
 /// deletes is absent or what Assemblr writes there: a real directory, or a

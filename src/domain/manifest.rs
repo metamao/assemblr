@@ -112,6 +112,17 @@ impl Manifest {
         Some(manifest)
     }
 
+    /// The same manifest with the base of each amendment in `bases` replaced
+    /// by the given version, or `None` when a path is not amended.
+    pub fn with_bases(&self, bases: &BTreeMap<RelativePath, Version>) -> Option<Self> {
+        let mut manifest = self.clone();
+        for (path, base) in bases {
+            let declaration = manifest.amendments.get_mut(path)?;
+            declaration.base = base.clone();
+        }
+        Some(manifest)
+    }
+
     /// The unit's identity.
     pub fn name(&self) -> &UnitIdentity {
         &self.name

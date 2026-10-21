@@ -13,6 +13,7 @@ mod path;
 mod provenance;
 mod registry;
 mod resolution;
+mod update;
 mod version;
 
 pub use composition::{
@@ -40,6 +41,10 @@ pub use registry::{
 pub use resolution::{
     AvailableVersions, Dependencies, Lock, LockChange, Requirement, Requirer, Resolution,
     ResolutionError, ResolvedGraph, ResolvedUnit, resolve,
+};
+pub use update::{
+    PublishedAmenderError, ReconcileCause, ReconcileError, published_amenders_at_base,
+    reconcile_amendments, update_lock,
 };
 pub use version::{RequirementError, Version, VersionError, VersionRequirement};
 
