@@ -30,3 +30,4 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0011](0011-published-amendments.md) | Published amendments: reading them, validating them at index time, and composing them at the base | Accepted |
 | [0012](0012-unit-update.md) | `unit update`: resolving with a partial lock, rewriting bases in place, and the update journal | Accepted |
 | [0013](0013-unit-check-and-publish.md) | `unit check` and `unit publish`: shared validation, the committed tree, the tag, and one-source indexing | Accepted |
+| [0014](0014-unit-init.md) | `unit init`: repository discovery and initialization, the scaffold's writes, and the embedded manifest schema | Accepted |

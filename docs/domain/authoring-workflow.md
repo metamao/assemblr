@@ -66,11 +66,59 @@ Assemblr's own validation remains authoritative over the schema.
 
 Open:
 
-- The schema's name, location, and tracking. **OC-17.**
+- The schema's name, location, and tracking. **OC-17.** Decided
+  provisionally (decision log D-2); see
+  [initialization details](#initialization-details--approved).
 - How `init` establishes the Git repository: for example, whether it
   initializes a new repository or adopts an existing one, how it treats a
   target inside another repository, and whether it creates an initial commit.
-  Part of **OC-7.**
+  Part of **OC-7.** Decided provisionally (decision log D-5); see
+  [initialization details](#initialization-details--approved).
+
+### Initialization details — Approved
+
+Decided for the first `unit init` under AGENTS.md §1.1 (decision log D-2
+and D-5) and accepted by the owner with PR #37.
+
+**Command.** `assemblr unit init <identity> [<directory>]
+[--description <text>]`. The directory defaults to the current one and is
+created, parents included, when it does not exist. The description is the
+manifest's; without one, a placeholder names the unit. The result says what
+was created, replaced, and already in place, and what to do next.
+
+**The repository.** When no Git repository encloses the directory, `unit
+init` runs `git init` there, with the author's own Git configuration, so
+that settings such as the default branch name are the author's. When the
+directory is the top level of an existing repository, that repository is
+adopted. When it lies inside a repository whose top level holds
+`manifest.jsonc`, the command refuses, changing nothing: a repository holds
+exactly one unit. Inside any other repository, such as a home directory
+kept in Git, the unit gets its own repository, nested in the enclosing one,
+and the result says so. A bare repository and a linked worktree, whose
+`.git` is a file, are refused: a unit's repository has a working tree with
+`.git` at its top level. `unit init` never commits; the author commits, and
+`unit publish` requires the result to be committed.
+
+**The files.** `manifest.jsonc` is written with `$schema`, `name`,
+`version` `0.1.0`, and `description`, in that order, and is read back by
+Assemblr's own reader before it is written. An existing manifest is never
+overwritten: one declaring the same identity is kept as it is, whatever its
+version and content, and one declaring another identity, or one Assemblr
+cannot read, refuses the command. The manifest's JSON Schema is written as
+`manifest.schema.json` at the repository's top level, next to the manifest,
+tracked in Git so that a fresh clone is editable without running Assemblr,
+and referenced as `"$schema": "./manifest.schema.json"`. It is a fixed
+document embedded in Assemblr, created when missing and replaced when it
+differs; no other command reads or compares it, since Assemblr's validation
+is authoritative, and running `unit init` again after an upgrade refreshes
+it, which the schema's own description says. `.gitignore` is created with
+`/build/`, or `/build/` is appended when no line of it already ignores
+`build/`, keeping the file's line endings. No `src/` or `amendments/` is
+created. A file that is replaced is written beside its destination, as
+`.assemblr-manifest.schema.json.new` or `.assemblr-gitignore.new`, reserved
+names, and renamed into place; a new file is created directly. Running the
+command again with the same identity completes whatever is missing and
+changes nothing else.
 
 ## Amend — Approved
 
