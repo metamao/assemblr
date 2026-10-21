@@ -1517,7 +1517,7 @@ fn amend_never_overwrites_a_copy_and_completes_an_interrupted_run() {
     );
     assert!(app.read("manifest.jsonc").contains("config/README.md"));
 
-    // Declared already.
+    // Declared already, and that is the only problem reported.
     let err = stderr(&fails(amend(&fixture, &app, &["config/README.md"])));
     assert!(
         err.contains(
@@ -1525,6 +1525,7 @@ fn amend_never_overwrites_a_copy_and_completes_an_interrupted_run() {
         ),
         "{err}"
     );
+    assert!(!err.contains("could not be edited safely"), "{err}");
 
     // A directory at the copy's path.
     fs::create_dir_all(app.path.join("amendments/bin/run")).unwrap();

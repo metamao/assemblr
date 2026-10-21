@@ -121,8 +121,10 @@ content differs from the provider's file, or that is not a regular file.
 created first, as a new file, and the manifest is replaced afterwards: the
 declaration is inserted into the manifest's text, so comments and formatting
 survive, and the edited text is read back and must describe exactly the
-manifest plus the declaration before it replaces `manifest.jsonc` through a
-temporary file and a rename. When the manifest cannot be edited safely, the
+manifest plus the declaration before it replaces `manifest.jsonc` through the
+temporary file `.assemblr-manifest.jsonc.new` beside it, a reserved name, and
+a rename. The edit keeps the manifest's line endings. When the manifest
+cannot be edited safely, the
 command fails before writing and prints the member to add by hand. When the
 manifest cannot be written, the copy is removed again. An interruption
 between the two steps leaves a copy that is not declared: `unit build`

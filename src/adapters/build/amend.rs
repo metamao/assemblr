@@ -229,16 +229,11 @@ pub fn amend_unit(
             false
         }
     };
-    let edited = match declare_amendment(&text, &manifest, &found.path, &declaration) {
-        Ok(edited) => Some(edited),
-        Err(error) => {
-            problems.push(AmendProblem::ManifestEdit(error));
-            None
-        }
-    };
-    let (Some(edited), true) = (edited, problems.is_empty()) else {
+    if !problems.is_empty() {
         return Err(AmendFailure::Rejected(problems));
-    };
+    }
+    let edited = declare_amendment(&text, &manifest, &found.path, &declaration)
+        .map_err(|error| rejected(AmendProblem::ManifestEdit(error)))?;
 
     let created = if keep {
         None

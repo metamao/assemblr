@@ -341,6 +341,11 @@ fn insert_amendment(text: &str, entry: &str) -> Option<String> {
     };
     let outer = indent(members.first()?.key_start);
     let inner = outer.as_ref().map(|indent| indent.repeat(2));
+    // The manifest's own line ending, so that the edit does not mix them.
+    let newline = match text.find('\n') {
+        Some(at) if text[..at].ends_with('\r') => "\r\n",
+        _ => "\n",
+    };
     let amendments = members.iter().find(|member| member.key == "amendments");
     let (at, insertion) = match amendments {
         Some(member) => {
@@ -349,14 +354,16 @@ fn insert_amendment(text: &str, entry: &str) -> Option<String> {
                 Some(last) => {
                     let indent = indent(declared.first()?.key_start);
                     let insertion = match indent {
-                        Some(indent) => format!(",\n{indent}{entry}"),
+                        Some(indent) => format!(",{newline}{indent}{entry}"),
                         None => format!(", {entry}"),
                     };
                     (last.value_end, insertion)
                 }
                 None => {
                     let insertion = match (&inner, &outer) {
-                        (Some(inner), Some(outer)) => format!("\n{inner}{entry}\n{outer}"),
+                        (Some(inner), Some(outer)) => {
+                            format!("{newline}{inner}{entry}{newline}{outer}")
+                        }
                         _ => format!(" {entry} "),
                     };
                     let _ = close;
@@ -366,9 +373,9 @@ fn insert_amendment(text: &str, entry: &str) -> Option<String> {
         }
         None => {
             let insertion = match (&inner, &outer) {
-                (Some(inner), Some(outer)) => {
-                    format!(",\n{outer}\"amendments\": {{\n{inner}{entry}\n{outer}}}")
-                }
+                (Some(inner), Some(outer)) => format!(
+                    ",{newline}{outer}\"amendments\": {{{newline}{inner}{entry}{newline}{outer}}}"
+                ),
                 _ => format!(", \"amendments\": {{ {entry} }}"),
             };
             (last.value_end, insertion)
@@ -1376,6 +1383,15 @@ mod tests {
         assert_eq!(
             declared(text, "a.txt").unwrap(),
             "{\n\t\"name\": \"@metamao/app\",\n\t\"version\": \"1.0.0\",\n\t\"description\": \"An app.\",\n\t\"dependencies\": { \"@metamao/node\": \"^1\" },\n\t\"amendments\": {\n\t\t\"a.txt\": { \"unit\": \"@metamao/node\", \"base\": \"1.4.2\" }\n\t}\n}"
+        );
+    }
+
+    #[test]
+    fn a_declaration_keeps_the_manifest_s_line_endings() {
+        let text = "{\r\n  \"name\": \"@metamao/app\",\r\n  \"version\": \"1.0.0\",\r\n  \"description\": \"An app.\",\r\n  \"dependencies\": { \"@metamao/node\": \"^1\" }\r\n}\r\n";
+        assert_eq!(
+            declared(text, "a.txt").unwrap(),
+            "{\r\n  \"name\": \"@metamao/app\",\r\n  \"version\": \"1.0.0\",\r\n  \"description\": \"An app.\",\r\n  \"dependencies\": { \"@metamao/node\": \"^1\" },\r\n  \"amendments\": {\r\n    \"a.txt\": { \"unit\": \"@metamao/node\", \"base\": \"1.4.2\" }\r\n  }\r\n}\r\n"
         );
     }
 
