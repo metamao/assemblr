@@ -26,7 +26,7 @@ use super::git::{
 };
 use crate::domain::{
     Excluded, ObservedTag, ObservedVersion, RegisteredUnit, RegistryError, RegistryIndex,
-    SourceReference, UnitIdentity, Version, declared_identity,
+    RelativePath, SourceReference, UnitIdentity, Version, declared_identity,
 };
 
 /// The environment variable that places the registry under another
@@ -191,7 +191,10 @@ impl Registry {
 
 /// Reads the version tags of `repository`. The `src/` of every valid
 /// version not indexed yet for `unit` is read too, so that a version is
-/// indexed only when its content is a valid published unit.
+/// indexed only when its content is a valid published unit. A version that
+/// declares amendments, or holds `amendments/`, is excluded: composing a
+/// published version's amendments is not supported yet, and its amendment
+/// content is not validated, so it is never indexed as if it were.
 fn observe(
     repository: &GitRepository,
     unit: Option<&RegisteredUnit>,
@@ -227,6 +230,16 @@ fn observe_tag(
             Ok(_) => {}
             Err(ReadSrcError::Git(error)) => return Err(error),
             Err(error) => return Ok(Err(TagProblem::Src(Arc::new(error)))),
+        }
+        let content = match repository.has_amendments(provenance.commit()) {
+            Ok(content) => content,
+            Err(ReadSrcError::Git(error)) => return Err(error),
+            Err(error) => return Ok(Err(TagProblem::Src(Arc::new(error)))),
+        };
+        let declared: Vec<RelativePath> =
+            published.manifest().amendments().keys().cloned().collect();
+        if content || !declared.is_empty() {
+            return Ok(Err(TagProblem::Amendments { declared, content }));
         }
     }
     Ok(Ok(ObservedVersion::new(
@@ -291,6 +304,15 @@ pub enum TagProblem {
     /// Its `src/` cannot be read as unit files. Never a failure to read
     /// the repository, which fails the source instead.
     Src(Arc<ReadSrcError>),
+    /// It declares amendments or holds `amendments/`. Published amendments
+    /// cannot be composed yet, and are not validated, so the version is not
+    /// indexed.
+    Amendments {
+        /// The amended paths its manifest declares, sorted.
+        declared: Vec<RelativePath>,
+        /// Whether its tree holds `amendments/`.
+        content: bool,
+    },
 }
 
 impl fmt::Display for TagProblem {
@@ -298,6 +320,21 @@ impl fmt::Display for TagProblem {
         match self {
             Self::Version(invalid) => invalid.fmt(f),
             Self::Src(error) => write!(f, "invalid `src/`: {error}"),
+            Self::Amendments { declared, content } => {
+                if declared.is_empty() {
+                    f.write_str("it holds `amendments/`")?;
+                } else {
+                    let paths: Vec<String> = declared.iter().map(ToString::to_string).collect();
+                    write!(f, "it declares amendments of {}", paths.join(", "))?;
+                    if *content {
+                        f.write_str(" and holds `amendments/`")?;
+                    }
+                }
+                f.write_str(
+                    "; a published version with amendments cannot be composed yet, and is not \
+                     indexed until it can be validated",
+                )
+            }
         }
     }
 }

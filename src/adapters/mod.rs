@@ -13,17 +13,18 @@ mod registry;
 mod render;
 
 pub use build::{
-    BuildFailure, BuildLockError, BuildProblem, Built, LockfileError, LockfileOutcome,
-    ManifestFileError, OutputProblem, PublishError, PublishState, PublishedProblem, TemplateError,
-    build_unit,
+    AmendFailure, AmendProblem, AmendState, Amended, BuildFailure, BuildLockError, BuildProblem,
+    Built, LockfileError, LockfileOutcome, ManifestFileError, Match, OutputProblem, PublishError,
+    PublishState, PublishedProblem, TemplateError, WriteError, amend_unit, build_unit,
 };
 pub use git::{
     GitError, GitErrorKind, GitRepository, HeadManifestError, InvalidVersion, ObjectTooLarge,
-    PublishedVersion, ReadSrcError, SrcEntryError, SrcEntryErrorReason, VersionTag,
+    PublishedVersion, ReadSrcError, SrcEntryError, SrcEntryErrorReason, UnitDirectory, VersionTag,
 };
 pub use jsonc::SyntaxError;
 pub use manifest::{
-    FieldPath, IssueKind, JsonKind, ManifestIssue, PathSegment, ReadManifestError, read_manifest,
+    EditError, FieldPath, IssueKind, JsonKind, ManifestIssue, PathSegment, ReadManifestError,
+    declare_amendment, read_manifest,
 };
 pub use registry::{
     Added, Problem, ReferenceError, Registry, RegistryFailure, StorageError, Synced, TagProblem,

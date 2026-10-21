@@ -9,7 +9,7 @@
   layout, catalog membership, or registry structure.
 
 `dependencies` is a map from identity to SemVer requirement (see
-[manifest.md](manifest.md#serialization-of-dependencies-options-and-params--approved)).
+[manifest.md](manifest.md#serialization-of-dependencies-options-params-and-amendments--approved)).
 
 ## Resolution — Approved
 
@@ -69,8 +69,8 @@ Open:
 - The SemVer range dialect. **OC-15.**
 - The consumer lockfile's format and location (**OC-8**). The unit
   lockfile is `assemblr-lock.json` (see
-  [unit lock state](authoring-workflow.md#unit-lock-state--approved)); how it
-  relates to amendment provenance is still open (**OC-46**).
+  [unit lock state](authoring-workflow.md#unit-lock-state--approved)); which
+  operations beyond `unit build` write it is still open (**OC-46**).
 
 ## Pre-releases and build metadata — Approved
 

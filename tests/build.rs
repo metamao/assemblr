@@ -464,7 +464,7 @@ fn a_rejected_build_reports_every_problem_and_changes_nothing() {
     let output = fails(fixture.build(&app));
     let stderr = stderr(&output);
     for expected in [
-        "`amendments/` has content, and amendments cannot be built yet: amendments/node/node.txt",
+        "amendments/node/node.txt of @acme/app is not declared in the manifest",
         "@acme/app declares required parameters without defaults: `appName`",
         "supplying development values is not supported yet",
         "path collision: node.txt from @acme/app, node.txt from @acme/node",
@@ -532,7 +532,10 @@ fn an_empty_amendments_directory_or_ignored_files_in_it_do_not_block_a_build() {
 
     app.write("amendments/package.json", "{}");
     let stderr = stderr(&fails(fixture.build(&app)));
-    assert!(stderr.contains("amendments/package.json"), "{stderr}");
+    assert!(
+        stderr.contains("amendments/package.json of @acme/app is not declared"),
+        "{stderr}"
+    );
     assert!(!stderr.contains(".swp"), "{stderr}");
 }
 
@@ -1289,4 +1292,581 @@ fn a_rendered_template_keeps_its_executable_bit() {
         fs::metadata(&built).unwrap().permissions().mode() & 0o100,
         0
     );
+}
+
+/// A registered `@acme/node` 1.0.0 with a parameter, a template, a plain
+/// file in a directory, and an executable script, and an unpublished
+/// `@acme/app` depending on it, built once so that it has a lockfile.
+fn app_amending_node(fixture: &Fixture) -> (Repo, Repo) {
+    let node = fixture.repo("node");
+    node.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/node",
+            "1.0.0",
+            &[],
+            r#", "params": {"port": {"type": "integer", "description": "The port.", "default": 80}}"#,
+        ),
+    );
+    node.write(
+        "src/config/app.yaml.assemblr.tmpl",
+        "port: {{ port }}\nname: node\n",
+    );
+    node.write("src/config/README.md", "node config\n");
+    node.write("src/README.md", "node\n");
+    node.write("src/bin/run", "#!/bin/sh\necho node\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            node.path.join("src/bin/run"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    node.publish("1.0.0");
+    fixture.register(&node);
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[("@acme/node", "^1")],
+            r#", "params": {"title": {"type": "string", "description": "A title.", "default": "Demo"}}"#,
+        ),
+    );
+    app.write("src/app.txt", "app");
+    succeeds(fixture.build(&app));
+    (node, app)
+}
+
+fn amend(fixture: &Fixture, repo: &Repo, args: &[&str]) -> Output {
+    let mut all = vec!["unit", "amend"];
+    all.extend_from_slice(args);
+    fixture.assemblr(&repo.path, &all)
+}
+
+#[test]
+fn an_amendment_is_created_declared_and_built() {
+    let fixture = Fixture::new("amend");
+    let (_node, app) = app_amending_node(&fixture);
+
+    let output = succeeds(amend(&fixture, &app, &["app.yaml"]));
+    assert_eq!(
+        stdout(&output).trim(),
+        "Amended src/config/app.yaml.assemblr.tmpl of @acme/node 1.0.0: created \
+         amendments/config/app.yaml.assemblr.tmpl and declared it in manifest.jsonc."
+    );
+    assert_eq!(
+        app.read("amendments/config/app.yaml.assemblr.tmpl"),
+        "port: {{ port }}\nname: node\n"
+    );
+    let manifest = app.read("manifest.jsonc");
+    assert!(
+        manifest.contains(
+            r#""amendments": { "config/app.yaml.assemblr.tmpl": { "unit": "@acme/node", "base": "1.0.0" } }"#
+        ),
+        "{manifest}"
+    );
+    succeeds(amend(&fixture, &app, &["bin/run"]));
+
+    // The copies are edited, and the build delivers them in the provider's
+    // place: the template with the provider's values and the author's as
+    // `own`, the script with the provider's executable bit.
+    app.write(
+        "amendments/config/app.yaml.assemblr.tmpl",
+        "port: {{ port }}\nname: {{ own.title }}\n",
+    );
+    app.write("amendments/bin/run", "#!/bin/sh\necho amended\n");
+    let output = succeeds(fixture.build(&app));
+    assert!(stdout(&output).contains("5 file(s)"), "{}", stdout(&output));
+    assert_eq!(
+        app.build_files(),
+        pairs(&[
+            ("README.md", "node\n"),
+            ("app.txt", "app"),
+            ("bin/run", "#!/bin/sh\necho amended\n"),
+            ("config/README.md", "node config\n"),
+            ("config/app.yaml", "port: 80\nname: Demo\n"),
+        ])
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(app.path.join("build/bin/run"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "{mode:o}");
+    }
+}
+
+#[test]
+fn amend_finds_files_by_name_or_path_and_reports_ambiguity() {
+    let fixture = Fixture::new("amend-search");
+    let (_node, app) = app_amending_node(&fixture);
+
+    let err = stderr(&fails(amend(&fixture, &app, &["README.md"])));
+    assert!(
+        err.contains(
+            "\"README.md\" matches 2 files: src/README.md of @acme/node 1.0.0, \
+             src/config/README.md of @acme/node 1.0.0; name the file by its path"
+        ),
+        "{err}"
+    );
+    assert!(err.contains("hint: nothing was changed"), "{err}");
+    assert!(!app.path.join("amendments").exists());
+
+    // A path, with or without the template suffix, is exact.
+    succeeds(amend(&fixture, &app, &["config/README.md"]));
+    succeeds(amend(&fixture, &app, &["config/app.yaml"]));
+    assert!(
+        app.path
+            .join("amendments/config/app.yaml.assemblr.tmpl")
+            .is_file()
+    );
+    let err = stderr(&fails(amend(&fixture, &app, &["config/missing.md"])));
+    assert!(
+        err.contains("no file matches \"config/missing.md\" in the `src/` of @acme/node"),
+        "{err}"
+    );
+    assert!(err.contains("with or without `.assemblr.tmpl`"), "{err}");
+
+    // `--unit` restricts the search, and must name a direct dependency.
+    let err = stderr(&fails(amend(
+        &fixture,
+        &app,
+        &["README.md", "--unit", "@acme/other"],
+    )));
+    assert!(
+        err.contains("@acme/other is not a direct dependency"),
+        "{err}"
+    );
+    let err = stderr(&fails(amend(
+        &fixture,
+        &app,
+        &["README.md", "--unit", "acme"],
+    )));
+    assert!(err.contains("--unit:"), "{err}");
+    let err = stderr(&fails(amend(&fixture, &app, &["../etc/passwd"])));
+    assert!(
+        err.contains("\"../etc/passwd\" is not a file name or a path in `src/`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn amend_requires_a_lockfile_that_records_the_resolution() {
+    let fixture = Fixture::new("amend-lock");
+    let (_node, app) = app_on_node(&fixture, "^1");
+    let err = stderr(&fails(amend(&fixture, &app, &["node.txt"])));
+    assert!(err.contains("there is no assemblr-lock.json"), "{err}");
+    assert!(
+        err.contains("hint: nothing was changed; run `assemblr unit build` first"),
+        "{err}"
+    );
+
+    succeeds(fixture.build(&app));
+    app.write(
+        "manifest.jsonc",
+        &manifest("@acme/app", "0.1.0", &[("@acme/node", "=1.0.0")], ""),
+    );
+    let err = stderr(&fails(amend(&fixture, &app, &["node.txt"])));
+    assert!(
+        err.contains(
+            "assemblr-lock.json does not record the current resolution: @acme/node 1.1.0 -> 1.0.0"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("only `unit build` writes the lockfile"),
+        "{err}"
+    );
+    assert!(!app.path.join("amendments").exists());
+    assert!(!app.read("manifest.jsonc").contains("amendments"));
+}
+
+#[test]
+fn amend_never_overwrites_a_copy_and_completes_an_interrupted_run() {
+    let fixture = Fixture::new("amend-existing");
+    let (_node, app) = app_amending_node(&fixture);
+    let before = app.read("manifest.jsonc");
+
+    // A copy the author already edited, not declared: never overwritten.
+    app.write("amendments/config/README.md", "edited\n");
+    let err = stderr(&fails(amend(&fixture, &app, &["config/README.md"])));
+    assert!(
+        err.contains(
+            "amendments/config/README.md already exists with content other than the \
+             provider's file, and an existing amendment is never overwritten"
+        ),
+        "{err}"
+    );
+    assert_eq!(app.read("manifest.jsonc"), before);
+    assert_eq!(app.read("amendments/config/README.md"), "edited\n");
+
+    // An unmodified copy without a declaration, as an interrupted run
+    // leaves: the same command completes it.
+    app.write("amendments/config/README.md", "node config\n");
+    let output = succeeds(amend(&fixture, &app, &["config/README.md"]));
+    assert!(
+        stdout(&output).contains("kept the existing copy at amendments/config/README.md"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(app.read("manifest.jsonc").contains("config/README.md"));
+
+    // Declared already, and that is the only problem reported.
+    let err = stderr(&fails(amend(&fixture, &app, &["config/README.md"])));
+    assert!(
+        err.contains(
+            "the manifest already declares an amendment of config/README.md from @acme/node 1.0.0"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("could not be edited safely"), "{err}");
+
+    // A directory at the copy's path.
+    fs::create_dir_all(app.path.join("amendments/bin/run")).unwrap();
+    let err = stderr(&fails(amend(&fixture, &app, &["bin/run"])));
+    assert!(
+        err.contains("amendments/bin/run exists and is not a regular file"),
+        "{err}"
+    );
+    fs::remove_dir(app.path.join("amendments/bin/run")).unwrap();
+
+    // The unit's own file at the path.
+    app.write("src/bin/run", "mine\n");
+    let err = stderr(&fails(amend(&fixture, &app, &["bin/run"])));
+    assert!(
+        err.contains("src/bin/run of the unit itself would collide"),
+        "{err}"
+    );
+    assert!(!app.path.join("amendments/bin/run").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn amend_never_writes_through_a_symbolic_link() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new("amend-links");
+    let (_node, app) = app_amending_node(&fixture);
+    let outside = fixture.dir.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let before = app.read("manifest.jsonc");
+
+    // `amendments/` itself, then a directory under it, as links out of the
+    // unit: nothing is written there.
+    symlink(&outside, app.path.join("amendments")).unwrap();
+    let err = stderr(&fails(amend(&fixture, &app, &["bin/run"])));
+    assert!(
+        err.contains("amendments exists and is not a directory"),
+        "{err}"
+    );
+    assert!(err.contains("outside the unit"), "{err}");
+    fs::remove_file(app.path.join("amendments")).unwrap();
+    fs::create_dir_all(app.path.join("amendments")).unwrap();
+    symlink(&outside, app.path.join("amendments/bin")).unwrap();
+    let err = stderr(&fails(amend(&fixture, &app, &["bin/run"])));
+    assert!(
+        err.contains("amendments/bin exists and is not a directory"),
+        "{err}"
+    );
+    assert_eq!(files(&outside), []);
+    fs::remove_file(app.path.join("amendments/bin")).unwrap();
+
+    // A link at the copy's own path is not a copy.
+    fs::create_dir_all(app.path.join("amendments/bin")).unwrap();
+    symlink(outside.join("run"), app.path.join("amendments/bin/run")).unwrap();
+    let err = stderr(&fails(amend(&fixture, &app, &["bin/run"])));
+    assert!(
+        err.contains("amendments/bin/run exists and is not a regular file"),
+        "{err}"
+    );
+    fs::remove_dir_all(app.path.join("amendments")).unwrap();
+
+    // The reserved staging name, as a link to a file that must survive.
+    let target = outside.join("target.txt");
+    fs::write(&target, "keep me").unwrap();
+    symlink(&target, app.path.join(".assemblr-manifest.jsonc.new")).unwrap();
+    let err = stderr(&fails(amend(&fixture, &app, &["bin/run"])));
+    assert!(
+        err.contains(".assemblr-manifest.jsonc.new exists; the name is reserved"),
+        "{err}"
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), "keep me");
+    assert!(!app.path.join("amendments").exists());
+    assert_eq!(app.read("manifest.jsonc"), before);
+    fs::remove_file(app.path.join(".assemblr-manifest.jsonc.new")).unwrap();
+
+    // With the links gone, the same command works, creating the directories.
+    succeeds(amend(&fixture, &app, &["bin/run"]));
+    assert!(app.path.join("amendments/bin/run").is_file());
+}
+
+#[test]
+fn amend_keeps_the_manifest_s_comments_and_formatting() {
+    let fixture = Fixture::new("amend-manifest");
+    let (_node, app) = app_amending_node(&fixture);
+    let text = "{\n  // The unit.\n  \"name\": \"@acme/app\",\n  \"version\": \"0.1.0\",\n  \
+                \"description\": \"An app.\",\n  \"dependencies\": {\n    \"@acme/node\": \"^1\", // node\n  },\n  \
+                \"params\": {\n    \"title\": { \"type\": \"string\", \"description\": \"A title.\", \"default\": \"Demo\" },\n  },\n}\n";
+    app.write("manifest.jsonc", text);
+    succeeds(amend(&fixture, &app, &["bin/run"]));
+    assert_eq!(
+        app.read("manifest.jsonc"),
+        "{\n  // The unit.\n  \"name\": \"@acme/app\",\n  \"version\": \"0.1.0\",\n  \
+         \"description\": \"An app.\",\n  \"dependencies\": {\n    \"@acme/node\": \"^1\", // node\n  },\n  \
+         \"params\": {\n    \"title\": { \"type\": \"string\", \"description\": \"A title.\", \"default\": \"Demo\" },\n  },\n  \
+         \"amendments\": {\n    \"bin/run\": { \"unit\": \"@acme/node\", \"base\": \"1.0.0\" }\n  },\n}\n"
+    );
+    succeeds(amend(&fixture, &app, &["app.yaml"]));
+    assert!(
+        app.read("manifest.jsonc").contains(
+            "  \"amendments\": {\n    \"bin/run\": { \"unit\": \"@acme/node\", \"base\": \"1.0.0\" },\n    \
+             \"config/app.yaml.assemblr.tmpl\": { \"unit\": \"@acme/node\", \"base\": \"1.0.0\" }\n  },\n}\n"
+        ),
+        "{}",
+        app.read("manifest.jsonc")
+    );
+    assert!(!app.path.join(".assemblr-manifest.jsonc.new").exists());
+    succeeds(fixture.build(&app));
+}
+
+#[test]
+fn a_build_never_moves_an_amended_unit_away_from_its_base() {
+    let fixture = Fixture::new("amend-moved");
+    let (node, app) = app_on_node(&fixture, "=1.0.0");
+    succeeds(fixture.build(&app));
+    succeeds(amend(&fixture, &app, &["node.txt"]));
+    let lockfile = app.read("assemblr-lock.json");
+    succeeds(fixture.build(&app));
+    assert_eq!(
+        app.build_files()[1],
+        ("node.txt".to_owned(), "node 1.0.0".to_owned())
+    );
+    let build = app.build_files();
+    let declared = |base: &str| {
+        manifest(
+            "@acme/app",
+            "0.1.0",
+            &[("@acme/node", "^1.1")],
+            &format!(
+                r#", "amendments": {{"node.txt": {{"unit": "@acme/node", "base": "{base}"}}}}"#
+            ),
+        )
+    };
+
+    // The range no longer allows the locked base.
+    app.write("manifest.jsonc", &declared("1.0.0"));
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(
+        err.contains(
+            "amendments/node.txt is based on @acme/node 1.0.0, the locked version, but the \
+             dependencies now resolve @acme/node to 1.1.0"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("(`unit update`) is not supported yet"),
+        "{err}"
+    );
+    assert!(
+        err.contains("hint: the build was rejected; build/ and assemblr-lock.json were not changed; a build never changes the locked version of an amended unit"),
+        "{err}"
+    );
+    // Not also reported as a plain base mismatch.
+    assert!(!err.contains("applied only to its base version"), "{err}");
+
+    // The declaration was edited by hand.
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[("@acme/node", "=1.0.0")],
+            r#", "amendments": {"node.txt": {"unit": "@acme/node", "base": "1.1.0"}}"#,
+        ),
+    );
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(
+        err.contains(
+            "amendments/node.txt declares @acme/node 1.1.0 as its base, but the lockfile locks \
+             @acme/node 1.0.0"
+        ),
+        "{err}"
+    );
+    assert!(err.contains("revert it to 1.0.0"), "{err}");
+
+    // No lockfile, and the newest version wins.
+    app.write("manifest.jsonc", &declared("1.0.0"));
+    app.remove("assemblr-lock.json");
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(
+        err.contains("@acme/node is not locked and the dependencies resolve it to 1.1.0"),
+        "{err}"
+    );
+    assert!(!app.path.join("assemblr-lock.json").exists());
+    assert_eq!(app.build_files(), build);
+    app.write("assemblr-lock.json", &lockfile);
+    let _ = node;
+}
+
+#[test]
+fn every_amendment_problem_rejects_the_build_and_changes_nothing() {
+    let fixture = Fixture::new("amend-problems");
+    let (_node, app) = app_amending_node(&fixture);
+    let lockfile = app.read("assemblr-lock.json");
+    let build = app.build_files();
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[("@acme/node", "^1")],
+            r#", "amendments": {
+                "config/app.yaml": {"unit": "@acme/node", "base": "1.0.0"},
+                "bin/run.assemblr.tmpl": {"unit": "@acme/node", "base": "1.0.0"},
+                "missing.txt": {"unit": "@acme/node", "base": "1.0.0"},
+                "README.md": {"unit": "@acme/node", "base": "1.0.0"}
+            }"#,
+        ),
+    );
+    app.write("amendments/config/app.yaml", "port: 1\n");
+    app.write("amendments/bin/run.assemblr.tmpl", "");
+    app.write("amendments/missing.txt", "");
+    app.write("amendments/stray.txt", "");
+    let err = stderr(&fails(fixture.build(&app)));
+    for expected in [
+        "amendments/README.md does not exist",
+        "amendments/bin/run.assemblr.tmpl amends a file that @acme/node 1.0.0 does not provide: \
+         it has no src/bin/run.assemblr.tmpl; its file is src/bin/run, which is not a template",
+        "amendments/config/app.yaml amends a file that @acme/node 1.0.0 does not provide: it has \
+         no src/config/app.yaml; its file is the template src/config/app.yaml.assemblr.tmpl",
+        "amendments/missing.txt amends a file that @acme/node 1.0.0 does not provide: it has no \
+         src/missing.txt",
+        "amendments/stray.txt of @acme/app is not declared in the manifest",
+        "hint: the build was rejected; build/ and assemblr-lock.json were not changed",
+    ] {
+        assert!(err.contains(expected), "{expected:?} in {err}");
+    }
+    assert_eq!(app.read("assemblr-lock.json"), lockfile);
+    assert_eq!(app.build_files(), build);
+
+    // A declaration of a unit that is not a dependency is a manifest error,
+    // and a symbolic link under `amendments/` is rejected like one in `src/`.
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[("@acme/node", "^1")],
+            r#", "amendments": {"README.md": {"unit": "@acme/other", "base": "1.0.0"}}"#,
+        ),
+    );
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(
+        err.contains("amendments[\"README.md\"].unit: the amendment of README.md names @acme/other, which is not declared in `dependencies`"),
+        "{err}"
+    );
+    #[cfg(unix)]
+    {
+        for path in [
+            "config/app.yaml",
+            "bin/run.assemblr.tmpl",
+            "missing.txt",
+            "stray.txt",
+        ] {
+            app.remove(&format!("amendments/{path}"));
+        }
+        std::os::unix::fs::symlink("../src/app.txt", app.path.join("amendments/README.md"))
+            .unwrap();
+        let err = stderr(&fails(fixture.build(&app)));
+        assert!(
+            err.contains("amendments/README.md: symbolic links are not supported in `amendments/`"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn an_amended_template_s_errors_name_the_copy_and_the_provider() {
+    let fixture = Fixture::new("amend-render");
+    let (_node, app) = app_amending_node(&fixture);
+    succeeds(amend(&fixture, &app, &["app.yaml"]));
+    app.write(
+        "amendments/config/app.yaml.assemblr.tmpl",
+        "port: {{ port }}\nname: {{ own.name }} {{ title }}\n{% if x %}\n",
+    );
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(
+        err.contains(
+            "amendments/config/app.yaml.assemblr.tmpl of @acme/app (a copy of template \
+             src/config/app.yaml.assemblr.tmpl of @acme/node), line 2, column 7: undefined \
+             reference `own.name`; the amending unit's parameters are `own.title`"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "line 2, column 22: undefined reference `title`; the unit's parameters are `port`"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("line 3, column 1: unsupported template construct"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_published_version_with_amendments_is_not_indexed_yet() {
+    let fixture = Fixture::new("amend-published");
+    let (_node, app) = app_amending_node(&fixture);
+    succeeds(amend(&fixture, &app, &["bin/run"]));
+    app.publish("0.1.0");
+    // A later version holds `amendments/` without declaring it, and the
+    // one after that is clean.
+    app.write(
+        "manifest.jsonc",
+        &manifest("@acme/app", "0.2.0", &[("@acme/node", "^1")], ""),
+    );
+    app.publish("0.2.0");
+    app.git(&["rm", "-q", "-r", "amendments"]);
+    app.write(
+        "manifest.jsonc",
+        &manifest("@acme/app", "0.3.0", &[("@acme/node", "^1")], ""),
+    );
+    app.publish("0.3.0");
+
+    let output = succeeds(fixture.assemblr(
+        &fixture.dir,
+        &["registry", "add", app.path.to_str().unwrap()],
+    ));
+    let err = stderr(&output);
+    assert!(
+        err.contains(
+            "excluded tag v0.1.0, which is not indexed as a published version: it declares \
+             amendments of bin/run and holds `amendments/`; a published version with amendments \
+             cannot be composed yet"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("excluded tag v0.2.0, which is not indexed as a published version: it holds `amendments/`"),
+        "{err}"
+    );
+    let listing = stdout(&fixture.assemblr(&fixture.dir, &["registry", "list"]));
+    assert!(listing.contains("0.3.0"), "{listing}");
+    assert!(!listing.contains("0.1.0"), "{listing}");
+
+    // A dependent therefore cannot resolve the amended version.
+    let consumer = fixture.repo("consumer");
+    consumer.write(
+        "manifest.jsonc",
+        &manifest("@acme/consumer", "0.1.0", &[("@acme/app", "=0.1.0")], ""),
+    );
+    let err = stderr(&fails(fixture.build(&consumer)));
+    assert!(err.contains("@acme/app"), "{err}");
 }

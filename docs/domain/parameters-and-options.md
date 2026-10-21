@@ -61,7 +61,7 @@ Requiredness follows from the default alone:
   see **OC-6**.
 
 The serialization of parameter declarations is described in
-[manifest.md](manifest.md#serialization-of-dependencies-options-and-params--approved).
+[manifest.md](manifest.md#serialization-of-dependencies-options-params-and-amendments--approved).
 
 ### What parameters may do — Approved
 
@@ -152,7 +152,7 @@ Open:
 the parameters of its **direct** dependencies.
 
 Example (serialization as approved in
-[manifest.md](manifest.md#serialization-of-dependencies-options-and-params--approved)):
+[manifest.md](manifest.md#serialization-of-dependencies-options-params-and-amendments--approved)):
 
 ```jsonc
 {

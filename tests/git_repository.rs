@@ -501,7 +501,7 @@ fn src_must_be_a_directory() {
 
     let error = read_src(&repo, &commit).unwrap_err();
 
-    assert!(matches!(error, ReadSrcError::SrcNotADirectory), "{error}");
+    assert!(matches!(error, ReadSrcError::NotADirectory(_)), "{error}");
 }
 
 #[test]
@@ -822,7 +822,7 @@ fn shared_subtrees_cannot_expand_src_without_bound() {
     let error = read_src(&repo, &commit).unwrap_err();
 
     assert!(
-        matches!(error, ReadSrcError::TooManyEntries { limit: 10_000 }),
+        matches!(error, ReadSrcError::TooManyEntries { limit: 10_000, .. }),
         "{error}"
     );
     assert!(
@@ -851,7 +851,7 @@ fn src_files_are_bounded_one_by_one_and_in_total() {
 
     let error = read_src(&repo, &total).unwrap_err();
     assert!(
-        matches!(error, ReadSrcError::TooLarge { size, limit } if size == 9 * 16 * MIB as u64 && limit == 128 * MIB as u64),
+        matches!(error, ReadSrcError::TooLarge { size, limit, .. } if size == 9 * 16 * MIB as u64 && limit == 128 * MIB as u64),
         "{error}"
     );
 

@@ -86,7 +86,7 @@ impl std::error::Error for SyntaxError {}
 /// A comma is trailing only if it follows a value and the next significant
 /// character closes the enclosing array or object. A comma after `[`, `{`,
 /// `:`, or another comma is left for the JSON parser to reject.
-fn to_strict_json(text: &str) -> Result<String, SyntaxError> {
+pub(crate) fn to_strict_json(text: &str) -> Result<String, SyntaxError> {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.char_indices().peekable();
     let mut last_significant: Option<char> = None;
@@ -165,6 +165,122 @@ fn to_strict_json(text: &str) -> Result<String, SyntaxError> {
         }
     }
     Ok(out)
+}
+
+/// A member of a JSON object, located in the text it was scanned from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Member {
+    /// The key, decoded.
+    pub(crate) key: String,
+    /// The byte offset of the key's opening quote.
+    pub(crate) key_start: usize,
+    /// The byte offset of the value's first character.
+    pub(crate) value_start: usize,
+    /// The byte offset just past the value.
+    pub(crate) value_end: usize,
+}
+
+/// The members of the object that starts at byte `open` of `strict`, which
+/// is JSON that [`to_strict_json`] produced and `serde_json` accepted, and
+/// the offset of its closing brace.
+///
+/// Editing a manifest in place needs the spans of its members, which a
+/// parsed value does not keep. The text is known to be valid JSON, so this
+/// scanner only locates: it returns `None` on anything unexpected rather
+/// than guessing, and the caller treats that as "cannot edit safely".
+pub(crate) fn members(strict: &str, open: usize) -> Option<(Vec<Member>, usize)> {
+    let bytes = strict.as_bytes();
+    if bytes.get(open) != Some(&b'{') {
+        return None;
+    }
+    let mut members = Vec::new();
+    let mut at = skip_whitespace(bytes, open + 1);
+    loop {
+        match bytes.get(at)? {
+            b'}' => return Some((members, at)),
+            b'"' => {}
+            _ => return None,
+        }
+        let key_start = at;
+        let key_end = skip_string(bytes, at)?;
+        let key: String = serde_json::from_str(strict.get(key_start..key_end)?).ok()?;
+        at = skip_whitespace(bytes, key_end);
+        if bytes.get(at)? != &b':' {
+            return None;
+        }
+        let value_start = skip_whitespace(bytes, at + 1);
+        let value_end = skip_value(bytes, value_start)?;
+        members.push(Member {
+            key,
+            key_start,
+            value_start,
+            value_end,
+        });
+        at = skip_whitespace(bytes, value_end);
+        match bytes.get(at)? {
+            b',' => at = skip_whitespace(bytes, at + 1),
+            b'}' => return Some((members, at)),
+            _ => return None,
+        }
+    }
+}
+
+/// The byte offset of the root object's opening brace.
+pub(crate) fn root_object(strict: &str) -> Option<usize> {
+    let at = skip_whitespace(strict.as_bytes(), 0);
+    (strict.as_bytes().get(at) == Some(&b'{')).then_some(at)
+}
+
+fn skip_whitespace(bytes: &[u8], mut at: usize) -> usize {
+    while matches!(bytes.get(at), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+        at += 1;
+    }
+    at
+}
+
+/// The offset just past the string that opens at `at`.
+fn skip_string(bytes: &[u8], at: usize) -> Option<usize> {
+    if bytes.get(at) != Some(&b'"') {
+        return None;
+    }
+    let mut at = at + 1;
+    loop {
+        match bytes.get(at)? {
+            b'\\' => at += 2,
+            b'"' => return Some(at + 1),
+            _ => at += 1,
+        }
+    }
+}
+
+/// The offset just past the value that starts at `at`.
+fn skip_value(bytes: &[u8], at: usize) -> Option<usize> {
+    match bytes.get(at)? {
+        b'"' => skip_string(bytes, at),
+        open @ (b'{' | b'[') => {
+            let close = if *open == b'{' { b'}' } else { b']' };
+            let mut at = at + 1;
+            loop {
+                match bytes.get(at)? {
+                    b'"' => at = skip_string(bytes, at)?,
+                    b'{' | b'[' => at = skip_value(bytes, at)?,
+                    byte if *byte == close => return Some(at + 1),
+                    b'}' | b']' => return None,
+                    _ => at += 1,
+                }
+            }
+        }
+        b',' | b'}' | b']' | b':' => None,
+        _ => {
+            let mut end = at;
+            while bytes.get(end).is_some_and(|byte| {
+                !matches!(byte, b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r')
+            }) {
+                end += 1;
+            }
+            Some(end)
+        }
+    }
 }
 
 /// Replaces a commented-out character with spaces of the same byte length,
@@ -265,7 +381,7 @@ impl<'de> Visitor<'de> for JsonVisitor {
 
 #[cfg(test)]
 mod tests {
-    use super::{Json, parse, to_strict_json};
+    use super::{Json, members, parse, root_object, to_strict_json};
 
     fn object(members: &[(&str, Json)]) -> Json {
         Json::Object(
@@ -393,5 +509,54 @@ mod tests {
     fn deep_nesting_is_an_error_not_a_crash() {
         let text = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
         assert!(parse(&text).is_err());
+    }
+
+    /// Each member of the root object as `(key, value text)`, from the
+    /// original text.
+    fn spans(text: &str) -> Vec<(String, String)> {
+        let strict = to_strict_json(text).unwrap();
+        let open = root_object(&strict).unwrap();
+        let (found, close) = members(&strict, open).unwrap();
+        assert_eq!(strict.as_bytes()[close], b'}');
+        found
+            .into_iter()
+            .map(|member| {
+                (
+                    member.key,
+                    text[member.value_start..member.value_end].to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn members_are_located_in_the_original_text() {
+        let text = r#"  { // c
+          "a": "x\"y}", /* { */ "b\u0041": [1, {"c": "]"}, ],
+          "d": { "e": true, },
+          "f": -1.5e3,
+        }"#;
+        assert_eq!(
+            spans(text),
+            [
+                ("a".to_owned(), r#""x\"y}""#.to_owned()),
+                ("bA".to_owned(), r#"[1, {"c": "]"}, ]"#.to_owned()),
+                ("d".to_owned(), r#"{ "e": true, }"#.to_owned()),
+                ("f".to_owned(), "-1.5e3".to_owned()),
+            ]
+        );
+        assert_eq!(spans("{}"), []);
+        assert_eq!(spans("{\"a\":1}"), [("a".to_owned(), "1".to_owned())]);
+    }
+
+    #[test]
+    fn the_scanner_declines_what_it_does_not_expect() {
+        assert_eq!(root_object("  [1]"), None);
+        assert_eq!(members("{\"a\": }", 0), None);
+        assert_eq!(members("{\"a\" 1}", 0), None);
+        assert_eq!(members("{a: 1}", 0), None);
+        assert_eq!(members("{\"a\": 1", 0), None);
+        assert_eq!(members("{\"a\": [1}", 0), None);
+        assert_eq!(members("\"a\"", 0), None);
     }
 }

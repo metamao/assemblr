@@ -9,10 +9,10 @@ use std::fmt;
 
 use super::jsonc::{self, Json, SyntaxError};
 use crate::domain::{
-    self, AllowedValues, AllowedValuesError, BlankDescription, Description, IdentityError,
-    Manifest, ManifestError, OptionValues, ParameterDefinition, ParameterName, ParameterNameError,
-    ParameterType, ParameterValue, ParameterValueError, RequirementError, UnitIdentity, Version,
-    VersionError, VersionRequirement,
+    self, AllowedValues, AllowedValuesError, AmendmentDeclaration, BlankDescription, Description,
+    IdentityError, Manifest, ManifestError, OptionValues, ParameterDefinition, ParameterName,
+    ParameterNameError, ParameterType, ParameterValue, ParameterValueError, RelativePath,
+    RelativePathError, RequirementError, UnitIdentity, Version, VersionError, VersionRequirement,
 };
 
 const MANIFEST_FIELDS: &[&str] = &[
@@ -23,8 +23,10 @@ const MANIFEST_FIELDS: &[&str] = &[
     "dependencies",
     "options",
     "params",
+    "amendments",
 ];
 const PARAMETER_FIELDS: &[&str] = &["type", "description", "default", "allowed"];
+const AMENDMENT_FIELDS: &[&str] = &["unit", "base"];
 const SCALAR: &[JsonKind] = &[JsonKind::String, JsonKind::Integer, JsonKind::Boolean];
 
 /// Reads and validates the text of a `manifest.jsonc`.
@@ -229,6 +231,8 @@ pub enum IssueKind {
     InvalidRequirement(RequirementError),
     /// The key is not a valid parameter name.
     InvalidParameterName(ParameterNameError),
+    /// The key is not a valid unit file path.
+    InvalidPath(RelativePathError),
     /// The description is empty or only whitespace.
     BlankDescription(BlankDescription),
     /// The parameter `type` is not one of the supported types.
@@ -266,6 +270,7 @@ impl fmt::Display for IssueKind {
             Self::InvalidVersion(error) => error.fmt(f),
             Self::InvalidRequirement(error) => error.fmt(f),
             Self::InvalidParameterName(error) => error.fmt(f),
+            Self::InvalidPath(error) => error.fmt(f),
             Self::BlankDescription(error) => error.fmt(f),
             Self::UnknownParameterType(name) => write!(
                 f,
@@ -280,6 +285,139 @@ impl fmt::Display for IssueKind {
         }
     }
 }
+
+/// The text of `manifest` with `declaration` added for `path`, as
+/// `unit amend` records a new amendment: a member of the top-level
+/// `amendments` object, which is created after the last member when the
+/// manifest has none. Every other byte of the text, comments and formatting
+/// included, is kept; the new member follows the indentation of its
+/// neighbours.
+///
+/// `text` must be the text `manifest` was read from. The edited text is read
+/// again and must describe exactly `manifest` plus the declaration; if it
+/// does not, or the text cannot be located precisely, nothing is produced
+/// and the error carries the member to add by hand.
+pub fn declare_amendment(
+    text: &str,
+    manifest: &Manifest,
+    path: &RelativePath,
+    declaration: &AmendmentDeclaration,
+) -> Result<String, EditError> {
+    let entry = format!(
+        "{}: {{ \"unit\": {}, \"base\": {} }}",
+        json_string(path.as_str()),
+        json_string(&declaration.unit().to_string()),
+        json_string(&declaration.base().to_string())
+    );
+    let failure = || EditError {
+        entry: entry.clone(),
+    };
+    let expected = manifest
+        .with_amendment(path.clone(), declaration.clone())
+        .ok_or_else(failure)?;
+    let edited = insert_amendment(text, &entry).ok_or_else(failure)?;
+    match read_manifest(&edited) {
+        Ok(manifest) if manifest == expected => Ok(edited),
+        _ => Err(failure()),
+    }
+}
+
+/// `text` with `entry` inserted as a member of its `amendments` object, or
+/// `None` when the text cannot be located precisely.
+fn insert_amendment(text: &str, entry: &str) -> Option<String> {
+    let strict = jsonc::to_strict_json(text).ok()?;
+    let open = jsonc::root_object(&strict)?;
+    let (members, _) = jsonc::members(&strict, open)?;
+    let last = members.last()?;
+    // The members' own layout: the whitespace before the first key on its
+    // line, or nothing when the first member shares the brace's line.
+    let indent = |key_start: usize| -> Option<String> {
+        let line_start = text.get(..key_start)?.rfind('\n')? + 1;
+        let indent = text.get(line_start..key_start)?;
+        indent
+            .chars()
+            .all(|c| c == ' ' || c == '\t')
+            .then(|| indent.to_owned())
+    };
+    let outer = indent(members.first()?.key_start);
+    let inner = outer.as_ref().map(|indent| indent.repeat(2));
+    // The manifest's own line ending, so that the edit does not mix them.
+    let newline = match text.find('\n') {
+        Some(at) if text[..at].ends_with('\r') => "\r\n",
+        _ => "\n",
+    };
+    let amendments = members.iter().find(|member| member.key == "amendments");
+    let (at, insertion) = match amendments {
+        Some(member) => {
+            let (declared, close) = jsonc::members(&strict, member.value_start)?;
+            match declared.last() {
+                Some(last) => {
+                    let indent = indent(declared.first()?.key_start);
+                    let insertion = match indent {
+                        Some(indent) => format!(",{newline}{indent}{entry}"),
+                        None => format!(", {entry}"),
+                    };
+                    (last.value_end, insertion)
+                }
+                None => {
+                    let insertion = match (&inner, &outer) {
+                        (Some(inner), Some(outer)) => {
+                            format!("{newline}{inner}{entry}{newline}{outer}")
+                        }
+                        _ => format!(" {entry} "),
+                    };
+                    let _ = close;
+                    (member.value_start + 1, insertion)
+                }
+            }
+        }
+        None => {
+            let insertion = match (&inner, &outer) {
+                (Some(inner), Some(outer)) => format!(
+                    ",{newline}{outer}\"amendments\": {{{newline}{inner}{entry}{newline}{outer}}}"
+                ),
+                _ => format!(", \"amendments\": {{ {entry} }}"),
+            };
+            (last.value_end, insertion)
+        }
+    };
+    let mut edited = String::with_capacity(text.len() + insertion.len());
+    edited.push_str(text.get(..at)?);
+    edited.push_str(&insertion);
+    edited.push_str(text.get(at..)?);
+    Some(edited)
+}
+
+/// `value` as a JSON string literal.
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| format!("{value:?}"))
+}
+
+/// The manifest could not be edited safely. Nothing was changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditError {
+    entry: String,
+}
+
+impl EditError {
+    /// The `amendments` member that was to be added, as JSON text.
+    pub fn entry(&self) -> &str {
+        &self.entry
+    }
+}
+
+impl fmt::Display for EditError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "`manifest.jsonc` could not be edited safely, so it is unchanged; add this member \
+             to its top-level `amendments` object by hand: {}",
+            self.entry
+        )
+    }
+}
+
+impl std::error::Error for EditError {}
 
 /// The base type named by a parameter's `type` field.
 #[derive(Clone, Copy)]
@@ -342,12 +480,22 @@ impl Reader {
         let params = fields
             .get("params")
             .map_or_else(BTreeMap::new, |json| self.params(&root.key("params"), json));
+        let amendments = fields.get("amendments").map_or_else(BTreeMap::new, |json| {
+            self.amendments(&root.key("amendments"), json)
+        });
 
-        // When `dependencies` is not an object, no option target can be
-        // judged undeclared, so only its type error is reported.
+        // When `dependencies` is not an object, no option or amendment
+        // target can be judged undeclared, so only its type error is
+        // reported.
         let dependencies = dependencies.unwrap_or_else(|| Some(Dependencies::default()))?;
-        for error in domain::relation_errors(name.as_ref(), &dependencies.declared, options.keys())
-        {
+        for error in domain::relation_errors(
+            name.as_ref(),
+            &dependencies.declared,
+            options.keys(),
+            amendments
+                .iter()
+                .map(|(path, declaration)| (path, declaration.unit())),
+        ) {
             self.inconsistent(error);
         }
 
@@ -360,6 +508,7 @@ impl Reader {
             dependencies.requirements,
             options,
             params,
+            amendments,
         )
         .ok()
     }
@@ -372,6 +521,10 @@ impl Reader {
             ManifestError::UndeclaredOptionTarget(target) => {
                 FieldPath::default().key("options").key(&target.to_string())
             }
+            ManifestError::UndeclaredAmendmentTarget { path, .. } => FieldPath::default()
+                .key("amendments")
+                .key(path.as_str())
+                .key("unit"),
         };
         self.report(path, IssueKind::Inconsistent(error));
     }
@@ -583,6 +736,39 @@ impl Reader {
         ParameterDefinition::new(parameter_type, description?, default).ok()
     }
 
+    fn amendments(
+        &mut self,
+        path: &FieldPath,
+        json: &Json,
+    ) -> BTreeMap<RelativePath, AmendmentDeclaration> {
+        let Some(members) = self.object(path, json) else {
+            return BTreeMap::new();
+        };
+        let mut amendments = BTreeMap::new();
+        for (key, value) in members {
+            let path = path.key(key);
+            let amended = RelativePath::parse(key)
+                .map_err(|error| self.report(path.clone(), IssueKind::InvalidPath(error)))
+                .ok();
+            let declaration = self.amendment(&path, value);
+            if let (Some(amended), Some(declaration)) = (amended, declaration) {
+                amendments.insert(amended, declaration);
+            }
+        }
+        amendments
+    }
+
+    fn amendment(&mut self, path: &FieldPath, json: &Json) -> Option<AmendmentDeclaration> {
+        let fields = self.fields(path, json, AMENDMENT_FIELDS)?;
+        let unit = self
+            .required(path, &fields, "unit")
+            .and_then(|json| self.identity(&path.key("unit"), json));
+        let base = self
+            .required(path, &fields, "base")
+            .and_then(|json| self.version(&path.key("base"), json));
+        Some(AmendmentDeclaration::new(unit?, base?))
+    }
+
     fn base_type(&mut self, path: &FieldPath, json: &Json) -> Option<BaseType> {
         match self.string(path, json)? {
             "string" => Some(BaseType::String),
@@ -622,10 +808,13 @@ impl Reader {
 
 #[cfg(test)]
 mod tests {
-    use super::{FieldPath, IssueKind, JsonKind, ReadManifestError, read_manifest};
+    use super::{
+        FieldPath, IssueKind, JsonKind, ReadManifestError, declare_amendment, read_manifest,
+    };
     use crate::domain::{
-        AllowedValuesError, IdentityErrorReason, ManifestError, ParameterType, ParameterValue,
-        ParameterValueError, Segment, UnitIdentity, ValueKind,
+        AllowedValuesError, AmendmentDeclaration, IdentityErrorReason, ManifestError,
+        ParameterType, ParameterValue, ParameterValueError, RelativePath, Segment, UnitIdentity,
+        ValueKind, Version,
     };
 
     const FULL: &str = r#"{
@@ -653,6 +842,10 @@ mod tests {
       "allowed": ["en", "es"],
       "default": "es",
     },
+  },
+  "amendments": {
+    "package.json.assemblr.tmpl": { "unit": "@metamao/node", "base": "1.4.2" },
+    "config/wrangler.toml": { "unit": "@metamao/cloudflare-worker", "base": "2.1.0" },
   },
 }"#;
 
@@ -739,6 +932,33 @@ mod tests {
         let port = &params[&"port".parse().unwrap()];
         assert_eq!(port.parameter_type(), &ParameterType::Integer);
         assert_eq!(port.default(), Some(&ParameterValue::Integer(8080)));
+
+        let amendments: Vec<(String, String, String)> = manifest
+            .amendments()
+            .iter()
+            .map(|(path, declaration)| {
+                (
+                    path.to_string(),
+                    declaration.unit().to_string(),
+                    declaration.base().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            amendments,
+            [
+                (
+                    "config/wrangler.toml".to_owned(),
+                    "@metamao/cloudflare-worker".to_owned(),
+                    "2.1.0".to_owned()
+                ),
+                (
+                    "package.json.assemblr.tmpl".to_owned(),
+                    "@metamao/node".to_owned(),
+                    "1.4.2".to_owned()
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -747,6 +967,65 @@ mod tests {
         assert!(manifest.dependencies().is_empty());
         assert!(manifest.options().is_empty());
         assert!(manifest.params().is_empty());
+        assert!(manifest.amendments().is_empty());
+    }
+
+    #[test]
+    fn amendment_declarations_are_validated() {
+        let text = with(
+            r#""dependencies": {"@metamao/node": "^1.0.0"},
+               "amendments": {
+                 "package.json": {"unit": "@metamao/node", "base": "1.2.0"},
+                 "../escape": {"unit": "@metamao/node", "base": "1.2.0"},
+                 "no-unit.txt": {"base": "1.2.0"},
+                 "range.txt": {"unit": "@metamao/node", "base": "^1.2.0"},
+                 "other.txt": {"unit": "@metamao/docker", "base": "1.0.0"},
+                 "extra.txt": {"unit": "@metamao/node", "base": "1.2.0", "path": "x"},
+                 "list.txt": []
+               }"#,
+        );
+        let issues = issues(&text);
+        let found: Vec<(&str, &IssueKind)> = issues
+            .iter()
+            .map(|(path, kind)| (path.as_str(), kind))
+            .collect();
+        assert_eq!(found.len(), 6, "{found:#?}");
+        assert!(matches!(
+            found[0],
+            ("amendments[\"../escape\"]", IssueKind::InvalidPath(_))
+        ));
+        assert!(matches!(
+            found[1],
+            ("amendments[\"extra.txt\"].path", IssueKind::UnknownField)
+        ));
+        assert!(matches!(
+            found[2],
+            (
+                "amendments[\"list.txt\"]",
+                IssueKind::WrongType {
+                    found: JsonKind::Array,
+                    ..
+                }
+            )
+        ));
+        assert!(matches!(
+            found[3],
+            ("amendments[\"no-unit.txt\"].unit", IssueKind::MissingField)
+        ));
+        assert!(matches!(
+            found[4],
+            (
+                "amendments[\"other.txt\"].unit",
+                IssueKind::Inconsistent(ManifestError::UndeclaredAmendmentTarget { .. })
+            )
+        ));
+        assert!(matches!(
+            found[5],
+            (
+                "amendments[\"range.txt\"].base",
+                IssueKind::InvalidVersion(_)
+            )
+        ));
     }
 
     #[test]
@@ -791,12 +1070,12 @@ mod tests {
     #[test]
     fn unknown_fields_are_rejected_at_every_level() {
         let text = with(
-            r#""amendments": [], "params": {"a": {"type": "string", "description": "A.", "required": true}}"#,
+            r#""fragments": [], "params": {"a": {"type": "string", "description": "A.", "required": true}}"#,
         );
         assert_eq!(
             issues(&text),
             [
-                ("amendments".to_owned(), IssueKind::UnknownField),
+                ("fragments".to_owned(), IssueKind::UnknownField),
                 ("params.a.required".to_owned(), IssueKind::UnknownField),
             ]
         );
@@ -1041,6 +1320,10 @@ mod tests {
 
         let reordered = r#"{
           "description": "Angular SSR on Cloudflare Workers.",
+          "amendments": {
+            "config/wrangler.toml": { "base": "2.1.0", "unit": "@metamao/cloudflare-worker" },
+            "package.json.assemblr.tmpl": { "base": "1.4.2", "unit": "@metamao/node" }
+          },
           "params": {
             "ssr": { "default": true, "description": "Render on the server.", "type": "boolean" },
             "port": { "default": 8080, "type": "integer", "description": "Local port." },
@@ -1066,6 +1349,102 @@ mod tests {
         for end in (0..=FULL.len()).filter(|end| FULL.is_char_boundary(*end)) {
             let _ = read_manifest(&FULL[..end]);
         }
+    }
+
+    /// `text` with an amendment of `path` from `@metamao/node` 1.4.2 added.
+    fn declared(text: &str, path: &str) -> Result<String, String> {
+        let manifest = read_manifest(text).unwrap();
+        let declaration =
+            AmendmentDeclaration::new(identity("@metamao/node"), Version::parse("1.4.2").unwrap());
+        let path = RelativePath::parse(path).unwrap();
+        declare_amendment(text, &manifest, &path, &declaration).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn a_declaration_is_added_to_the_existing_amendments_keeping_everything_else() {
+        let edited = declared(FULL, "src/index.ts").unwrap();
+        let expected = FULL.replace(
+            r#"    "config/wrangler.toml": { "unit": "@metamao/cloudflare-worker", "base": "2.1.0" },"#,
+            "    \"config/wrangler.toml\": { \"unit\": \"@metamao/cloudflare-worker\", \"base\": \"2.1.0\" },\n    \"src/index.ts\": { \"unit\": \"@metamao/node\", \"base\": \"1.4.2\" },",
+        );
+        assert_eq!(edited, expected);
+        assert_eq!(read_manifest(&edited).unwrap().amendments().len(), 3);
+    }
+
+    #[test]
+    fn a_declaration_creates_the_amendments_object_after_the_last_member() {
+        let text = "{\n  \"name\": \"@metamao/app\",\n  \"version\": \"1.0.0\",\n  // Why.\n  \"description\": \"An app.\",\n  \"dependencies\": { \"@metamao/node\": \"^1\" }, // trailing\n}\n";
+        assert_eq!(
+            declared(text, "a \"quoted\" name.txt").unwrap(),
+            "{\n  \"name\": \"@metamao/app\",\n  \"version\": \"1.0.0\",\n  // Why.\n  \"description\": \"An app.\",\n  \"dependencies\": { \"@metamao/node\": \"^1\" },\n  \"amendments\": {\n    \"a \\\"quoted\\\" name.txt\": { \"unit\": \"@metamao/node\", \"base\": \"1.4.2\" }\n  }, // trailing\n}\n"
+        );
+        // Tabs are followed too.
+        let text = "{\n\t\"name\": \"@metamao/app\",\n\t\"version\": \"1.0.0\",\n\t\"description\": \"An app.\",\n\t\"dependencies\": { \"@metamao/node\": \"^1\" }\n}";
+        assert_eq!(
+            declared(text, "a.txt").unwrap(),
+            "{\n\t\"name\": \"@metamao/app\",\n\t\"version\": \"1.0.0\",\n\t\"description\": \"An app.\",\n\t\"dependencies\": { \"@metamao/node\": \"^1\" },\n\t\"amendments\": {\n\t\t\"a.txt\": { \"unit\": \"@metamao/node\", \"base\": \"1.4.2\" }\n\t}\n}"
+        );
+    }
+
+    #[test]
+    fn a_declaration_keeps_the_manifest_s_line_endings() {
+        let text = "{\r\n  \"name\": \"@metamao/app\",\r\n  \"version\": \"1.0.0\",\r\n  \"description\": \"An app.\",\r\n  \"dependencies\": { \"@metamao/node\": \"^1\" }\r\n}\r\n";
+        assert_eq!(
+            declared(text, "a.txt").unwrap(),
+            "{\r\n  \"name\": \"@metamao/app\",\r\n  \"version\": \"1.0.0\",\r\n  \"description\": \"An app.\",\r\n  \"dependencies\": { \"@metamao/node\": \"^1\" },\r\n  \"amendments\": {\r\n    \"a.txt\": { \"unit\": \"@metamao/node\", \"base\": \"1.4.2\" }\r\n  }\r\n}\r\n"
+        );
+    }
+
+    #[test]
+    fn a_declaration_fills_an_empty_amendments_object() {
+        let text = "{\n  \"name\": \"@metamao/app\",\n  \"version\": \"1.0.0\",\n  \"description\": \"An app.\",\n  \"amendments\": { /* none yet */ },\n  \"dependencies\": { \"@metamao/node\": \"^1\" }\n}";
+        assert_eq!(
+            declared(text, "a.txt").unwrap(),
+            "{\n  \"name\": \"@metamao/app\",\n  \"version\": \"1.0.0\",\n  \"description\": \"An app.\",\n  \"amendments\": {\n    \"a.txt\": { \"unit\": \"@metamao/node\", \"base\": \"1.4.2\" }\n   /* none yet */ },\n  \"dependencies\": { \"@metamao/node\": \"^1\" }\n}"
+        );
+    }
+
+    #[test]
+    fn a_one_line_manifest_is_edited_inline() {
+        let text = with(r#""dependencies": {"@metamao/node": "^1"}"#);
+        assert_eq!(
+            declared(&text, "a.txt").unwrap(),
+            r#"{"name": "@metamao/app", "version": "1.0.0", "description": "An app.", "dependencies": {"@metamao/node": "^1"}, "amendments": { "a.txt": { "unit": "@metamao/node", "base": "1.4.2" } }}"#
+        );
+        let text = with(r#""dependencies": {"@metamao/node": "^1"}, "amendments": {}"#);
+        assert_eq!(
+            declared(&text, "a.txt").unwrap(),
+            r#"{"name": "@metamao/app", "version": "1.0.0", "description": "An app.", "dependencies": {"@metamao/node": "^1"}, "amendments": { "a.txt": { "unit": "@metamao/node", "base": "1.4.2" } }}"#
+        );
+        let text = with(
+            r#""dependencies": {"@metamao/node": "^1"}, "amendments": {"b.txt": {"unit": "@metamao/node", "base": "1.0.0"}}"#,
+        );
+        assert_eq!(
+            declared(&text, "a.txt").unwrap(),
+            r#"{"name": "@metamao/app", "version": "1.0.0", "description": "An app.", "dependencies": {"@metamao/node": "^1"}, "amendments": {"b.txt": {"unit": "@metamao/node", "base": "1.0.0"}, "a.txt": { "unit": "@metamao/node", "base": "1.4.2" }}}"#
+        );
+    }
+
+    #[test]
+    fn an_edit_that_cannot_be_made_safely_names_the_member_to_add() {
+        // Already declared, and a target that is not a dependency.
+        let error = declared(FULL, "config/wrangler.toml").unwrap_err();
+        assert!(error.contains("unchanged"), "{error}");
+        assert!(
+            error.contains(
+                r#""config/wrangler.toml": { "unit": "@metamao/node", "base": "1.4.2" }"#
+            ),
+            "{error}"
+        );
+        let text = with(r#""dependencies": {"@metamao/docker": "^1"}"#);
+        assert!(declared(&text, "a.txt").is_err());
+        // Text that is not the manifest's own.
+        let manifest = read_manifest(FULL).unwrap();
+        let declaration =
+            AmendmentDeclaration::new(identity("@metamao/node"), Version::parse("1.4.2").unwrap());
+        let path = RelativePath::parse("a.txt").unwrap();
+        assert!(declare_amendment("{}", &manifest, &path, &declaration).is_err());
+        assert!(declare_amendment("[]", &manifest, &path, &declaration).is_err());
     }
 
     #[test]

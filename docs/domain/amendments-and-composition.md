@@ -79,6 +79,20 @@ Amendments are created with `unit amend` and reconciled with `unit update`
   target unit and the **exact base version**. The declared version must equal
   the version of that unit in the
   [unit lock state](authoring-workflow.md#unit-lock-state--approved).
+  The declaration is a member of the top-level **`amendments`** map, keyed by
+  the path, whose value names the provider as `unit` and the base as `base`
+  (see
+  [manifest.md](manifest.md#serialization-of-dependencies-options-params-and-amendments--approved)):
+
+  ```jsonc
+  "amendments": {
+    "wrangler.toml.assemblr.tmpl": { "unit": "@metamao/cloudflare-worker", "base": "2.1.0" }
+  }
+  ```
+
+- A copy under `amendments/` that the manifest does not declare, and a
+  declaration whose copy does not exist, are errors: an undeclared copy has
+  no base, and a declared base without a copy amends nothing.
 - Amendments change **content only**. They do not delete, rename, or create
   files, and they do not change a file's executable bit; the provider's bit
   stands.
@@ -111,9 +125,6 @@ Amendments are created with `unit amend` and reconciled with `unit update`
 
 Open:
 
-- The manifest schema and syntax for declaring amendments. No earlier
-  experimental syntax, such as `extends` or a `merges` field, is canonical.
-  **OC-2.**
 - Behavior when a base's historical Git objects are unavailable. **OC-9.**
 - Whether conflicts between units' contributions in a consumer composition are
   resolved like conflicts with consumer modifications. **OC-47.**
@@ -219,6 +230,18 @@ Open:
 For unit authoring, composition output goes to `build/`, which is rebuilt from
 scratch and needs no reconciliation history (see
 [authoring-workflow.md](authoring-workflow.md#build--approved)).
+
+**Implemented so far.** A unit's build applies the unit's own amendments,
+whose providers resolve to the declared bases by construction of the
+[unit lock state](authoring-workflow.md#unit-lock-state--approved); with the
+base and the resolved version equal, the result is the rendered copy, and no
+change is derived. The cases that need the open decisions above fail
+explicitly and change nothing (standing default D2): a dependency whose
+published version declares amendments is not composed, and such a version is
+not indexed (see
+[registries-and-discovery.md](registries-and-discovery.md#invalid-versions-and-failed-sources--approved)),
+so no file has more than one amender yet, and no amendment is applied to a
+provider version other than its base.
 
 Consumer projects reconcile downstream modifications with three inputs: the
 **reconciliation base** (the previously materialized composition), **current**

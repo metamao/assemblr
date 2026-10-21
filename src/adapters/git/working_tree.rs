@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use super::object::EntryKind;
 use super::{
     FILE_LIMIT, GitError, GitErrorKind, GitRepository, ReadSrcError, SRC_ENTRY_LIMIT,
-    SRC_SIZE_LIMIT, SrcEntryError, SrcEntryErrorReason, src_path,
+    SRC_SIZE_LIMIT, SrcEntryError, SrcEntryErrorReason, UnitDirectory, src_path,
 };
 use crate::domain::{FileTree, RelativePath, UnitFile};
 
@@ -44,21 +44,37 @@ impl GitRepository {
     /// file is executable when the index records it so, and an untracked
     /// file is not.
     pub fn read_working_src(&self) -> Result<FileTree, ReadSrcError> {
+        self.read_working_files(UnitDirectory::Src)
+    }
+
+    /// Reads the working tree's `amendments/` copies, selected and read
+    /// exactly as [`read_working_src`](Self::read_working_src) reads `src/`.
+    pub fn read_working_amendments(&self) -> Result<FileTree, ReadSrcError> {
+        self.read_working_files(UnitDirectory::Amendments)
+    }
+
+    fn read_working_files(&self, directory: UnitDirectory) -> Result<FileTree, ReadSrcError> {
         let root = self.work_tree()?;
-        let listing = self.listing(&root, "src")?;
+        let listing = self.listing(&root, directory.as_str())?;
+        let prefix = format!("{directory}/");
+        let entry_error = |path: &str, reason| SrcEntryError {
+            directory,
+            path: path.to_owned(),
+            reason,
+        };
         let mut entries = Vec::new();
         let mut errors = Vec::new();
         let mut directories = BTreeSet::new();
         for (path, index) in &listing {
-            let Some(relative) = path.strip_prefix(b"src/") else {
-                // `src` itself is listed when it is not a directory.
-                return Err(ReadSrcError::SrcNotADirectory);
+            let Some(relative) = path.strip_prefix(prefix.as_bytes()) else {
+                // The directory itself is listed when it is not a directory.
+                return Err(ReadSrcError::NotADirectory(directory));
             };
             let display = String::from_utf8_lossy(relative).into_owned();
-            if let Some(directory) = relative.strip_suffix(b"/") {
+            if let Some(nested) = relative.strip_suffix(b"/") {
                 // Git lists a nested repository as a directory.
                 errors.push(entry_error(
-                    &String::from_utf8_lossy(directory),
+                    &String::from_utf8_lossy(nested),
                     SrcEntryErrorReason::NotARegularFile,
                 ));
                 continue;
@@ -90,11 +106,12 @@ impl GitRepository {
         }
         if listing.len() + directories.len() > SRC_ENTRY_LIMIT {
             return Err(ReadSrcError::TooManyEntries {
+                directory,
                 limit: SRC_ENTRY_LIMIT,
             });
         }
 
-        let src = root.join("src");
+        let src = root.join(directory.as_str());
         let mut checked = Directories::default();
         let mut files = Vec::new();
         let mut total: u64 = 0;
@@ -140,6 +157,7 @@ impl GitRepository {
         }
         if total > SRC_SIZE_LIMIT {
             return Err(ReadSrcError::TooLarge {
+                directory,
                 size: total,
                 limit: SRC_SIZE_LIMIT,
             });
@@ -164,31 +182,12 @@ impl GitRepository {
         }
         if total > SRC_SIZE_LIMIT {
             return Err(ReadSrcError::TooLarge {
+                directory,
                 size: total,
                 limit: SRC_SIZE_LIMIT,
             });
         }
         Ok(tree)
-    }
-
-    /// The paths under `directory` that the working tree would publish,
-    /// relative to the repository, sorted. Bytes that are not UTF-8 are
-    /// replaced with `U+FFFD`. A tracked file deleted from the working tree
-    /// is not listed.
-    pub fn working_paths(&self, directory: &str) -> Result<Vec<String>, GitError> {
-        let root = self.work_tree()?;
-        let listing = self.listing(&root, directory)?;
-        let mut paths: Vec<String> = listing
-            .keys()
-            .filter(|path| {
-                let path = String::from_utf8_lossy(path);
-                let path = path.strip_suffix('/').unwrap_or(&path);
-                fs::symlink_metadata(root.join(path)).is_ok()
-            })
-            .map(|path| String::from_utf8_lossy(path).into_owned())
-            .collect();
-        paths.sort();
-        Ok(paths)
     }
 
     /// The repository's top level, absolute: the directory it was opened
@@ -310,13 +309,6 @@ impl Directories {
             }
         }
         Ok(())
-    }
-}
-
-fn entry_error(path: &str, reason: SrcEntryErrorReason) -> SrcEntryError {
-    SrcEntryError {
-        path: path.to_owned(),
-        reason,
     }
 }
 

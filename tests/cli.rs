@@ -77,5 +77,10 @@ fn help_offers_only_implemented_commands() {
         .take_while(|line| !line.is_empty())
         .filter_map(|line| line.split_whitespace().next())
         .collect();
-    assert_eq!(commands, ["build", "help"], "{help}");
+    assert_eq!(commands, ["build", "amend", "help"], "{help}");
+
+    let output = assemblr(&["unit", "amend", "--help"]);
+    let help = self::stdout(&output);
+    assert!(help.contains("<FILE>"), "{help}");
+    assert!(help.contains("--unit <IDENTITY>"), "{help}");
 }
