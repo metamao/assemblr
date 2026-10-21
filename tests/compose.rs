@@ -58,13 +58,18 @@ impl Fixture {
     }
 
     fn assemblr(&self, dir: &Path, args: &[&str]) -> Output {
+        self.assemblr_with_global_config(dir, Path::new(NULL_DEVICE), args)
+    }
+
+    /// Runs `assemblr` with `global` as the user's Git configuration.
+    fn assemblr_with_global_config(&self, dir: &Path, global: &Path, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_assemblr"))
             .current_dir(dir)
             .env("ASSEMBLR_DATA_DIR", &self.data)
             .env("HOME", &self.home)
             .env("USERPROFILE", &self.home)
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", NULL_DEVICE)
+            .env("GIT_CONFIG_GLOBAL", global)
             .args(args)
             .output()
             .unwrap()
@@ -696,8 +701,45 @@ fn ignored_delivered_files_get_no_stored_base_and_a_warning() {
     // Nothing was staged.
     assert!(git(&project, &["diff", "--cached", "--name-only"]).is_empty());
 
-    // A project that ignores `.assemblr/` is warned that the base will not
-    // travel; a project outside any repository ignores nothing.
+    // The user's global excludes count too, which the scrubbed environment
+    // of a read would miss.
+    let global = fixture.dir.join("gitconfig");
+    let excludes = fixture.dir.join("global-ignores");
+    fs::write(&excludes, "*.secret\n").unwrap();
+    fs::write(
+        &global,
+        format!(
+            "[core]\n\texcludesFile = {}\n",
+            excludes.display().to_string().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+    let secret = fixture.repo("secret");
+    secret.write(
+        "manifest.jsonc",
+        &manifest("@acme/secret", "1.0.0", &[], ""),
+    );
+    secret.write("src/a.secret", "s\n");
+    secret.write("src/b.txt", "b\n");
+    secret.publish("1.0.0");
+    fixture.register(&secret);
+    let global_project = fixture.project("global", &[("@acme/secret", "^1")], "");
+    git(&global_project, &["init", "-q"]);
+    let output =
+        succeeds(fixture.assemblr_with_global_config(&global_project, &global, &["compose"]));
+    assert!(
+        stderr(&output).contains("warning: a.secret is ignored"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        lockfile(&global_project)["project"]["unbased"],
+        serde_json::json!(["a.secret"])
+    );
+
+    // A project that ignores `.assemblr/`, or one of its directories, is
+    // warned that the base will not travel; a project outside any
+    // repository ignores nothing.
     let other = fixture.project("other", &[("@acme/env", "^1")], "");
     git(&other, &["init", "-q"]);
     fs::write(other.join(".gitignore"), ".assemblr/\n").unwrap();
@@ -707,6 +749,28 @@ fn ignored_delivered_files_get_no_stored_base_and_a_warning() {
         "{}",
         stderr(&output)
     );
+    let objects = fixture.project("objects", &[("@acme/env", "^1")], "");
+    git(&objects, &["init", "-q"]);
+    fs::write(objects.join(".gitignore"), ".assemblr/objects/\n").unwrap();
+    let output = succeeds(fixture.compose(&objects));
+    assert!(
+        stderr(&output).contains(".assemblr/objects/ is ignored by the project's version control"),
+        "{}",
+        stderr(&output)
+    );
+
+    // An edited attributes file is restored when the base is written.
+    let edited = fixture.project("edited", &[("@acme/env", "^1")], "");
+    fs::create_dir(edited.join(".assemblr")).unwrap();
+    fs::write(edited.join(".assemblr/.gitattributes"), "* text=auto\n").unwrap();
+    let output = succeeds(fixture.compose(&edited));
+    assert!(
+        stderr(&output)
+            .contains("warning: .assemblr/.gitattributes had been edited and was restored"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(read(&edited.join(".assemblr/.gitattributes")), "* -text\n");
     let plain = fixture.project("plain", &[("@acme/env", "^1")], "");
     let output = succeeds(fixture.compose(&plain));
     assert!(!stderr(&output).contains("warning"), "{}", stderr(&output));

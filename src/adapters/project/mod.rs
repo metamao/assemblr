@@ -424,8 +424,8 @@ fn compose_with(
     // base is not stored, since the store is tracked.
     let path_texts: Vec<&str> = files.keys().map(RelativePath::as_str).collect();
     let mut probe = path_texts.clone();
-    let listing_relative = store.listing_relative(&identity);
-    probe.push(&listing_relative);
+    let directories_of_store = store.directories();
+    probe.extend(directories_of_store.iter().map(String::as_str));
     let ignored = match ignore::ignored(root, &probe) {
         Ok(ignored) => ignored,
         Err(error) => {
@@ -447,10 +447,13 @@ fn compose_with(
              not stored; a later composition cannot reconcile edits to it"
         ));
     }
-    if ignored.contains(&listing_relative) {
+    if let Some(directory) = directories_of_store
+        .iter()
+        .find(|directory| ignored.contains(*directory))
+    {
         notes.push(format!(
-            "{STATE_DIR}/ is ignored by the project's version control, so the reconciliation base \
-             will not travel with the project; a clone cannot reconcile later compositions"
+            "{directory} is ignored by the project's version control, so the reconciliation \
+             base will not travel with the project; a clone cannot reconcile later compositions"
         ));
     }
     let state = ReconciliationState::new(
@@ -507,6 +510,12 @@ fn compose_with(
     store
         .write_base(&snapshot, &stored)
         .map_err(|error| rejected(ComposeProblem::Store(error)))?;
+    if store.restored_attributes() {
+        notes.push(format!(
+            "{STATE_DIR}/.gitattributes had been edited and was restored; it keeps version \
+             control from converting the stored base"
+        ));
+    }
     let journal = Journal {
         files: files
             .keys()

@@ -50,13 +50,33 @@ const TEXT_LIMIT: u64 = 64 * 1024 * 1024;
 /// The store under `root/.assemblr`.
 pub(super) struct Store {
     dir: PathBuf,
+    /// Whether writing the base restored an edited attributes file.
+    restored_attributes: std::cell::Cell<bool>,
 }
 
 impl Store {
     pub(super) fn new(root: &Path) -> Self {
         Self {
             dir: root.join(STATE_DIR),
+            restored_attributes: std::cell::Cell::new(false),
         }
+    }
+
+    /// Whether [`write_base`](Self::write_base) restored
+    /// `.assemblr/.gitattributes`, which had been edited.
+    pub(super) fn restored_attributes(&self) -> bool {
+        self.restored_attributes.get()
+    }
+
+    /// The store's directories as `git check-ignore` must see them, with a
+    /// trailing slash, since a rule such as `.assemblr/objects/` matches
+    /// the directory only when it is named as one.
+    pub(super) fn directories(&self) -> [String; 3] {
+        [
+            format!("{STATE_DIR}/"),
+            format!("{STATE_DIR}/{OBJECTS}/"),
+            format!("{STATE_DIR}/{BASES}/"),
+        ]
     }
 
     fn blob_path(&self, blob: &BlobId) -> PathBuf {
@@ -66,12 +86,6 @@ impl Store {
 
     fn listing_path(&self, base: &BaseIdentity) -> PathBuf {
         self.dir.join(BASES).join(base.digits())
-    }
-
-    /// The path of the listing of `base`, relative to the project's top
-    /// level, as the project's version control sees it.
-    pub(super) fn listing_relative(&self, base: &BaseIdentity) -> String {
-        format!("{STATE_DIR}/{BASES}/{}", base.digits())
     }
 
     /// Writes `snapshot`'s listing and the blobs of `files`, the bytes of
@@ -101,6 +115,8 @@ impl Store {
                 Err(error) => return Err(io(&dir, error)),
             }
         }
+        // The attributes file is Assemblr's own: when it was edited, it is
+        // restored, since without it a checkout could convert the store.
         let attributes = self.dir.join(ATTRIBUTES);
         match fs::symlink_metadata(&attributes) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -108,7 +124,18 @@ impl Store {
                     .map_err(|error| io(&attributes, error))?;
             }
             Err(error) => return Err(io(&attributes, error)),
-            Ok(_) => {}
+            Ok(metadata) if metadata.is_file() => {
+                let current = fs::read(&attributes).map_err(|error| io(&attributes, error))?;
+                if current != ATTRIBUTES_TEXT.as_bytes() {
+                    let staged = self.dir.join(format!("{ATTRIBUTES}.new"));
+                    let _ = fs::remove_file(&staged);
+                    write_new(&staged, ATTRIBUTES_TEXT.as_bytes())
+                        .and_then(|()| fs::rename(&staged, &attributes))
+                        .map_err(|error| io(&attributes, error))?;
+                    self.restored_attributes.set(true);
+                }
+            }
+            Ok(_) => return Err(StoreError::NotADirectory(attributes)),
         }
         for (path, bytes) in files {
             let Some(file) = snapshot.files().get(*path) else {

@@ -224,9 +224,12 @@ with the consumer's own configuration and read-only, which delivered paths
 it ignores; a project in no repository ignores nothing. An ignored file is
 written to the project, but its content is not stored in the tracked base:
 the lock lists it as unbased, and a warning says a later composition cannot
-reconcile edits to it. When `.assemblr/` itself is ignored, a warning says
-the base will not travel with the project. Nothing is staged, and content
-is never scanned for secrets.
+reconcile edits to it. Whether a file is unbased is decided when it is
+materialized; a later change to the ignore rules does not move it between
+the two sets. When `.assemblr/` or one of its directories is ignored, a
+warning says the base will not travel with the project, and an edited
+`.assemblr/.gitattributes` is restored and reported. Nothing is staged, and
+content is never scanned for secrets.
 
 **Repeating `compose`.** On a project composed before, the stored base is
 verified against the lock first; a missing, corrupted, or unverifiable base

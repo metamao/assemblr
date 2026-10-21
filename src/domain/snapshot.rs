@@ -73,7 +73,9 @@ impl Snapshot {
     }
 
     /// The canonical listing: the header line, then one line per file,
-    /// `<mode> <blob> <path>`, in path order, each ended by `\n`.
+    /// `<mode> <blob> <path>`, in path order, each ended by `\n`. The path
+    /// is the last field, so a path holding spaces reads back whole; a
+    /// path never holds a line break (see [`RelativePath`]).
     pub fn listing(&self) -> String {
         let mut text = format!("{LISTING_HEADER}\n");
         for (path, file) in &self.files {
@@ -273,6 +275,15 @@ mod tests {
             Some(&a.identity())
         );
         assert_eq!(Snapshot::default().listing(), "assemblr-base-v1\n");
+    }
+
+    #[test]
+    fn paths_with_spaces_and_non_ascii_names_round_trip() {
+        let snapshot = snapshot(&[("docs/read me.md", "x", false), ("src/año.txt", "y", false)]);
+        let listing = snapshot.listing();
+        assert!(listing.contains(" docs/read me.md\n"), "{listing}");
+        assert!(listing.contains(" src/año.txt\n"), "{listing}");
+        assert_eq!(Snapshot::parse_listing(&listing).unwrap(), snapshot);
     }
 
     #[test]
