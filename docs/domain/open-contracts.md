@@ -4,7 +4,10 @@ This register lists every point in the domain documents that is not fully
 decided. It has three parts:
 
 - **[Unresolved contracts](#unresolved-contracts)**: product questions with no
-  decision yet. Each needs an owner decision before it is implemented.
+  decision yet. Each needs an owner decision to be settled. An
+  implementation may proceed on a recorded provisional decision only where
+  [AGENTS.md §1.1](../../AGENTS.md#11-decisions-autonomy-by-default-escalation-by-exception)
+  allows it.
 - **[Approved semantics with open details](#approved-semantics-with-open-details)**:
   the behavior is approved and normative, and implementations must conform to
   it. What remains open is the listed detail, such as syntax, formats,
@@ -15,9 +18,15 @@ decided. It has three parts:
 - **[Resolved contracts](#resolved-contracts)**: entries settled or superseded
   by a decision, kept so their numbers stay traceable.
 
-Implementations must not resolve any entry by assumption. Following a
-default the owner has accepted as **Recommended (provisional)** is not
-resolving by assumption. When a decision
+Implementations must not resolve any entry by assumption. Two things are
+not resolution by assumption: following a default the owner has accepted as
+**Recommended (provisional)**, and a **provisional decision** an agent makes
+within its delegated authority (AGENTS.md §1.1) and records in the
+autonomous decision log. A provisional decision is implemented behavior, not
+an approved contract: the entry stays open, the owner may revise the
+decision, and a decision that sets product direction, changes an approved
+statement, or commits a compatibility or integrity guarantee is never
+provisional and needs the owner. When a decision
 settles an entry, update the relevant domain document in the same change, then
 mark the entry **Resolved** here with a link to the decision. Numbers are
 stable and never reused.
@@ -49,9 +58,10 @@ How the status of a statement affects implementation:
   by the owner to guide Alpha implementation, which may follow it. It is not a
   final decision: the entry stays open until the owner settles it, and having
   a recommended implementation never closes an entry by itself.
-- The **open details** of an entry stay open until decided. They are decided
+- The **open details** of an entry stay open until decided. They are settled
   by the owner when they affect user-visible behavior, syntax, or file formats,
-  and by engineering otherwise.
+  and by engineering otherwise. Until then an agent may implement a recorded
+  provisional decision under AGENTS.md §1.1.
 - A recommendation the owner has **not** accepted, for example from research
   or a review, is not a requirement.
 
