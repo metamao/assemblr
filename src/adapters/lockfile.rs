@@ -207,6 +207,10 @@ pub enum PublishedLockfileError {
 impl fmt::Display for PublishedLockfileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // These two name the file themselves.
+            Self::Read(
+                error @ (ReadFileError::NotAFile { .. } | ReadFileError::TooLarge { .. }),
+            ) => error.fmt(f),
             Self::Read(error) => write!(f, "could not read `{LOCKFILE}`: {error}"),
             Self::Invalid(detail) => write!(f, "`{LOCKFILE}` is not a valid lockfile: {detail}"),
         }
