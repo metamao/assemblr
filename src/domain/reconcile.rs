@@ -83,8 +83,6 @@ pub enum Action {
 pub enum Disagreement {
     /// Both sides changed the content, and the changes cannot be merged.
     BothChanged(Mergeability),
-    /// Both sides changed the mode, differently.
-    ModeChanged,
     /// The composition removes a file the project edited.
     RemovedButEdited,
     /// The project deleted a file the composition changes.
@@ -201,14 +199,13 @@ fn decide(
     let Some(current) = current else {
         return Err(Disagreement::DeletedButChanged);
     };
-    let mode = match three_way(
-        &base.is_executable(),
-        &current.is_executable(),
-        &incoming.is_executable(),
-    ) {
-        Change::Agreed | Change::ByCurrent => current.is_executable(),
-        Change::ByIncoming => incoming.is_executable(),
-        Change::Both => return Err(Disagreement::ModeChanged),
+    // A bit has one other value, so two sides that both change it agree:
+    // the composition's change wins when it made one, else the project's
+    // mode stands.
+    let mode = if incoming.is_executable() == base.is_executable() {
+        current.is_executable()
+    } else {
+        incoming.is_executable()
     };
     match three_way(base.blob(), current.blob(), incoming.blob()) {
         Change::Agreed | Change::ByCurrent => Ok(if mode == current.is_executable() {
@@ -380,13 +377,12 @@ mod tests {
             action(b, Some(("base", true)), Some(("theirs", false))),
             Ok(Action::Write { executable: true })
         );
-        // Both change the content, the project the mode too.
+        // Both change the content, the project the mode too; and both
+        // change the mode, which for a bit is the same change.
         assert_eq!(
             action(b, Some(("mine", true)), Some(("theirs", false))),
             Ok(Action::Merge { executable: true })
         );
-        // Both change the mode differently: impossible for a bit unless
-        // both change it from the base, which is the same change.
         assert_eq!(
             action(b, Some(("mine", true)), Some(("theirs", true))),
             Ok(Action::Merge { executable: true })

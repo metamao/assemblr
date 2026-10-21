@@ -1477,9 +1477,6 @@ impl fmt::Display for FileConflict {
             FileConflictKind::Disagreement(Disagreement::BothChanged(Mergeability::Mergeable)) => {
                 f.write_str("the project and the composition both changed it")
             }
-            FileConflictKind::Disagreement(Disagreement::ModeChanged) => {
-                f.write_str("the project and the composition set its executable bit differently")
-            }
             FileConflictKind::Disagreement(Disagreement::RemovedButEdited) => {
                 f.write_str("the composition no longer delivers it, and the project edited it")
             }
