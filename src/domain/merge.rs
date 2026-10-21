@@ -334,10 +334,24 @@ fn add(path: &Path, value: &Value, after: Option<String>, out: &mut Derived) {
 }
 
 /// An operation shared by the amenders that made it, in amender order.
+/// `A` names a contributor: a unit that amends a file, or, in a consumer
+/// project's reconciliation, one side of the three-way merge.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Combined {
+pub struct Combined<A = UnitIdentity> {
     operation: Operation,
-    amenders: Vec<UnitIdentity>,
+    amenders: Vec<A>,
+}
+
+impl<A> Combined<A> {
+    /// The operation.
+    pub fn operation(&self) -> &Operation {
+        &self.operation
+    }
+
+    /// Who makes it, in contributor order.
+    pub fn amenders(&self) -> &[A] {
+        &self.amenders
+    }
 }
 
 /// Combines the operations of every amender. `sets` holds each amender's
@@ -345,10 +359,10 @@ pub struct Combined {
 /// they are given in. Equal operations on one path are one; different ones
 /// are a conflict, as is an edit inside a value another amender removes or
 /// replaces with a scalar or a list.
-pub fn combine(
-    sets: &BTreeMap<UnitIdentity, Vec<Operation>>,
-) -> Result<Vec<Combined>, Vec<Conflict>> {
-    let mut by_path: BTreeMap<Path, Vec<(UnitIdentity, &Operation)>> = BTreeMap::new();
+pub fn combine<A: Ord + Clone>(
+    sets: &BTreeMap<A, Vec<Operation>>,
+) -> Result<Vec<Combined<A>>, Vec<Conflict<A>>> {
+    let mut by_path: BTreeMap<Path, Vec<(A, &Operation)>> = BTreeMap::new();
     for (amender, operations) in sets {
         for operation in operations {
             by_path
@@ -360,7 +374,7 @@ pub fn combine(
     let mut combined = Vec::new();
     let mut conflicts = Vec::new();
     for (path, operations) in &by_path {
-        let mut distinct: Vec<Combined> = Vec::new();
+        let mut distinct: Vec<Combined<A>> = Vec::new();
         for (amender, operation) in operations {
             // Two `Ensure`s differ at most in their anchor, which is not a
             // conflict: the object is shared, its members are placed by
@@ -410,7 +424,7 @@ pub fn combine(
     }
     // A removed value, or one replaced by something that is not an object,
     // cannot also receive another amender's edits inside it.
-    let replacing: Vec<&Combined> = combined
+    let replacing: Vec<&Combined<A>> = combined
         .iter()
         .filter(|entry| match &entry.operation.change {
             ValueChange::Remove(_) => true,
@@ -475,12 +489,15 @@ pub struct Plan {
 /// Checks the combined operations against `target`, the provider's file,
 /// and turns them into edits. A value that is not what an operation
 /// expects is a conflict: the file changed under the amendment.
-pub fn plan(target: &Value, mut operations: Vec<Combined>) -> Result<Plan, Vec<Conflict>> {
+pub fn plan<A: Ord + Clone>(
+    target: &Value,
+    mut operations: Vec<Combined<A>>,
+) -> Result<Plan, Vec<Conflict<A>>> {
     // Parents before members; within one parent, by anchor, then by the
     // first amender, then by key, so that the order never depends on the
     // order the operations were derived in.
     operations.sort_by(|a, b| {
-        let key = |entry: &Combined| {
+        let key = |entry: &Combined<A>| {
             (
                 entry.operation.path.len(),
                 entry.operation.path[..entry.operation.path.len().saturating_sub(1)].to_vec(),
@@ -599,50 +616,48 @@ pub fn plan(target: &Value, mut operations: Vec<Combined>) -> Result<Plan, Vec<C
 
 /// Why amendments cannot be combined, at one path.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Conflict {
+pub struct Conflict<A = UnitIdentity> {
     path: Path,
-    kind: ConflictKind,
+    kind: ConflictKind<A>,
 }
 
-impl Conflict {
+impl<A> Conflict<A> {
     /// The path of the contested value.
     pub fn path(&self) -> &[String] {
         &self.path
     }
 
     /// What is in conflict.
-    pub fn kind(&self) -> &ConflictKind {
+    pub fn kind(&self) -> &ConflictKind<A> {
         &self.kind
     }
 }
 
 /// The kinds of conflict.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ConflictKind {
+pub enum ConflictKind<A = UnitIdentity> {
     /// Amenders make different changes to one value. Each change with the
     /// amenders that make it, in amender order.
-    Different {
-        changes: Vec<(Vec<UnitIdentity>, ValueChange)>,
-    },
+    Different { changes: Vec<(Vec<A>, ValueChange)> },
     /// Amenders remove or replace a value that other amenders edit inside.
     EditedInside {
-        amenders: Vec<UnitIdentity>,
+        amenders: Vec<A>,
         change: ValueChange,
         inside: Path,
-        by: Vec<UnitIdentity>,
+        by: Vec<A>,
     },
     /// The provider's file does not hold what the change expects.
     Unexpected {
-        amenders: Vec<UnitIdentity>,
+        amenders: Vec<A>,
         change: ValueChange,
         /// What the file holds there, or `None` for nothing.
         found: Option<Value>,
     },
 }
 
-impl fmt::Display for Conflict {
+impl<A: fmt::Display> fmt::Display for Conflict<A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let names = |amenders: &[UnitIdentity]| {
+        let names = |amenders: &[A]| {
             amenders
                 .iter()
                 .map(ToString::to_string)
@@ -693,7 +708,7 @@ impl fmt::Display for Conflict {
     }
 }
 
-impl std::error::Error for Conflict {}
+impl<A: fmt::Debug + fmt::Display> std::error::Error for Conflict<A> {}
 
 /// The formats several amendments of one file can be combined in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -14,6 +14,7 @@ mod parameter;
 mod path;
 mod project;
 mod provenance;
+mod reconcile;
 mod registry;
 mod resolution;
 mod snapshot;
@@ -44,6 +45,10 @@ pub use parameter::{
 pub use path::{RelativePath, RelativePathError, RelativePathErrorReason};
 pub use project::{Project, ReconciliationState};
 pub use provenance::{ObjectId, Provenance};
+pub use reconcile::{
+    Action, Contributor, Current, Disagreement, Mergeability, Reconciliation, merge_values,
+    reconcile,
+};
 pub use registry::{
     Change, Excluded, IntegrityChange, InvalidIndex, ObservedTag, ObservedVersion, RegisteredUnit,
     RegistryError, RegistryIndex, SourceReference, declared_identity,

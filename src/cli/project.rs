@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use assemblr::adapters::{
-    BuildProblem, ComposeFailure, ComposeProblem, ComposeRecovery, Composed, InitProjectFailure,
-    Registry, StoreError, WriteStep, compose_project, init_project,
+    BuildProblem, ComposeFailure, ComposeProblem, ComposeRecovery, Composed, FileChange,
+    InitProjectFailure, Registry, StoreError, WriteStep, compose_project, init_project,
 };
 use assemblr::domain::{LockChange, LockError, ResolutionError, UnitIdentity};
 use clap::Args;
@@ -112,15 +112,57 @@ fn report(composed: &Composed) {
         .map(|(identity, change)| describe(identity, change))
         .collect();
     if !changes.is_empty() {
-        eprintln!("note: created assemblr-lock.json: {}", changes.join(", "));
+        eprintln!(
+            "note: {} assemblr-lock.json: {}",
+            if composed.first() {
+                "created"
+            } else {
+                "updated"
+            },
+            changes.join(", ")
+        );
     }
+    if composed.first() {
+        println!(
+            "Composed {} unit{} into {} file(s); the reconciliation base {} is stored in \
+             .assemblr/.",
+            composed.units(),
+            if composed.units() == 1 { "" } else { "s" },
+            composed.files(),
+            composed.base()
+        );
+        return;
+    }
+    let count = |change: FileChange| {
+        composed
+            .paths()
+            .values()
+            .filter(|found| **found == change)
+            .count()
+    };
     println!(
-        "Composed {} unit{} into {} file(s); the reconciliation base {} is stored in .assemblr/.",
+        "Reconciled the project with {} unit{} ({} file(s)): created {}, modified {}, merged {}, \
+         removed {}; the reconciliation base {} is stored in .assemblr/.",
         composed.units(),
         if composed.units() == 1 { "" } else { "s" },
         composed.files(),
+        count(FileChange::Created),
+        count(FileChange::Modified),
+        count(FileChange::Merged),
+        count(FileChange::Removed),
         composed.base()
     );
+    for (path, change) in composed.paths() {
+        println!(
+            "  {} {path}",
+            match change {
+                FileChange::Created => "created",
+                FileChange::Modified => "modified",
+                FileChange::Merged => "merged",
+                FileChange::Removed => "removed",
+            }
+        );
+    }
 }
 
 fn report_recovered(recovered: &ComposeRecovery) {
@@ -129,10 +171,15 @@ fn report_recovered(recovered: &ComposeRecovery) {
             "note: completed a composition that was interrupted earlier, after its files and \
              lock were written: removed its journal"
         ),
-        ComposeRecovery::Reverted { removed, kept } => eprintln!(
+        ComposeRecovery::Reverted {
+            removed,
+            restored,
+            kept,
+        } => eprintln!(
             "note: reverted a composition that was interrupted earlier: removed {} file(s) it \
-             had written{}",
+             had created, restored {} it had changed or removed{}",
             removed.len(),
+            restored.len(),
             if kept.is_empty() {
                 String::new()
             } else {
@@ -162,15 +209,15 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
     let problems = match failure {
         ComposeFailure::Write { step, .. } => {
             return match step {
-                WriteStep::Store | WriteStep::Journal => {
-                    "the project's files were not written; fix the problem and run `assemblr \
+                WriteStep::Store | WriteStep::Previous | WriteStep::Journal => {
+                    "the project's files were not changed; fix the problem and run `assemblr \
                      compose` again"
                         .to_owned()
                 }
                 WriteStep::File(_) | WriteStep::Lock => "the composition is recorded in \
                                                          .assemblr/journal.json; the next \
                                                          `assemblr compose` reverts what was \
-                                                         written and starts over"
+                                                         changed and starts over"
                     .to_owned(),
                 WriteStep::Finish => "the composition is complete except for its journal; the \
                                       next `assemblr compose` removes it"
@@ -196,9 +243,10 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
              them"
                 .to_owned(),
         ),
-        ComposeProblem::Changed { .. } => Some(
-            "revert assemblr.jsonc to the composed declaration, or wait for the composition \
-             of changes, which a later increment adds"
+        ComposeProblem::Conflicts(_) => Some(
+            "for each file, make the project's content the composed one or restore the \
+             composed content, or change the declaration; resolving conflicts in place is a \
+             later increment"
                 .to_owned(),
         ),
         ComposeProblem::Base(StoreError::Missing(_)) => Some(

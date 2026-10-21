@@ -1,19 +1,21 @@
-//! Consumer projects: `assemblr init` and the first `assemblr compose`
-//! (see `docs/domain/consumer-projects.md` and
-//! `docs/adr/0016-consumer-compose.md`).
+//! Consumer projects: `assemblr init` and `assemblr compose` (see
+//! `docs/domain/consumer-projects.md`, `docs/adr/0016-consumer-compose.md`,
+//! and `docs/adr/0017-consumer-reconciliation.md`).
 //!
 //! `init` creates `assemblr.jsonc`, the editable declaration of the
 //! project's explicit selections and their options, and nothing else: no
 //! Git repository, no files, no commands run. `compose` resolves the
 //! declared units from the local registry under the project's lock,
 //! composes and renders their files as a unit build does with the project
-//! as the root, and materializes them into the project together with the
-//! lock, which records the resolved versions and the reconciliation
-//! state, and the stored reconciliation base. Everything is decided before
-//! anything is written, the writes are journaled so that an interrupted
-//! composition is reverted by the next one, and a second composition that
-//! would change nothing changes nothing. Evolving a composition that is
-//! already materialized is not supported yet and is refused explicitly.
+//! as the root, and reconciles the project with them three-way: the
+//! stored reconciliation base, what the project holds now, and the
+//! incoming composition decide each path, so that the consumer's edits
+//! stay and the composition's changes arrive, and a path both sides
+//! changed is merged when its format allows it and refused otherwise.
+//! Everything is decided before anything is written, the writes are
+//! journaled with the previous content of what they replace so that an
+//! interrupted composition is completed or reverted by the next one, and
+//! a composition that would change nothing changes nothing.
 
 mod ignore;
 mod store;
@@ -26,16 +28,18 @@ use std::path::{Path, PathBuf};
 
 use ignore::IgnoreError;
 pub use store::StoreError;
-use store::{Journal, STATE_DIR, Store, write_new};
+use store::{Journal, JournalEntry, STATE_DIR, Store, write_new};
 
 use super::build::{BuildProblem, render_files, resolve_graph};
 use super::git::MANIFEST_LIMIT;
 use super::lockfile::{self, LOCKFILE, Lockfile, LockfileError, serialize_lockfile};
 use super::manifest::{ReadManifestError, read_project};
+use super::merge::{ReconcileFailure, reconcile_json};
 use super::registry::Registry;
 use crate::domain::{
-    BaseIdentity, LockChange, ReconciliationState, RelativePath, Root, Snapshot, SnapshotFile,
-    UnitFile, UnitIdentity, compose,
+    Action, BaseIdentity, BlobId, Conflict, Contributor, Current, Disagreement, LockChange,
+    MergeFormat, Mergeability, ReconciliationState, RelativePath, Root, Snapshot, SnapshotFile,
+    UnitFile, UnitIdentity, compose, reconcile,
 };
 
 /// The project's declaration, at its top level.
@@ -203,6 +207,7 @@ pub fn compose_project(root: &Path, registry: &Registry) -> Result<Composed, Com
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
     Store,
+    Previous,
     Journal,
     Files,
     Lock,
@@ -299,13 +304,22 @@ fn compose_with(
         return Err(rejected_all(problems));
     };
     // The stored base is verified before anything else happens to a
-    // project that was composed before.
-    if let Some((_, state)) = &previous {
-        if let Err(error) = store.verify_base(state.base(), state.unbased()) {
-            problems.push(ComposeProblem::Base(error));
-            return Err(rejected_all(problems));
-        }
-    }
+    // project that was composed before. A first composition has an empty
+    // base: every file is new.
+    let base = match &previous {
+        Some((_, state)) => match store.verify_base(state.base(), state.unbased()) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                problems.push(ComposeProblem::Base(error));
+                return Err(rejected_all(problems));
+            }
+        },
+        None => Snapshot::default(),
+    };
+    let previously_unbased: BTreeSet<RelativePath> = previous
+        .as_ref()
+        .map(|(_, state)| state.unbased().clone())
+        .unwrap_or_default();
     let previous_lock = previous
         .as_ref()
         .map(|(lock, _)| lock.clone())
@@ -384,7 +398,7 @@ fn compose_with(
     let identity = snapshot.identity();
 
     // A project composed before: nothing to do when the composition is the
-    // one materialized; otherwise reconciling it is item 14's work.
+    // one materialized, whatever the consumer did to its files since.
     if let Some((_, state)) = &previous {
         if !problems.is_empty() {
             return Err(rejected_all(problems));
@@ -394,34 +408,141 @@ fn compose_with(
                 units: resolved.lock.units().len(),
                 files: 0,
                 changes: BTreeMap::new(),
+                paths: BTreeMap::new(),
                 base: identity,
                 unbased: BTreeSet::new(),
                 notes,
                 recovered: recovered.clone(),
                 unchanged: true,
+                first: false,
             });
         }
-        let changed = state
-            .managed()
-            .symmetric_difference(&files.keys().cloned().collect())
-            .count();
-        problems.push(ComposeProblem::Changed {
-            base: state.base().clone(),
-            incoming: identity,
-            paths: changed,
-        });
-        return Err(rejected_all(problems));
     }
 
-    // A first composition: nothing of it may exist yet.
-    let (existing, mut directories) = (existing_paths(root, files.keys()), Vec::new());
+    // What the project holds at the base's paths, and what to do at every
+    // path of the base and the incoming composition.
+    let current = match read_current(root, &base, &snapshot) {
+        Ok(current) => current,
+        Err(problem) => {
+            problems.push(problem);
+            return Err(rejected_all(problems));
+        }
+    };
+    let compared: BTreeMap<RelativePath, Current> = current
+        .iter()
+        .map(|(path, file)| (path.clone(), file.compared.clone()))
+        .collect();
+    let mergeable = |path: &RelativePath| {
+        if previously_unbased.contains(path) {
+            Mergeability::BaseNotStored
+        } else if MergeFormat::of_path(path).is_none() {
+            Mergeability::Format
+        } else {
+            Mergeability::Mergeable
+        }
+    };
+    let reconciliation = reconcile(&base, &compared, &snapshot, &mergeable);
+    let mut conflicts: Vec<FileConflict> = reconciliation
+        .disagreements()
+        .iter()
+        .map(|(path, disagreement)| FileConflict {
+            path: path.clone(),
+            kind: FileConflictKind::Disagreement(disagreement.clone()),
+        })
+        .collect();
+    let mut changes: BTreeMap<RelativePath, Change> = BTreeMap::new();
+    let mut created = Vec::new();
+    for (path, action) in reconciliation.actions() {
+        let incoming = files.get(path);
+        let held = current.get(path);
+        match (action, incoming, held) {
+            (Action::Create, Some(file), _) => {
+                created.push(path.clone());
+                changes.insert(path.clone(), Change::Create(file.clone()));
+            }
+            (Action::Write { executable }, Some(file), Some(held)) => {
+                let mut bytes = file.contents().to_vec();
+                if held.crlf {
+                    bytes = with_crlf(&bytes);
+                    notes.push(format!(
+                        "{path} has CRLF line endings in the project, so the composed content \
+                         was written with CRLF line endings too"
+                    ));
+                }
+                changes.insert(
+                    path.clone(),
+                    Change::Modify {
+                        file: UnitFile::new(bytes, *executable),
+                        previous: held.bytes.clone(),
+                        previous_executable: held.executable,
+                        merged: false,
+                    },
+                );
+            }
+            (Action::Mode { executable }, _, Some(held)) => {
+                changes.insert(
+                    path.clone(),
+                    Change::Modify {
+                        file: UnitFile::new(held.bytes.clone(), *executable),
+                        previous: held.bytes.clone(),
+                        previous_executable: held.executable,
+                        merged: false,
+                    },
+                );
+            }
+            (Action::Merge { executable }, Some(file), Some(held)) => {
+                match merge_file(&store, &base, path, held, file) {
+                    Ok(bytes) => {
+                        changes.insert(
+                            path.clone(),
+                            Change::Modify {
+                                file: UnitFile::new(bytes, *executable),
+                                previous: held.bytes.clone(),
+                                previous_executable: held.executable,
+                                merged: true,
+                            },
+                        );
+                    }
+                    Err(kind) => conflicts.push(FileConflict {
+                        path: path.clone(),
+                        kind,
+                    }),
+                }
+            }
+            (Action::Remove, _, Some(held)) => {
+                changes.insert(
+                    path.clone(),
+                    Change::Remove {
+                        previous: held.bytes.clone(),
+                        previous_executable: held.executable,
+                    },
+                );
+            }
+            (Action::Keep, _, None) if base.files().contains_key(path) => {
+                notes.push(format!(
+                    "{path} was deleted in the project and the composition does not change it; \
+                     it stays deleted"
+                ));
+            }
+            _ => {}
+        }
+    }
+    conflicts.sort_by(|a, b| a.path.cmp(&b.path));
+    if !conflicts.is_empty() {
+        problems.push(ComposeProblem::Conflicts(conflicts));
+    }
+
+    // Nothing of a created file may exist yet.
+    let (existing, mut directories) = (existing_paths(root, created.iter()), Vec::new());
     match existing {
         Ok(found) if found.is_empty() => {}
         Ok(found) => problems.push(ComposeProblem::Existing(found)),
         Err(problem) => problems.push(problem),
     }
     // Which delivered files the project's version control ignores: their
-    // base is not stored, since the store is tracked.
+    // base is not stored, since the store is tracked. The rules are read
+    // at every composition: a file the consumer ignored since is no longer
+    // stored, and one no longer ignored is stored from now on.
     let path_texts: Vec<&str> = files.keys().map(RelativePath::as_str).collect();
     let mut probe = path_texts.clone();
     let directories_of_store = store.directories();
@@ -442,6 +563,9 @@ fn compose_with(
         .cloned()
         .collect();
     for path in &unbased {
+        if previously_unbased.contains(path) {
+            continue;
+        }
         notes.push(format!(
             "{path} is ignored by the project's version control, so its reconciliation base is \
              not stored; a later composition cannot reconcile edits to it"
@@ -467,7 +591,7 @@ fn compose_with(
             error,
         })
     })?;
-    for path in files.keys() {
+    for path in &created {
         let mut segments: Vec<&str> = path.segments().collect();
         segments.pop();
         let mut directory = String::new();
@@ -489,6 +613,7 @@ fn compose_with(
     // Writing (see `apply`).
     let application = Application {
         files: &files,
+        changes: &changes,
         snapshot: &snapshot,
         unbased: &unbased,
         lock_bytes: &lock_bytes,
@@ -498,28 +623,257 @@ fn compose_with(
         ComposeFailure::Rejected { problems, .. } => rejected_all(problems),
         write => write,
     })?;
-    if restored {
+    for name in restored {
         notes.push(format!(
-            "{STATE_DIR}/.gitattributes had been edited and was restored; it keeps version \
-             control from converting the stored base"
+            "{STATE_DIR}/{name} had been edited and was restored; it keeps version control from \
+             {}",
+            if name == ".gitattributes" {
+                "converting the stored base"
+            } else {
+                "committing the journal and the previous content of a composition in progress"
+            }
         ));
     }
     drop(guard);
+    let paths = changes
+        .iter()
+        .map(|(path, change)| {
+            let change = match change {
+                Change::Create(_) => FileChange::Created,
+                Change::Modify { merged: true, .. } => FileChange::Merged,
+                Change::Modify { .. } => FileChange::Modified,
+                Change::Remove { .. } => FileChange::Removed,
+            };
+            (path.clone(), change)
+        })
+        .collect();
     Ok(Composed {
         units: resolved.lock.units().len(),
         files: files.len(),
         changes: resolved.resolution.changes().clone(),
+        paths,
         base: identity,
         unbased,
         notes,
         recovered: recovered.clone(),
         unchanged: false,
+        first: previous.is_none(),
     })
+}
+
+/// A file of the project, as read for reconciliation.
+struct CurrentFile {
+    /// Its bytes, as they are.
+    bytes: Vec<u8>,
+    /// Its executable bit, or the base's where the file system has none.
+    executable: bool,
+    /// What it is compared as.
+    compared: Current,
+    /// Whether it is the base's or the incoming content with CRLF line
+    /// endings, which a checkout can produce: it counts as unchanged, and
+    /// what is written to it keeps its line endings.
+    crlf: bool,
+}
+
+/// Reads what the project holds at every path of `base`. The incoming
+/// composition's other paths are new, and what may exist there is checked
+/// as existing content.
+fn read_current(
+    root: &Path,
+    base: &Snapshot,
+    incoming: &Snapshot,
+) -> Result<BTreeMap<RelativePath, CurrentFile>, ComposeProblem> {
+    let mut current = BTreeMap::new();
+    for (path, file) in base.files() {
+        let target = root.join(path.as_str());
+        let other = CurrentFile {
+            bytes: Vec::new(),
+            executable: false,
+            compared: Current::Other,
+            crlf: false,
+        };
+        // The directories on the way must be real ones: a symbolic link
+        // among them would take a read, and later a write, out of the
+        // project.
+        let mut prefix = root.to_owned();
+        let mut segments: Vec<&str> = path.segments().collect();
+        segments.pop();
+        let mut through_link = false;
+        for segment in segments {
+            prefix.push(segment);
+            match fs::symlink_metadata(&prefix) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => {
+                    through_link = true;
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                Err(error) => {
+                    return Err(ComposeProblem::Io {
+                        path: prefix,
+                        error,
+                    });
+                }
+            }
+        }
+        if through_link {
+            current.insert(path.clone(), other);
+            continue;
+        }
+        let metadata = match fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(ComposeProblem::Io {
+                    path: target,
+                    error,
+                });
+            }
+        };
+        if !metadata.is_file() {
+            current.insert(path.clone(), other);
+            continue;
+        }
+        let bytes = fs::read(&target).map_err(|error| ComposeProblem::Io {
+            path: target.clone(),
+            error,
+        })?;
+        let executable = executable_bit(&metadata, file.is_executable());
+        let known = |blob: &BlobId| {
+            *file.blob() == *blob
+                || incoming
+                    .files()
+                    .get(path)
+                    .is_some_and(|incoming| incoming.blob() == blob)
+        };
+        let raw = BlobId::of(&bytes);
+        let (blob, crlf) = if known(&raw) {
+            (raw, false)
+        } else {
+            match without_crlf(&bytes).map(|text| BlobId::of(&text)) {
+                Some(normalized) if known(&normalized) => (normalized, true),
+                _ => (raw, false),
+            }
+        };
+        current.insert(
+            path.clone(),
+            CurrentFile {
+                bytes,
+                executable,
+                compared: Current::File(SnapshotFile::from_blob(blob, executable)),
+                crlf,
+            },
+        );
+    }
+    Ok(current)
+}
+
+#[cfg(unix)]
+fn executable_bit(metadata: &fs::Metadata, _base: bool) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+/// Where the file system has no executable bit, the file's mode is the
+/// base's: the consumer cannot have changed it.
+#[cfg(not(unix))]
+fn executable_bit(_metadata: &fs::Metadata, base: bool) -> bool {
+    base
+}
+
+/// `bytes` with every CRLF line ending as LF, when `bytes` is text whose
+/// line endings are all CRLF; `None` otherwise.
+fn without_crlf(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.contains(&0) || !bytes.contains(&b'\r') {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => {
+                out.push(b'\n');
+                index += 2;
+            }
+            b'\r' | b'\n' => return None,
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// `bytes` with every LF line ending as CRLF, when `bytes` has no CR.
+fn with_crlf(bytes: &[u8]) -> Vec<u8> {
+    if bytes.contains(&b'\r') {
+        return bytes.to_vec();
+    }
+    let mut out = Vec::with_capacity(bytes.len() + bytes.len() / 16);
+    for &byte in bytes {
+        if byte == b'\n' {
+            out.push(b'\r');
+        }
+        out.push(byte);
+    }
+    out
+}
+
+/// Merges the incoming change to `path` into the project's file.
+fn merge_file(
+    store: &Store,
+    base: &Snapshot,
+    path: &RelativePath,
+    held: &CurrentFile,
+    incoming: &UnitFile,
+) -> Result<Vec<u8>, FileConflictKind> {
+    let Some(base_file) = base.files().get(path) else {
+        return Err(FileConflictKind::Unmergeable("it has no base".to_owned()));
+    };
+    let base_bytes = store
+        .read_blob(base_file.blob())
+        .map_err(|error| FileConflictKind::Unmergeable(error.to_string()))?;
+    let text = |bytes: &[u8], what: &str| {
+        std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| FileConflictKind::Unmergeable(format!("{what} is not UTF-8 text")))
+    };
+    let base_text = text(&base_bytes, "its base")?;
+    let current_text = text(&held.bytes, "the project's file")?;
+    let incoming_text = text(incoming.contents(), "the composed file")?;
+    match reconcile_json(&base_text, &current_text, &incoming_text) {
+        Ok(text) => Ok(text.into_bytes()),
+        Err(ReconcileFailure::Conflicts(conflicts)) => Err(FileConflictKind::Values(conflicts)),
+        Err(other) => Err(FileConflictKind::Unmergeable(other.to_string())),
+    }
+}
+
+/// What a composition does to one file of the project.
+enum Change {
+    /// Creates it.
+    Create(UnitFile),
+    /// Replaces its content or its mode; `merged` when the content is the
+    /// merge of the project's and the composition's changes.
+    Modify {
+        file: UnitFile,
+        previous: Vec<u8>,
+        previous_executable: bool,
+        merged: bool,
+    },
+    /// Removes it.
+    Remove {
+        previous: Vec<u8>,
+        previous_executable: bool,
+    },
 }
 
 /// What a composition writes into the project.
 struct Application<'a> {
+    /// The composed files, the next reconciliation base.
     files: &'a BTreeMap<RelativePath, UnitFile>,
+    /// What changes in the project, by path.
+    changes: &'a BTreeMap<RelativePath, Change>,
     snapshot: &'a Snapshot,
     unbased: &'a BTreeSet<RelativePath>,
     lock_bytes: &'a [u8],
@@ -528,19 +882,21 @@ struct Application<'a> {
 }
 
 /// Writes `application` into the project at `root`: the store first,
-/// content-addressed, so a leftover is harmless; then the journal; then
-/// the directories and files; then the lock; then the journal's removal.
-/// Returns whether the store's attributes file had to be restored. A
-/// failure before the journal leaves the project untouched; after it, the
-/// journal records the composition for [`recover`].
+/// content-addressed, so a leftover is harmless; then the previous content
+/// of the files that change, then the journal; then the directories and
+/// the file changes; then the lock; then the journal's removal. Returns
+/// the store's own files that had to be restored. A failure before the
+/// journal leaves the project untouched; after it, the journal records the
+/// composition for [`recover`].
 fn apply(
     root: &Path,
     store: &Store,
     application: &Application<'_>,
     fault: &mut dyn FnMut(Step) -> io::Result<()>,
-) -> Result<bool, ComposeFailure> {
+) -> Result<Vec<&'static str>, ComposeFailure> {
     let Application {
         files,
+        changes,
         snapshot,
         unbased,
         lock_bytes,
@@ -562,12 +918,43 @@ fn apply(
     store
         .write_base(snapshot, &stored)
         .map_err(|error| rejected(ComposeProblem::Store(error)))?;
+    if let Err(error) = fault(Step::Previous) {
+        return Err(write_failed(WriteStep::Previous, error));
+    }
+    let mut entries = Vec::new();
+    for (path, change) in changes {
+        let entry = match change {
+            Change::Create(file) => JournalEntry::Create {
+                blob: BlobId::of(file.contents()),
+            },
+            Change::Modify {
+                file,
+                previous,
+                previous_executable,
+                ..
+            } => JournalEntry::Modify {
+                blob: BlobId::of(file.contents()),
+                executable: file.is_executable(),
+                previous: store
+                    .save_previous(previous)
+                    .map_err(|error| rejected(ComposeProblem::Store(error)))?,
+                previous_executable: *previous_executable,
+            },
+            Change::Remove {
+                previous,
+                previous_executable,
+            } => JournalEntry::Remove {
+                previous: store
+                    .save_previous(previous)
+                    .map_err(|error| rejected(ComposeProblem::Store(error)))?,
+                previous_executable: *previous_executable,
+            },
+        };
+        entries.push((path.clone(), entry));
+    }
     let journal = Journal {
         base: snapshot.identity(),
-        files: files
-            .keys()
-            .map(|path| (path.clone(), snapshot.files()[path].blob().clone()))
-            .collect(),
+        files: entries,
         directories: directories.to_vec(),
     };
     if let Err(error) = fault(Step::Journal) {
@@ -582,10 +969,24 @@ fn apply(
             return Err(write_failed(WriteStep::File(path), error));
         }
     }
-    for (path, file) in files {
+    // Creations and replacements first, removals last: a removal empties
+    // and removes directories, which a file created later may need.
+    let removal = |change: &Change| matches!(change, Change::Remove { .. });
+    let ordered = changes
+        .iter()
+        .filter(|(_, change)| !removal(change))
+        .chain(changes.iter().filter(|(_, change)| removal(change)));
+    for (path, change) in ordered {
         let target = root.join(path.as_str());
-        let written = fault(Step::Files).and_then(|()| write_file(&target, file));
-        if let Err(error) = written {
+        let done = fault(Step::Files).and_then(|()| match change {
+            Change::Create(file) | Change::Modify { file, .. } => put_file(&target, file),
+            Change::Remove { .. } => {
+                fs::remove_file(&target)?;
+                prune_directories(root, path);
+                Ok(())
+            }
+        });
+        if let Err(error) = done {
             return Err(write_failed(WriteStep::File(target), error));
         }
     }
@@ -611,17 +1012,18 @@ fn apply(
     if let Err(error) = finished {
         return Err(write_failed(WriteStep::Finish, error));
     }
-    Ok(store.restored_attributes())
+    Ok(store.restored())
 }
 
 /// Recovers from the interrupted composition `journal` records. The lock
 /// is written after every file, so a lock that records the journal's base
 /// means the composition was complete except for the journal's removal,
 /// and it is completed: only the journal goes. Otherwise the composition
-/// is reverted: each file whose content is still the planned one is
-/// removed, the directories the composition created are removed when
-/// empty, innermost first, and the journal last. A file with other content
-/// is left: it is the consumer's now.
+/// is reverted, file by file: a created file whose content is still the
+/// planned one is removed, a replaced one is restored from its previous
+/// content, and a removed one is put back; a file with other content is
+/// left, since it is the consumer's now. The directories the composition
+/// created are removed when empty, innermost first, and the journal last.
 fn recover(root: &Path, store: &Store, journal: &Journal) -> Result<ComposeRecovery, StoreError> {
     if let Ok(Some((
         _,
@@ -638,27 +1040,58 @@ fn recover(root: &Path, store: &Store, journal: &Journal) -> Result<ComposeRecov
         }
     }
     let mut removed = Vec::new();
+    let mut restored = Vec::new();
     let mut kept = Vec::new();
-    for (path, blob) in &journal.files {
+    for (path, entry) in &journal.files {
         let target = root.join(path.as_str());
-        match fs::symlink_metadata(&target) {
-            Ok(metadata) if metadata.is_file() => {
-                let bytes = fs::read(&target).map_err(|error| StoreError::Io {
-                    path: target.clone(),
-                    error,
-                })?;
-                if crate::domain::BlobId::of(&bytes) == *blob {
+        let _ = fs::remove_file(staging_path(&target));
+        let held = held_content(&target)?;
+        let put_back = |blob: &BlobId, executable: bool| -> Result<(), StoreError> {
+            let bytes = store.read_previous(blob)?;
+            if let Some(parent) = target.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            put_file(&target, &UnitFile::new(bytes, executable)).map_err(|error| StoreError::Io {
+                path: target.clone(),
+                error,
+            })
+        };
+        match entry {
+            JournalEntry::Create { blob } => match held {
+                Held::File(bytes) if BlobId::of(&bytes) == *blob => {
                     fs::remove_file(&target).map_err(|error| StoreError::Io {
                         path: target.clone(),
                         error,
                     })?;
                     removed.push(path.clone());
-                } else {
-                    kept.push(path.clone());
                 }
-            }
-            Ok(_) => kept.push(path.clone()),
-            Err(_) => {}
+                Held::Absent => {}
+                Held::File(_) | Held::Other => kept.push(path.clone()),
+            },
+            JournalEntry::Modify {
+                blob,
+                previous,
+                previous_executable,
+                ..
+            } => match held {
+                Held::File(bytes) if BlobId::of(&bytes) == *blob => {
+                    put_back(previous, *previous_executable)?;
+                    restored.push(path.clone());
+                }
+                Held::File(bytes) if BlobId::of(&bytes) == *previous => {}
+                Held::File(_) | Held::Other | Held::Absent => kept.push(path.clone()),
+            },
+            JournalEntry::Remove {
+                previous,
+                previous_executable,
+            } => match held {
+                Held::Absent => {
+                    put_back(previous, *previous_executable)?;
+                    restored.push(path.clone());
+                }
+                Held::File(bytes) if BlobId::of(&bytes) == *previous => {}
+                Held::File(_) | Held::Other => kept.push(path.clone()),
+            },
         }
     }
     for directory in journal.directories.iter().rev() {
@@ -666,7 +1099,37 @@ fn recover(root: &Path, store: &Store, journal: &Journal) -> Result<ComposeRecov
     }
     let _ = fs::remove_file(root.join(LOCK_STAGING));
     store.finish()?;
-    Ok(ComposeRecovery::Reverted { removed, kept })
+    Ok(ComposeRecovery::Reverted {
+        removed,
+        restored,
+        kept,
+    })
+}
+
+/// What a path holds during recovery.
+enum Held {
+    Absent,
+    File(Vec<u8>),
+    Other,
+}
+
+fn held_content(target: &Path) -> Result<Held, StoreError> {
+    match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.is_file() => {
+            fs::read(target)
+                .map(Held::File)
+                .map_err(|error| StoreError::Io {
+                    path: target.to_owned(),
+                    error,
+                })
+        }
+        Ok(_) => Ok(Held::Other),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Held::Absent),
+        Err(error) => Err(StoreError::Io {
+            path: target.to_owned(),
+            error,
+        }),
+    }
 }
 
 /// The delivered paths, or their directories, that already exist in the
@@ -728,6 +1191,39 @@ fn write_file(target: &Path, file: &UnitFile) -> io::Result<()> {
     handle.sync_all()
 }
 
+/// Where a file is written before it is put in place.
+fn staging_path(target: &Path) -> PathBuf {
+    let mut name = target
+        .file_name()
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
+    name.push(".assemblr-new");
+    target.with_file_name(name)
+}
+
+/// Puts `file` at `target`, whether or not something is there: it is
+/// written next to it and renamed into place, so that `target` holds
+/// either what it held or the whole of `file`, never part of it.
+fn put_file(target: &Path, file: &UnitFile) -> io::Result<()> {
+    let staged = staging_path(target);
+    let _ = fs::remove_file(&staged);
+    write_file(&staged, file)?;
+    fs::rename(&staged, target)
+}
+
+/// Removes the directories of `path` that are empty, innermost first,
+/// never the project's root.
+fn prune_directories(root: &Path, path: &RelativePath) {
+    let mut segments: Vec<&str> = path.segments().collect();
+    segments.pop();
+    while !segments.is_empty() {
+        if fs::remove_dir(root.join(segments.join("/"))).is_err() {
+            break;
+        }
+        segments.pop();
+    }
+}
+
 /// Reads a text file, bounded like a manifest.
 fn read_text(path: &Path) -> io::Result<String> {
     read_handle(&fs::File::open(path)?)
@@ -753,11 +1249,13 @@ pub struct Composed {
     units: usize,
     files: usize,
     changes: BTreeMap<UnitIdentity, LockChange>,
+    paths: BTreeMap<RelativePath, FileChange>,
     base: BaseIdentity,
     unbased: BTreeSet<RelativePath>,
     notes: Vec<String>,
     recovered: Option<ComposeRecovery>,
     unchanged: bool,
+    first: bool,
 }
 
 impl Composed {
@@ -766,9 +1264,14 @@ impl Composed {
         self.units
     }
 
-    /// How many files were written.
+    /// How many files the composition holds.
     pub fn files(&self) -> usize {
         self.files
+    }
+
+    /// What happened to each path the composition changed in the project.
+    pub fn paths(&self) -> &BTreeMap<RelativePath, FileChange> {
+        &self.paths
     }
 
     /// How the lock changed, by identity.
@@ -803,6 +1306,25 @@ impl Composed {
     pub fn unchanged(&self) -> bool {
         self.unchanged
     }
+
+    /// Whether this was the project's first composition, with no base to
+    /// reconcile against.
+    pub fn first(&self) -> bool {
+        self.first
+    }
+}
+
+/// What a composition did to a path of the project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileChange {
+    /// Created it.
+    Created,
+    /// Replaced its content, or its mode, with the composition's.
+    Modified,
+    /// Merged the composition's changes into the project's edits.
+    Merged,
+    /// Removed it.
+    Removed,
 }
 
 /// What recovering from an interrupted composition did.
@@ -816,8 +1338,10 @@ pub enum ComposeRecovery {
         /// The files removed, still holding what the interrupted
         /// composition wrote.
         removed: Vec<RelativePath>,
-        /// The files kept, because their content is no longer what was
-        /// written.
+        /// The files restored to the content they had before.
+        restored: Vec<RelativePath>,
+        /// The files kept, because their content is neither what was
+        /// written nor what was there before.
         kept: Vec<RelativePath>,
     },
 }
@@ -850,6 +1374,9 @@ pub enum WriteStep {
     /// Writing the reconciliation base to the store; nothing else was
     /// written.
     Store,
+    /// Keeping the previous content of the files that change; nothing of
+    /// the project was written.
+    Previous,
     /// Writing the journal; nothing of the project was written.
     Journal,
     /// Writing a project file; the journal records the composition.
@@ -875,6 +1402,10 @@ impl fmt::Display for ComposeFailure {
             }
             Self::Write { step, error } => match step {
                 WriteStep::Store => write!(f, "could not store the reconciliation base: {error}"),
+                WriteStep::Previous => write!(
+                    f,
+                    "could not keep the previous content of the files that change: {error}"
+                ),
                 WriteStep::Journal => write!(f, "could not write the journal: {error}"),
                 WriteStep::File(path) => write!(f, "could not write {}: {error}", path.display()),
                 WriteStep::Lock => write!(f, "could not write {LOCKFILE}: {error}"),
@@ -925,15 +1456,83 @@ pub enum ComposeProblem {
     Existing(Vec<RelativePath>),
     /// The project's ignore rules could not be read.
     Ignore(IgnoreError),
-    /// The project was composed before, and the composition changed.
-    Changed {
-        /// The materialized base.
-        base: BaseIdentity,
-        /// The composition now declared.
-        incoming: BaseIdentity,
-        /// How many paths are only in one of them.
-        paths: usize,
-    },
+    /// The project and the declared composition changed the same files
+    /// in ways that need the consumer.
+    Conflicts(Vec<FileConflict>),
+}
+
+/// A file the consumer must settle.
+#[derive(Debug)]
+pub struct FileConflict {
+    path: RelativePath,
+    kind: FileConflictKind,
+}
+
+impl FileConflict {
+    /// The file.
+    pub fn path(&self) -> &RelativePath {
+        &self.path
+    }
+
+    /// What is in conflict.
+    pub fn kind(&self) -> &FileConflictKind {
+        &self.kind
+    }
+}
+
+/// What is in conflict at a file.
+#[derive(Debug)]
+pub enum FileConflictKind {
+    /// The sides disagree, as the reconciliation decides.
+    Disagreement(Disagreement),
+    /// The project and the composition change the same values of a
+    /// structured file.
+    Values(Vec<Conflict<Contributor>>),
+    /// Both sides changed the file, and the merge could not be done.
+    Unmergeable(String),
+}
+
+impl fmt::Display for FileConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: ", self.path)?;
+        match &self.kind {
+            FileConflictKind::Disagreement(Disagreement::BothChanged(Mergeability::Format)) => f
+                .write_str(
+                    "the project and the composition both changed it, and its format has no merge",
+                ),
+            FileConflictKind::Disagreement(Disagreement::BothChanged(
+                Mergeability::BaseNotStored,
+            )) => f.write_str(
+                "the project and the composition both changed it, and its base is not stored \
+                 (the file was ignored by version control when it was composed), so the changes \
+                 cannot be told apart",
+            ),
+            FileConflictKind::Disagreement(Disagreement::BothChanged(Mergeability::Mergeable)) => {
+                f.write_str("the project and the composition both changed it")
+            }
+            FileConflictKind::Disagreement(Disagreement::RemovedButEdited) => {
+                f.write_str("the composition no longer delivers it, and the project edited it")
+            }
+            FileConflictKind::Disagreement(Disagreement::DeletedButChanged) => {
+                f.write_str("the project deleted it, and the composition changes it")
+            }
+            FileConflictKind::Disagreement(Disagreement::NotAFile) => {
+                f.write_str("it is not a regular file in the project")
+            }
+            FileConflictKind::Values(conflicts) => {
+                f.write_str("the project and the composition change the same values:")?;
+                for conflict in conflicts {
+                    write!(f, "\n    {conflict}")?;
+                }
+                Ok(())
+            }
+            FileConflictKind::Unmergeable(detail) => write!(
+                f,
+                "the project and the composition both changed it, and the changes could not be \
+                 merged: {detail}"
+            ),
+        }
+    }
 }
 
 impl fmt::Display for ComposeProblem {
@@ -980,16 +1579,18 @@ impl fmt::Display for ComposeProblem {
                 Ok(())
             }
             Self::Ignore(error) => error.fmt(f),
-            Self::Changed {
-                base,
-                incoming,
-                paths,
-            } => write!(
-                f,
-                "the project holds the composition {base}, and the declaration now composes \
-                 {incoming} ({paths} path(s) added or removed); reconciling a project that was \
-                 composed before is not supported yet"
-            ),
+            Self::Conflicts(conflicts) => {
+                write!(
+                    f,
+                    "the project and the declared composition disagree at {} path(s), and \
+                     resolving conflicts in the project is not supported yet:",
+                    conflicts.len()
+                )?;
+                for conflict in conflicts {
+                    write!(f, "\n  {conflict}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -997,204 +1598,4 @@ impl fmt::Display for ComposeProblem {
 impl std::error::Error for ComposeProblem {}
 
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, reason = "fixtures are valid by construction")]
-
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::fs;
-    use std::io;
-    use std::path::{Path, PathBuf};
-
-    use super::store::Store;
-    use super::{Application, ComposeFailure, ComposeRecovery, Step, WriteStep, apply, recover};
-    use crate::adapters::lockfile::serialize_lockfile;
-    use crate::domain::{
-        ReconciliationState, RelativePath, Snapshot, SnapshotFile, UnitFile, UnitLock,
-    };
-
-    /// A fresh project directory for `test`.
-    fn project(test: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("assemblr-apply-tests").join(test);
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn path(text: &str) -> RelativePath {
-        RelativePath::parse(text).unwrap()
-    }
-
-    /// Two files, one in a new directory, and the lock they belong to.
-    struct Plan {
-        files: BTreeMap<RelativePath, UnitFile>,
-        snapshot: Snapshot,
-        lock_bytes: Vec<u8>,
-        directories: Vec<RelativePath>,
-    }
-
-    fn plan() -> Plan {
-        let files: BTreeMap<RelativePath, UnitFile> = [
-            ("README.md", "readme\n", false),
-            ("bin/run", "#!/bin/sh\n", true),
-        ]
-        .into_iter()
-        .map(|(name, text, executable)| {
-            (
-                path(name),
-                UnitFile::new(text.as_bytes().to_vec(), executable),
-            )
-        })
-        .collect();
-        let snapshot = Snapshot::new(
-            files
-                .iter()
-                .map(|(p, f)| {
-                    (
-                        p.clone(),
-                        SnapshotFile::new(f.contents(), f.is_executable()),
-                    )
-                })
-                .collect(),
-        );
-        let state = ReconciliationState::new(
-            snapshot.identity(),
-            files.keys().cloned().collect(),
-            BTreeSet::new(),
-        );
-        let lock_bytes = serialize_lockfile(&UnitLock::default(), Some(&state)).unwrap();
-        Plan {
-            files,
-            snapshot,
-            lock_bytes,
-            directories: vec![path("bin")],
-        }
-    }
-
-    /// Applies `plan` in `root`, failing at the `n`th occurrence of `step`.
-    fn apply_failing(root: &Path, plan: &Plan, step: Step, n: usize) -> ComposeFailure {
-        let mut seen = 0;
-        let mut fault = |current: Step| {
-            if current == step {
-                seen += 1;
-                if seen == n {
-                    return Err(io::Error::other("injected"));
-                }
-            }
-            Ok(())
-        };
-        let store = Store::new(root);
-        let application = Application {
-            files: &plan.files,
-            snapshot: &plan.snapshot,
-            unbased: &BTreeSet::new(),
-            lock_bytes: &plan.lock_bytes,
-            directories: &plan.directories,
-        };
-        apply(root, &store, &application, &mut fault).unwrap_err()
-    }
-
-    fn exists(root: &Path, name: &str) -> bool {
-        root.join(name).exists()
-    }
-
-    #[test]
-    fn a_failure_before_the_journal_leaves_the_project_untouched() {
-        let root = project("before-journal");
-        let plan = plan();
-        let failure = apply_failing(&root, &plan, Step::Store, 1);
-        assert!(matches!(
-            failure,
-            ComposeFailure::Write {
-                step: WriteStep::Store,
-                ..
-            }
-        ));
-        assert!(!exists(&root, ".assemblr"));
-
-        let failure = apply_failing(&root, &plan, Step::Journal, 1);
-        assert!(matches!(
-            failure,
-            ComposeFailure::Write {
-                step: WriteStep::Journal,
-                ..
-            }
-        ));
-        assert!(exists(&root, ".assemblr/objects"));
-        assert!(!exists(&root, ".assemblr/journal.json"));
-        assert!(!exists(&root, "README.md"));
-        assert!(!exists(&root, "bin"));
-        assert!(Store::new(&root).journal().unwrap().is_none());
-    }
-
-    #[test]
-    fn a_failure_among_the_files_or_at_the_lock_is_reverted() {
-        for (name, step, n) in [("second-file", Step::Files, 2), ("lock", Step::Lock, 1)] {
-            let root = project(name);
-            let plan = plan();
-            let failure = apply_failing(&root, &plan, step, n);
-            assert!(matches!(failure, ComposeFailure::Write { .. }), "{name}");
-            let store = Store::new(&root);
-            let journal = store.journal().unwrap().expect("the journal remains");
-            assert!(!exists(&root, "assemblr-lock.json"), "{name}");
-
-            let recovered = recover(&root, &store, &journal).unwrap();
-            assert!(
-                matches!(&recovered, ComposeRecovery::Reverted { kept, .. } if kept.is_empty()),
-                "{name}: {recovered:?}"
-            );
-            assert!(!exists(&root, "README.md"), "{name}");
-            assert!(!exists(&root, "bin"), "{name}");
-            assert!(!exists(&root, ".assemblr/journal.json"), "{name}");
-            // The store, content-addressed, stays.
-            assert!(exists(&root, ".assemblr/objects"), "{name}");
-        }
-    }
-
-    #[test]
-    fn a_failure_after_the_lock_is_completed_not_reverted() {
-        let root = project("finish");
-        let plan = plan();
-        let failure = apply_failing(&root, &plan, Step::Finish, 1);
-        assert!(matches!(
-            failure,
-            ComposeFailure::Write {
-                step: WriteStep::Finish,
-                ..
-            }
-        ));
-        assert!(exists(&root, "assemblr-lock.json"));
-        let store = Store::new(&root);
-        let journal = store.journal().unwrap().unwrap();
-
-        let recovered = recover(&root, &store, &journal).unwrap();
-        assert_eq!(recovered, ComposeRecovery::Completed);
-        assert_eq!(
-            fs::read_to_string(root.join("README.md")).unwrap(),
-            "readme\n"
-        );
-        assert!(exists(&root, "bin/run"));
-        assert!(exists(&root, "assemblr-lock.json"));
-        assert!(!exists(&root, ".assemblr/journal.json"));
-    }
-
-    #[test]
-    fn an_edited_file_is_kept_by_a_revert() {
-        let root = project("edited");
-        let plan = plan();
-        apply_failing(&root, &plan, Step::Lock, 1);
-        fs::write(root.join("README.md"), "mine").unwrap();
-        let store = Store::new(&root);
-        let journal = store.journal().unwrap().unwrap();
-
-        let recovered = recover(&root, &store, &journal).unwrap();
-        assert_eq!(
-            recovered,
-            ComposeRecovery::Reverted {
-                removed: vec![path("bin/run")],
-                kept: vec![path("README.md")],
-            }
-        );
-        assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), "mine");
-        assert!(!exists(&root, "bin"));
-    }
-}
+mod tests;

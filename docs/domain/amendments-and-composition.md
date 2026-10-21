@@ -254,7 +254,8 @@ composition:
   promised; semantic compatibility is, and a consequential change to merge
   behavior is an explicit decision.
 - The same merge model is the foundation for consumer reconciliation, which
-  is not implemented by this decision.
+  [reconciliation details](consumer-projects.md#reconciliation-details--approved)
+  implements provisionally.
 
 Implementation notes (provisional, decision log D-6 to D-8):
 
@@ -271,9 +272,10 @@ Implementation notes (provisional, decision log D-6 to D-8):
 Open:
 
 - The manifest representation of list identity hints. **OC-4.**
-- Further format adapters, how an amendment is applied to a provider
-  version other than its base, Git's part in merging, and the consumer
-  side of OC-10. **OC-10.**
+- Further format adapters, and how an amendment is applied to a provider
+  version other than its base. **OC-10.** The consumer side is decided
+  provisionally, without Git, in
+  [reconciliation details](consumer-projects.md#reconciliation-details--approved).
 
 ### Composition, builds, and reconciliation
 

@@ -22,7 +22,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use super::jsonc_edit::{EditError, ValueError, apply, comments_of, parse_value};
-use crate::domain::{Conflict, Operation, UnitIdentity, Value, combine, derive, plan};
+use crate::domain::{
+    Conflict, Contributor, Operation, UnitIdentity, Value, combine, derive, merge_values, plan,
+};
 
 /// Composes `copies`, each amender's rendered copy, onto `base`, the
 /// provider's rendered file. The amenders are ordered by identity, whatever
@@ -212,6 +214,89 @@ impl fmt::Display for MergeFailure {
 }
 
 impl std::error::Error for MergeFailure {}
+
+/// Reconciles a consumer project's JSON or JSONC file: the changes the
+/// incoming composition makes against `base` are edited into `current`,
+/// the project's text, whose own changes and layout stay. The edited text
+/// must parse back to the planned value.
+pub(crate) fn reconcile_json(
+    base: &str,
+    current: &str,
+    incoming: &str,
+) -> Result<String, ReconcileFailure> {
+    let read = |text: &str, side: Option<Contributor>| {
+        parse_value(text).map_err(|error| ReconcileFailure::Unreadable { side, error })
+    };
+    let base_value = read(base, None)?;
+    let current_value = read(current, Some(Contributor::Current))?;
+    let incoming_value = read(incoming, Some(Contributor::Incoming))?;
+    let planned = merge_values(&base_value, &current_value, &incoming_value)
+        .map_err(ReconcileFailure::Conflicts)?;
+    let text = apply(current, &planned.edits).map_err(ReconcileFailure::Edit)?;
+    let written = parse_value(&text).map_err(|error| ReconcileFailure::Projection {
+        detail: error.to_string(),
+    })?;
+    if written != planned.result {
+        return Err(ReconcileFailure::Projection {
+            detail: format!(
+                "the edited text holds {}, not the planned {}",
+                written.brief(),
+                planned.result.brief()
+            ),
+        });
+    }
+    Ok(text)
+}
+
+/// Why a consumer's file cannot be reconciled by the value merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReconcileFailure {
+    /// The base (`side` is `None`), the project's file, or the composed
+    /// file is not a JSON document the merge can read.
+    Unreadable {
+        side: Option<Contributor>,
+        error: ValueError,
+    },
+    /// The project and the composition change the same values, sorted by
+    /// path.
+    Conflicts(Vec<Conflict<Contributor>>),
+    /// The editor could not locate an edit in the project's file.
+    Edit(EditError),
+    /// The edited text does not hold the planned value.
+    Projection { detail: String },
+}
+
+impl fmt::Display for ReconcileFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unreadable { side: None, error } => {
+                write!(f, "its base cannot be read as JSON: {error}")
+            }
+            Self::Unreadable {
+                side: Some(Contributor::Current),
+                error,
+            } => write!(f, "the project's file cannot be read as JSON: {error}"),
+            Self::Unreadable {
+                side: Some(Contributor::Incoming),
+                error,
+            } => write!(f, "the composed file cannot be read as JSON: {error}"),
+            Self::Conflicts(conflicts) => {
+                write!(f, "the project and the composition change the same values:")?;
+                for conflict in conflicts {
+                    write!(f, "\n    {conflict}")?;
+                }
+                Ok(())
+            }
+            Self::Edit(error) => write!(f, "the merged file could not be written: {error}"),
+            Self::Projection { detail } => write!(
+                f,
+                "the merged file was refused by the projection check: {detail}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ReconcileFailure {}
 
 #[cfg(test)]
 mod tests {
