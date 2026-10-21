@@ -15,7 +15,7 @@ use crate::domain::{
     RelativePathError, RequirementError, UnitIdentity, Version, VersionError, VersionRequirement,
 };
 
-const MANIFEST_FIELDS: &[&str] = &[
+pub(crate) const MANIFEST_FIELDS: &[&str] = &[
     "$schema",
     "name",
     "version",

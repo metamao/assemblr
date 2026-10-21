@@ -17,12 +17,16 @@ const NULL_DEVICE: &str = "NUL";
 #[cfg(not(windows))]
 const NULL_DEVICE: &str = "/dev/null";
 
-const ENVIRONMENT: [(&str, &str); 6] = [
+pub(super) const ENVIRONMENT: [(&str, &str); 8] = [
     // Ignore the user's and the system's configuration, so a read does not
     // depend on the machine. The repository's own configuration still
     // applies, which is why the arguments below override parts of it.
     ("GIT_CONFIG_NOSYSTEM", "1"),
     ("GIT_CONFIG_GLOBAL", NULL_DEVICE),
+    // Git's messages are read in places, such as repository discovery, so
+    // they must not depend on the user's locale.
+    ("LC_ALL", "C"),
+    ("LANGUAGE", "C"),
     // Never fetch a missing object, as a partial clone would: that reaches
     // the network and runs the transport the repository configures. Git
     // before 2.45 ignores the first setting, and the second, which allows
@@ -34,7 +38,7 @@ const ENVIRONMENT: [(&str, &str); 6] = [
     ("GIT_OPTIONAL_LOCKS", "0"),
 ];
 
-const ARGUMENTS: [&str; 4] = [
+pub(super) const ARGUMENTS: [&str; 4] = [
     "--no-pager",
     // A replace ref would substitute other content for an object, so what
     // is read would no longer be what the tag published.
@@ -45,26 +49,33 @@ const ARGUMENTS: [&str; 4] = [
     "core.fsmonitor=",
 ];
 
+/// A read-only `git` command in `directory` with the environment every read
+/// uses, naming no repository: Git discovers one as it does for the user.
+pub(super) fn discovery_command(directory: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    // Variables such as `GIT_DIR`, `GIT_SSH_COMMAND`, and
+    // `GIT_CONFIG_PARAMETERS` would redirect or reconfigure the read.
+    for (name, _) in std::env::vars_os() {
+        if name
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("GIT_")
+        {
+            command.env_remove(name);
+        }
+    }
+    command
+        .current_dir(directory)
+        .envs(ENVIRONMENT)
+        .args(ARGUMENTS)
+        .args(args);
+    command
+}
+
 impl GitRepository {
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new("git");
-        // Variables such as `GIT_DIR`, `GIT_SSH_COMMAND`, and
-        // `GIT_CONFIG_PARAMETERS` would redirect or reconfigure the read.
-        for (name, _) in std::env::vars_os() {
-            if name
-                .to_string_lossy()
-                .to_ascii_uppercase()
-                .starts_with("GIT_")
-            {
-                command.env_remove(name);
-            }
-        }
-        command
-            .current_dir(&self.path)
-            .env("GIT_DIR", &self.git_dir)
-            .envs(ENVIRONMENT)
-            .args(ARGUMENTS)
-            .args(args);
+        let mut command = discovery_command(&self.path, args);
+        command.env("GIT_DIR", &self.git_dir);
         command
     }
 
