@@ -10,12 +10,11 @@ use std::path::{Path, PathBuf};
 
 use super::store::Store;
 use super::{
-    Application, Change, ComposeFailure, ComposeRecovery, Step, WriteStep, apply, read_current,
-    recover,
+    Application, Change, ComposeFailure, ComposeRecovery, Step, WriteStep, apply, recover,
 };
 use crate::adapters::lockfile::serialize_lockfile;
 use crate::domain::{
-    Current, ReconciliationState, RelativePath, Snapshot, SnapshotFile, UnitFile, UnitLock,
+    ReconciliationState, RelativePath, Snapshot, SnapshotFile, UnitFile, UnitLock,
 };
 
 /// A fresh project directory for `test`.
@@ -467,6 +466,9 @@ fn a_file_created_in_a_directory_another_leaves_finds_the_directory() {
 #[cfg(unix)]
 #[test]
 fn a_managed_path_behind_a_symbolic_link_is_not_a_file_of_the_project() {
+    use super::read_current;
+    use crate::domain::Current;
+
     let root = composed("symlink");
     let elsewhere = project("symlink-elsewhere");
     fs::create_dir(elsewhere.join("config")).unwrap();
