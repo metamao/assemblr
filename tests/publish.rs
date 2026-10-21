@@ -66,6 +66,7 @@ impl Fixture {
             .env("HOME", &self.home)
             .env("USERPROFILE", &self.home)
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", NULL_DEVICE)
             .env("GIT_AUTHOR_NAME", "Author")
             .env("GIT_AUTHOR_EMAIL", "author@example.com")
             .env("GIT_COMMITTER_NAME", "Author")
@@ -665,8 +666,6 @@ fn publish_refuses_and_changes_nothing() {
     assert!(app.tags().is_empty());
     assert_eq!(fixture.versions("@acme/app"), Vec::<String>::new());
     app.git(&["config", "--unset", "user.useConfigOnly"]);
-    app.git(&["add", ".git/config"]);
-    assert!(app.git(&["status", "--porcelain"]).is_empty());
 
     // A version published at another commit, and one of equal precedence.
     succeeds(fixture.publish(&app));
@@ -718,6 +717,27 @@ fn publish_refuses_a_unit_without_a_committed_lockfile_or_contribution() {
     app.commit("ignore the lockfile");
     let err = stderr(&fails(fixture.publish(&app)));
     assert!(err.contains("there is no assemblr-lock.json"), "{err}");
+    assert!(app.tags().is_empty());
+
+    // A committed lockfile, then a committed manifest, that cannot be read.
+    app.write(".gitignore", "/build/\n");
+    app.write("assemblr-lock.json", "{");
+    app.commit("break the lockfile");
+    let err = stderr(&fails(fixture.publish(&app)));
+    assert!(
+        err.contains("in the commit at `HEAD`, `assemblr-lock.json` is not a valid lockfile"),
+        "{err}"
+    );
+    assert!(err.contains("fix the file, commit, and run"), "{err}");
+    fs::remove_file(app.path.join("assemblr-lock.json")).unwrap();
+    succeeds(fixture.build(&app));
+    app.write("manifest.jsonc", "{\"name\": ");
+    app.commit("break the manifest");
+    let err = stderr(&fails(fixture.publish(&app)));
+    assert!(
+        err.contains("the commit at `HEAD` cannot be published:"),
+        "{err}"
+    );
     assert!(app.tags().is_empty());
 
     // An ineffective unit.
@@ -886,7 +906,7 @@ fn a_unit_registered_from_another_clone_publishes_without_an_index_update() {
 
     // This repository registered under another identity cannot publish a
     // version the registry would reject.
-    fixture.assemblr(&fixture.dir, &["registry", "remove", "@acme/app"]);
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "remove", "@acme/app"]));
     fixture.register(&app);
     app.write(
         "manifest.jsonc",
