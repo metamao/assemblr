@@ -184,8 +184,10 @@ stdout. Diagnostics, and changes to the unit lockfile, go to stderr.
 - parameter and options consistency, including that the required
   parameters of every dependency are satisfied through the dependency chain;
 - dependency resolution, under the [unit lock state](#unit-lock-state--approved);
-- `src/` path validity and path collisions (see
-  [units.md](units.md#src-unit-files)).
+- `src/` path validity and path collisions, on delivered paths (see
+  [units.md](units.md#src-unit-files));
+- rendering of the templates of the unit and of its dependencies (see
+  [parameters-and-options.md](parameters-and-options.md#rendering--approved)).
 
 The effective-contribution check (OC-11) does not gate a build; it gates
 publication. Neither does a clean or committed working tree. A failed build
@@ -220,6 +222,14 @@ rejected and reported. On Unix a file is executable when its owner may
 execute it. Windows file systems record no such bit, so there a tracked
 file is executable when the Git index records it as executable, and an
 untracked file is not.
+
+**Templates.** The `src/` files ending in `.assemblr.tmpl`, of the unit and
+of its dependencies, are rendered with the resolved parameter values of the
+unit that provides each one, and delivered without the suffix (see
+[units.md](units.md#templates) and
+[parameters-and-options.md](parameters-and-options.md#rendering--approved)).
+Every rendering problem is reported with its file and position, and a build
+with any is rejected before `build/` or the lockfile changes.
 
 **Amendments.** A build cannot apply amendments yet. It fails when
 `amendments/` has content, selected by the same rules as `src/`, and lists

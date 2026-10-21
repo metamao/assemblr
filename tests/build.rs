@@ -142,6 +142,16 @@ impl Repo {
         fs::write(path, contents).unwrap();
     }
 
+    fn write_bytes(&self, path: &str, contents: &[u8]) {
+        let path = self.path.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn read_bytes(&self, path: &str) -> Vec<u8> {
+        fs::read(self.path.join(path)).unwrap()
+    }
+
     fn remove(&self, path: &str) {
         fs::remove_file(self.path.join(path)).unwrap();
     }
@@ -996,4 +1006,287 @@ fn the_build_and_lockfile_do_not_depend_on_registration_or_declaration_order() {
         outcomes.push((app.read("assemblr-lock.json"), app.build_files()));
     }
     assert_eq!(outcomes[0], outcomes[1]);
+}
+
+// Templates (I7).
+
+/// A registered `@acme/node` 1.0.0 with a required `port`, a defaulted
+/// `name`, a template, and a plain file that looks like one.
+fn node_with_template(fixture: &Fixture) -> Repo {
+    let node = fixture.repo("node");
+    node.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/node",
+            "1.0.0",
+            &[],
+            r#", "params": {
+                "port": {"type": "integer", "description": "The port."},
+                "name": {"type": "string", "description": "The name.", "default": "node"},
+                "env": {"type": "string", "description": "The environment.",
+                        "allowed": ["dev", "prod"], "default": "dev"}
+            }"#,
+        ),
+    );
+    node.write(
+        "src/config.json.assemblr.tmpl",
+        "{\"port\": {{ port }}, \"name\": \"{{ name }}\", \"env\": \"{{ env }}\", \
+         \"tmpl\": \"{{ \"{{\" }} x }}\"}\n",
+    );
+    node.write("src/plain.txt", "{{ port }} stays as it is\n");
+    node.publish("1.0.0");
+    fixture.register(&node);
+    node
+}
+
+#[test]
+fn templates_render_with_their_unit_s_values_and_other_files_are_delivered_as_they_are() {
+    let fixture = Fixture::new("templates");
+    node_with_template(&fixture);
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[("@acme/node", "^1")],
+            r#", "options": {"@acme/node": {"port": 8080}},
+                "params": {
+                    "title": {"type": "string", "description": "A title.", "default": "Demo \"app\""},
+                    "motto": {"type": "string", "description": "Lines.", "default": "one\ntwo"},
+                    "ssr": {"type": "boolean", "description": "Server-side.", "default": true},
+                    "workers": {"type": "integer", "description": "Workers.", "default": -2}
+                }"#,
+        ),
+    );
+    app.write(
+        "src/index.html.assemblr.tmpl",
+        "<h1>{{ title }}</h1>\n<p>{{motto}}</p>\nssr={{ ssr }} workers={{\n  workers }}\r\n",
+    );
+    // Angular templates and workflows are delivered intact without the suffix.
+    app.write("src/app.component.html", "<span>{{ value }}</span>\n");
+    app.write(
+        "src/.github/workflows/ci.yml",
+        "runs-on: ${{ matrix.os }}\n{% raw %}\n",
+    );
+    app.write("src/notes.tmpl", "{{ title }} is not rendered here\n");
+    let output = succeeds(fixture.build(&app));
+    assert_eq!(
+        stdout(&output).trim(),
+        "Built @acme/app 0.1.0 into build/: 6 file(s), with 1 dependency."
+    );
+    assert_eq!(
+        app.build_files(),
+        pairs(&[
+            (
+                ".github/workflows/ci.yml",
+                "runs-on: ${{ matrix.os }}\n{% raw %}\n"
+            ),
+            ("app.component.html", "<span>{{ value }}</span>\n"),
+            (
+                "config.json",
+                "{\"port\": 8080, \"name\": \"node\", \"env\": \"dev\", \"tmpl\": \"{{ x }}\"}\n"
+            ),
+            (
+                "index.html",
+                "<h1>Demo \"app\"</h1>\n<p>one\ntwo</p>\nssr=true workers=-2\r\n"
+            ),
+            ("notes.tmpl", "{{ title }} is not rendered here\n"),
+            ("plain.txt", "{{ port }} stays as it is\n"),
+        ])
+    );
+}
+
+#[test]
+fn rendering_problems_reject_the_build_and_change_nothing() {
+    let fixture = Fixture::new("template-errors");
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[],
+            r#", "params": {"title": {"type": "string", "description": "A title.", "default": "Demo"}}"#,
+        ),
+    );
+    app.write("src/index.html.assemblr.tmpl", "<h1>{{ title }}</h1>\n");
+    succeeds(fixture.build(&app));
+    let before = (app.build_files(), app.read("assemblr-lock.json"));
+
+    app.write(
+        "src/index.html.assemblr.tmpl",
+        "<h1>{{ title }}</h1>\n  {{ titel }}\n{% if title %}x{% endif %}\n{{ own.title }}\n{{ title",
+    );
+    app.write("src/b.txt.assemblr.tmpl", "{{ title | upper }}\n");
+    let stderr = stderr(&fails(fixture.build(&app)));
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.starts_with("error: template "))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "error: template src/b.txt.assemblr.tmpl of @acme/app, line 1, column 1: unsupported \
+             template construct \"{{ title | upper }}\"; only `{{ name }}` references and the \
+             escape `{{ \"{{\" }}` are supported",
+            "error: template src/index.html.assemblr.tmpl of @acme/app, line 2, column 3: \
+             undefined reference `titel`; the unit's parameters are `title`",
+            "error: template src/index.html.assemblr.tmpl of @acme/app, line 3, column 1: \
+             unsupported template construct \"{% if title %}\"; only `{{ name }}` references and \
+             the escape `{{ \"{{\" }}` are supported",
+            "error: template src/index.html.assemblr.tmpl of @acme/app, line 3, column 16: \
+             unsupported template construct \"{% endif %}\"; only `{{ name }}` references and \
+             the escape `{{ \"{{\" }}` are supported",
+            "error: template src/index.html.assemblr.tmpl of @acme/app, line 4, column 1: \
+             undefined reference `own.title`; `own` is defined only when an amendment copy is \
+             rendered, and a unit's own files refer to its parameters by name",
+            "error: template src/index.html.assemblr.tmpl of @acme/app, line 5, column 1: `{{` \
+             is never closed",
+        ],
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "hint: the build was rejected; build/ and assemblr-lock.json were not changed"
+        ),
+        "{stderr}"
+    );
+    assert_eq!((app.build_files(), app.read("assemblr-lock.json")), before);
+}
+
+#[test]
+fn a_dependency_s_template_sees_only_the_dependency_s_values() {
+    let fixture = Fixture::new("template-context");
+    let node = fixture.repo("node");
+    node.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/node",
+            "1.0.0",
+            &[],
+            r#", "params": {"port": {"type": "integer", "description": "The port.", "default": 80}}"#,
+        ),
+    );
+    node.write(
+        "src/server.txt.assemblr.tmpl",
+        "{{ port }} for {{ title }}\n",
+    );
+    node.publish("1.0.0");
+    fixture.register(&node);
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[("@acme/node", "^1")],
+            r#", "params": {"title": {"type": "string", "description": "A title.", "default": "Demo"}}"#,
+        ),
+    );
+    let stderr = stderr(&fails(fixture.build(&app)));
+    assert!(
+        stderr.contains(
+            "template src/server.txt.assemblr.tmpl of @acme/node, line 1, column 16: undefined \
+             reference `title`; the unit's parameters are `port`"
+        ),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_template_that_is_not_utf_8_is_rejected_while_other_files_are_opaque_bytes() {
+    let fixture = Fixture::new("template-bytes");
+    let app = fixture.repo("app");
+    app.write("manifest.jsonc", &manifest("@acme/app", "0.1.0", &[], ""));
+    let binary = [
+        0xff, 0xfe, b'{', b'{', b' ', b'x', b' ', b'}', b'}', 0x00, b'\r', b'\n',
+    ];
+    app.write_bytes("src/logo.bin", &binary);
+    succeeds(fixture.build(&app));
+    assert_eq!(app.read_bytes("build/logo.bin"), binary);
+
+    app.write_bytes("src/bad.txt.assemblr.tmpl", &binary);
+    let stderr = stderr(&fails(fixture.build(&app)));
+    assert!(
+        stderr.contains(
+            "template src/bad.txt.assemblr.tmpl of @acme/app is not UTF-8 text; a template is \
+             rendered as text, and a file that is not text must not end in `.assemblr.tmpl`"
+        ),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_template_and_an_ordinary_file_delivered_at_the_same_path_collide() {
+    let fixture = Fixture::new("template-collision");
+    let node = fixture.repo("node");
+    node.write("manifest.jsonc", &manifest("@acme/node", "1.0.0", &[], ""));
+    node.write("src/package.json", "{}\n");
+    node.publish("1.0.0");
+    fixture.register(&node);
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest("@acme/app", "0.1.0", &[("@acme/node", "^1")], ""),
+    );
+    app.write("src/package.json.assemblr.tmpl", "{}\n");
+    let stderr = stderr(&fails(fixture.build(&app)));
+    assert!(
+        stderr.contains(
+            "path collision: package.json from @acme/node, package.json.assemblr.tmpl from \
+             @acme/app (delivered as package.json); no unit takes precedence"
+        ),
+        "{stderr}"
+    );
+    assert!(!app.path.join("build").exists());
+}
+
+#[test]
+fn own_is_not_a_parameter_name() {
+    let fixture = Fixture::new("own-parameter");
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[],
+            r#", "params": {"own": {"type": "string", "description": "Reserved.", "default": "x"}}"#,
+        ),
+    );
+    let stderr = stderr(&fails(fixture.build(&app)));
+    assert!(
+        stderr.contains("invalid parameter name \"own\": `own` is reserved"),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_rendered_template_keeps_its_executable_bit() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new("template-executable");
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[],
+            r#", "params": {"shell": {"type": "string", "description": "The shell.", "default": "/bin/sh"}}"#,
+        ),
+    );
+    app.write("src/run.sh.assemblr.tmpl", "#!{{ shell }}\n");
+    let source = app.path.join("src/run.sh.assemblr.tmpl");
+    let mut permissions = fs::metadata(&source).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&source, permissions).unwrap();
+    succeeds(fixture.build(&app));
+    let built = app.path.join("build/run.sh");
+    assert_eq!(fs::read_to_string(&built).unwrap(), "#!/bin/sh\n");
+    assert_ne!(
+        fs::metadata(&built).unwrap().permissions().mode() & 0o100,
+        0
+    );
 }

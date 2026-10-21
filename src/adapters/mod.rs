@@ -10,10 +10,12 @@ mod git;
 mod jsonc;
 mod manifest;
 mod registry;
+mod render;
 
 pub use build::{
     BuildFailure, BuildLockError, BuildProblem, Built, LockfileError, LockfileOutcome,
-    ManifestFileError, OutputProblem, PublishError, PublishState, PublishedProblem, build_unit,
+    ManifestFileError, OutputProblem, PublishError, PublishState, PublishedProblem, TemplateError,
+    build_unit,
 };
 pub use git::{
     GitError, GitErrorKind, GitRepository, HeadManifestError, InvalidVersion, ObjectTooLarge,
@@ -27,3 +29,4 @@ pub use registry::{
     Added, Problem, ReferenceError, Registry, RegistryFailure, StorageError, Synced, TagProblem,
     local_reference,
 };
+pub use render::{Context as RenderContext, RenderError, RenderErrorKind, render};

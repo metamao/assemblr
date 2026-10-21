@@ -14,6 +14,7 @@ mod exclusive;
 mod lockfile;
 mod output;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
@@ -28,10 +29,11 @@ pub use output::{OutputProblem, PublishError, State as PublishState};
 use super::git::{GitError, GitRepository, InvalidVersion, MANIFEST_LIMIT, ReadSrcError};
 use super::manifest::{ReadManifestError, read_manifest};
 use super::registry::{Registry, StorageError};
+use super::render::{Context, RenderError, render};
 use crate::domain::{
     AvailableVersions, CompositionError, FileTree, LockChange, LockError, Manifest, ObjectId,
-    ParameterName, ResolutionError, Root, UnitContent, UnitIdentity, UnitLock, Version, compose,
-    relock, resolve,
+    ParameterName, ParameterValues, RelativePath, ResolutionError, Root, TEMPLATE_SUFFIX,
+    UnitContent, UnitFile, UnitIdentity, UnitLock, Version, compose, relock, resolve,
 };
 
 /// The unit's manifest, at the repository's top level.
@@ -214,10 +216,49 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
         Some(previous) if *previous == lock => LockfileOutcome::Unchanged,
         Some(_) => LockfileOutcome::Updated,
     };
-    let files: Vec<_> = composition
-        .files()
+
+    // Templates are rendered with the parameter values of the unit that
+    // provides each one. Every template's problems are reported, by delivered
+    // path and then position, and nothing is written when there is any.
+    let no_values = ParameterValues::new();
+    let mut files: Vec<(&RelativePath, Cow<'_, UnitFile>)> = Vec::new();
+    for (path, composed) in composition.files() {
+        if !composed.is_template() {
+            files.push((path, Cow::Borrowed(composed.file())));
+            continue;
+        }
+        let template = |error| BuildProblem::Template {
+            unit: composed.unit().clone(),
+            path: composed.source().clone(),
+            error,
+        };
+        let Ok(text) = std::str::from_utf8(composed.file().contents()) else {
+            problems.push(template(TemplateError::NotUtf8));
+            continue;
+        };
+        let values = composition
+            .values()
+            .get(composed.unit())
+            .unwrap_or(&no_values);
+        match render(text, &Context::new(values)) {
+            Ok(rendered) => files.push((
+                path,
+                Cow::Owned(UnitFile::new(
+                    rendered.into_bytes(),
+                    composed.file().is_executable(),
+                )),
+            )),
+            Err(errors) => {
+                problems.extend(errors.into_iter().map(TemplateError::Render).map(template))
+            }
+        }
+    }
+    if !problems.is_empty() {
+        return Err(BuildFailure::Rejected(problems));
+    }
+    let files: Vec<(&RelativePath, &UnitFile)> = files
         .iter()
-        .map(|(path, composed)| (path, composed.file()))
+        .map(|(path, file)| (*path, file.as_ref()))
         .collect();
     let new_lock = (lockfile != LockfileOutcome::Unchanged).then_some(&lock);
     let published =
@@ -548,6 +589,15 @@ pub enum BuildProblem {
     Lock(LockError),
     /// The unit and its dependencies cannot be composed.
     Composition(CompositionError),
+    /// A template cannot be rendered.
+    Template {
+        /// The unit whose `src/` provides the template.
+        unit: UnitIdentity,
+        /// The template's path in that `src/`.
+        path: RelativePath,
+        /// What is wrong.
+        error: TemplateError,
+    },
 }
 
 impl fmt::Display for BuildProblem {
@@ -592,11 +642,31 @@ impl fmt::Display for BuildProblem {
             Self::Resolution(error) => error.fmt(f),
             Self::Lock(error) => error.fmt(f),
             Self::Composition(error) => error.fmt(f),
+            Self::Template { unit, path, error } => {
+                write!(f, "template src/{path} of {unit}")?;
+                match error {
+                    TemplateError::NotUtf8 => write!(
+                        f,
+                        " is not UTF-8 text; a template is rendered as text, and a file that is \
+                         not text must not end in `{TEMPLATE_SUFFIX}`"
+                    ),
+                    TemplateError::Render(error) => write!(f, ", {error}"),
+                }
+            }
         }
     }
 }
 
 impl std::error::Error for BuildProblem {}
+
+/// Why a template cannot be rendered.
+#[derive(Debug)]
+pub enum TemplateError {
+    /// Its source is not UTF-8 text.
+    NotUtf8,
+    /// A construct in it cannot be rendered.
+    Render(RenderError),
+}
 
 /// Why a published version cannot be used as the index records it.
 #[derive(Debug)]
