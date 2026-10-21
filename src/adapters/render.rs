@@ -72,9 +72,12 @@ pub fn render(source: &str, context: &Context<'_>) -> Result<String, Vec<RenderE
     let mut errors = Vec::new();
     let mut rest = source;
     let mut offset = 0;
+    // Where the last construct began: the size bound is attributed to it.
+    let mut last_at = 0;
     while let Some((start, opener)) = next_opener(rest) {
         out.push_str(&rest[..start]);
         let at = offset + start;
+        last_at = at;
         let after = &rest[start + 2..];
         let Some(length) = after.find(opener.closer()) else {
             errors.push(RenderError::at(
@@ -137,6 +140,20 @@ pub fn render(source: &str, context: &Context<'_>) -> Result<String, Vec<RenderE
         offset += consumed;
     }
     out.push_str(rest);
+    if out.len() > RENDERED_LIMIT
+        && !matches!(
+            errors.last().map(RenderError::kind),
+            Some(RenderErrorKind::TooLarge { .. })
+        )
+    {
+        errors.push(RenderError::at(
+            source,
+            last_at,
+            RenderErrorKind::TooLarge {
+                limit: RENDERED_LIMIT,
+            },
+        ));
+    }
     if errors.is_empty() {
         Ok(out)
     } else {
@@ -668,6 +685,18 @@ mod tests {
         let errors = render("{{ big }}\n{{ big }}", &context).unwrap_err();
         assert_eq!(
             errors,
+            [RenderError {
+                line: 2,
+                column: 1,
+                kind: RenderErrorKind::TooLarge {
+                    limit: RENDERED_LIMIT
+                }
+            }]
+        );
+        // Text after the last construct counts too, against that construct.
+        let trailing = format!("x\n{{{{ big }}}}{}", "y".repeat(RENDERED_LIMIT / 2));
+        assert_eq!(
+            render(&trailing, &context).unwrap_err(),
             [RenderError {
                 line: 2,
                 column: 1,

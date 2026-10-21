@@ -1022,13 +1022,16 @@ fn node_with_template(fixture: &Fixture) -> Repo {
             &[],
             r#", "params": {
                 "port": {"type": "integer", "description": "The port."},
-                "name": {"type": "string", "description": "The name.", "default": "node"}
+                "name": {"type": "string", "description": "The name.", "default": "node"},
+                "env": {"type": "string", "description": "The environment.",
+                        "allowed": ["dev", "prod"], "default": "dev"}
             }"#,
         ),
     );
     node.write(
         "src/config.json.assemblr.tmpl",
-        "{\"port\": {{ port }}, \"name\": \"{{ name }}\", \"tmpl\": \"{{ \"{{\" }} x }}\"}\n",
+        "{\"port\": {{ port }}, \"name\": \"{{ name }}\", \"env\": \"{{ env }}\", \
+         \"tmpl\": \"{{ \"{{\" }} x }}\"}\n",
     );
     node.write("src/plain.txt", "{{ port }} stays as it is\n");
     node.publish("1.0.0");
@@ -1082,7 +1085,7 @@ fn templates_render_with_their_unit_s_values_and_other_files_are_delivered_as_th
             ("app.component.html", "<span>{{ value }}</span>\n"),
             (
                 "config.json",
-                "{\"port\": 8080, \"name\": \"node\", \"tmpl\": \"{{ x }}\"}\n"
+                "{\"port\": 8080, \"name\": \"node\", \"env\": \"dev\", \"tmpl\": \"{{ x }}\"}\n"
             ),
             (
                 "index.html",

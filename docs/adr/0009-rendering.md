@@ -81,9 +81,11 @@ they must use the same template language.
    errors in delivered-path order, as one build problem each, and rejects
    the build. A template that is not UTF-8 is one error for the file.
 7. **Bounds.** A rendered file may not exceed ADR 0006's per-file limit,
-   16 MiB, which `FILE_LIMIT` already bounds a source file to. A value that
-   would take the output past it is an error at that reference. Rendering
-   is linear in the source and the values; there is no recursion.
+   16 MiB, which `FILE_LIMIT` already bounds a source file to. The output
+   is checked after each construct and once more after the text that
+   follows the last one; an excess is an error at the construct that
+   preceded it. Rendering is linear in the source and the values; there is
+   no recursion.
 8. **Values.** A string is inserted unchanged, an integer as its decimal
    digits, a boolean as `true` or `false`. No quoting or format escaping
    exists, by decision; a filter system would be the place for it and is
