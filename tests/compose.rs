@@ -1405,3 +1405,279 @@ fn what_a_new_version_changes_beyond_values_is_reported_when_it_is_merged_into_a
         "{err}"
     );
 }
+
+/// A project created by `assemblr init`, with its pristine declaration.
+fn initialized(fixture: &Fixture, name: &str) -> PathBuf {
+    succeeds(fixture.assemblr(&fixture.dir, &["init", name]));
+    fixture.dir.join(name)
+}
+
+fn add(fixture: &Fixture, project: &Path, unit: &str) -> Output {
+    fixture.assemblr(project, &["add", unit])
+}
+
+fn remove(fixture: &Fixture, project: &Path, unit: &str) -> Output {
+    fixture.assemblr(project, &["remove", unit])
+}
+
+fn declaration(project: &Path) -> String {
+    read(&project.join("assemblr.jsonc"))
+}
+
+#[test]
+fn add_selects_a_unit_records_a_caret_requirement_and_composes() {
+    let fixture = Fixture::new("add");
+    registry(&fixture);
+    let project = initialized(&fixture, "shop");
+
+    let output = succeeds(add(&fixture, &project, "@acme/node"));
+    let out = stdout(&output);
+    assert!(
+        out.contains("Selected @acme/node (^1.0.0) in assemblr.jsonc."),
+        "{out}"
+    );
+    assert!(out.contains("Composed 1 unit into 3 file(s)"), "{out}");
+    assert_eq!(read(&project.join("README.md")), "node\n");
+    assert!(declaration(&project).contains("\"@acme/node\": \"^1.0.0\""));
+    assert_eq!(
+        lockfile(&project)["units"]["@acme/node"]["version"],
+        "1.0.0"
+    );
+
+    // The next unit joins the first, the declaration's comments stay, and
+    // the composition is reconciled with what is already there.
+    fs::write(
+        project.join("assemblr.jsonc"),
+        declaration(&project).replacen("{\n", "{\n  // What this shop is made of.\n", 1),
+    )
+    .unwrap();
+    let output = succeeds(add(&fixture, &project, "@acme/web"));
+    let out = stdout(&output);
+    assert!(
+        out.contains("Selected @acme/web (^1.0.0) in assemblr.jsonc."),
+        "{out}"
+    );
+    assert!(out.contains("  created web.txt\n"), "{out}");
+    assert!(out.contains("  modified config/app.json\n"), "{out}");
+    let text = declaration(&project);
+    assert!(text.contains("// What this shop is made of."), "{text}");
+    assert!(text.contains("\"@acme/web\": \"^1.0.0\""), "{text}");
+    assert_eq!(
+        read(&project.join("config/app.json")),
+        "{\n  \"port\": 8080,\n  \"web\": true\n}\n"
+    );
+
+    // Again with the same unit: nothing changes, in the declaration or
+    // the project.
+    let before = tree(&project);
+    let output = succeeds(add(&fixture, &project, "@acme/web"));
+    assert!(
+        stdout(&output)
+            .contains("@acme/web is already selected (^1.0.0); assemblr.jsonc is unchanged."),
+        "{}",
+        stdout(&output)
+    );
+    assert!(
+        stdout(&output).contains("Nothing to compose"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(tree(&project), before);
+}
+
+#[test]
+fn add_promotes_a_transitive_unit_and_replaces_a_requirement_only_when_given_one() {
+    let fixture = Fixture::new("add-promote");
+    registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/web", "^1")], "");
+    succeeds(fixture.compose(&project));
+    let files = tree(&project.join("config"));
+
+    // `@acme/node` is in the composition already, through `@acme/web`:
+    // selecting it only changes the declaration, to the locked version.
+    let output = succeeds(add(&fixture, &project, "@acme/node"));
+    let out = stdout(&output);
+    assert!(out.contains("Selected @acme/node (^1.0.0)"), "{out}");
+    assert!(out.contains("Nothing to compose"), "{out}");
+    assert_eq!(tree(&project.join("config")), files);
+    assert!(declaration(&project).contains("\"@acme/node\": \"^1.0.0\""));
+
+    // A unit that is selected keeps its requirement unless one is given.
+    let output = succeeds(add(&fixture, &project, "@acme/node"));
+    assert!(stdout(&output).contains("already selected (^1.0.0)"));
+    let output = succeeds(add(&fixture, &project, "@acme/node@~1.0"));
+    assert!(
+        stdout(&output).contains(
+            "Changed the requirement of @acme/node from ^1.0.0 to ~1.0 in assemblr.jsonc."
+        ),
+        "{}",
+        stdout(&output)
+    );
+    assert!(declaration(&project).contains("\"@acme/node\": \"~1.0\""));
+}
+
+#[test]
+fn a_refused_add_leaves_the_declaration_and_the_project_as_they_were() {
+    let fixture = Fixture::new("add-refused");
+    registry(&fixture);
+    let project = initialized(&fixture, "shop");
+    succeeds(add(&fixture, &project, "@acme/node"));
+    let before = tree(&project);
+
+    // A unit nobody registered.
+    let err = stderr(&fails(add(&fixture, &project, "@acme/missing")));
+    assert!(err.contains("@acme/missing"), "{err}");
+    assert_eq!(tree(&project), before);
+
+    // A requirement that is not one, and an argument that is not a unit.
+    let err = stderr(&fails(add(&fixture, &project, "@acme/web@banana")));
+    assert!(
+        err.contains("the version requirement is not valid"),
+        "{err}"
+    );
+    assert!(err.contains("@owner/name@^1.2.0"), "{err}");
+    let err = stderr(&fails(add(&fixture, &project, "web")));
+    assert!(err.contains("`web` is not a unit identity"), "{err}");
+    let err = stderr(&fails(add(&fixture, &project, "@acme/web@")));
+    assert!(err.contains("names no version requirement"), "{err}");
+    assert_eq!(tree(&project), before);
+
+    // A composition that the project's own content refuses: the file the
+    // unit would create is there already, edited.
+    fs::write(project.join("web.txt"), "mine\n").unwrap();
+    let before = tree(&project);
+    let err = stderr(&fails(add(&fixture, &project, "@acme/web")));
+    assert!(err.contains("web.txt"), "{err}");
+    assert_eq!(tree(&project), before);
+    assert!(!declaration(&project).contains("@acme/web"));
+}
+
+#[test]
+fn remove_retires_the_files_only_that_unit_contributed_and_keeps_what_others_need() {
+    let fixture = Fixture::new("remove");
+    registry(&fixture);
+    let project = initialized(&fixture, "shop");
+    succeeds(add(&fixture, &project, "@acme/node"));
+    succeeds(add(&fixture, &project, "@acme/web"));
+
+    // `@acme/web` goes: its file and its amendment of the config leave,
+    // and what `@acme/node` delivers stays.
+    let output = succeeds(remove(&fixture, &project, "@acme/web"));
+    let out = stdout(&output);
+    assert!(
+        out.contains("Removed @acme/web from assemblr.jsonc."),
+        "{out}"
+    );
+    assert!(out.contains("  removed web.txt\n"), "{out}");
+    assert!(!project.join("web.txt").exists());
+    assert_eq!(read(&project.join("README.md")), "node\n");
+    assert_eq!(
+        read(&project.join("config/app.json")),
+        "{\n  \"port\": 3000\n}\n"
+    );
+    assert!(!declaration(&project).contains("@acme/web"));
+    assert!(declaration(&project).contains("@acme/node"));
+
+    // A unit that is only there because another one requires it is not
+    // removable by name, and the message says why.
+    let transitive = fixture.project("deps", &[("@acme/web", "^1")], "");
+    succeeds(fixture.compose(&transitive));
+    let err = stderr(&fails(remove(&fixture, &transitive, "@acme/node")));
+    assert!(
+        err.contains(
+            "@acme/node is not an explicit selection of this project; it is in the composition \
+             only because a selected unit requires it"
+        ),
+        "{err}"
+    );
+    let err = stderr(&fails(remove(&fixture, &transitive, "@acme/nothing")));
+    assert!(err.contains("is not an explicit selection"), "{err}");
+    assert!(!err.contains("only because"), "{err}");
+
+    // A unit that others still require leaves the declaration and stays in
+    // the composition.
+    succeeds(add(&fixture, &transitive, "@acme/node"));
+    let before = tree(&transitive.join("config"));
+    let output = succeeds(remove(&fixture, &transitive, "@acme/node"));
+    assert!(stdout(&output).contains("Removed @acme/node from assemblr.jsonc."));
+    assert_eq!(tree(&transitive.join("config")), before);
+    assert!(!declaration(&transitive).contains("@acme/node"));
+}
+
+#[test]
+fn remove_takes_the_options_entry_with_it_and_never_discards_an_edited_file() {
+    let fixture = Fixture::new("remove-options");
+    registry(&fixture);
+    let project = fixture.project(
+        "shop",
+        &[("@acme/node", "^1")],
+        r#""@acme/node": {"port": 9000}"#,
+    );
+    succeeds(fixture.compose(&project));
+    assert_eq!(
+        read(&project.join("config/app.json")),
+        "{\n  \"port\": 9000\n}\n"
+    );
+
+    // A file the consumer edited is not deleted because its unit left: the
+    // removal is refused and nothing changes, the declaration included.
+    fs::write(project.join("README.md"), "my readme\n").unwrap();
+    let before = tree(&project);
+    let err = stderr(&fails(remove(&fixture, &project, "@acme/node")));
+    assert!(err.contains("README.md"), "{err}");
+    assert_eq!(tree(&project), before);
+
+    fs::write(project.join("README.md"), "node\n").unwrap();
+    let output = succeeds(remove(&fixture, &project, "@acme/node"));
+    assert!(
+        stdout(&output).contains("Removed @acme/node and its options from assemblr.jsonc."),
+        "{}",
+        stdout(&output)
+    );
+    let text = declaration(&project);
+    assert!(
+        !text.contains("@acme/node") && !text.contains("9000"),
+        "{text}"
+    );
+    assert!(!project.join("README.md").exists());
+    assert!(!project.join("config").exists());
+    assert_eq!(
+        lockfile(&project)["project"]["managed"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn a_sequence_of_adds_equals_one_compose_of_the_final_declaration() {
+    let fixture = Fixture::new("converge");
+    registry(&fixture);
+    let node_then_web = initialized(&fixture, "a");
+    succeeds(add(&fixture, &node_then_web, "@acme/node"));
+    succeeds(add(&fixture, &node_then_web, "@acme/web"));
+    let web_then_node = initialized(&fixture, "b");
+    succeeds(add(&fixture, &web_then_node, "@acme/web"));
+    succeeds(add(&fixture, &web_then_node, "@acme/node"));
+    let at_once = fixture.project(
+        "c",
+        &[("@acme/node", "^1.0.0"), ("@acme/web", "^1.0.0")],
+        "",
+    );
+    succeeds(fixture.compose(&at_once));
+
+    let base = |project: &Path| lockfile(project)["project"]["base"].clone();
+    assert_eq!(base(&node_then_web), base(&at_once));
+    assert_eq!(base(&web_then_node), base(&at_once));
+    // The files and the lock are the same; the store also keeps the bases
+    // the incremental projects went through, which is its job.
+    let files = |project: &Path| -> Vec<(String, Vec<u8>)> {
+        tree(project)
+            .into_iter()
+            .filter(|(name, _)| !name.starts_with(".assemblr") && name != "assemblr.jsonc")
+            .collect()
+    };
+    for project in [&node_then_web, &web_then_node] {
+        assert_eq!(files(project), files(&at_once));
+        assert_eq!(lockfile(project)["units"], lockfile(&at_once)["units"]);
+        assert_eq!(read(&project.join("web.txt")), "web\n");
+    }
+}
