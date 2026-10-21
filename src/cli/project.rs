@@ -8,8 +8,8 @@ use std::process::ExitCode;
 
 use assemblr::adapters::{
     BuildProblem, ComposeFailure, ComposeProblem, ComposeRecovery, Composed, DeclarationChange,
-    FileChange, InitProjectFailure, Registry, StoreError, WriteStep, add_unit, compose_project,
-    init_project, remove_unit,
+    FileChange, InitProjectFailure, Registry, StoreError, WriteStep, abort_compose, add_unit,
+    compose_project, continue_compose, init_project, remove_unit,
 };
 use assemblr::domain::{LockChange, LockError, ResolutionError, UnitIdentity};
 use clap::Args;
@@ -123,8 +123,93 @@ pub(super) fn remove(args: &RemoveArgs) -> ExitCode {
     })
 }
 
-pub(super) fn compose() -> ExitCode {
+#[derive(Debug, Args)]
+pub(super) struct ComposeArgs {
+    /// Finalize a composition that left conflicts in files, once you have
+    /// resolved them: no conflict marker may remain.
+    #[arg(long = "continue", conflicts_with = "abort")]
+    resume: bool,
+    /// Give up a composition that left conflicts in files: restore the
+    /// project, `assemblr.jsonc` included, to what it held before.
+    #[arg(long)]
+    abort: bool,
+}
+
+pub(super) fn compose(args: &ComposeArgs) -> ExitCode {
+    if args.resume {
+        return settle(|root| continue_compose(root).map(|continued| report_continued(&continued)));
+    }
+    if args.abort {
+        return settle(|root| abort_compose(root).map(|recovery| report_aborted(&recovery)));
+    }
     run(None, compose_project)
+}
+
+/// Runs `--continue` or `--abort` on the project in the current directory.
+fn settle(operation: impl FnOnce(&Path) -> Result<(), ComposeFailure>) -> ExitCode {
+    let root = match std::env::current_dir() {
+        Ok(root) => root,
+        Err(error) => {
+            return fail(
+                &format!("could not read the current directory: {error}"),
+                None,
+            );
+        }
+    };
+    match operation(&root) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => {
+            let hint = hint(&failure, &root);
+            fail(&failure.to_string(), Some(&hint))
+        }
+    }
+}
+
+fn report_continued(continued: &assemblr::adapters::Continued) {
+    if continued.completed() {
+        println!(
+            "The composition had been continued already; removed its journal. The \
+             reconciliation base is {}.",
+            continued.base()
+        );
+        return;
+    }
+    println!(
+        "Resolved {} file(s) and finalized the composition; the reconciliation base {} is \
+         stored in .assemblr/ and assemblr-lock.json is updated.",
+        continued.files().len(),
+        continued.base()
+    );
+    for path in continued.files() {
+        println!("  resolved {path}");
+    }
+}
+
+fn report_aborted(recovery: &ComposeRecovery) {
+    match recovery {
+        ComposeRecovery::Completed => println!(
+            "The composition had been continued already, so there is nothing to abort; removed \
+             its journal."
+        ),
+        ComposeRecovery::Reverted {
+            removed,
+            restored,
+            kept,
+        } => {
+            println!(
+                "Aborted the composition: removed {} file(s) it had created and restored {} it \
+                 had changed or removed, assemblr.jsonc included where it was rewritten.",
+                removed.len(),
+                restored.len()
+            );
+            for path in kept {
+                eprintln!(
+                    "warning: kept {path}: it changed since the composition wrote it, so it is \
+                     yours now"
+                );
+            }
+        }
+    }
 }
 
 /// Runs `operation` on the project in the current directory and reports
@@ -150,7 +235,20 @@ fn run(
         Ok(composed) => {
             report_declaration(unit, &composed);
             report(&composed);
-            ExitCode::SUCCESS
+            if composed.pending().is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                fail(
+                    &format!(
+                        "{} file(s) hold conflicts between your changes and the composition",
+                        composed.pending().len()
+                    ),
+                    Some(
+                        "resolve the conflict markers in each file, then run `assemblr compose \
+                         --continue`; `assemblr compose --abort` restores the project instead",
+                    ),
+                )
+            }
         }
         Err(failure) => {
             if let ComposeFailure::Rejected {
@@ -193,6 +291,10 @@ fn report(composed: &Composed) {
     }
     for note in composed.notes() {
         eprintln!("warning: {note}");
+    }
+    if !composed.pending().is_empty() {
+        report_pending(composed);
+        return;
     }
     // A declaration that changed without changing the composition, as when
     // a unit that is in the composition already is selected.
@@ -254,15 +356,36 @@ fn report(composed: &Composed) {
         composed.base()
     );
     for (path, change) in composed.paths() {
-        println!(
-            "  {} {path}",
-            match change {
-                FileChange::Created => "created",
-                FileChange::Modified => "modified",
-                FileChange::Merged => "merged",
-                FileChange::Removed => "removed",
-            }
-        );
+        println!("  {} {path}", describe_change(*change));
+    }
+}
+
+/// A composition that waits for the consumer: the lock is not written yet.
+fn report_pending(composed: &Composed) {
+    println!(
+        "Reconciled the project with {} unit{} ({} file(s)), but {} file(s) hold conflicts; the \
+         rest of the composition is applied and its lock waits for you:",
+        composed.units(),
+        if composed.units() == 1 { "" } else { "s" },
+        composed.files(),
+        composed.pending().len(),
+    );
+    for (path, change) in composed.paths() {
+        println!("  {} {path}", describe_change(*change));
+    }
+    println!(
+        "Each conflicted file holds your content, the last composition's, and the declared \
+         composition's between <<<<<<<, |||||||, =======, and >>>>>>> lines."
+    );
+}
+
+fn describe_change(change: FileChange) -> &'static str {
+    match change {
+        FileChange::Created => "created",
+        FileChange::Modified => "modified",
+        FileChange::Merged => "merged",
+        FileChange::Removed => "removed",
+        FileChange::Conflicted => "conflict",
     }
 }
 
@@ -315,7 +438,10 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
                      compose` again"
                         .to_owned()
                 }
-                WriteStep::File(_) | WriteStep::Declaration | WriteStep::Lock => {
+                WriteStep::File(_)
+                | WriteStep::Declaration
+                | WriteStep::Pending
+                | WriteStep::Lock => {
                     "the composition is recorded in .assemblr/journal.json; the next `assemblr \
                      compose` reverts what was changed, assemblr.jsonc included, and starts over"
                         .to_owned()
@@ -367,8 +493,23 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
         ),
         ComposeProblem::Conflicts(_) => Some(
             "for each file, make the project's content the composed one or restore the \
-             composed content, or change the declaration; resolving conflicts in place is a \
-             later increment"
+             composed content, or change the declaration; conflicts between text content are \
+             left in the files to resolve, but not together with conflicts of other kinds"
+                .to_owned(),
+        ),
+        ComposeProblem::Pending(_) => Some(
+            "resolve the conflict markers in those files and run `assemblr compose --continue`, \
+             or run `assemblr compose --abort` to restore the project"
+                .to_owned(),
+        ),
+        ComposeProblem::Unresolved(_) => Some(
+            "edit each file to the content you want, with no <<<<<<< current or >>>>>>> incoming \
+             line left, then run `assemblr compose --continue` again"
+                .to_owned(),
+        ),
+        ComposeProblem::NothingPending | ComposeProblem::NotPending => Some(
+            "`assemblr compose` completes or reverts an interrupted composition, and composes the \
+             declaration"
                 .to_owned(),
         ),
         ComposeProblem::Base(StoreError::Missing(_)) => Some(

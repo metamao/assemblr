@@ -19,6 +19,7 @@
 
 mod declaration;
 mod ignore;
+mod pending;
 mod store;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,8 +30,9 @@ use std::path::{Path, PathBuf};
 
 pub use declaration::DeclarationChange;
 use ignore::IgnoreError;
+pub use pending::{Continued, abort_compose, continue_compose};
 pub use store::StoreError;
-use store::{Journal, JournalEntry, STATE_DIR, Store, write_new};
+use store::{Journal, JournalEntry, Pending, STATE_DIR, Store, write_new};
 
 use super::build::{BuildProblem, render_files, resolve_graph};
 use super::git::MANIFEST_LIMIT;
@@ -264,8 +266,33 @@ enum Step {
     Journal,
     Files,
     Declaration,
+    Pending,
     Lock,
     Finish,
+}
+
+/// Opens the declaration and takes the project's lock. Compositions of
+/// one project run one at a time: the declaration, which every composition
+/// reads and none replaces, carries the lock. The handle is writable where
+/// the file system allows: `add` and `remove` write the declaration
+/// through it, and so does the recovery of one that was interrupted, since
+/// a rename would leave the lock on a file that is no longer the
+/// declaration.
+fn lock_declaration(root: &Path) -> Result<fs::File, ComposeProblem> {
+    let declaration_path = root.join(DECLARATION);
+    if fs::symlink_metadata(&declaration_path).is_err() {
+        return Err(ComposeProblem::NoDeclaration(declaration_path));
+    }
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&declaration_path)
+        .or_else(|_| OpenOptions::new().read(true).open(&declaration_path))
+        .and_then(|file| fs4::FileExt::lock(&file).map(|()| file))
+        .map_err(|error| ComposeProblem::Io {
+            path: declaration_path,
+            error,
+        })
 }
 
 fn compose_with(
@@ -285,24 +312,7 @@ fn compose_with(
     if root.join(MANIFEST).exists() {
         return Err(rejected(ComposeProblem::UnitRepository(root.to_owned())));
     }
-    // Compositions of one project run one at a time: the declaration,
-    // which every composition reads and none writes, carries the lock.
-    // The handle is writable where the file system allows: `add` and
-    // `remove` write the declaration through it, and so does the recovery
-    // of one that was interrupted, since a rename would leave the lock on
-    // a file that is no longer the declaration.
-    let guard = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&declaration_path)
-        .or_else(|_| OpenOptions::new().read(true).open(&declaration_path))
-        .and_then(|file| fs4::FileExt::lock(&file).map(|()| file))
-        .map_err(|error| {
-            rejected(ComposeProblem::Io {
-                path: declaration_path.clone(),
-                error,
-            })
-        })?;
+    let guard = lock_declaration(root).map_err(rejected)?;
     // `add` and `remove` write the declaration, so a read-only one is
     // refused before anything else happens, not after the files are.
     if edit.is_some()
@@ -317,10 +327,21 @@ fn compose_with(
     let mut recovered = None;
     match store.journal() {
         Ok(None) => {}
-        Ok(Some(journal)) => match recover(root, &store, &journal, &guard) {
-            Ok(summary) => recovered = Some(summary),
-            Err(error) => return Err(rejected(ComposeProblem::Store(error))),
-        },
+        Ok(Some(journal)) => {
+            // A composition waiting for the consumer's resolution is not an
+            // interrupted one: reverting it would discard the resolution.
+            if let Some(pending) = journal
+                .pending
+                .as_ref()
+                .filter(|_| !pending::lock_records(root, &journal))
+            {
+                return Err(rejected(ComposeProblem::Pending(pending.files.clone())));
+            }
+            match recover(root, &store, &journal, &guard, &[]) {
+                Ok(summary) => recovered = Some(summary),
+                Err(error) => return Err(rejected(ComposeProblem::Store(error))),
+            }
+        }
         Err(error) => return Err(rejected(ComposeProblem::Store(error))),
     }
     let rejected = |problem| ComposeFailure::Rejected {
@@ -511,6 +532,7 @@ fn compose_with(
                 unchanged: true,
                 first: false,
                 declaration: planned_declaration.map(|planned| planned.change),
+                pending: BTreeSet::new(),
             });
         }
     }
@@ -627,6 +649,22 @@ fn compose_with(
                 ));
             }
             _ => {}
+        }
+    }
+    // A conflict between the project's text and the composition's is left
+    // in the file, marked, for the consumer to resolve; a composition
+    // with any other kind of conflict is refused whole.
+    let mut marked: BTreeSet<RelativePath> = BTreeSet::new();
+    let marks: Vec<Option<Change>> = conflicts
+        .iter()
+        .map(|conflict| pending::marked_change(&store, &base, &current, &files, conflict))
+        .collect();
+    if marks.iter().all(Option::is_some) {
+        for (conflict, change) in conflicts.drain(..).zip(marks) {
+            if let Some(change) = change {
+                marked.insert(conflict.path.clone());
+                changes.insert(conflict.path, change);
+            }
         }
     }
     conflicts.sort_by(|a, b| a.path.cmp(&b.path));
@@ -755,6 +793,7 @@ fn compose_with(
         unbased: &unbased,
         lock_bytes: &lock_bytes,
         directories: &directories,
+        marked: &marked,
         declaration: planned_declaration
             .as_ref()
             .filter(|_| declaration_changes)
@@ -785,6 +824,7 @@ fn compose_with(
         .iter()
         .map(|(path, change)| {
             let change = match change {
+                Change::Modify { .. } if marked.contains(path) => FileChange::Conflicted,
                 Change::Create(_) => FileChange::Created,
                 Change::Modify { merged: true, .. } => FileChange::Merged,
                 Change::Modify { .. } => FileChange::Modified,
@@ -805,6 +845,7 @@ fn compose_with(
         unchanged: false,
         first: previous.is_none(),
         declaration: planned_declaration.map(|planned| planned.change),
+        pending: marked,
     })
 }
 
@@ -1028,6 +1069,10 @@ struct Application<'a> {
     directories: &'a [RelativePath],
     /// The declaration `add` or `remove` rewrites, when it changes.
     declaration: Option<DeclarationWrite<'a>>,
+    /// The files that hold conflict markers. When there are any, the
+    /// composition is written except for its lock, which waits for
+    /// `compose --continue`.
+    marked: &'a BTreeSet<RelativePath>,
 }
 
 /// The declaration's new text, written through the handle that holds its
@@ -1060,6 +1105,7 @@ fn apply(
         lock_bytes,
         directories,
         declaration,
+        marked,
     } = *application;
     let rejected = |problem| ComposeFailure::Rejected {
         problems: vec![problem],
@@ -1128,6 +1174,7 @@ fn apply(
         base: snapshot.identity(),
         files: entries,
         directories: directories.to_vec(),
+        pending: None,
     };
     if let Err(error) = fault(Step::Journal) {
         return Err(write_failed(WriteStep::Journal, error));
@@ -1172,19 +1219,26 @@ fn apply(
             return Err(write_failed(WriteStep::Declaration, error));
         }
     }
-    let staged = root.join(LOCK_STAGING);
-    let lock_path = root.join(LOCKFILE);
-    let locked = fault(Step::Lock)
-        .and_then(|()| {
-            let _ = fs::remove_file(&staged);
-            write_new(&staged, lock_bytes)
-        })
-        .and_then(|()| fs::rename(&staged, &lock_path));
-    if let Err(error) = locked {
-        let _ = fs::remove_file(&staged);
-        return Err(write_failed(WriteStep::Lock, error));
+    if !marked.is_empty() {
+        // Everything is written but the lock. The journal now says so, and
+        // keeps the lock `--continue` writes: the next composition waits
+        // for the consumer instead of reverting.
+        let other = |error: StoreError| write_failed(WriteStep::Pending, io::Error::other(error));
+        let kept = store.save_previous(lock_bytes).map_err(other)?;
+        let waiting = Journal {
+            pending: Some(Pending {
+                lock: kept,
+                files: marked.iter().cloned().collect(),
+            }),
+            ..journal
+        };
+        if let Err(error) = fault(Step::Pending) {
+            return Err(write_failed(WriteStep::Pending, error));
+        }
+        store.begin(&waiting).map_err(other)?;
+        return Ok(store.restored());
     }
-    store::sync_dir(root);
+    write_lock(root, lock_bytes, fault)?;
     let finished = fault(Step::Finish).and_then(|()| {
         store.finish().map_err(|error| match error {
             StoreError::Io { error, .. } => error,
@@ -1197,6 +1251,32 @@ fn apply(
     Ok(store.restored())
 }
 
+/// Replaces the lockfile with `lock_bytes`, staged beside it and renamed
+/// into place.
+fn write_lock(
+    root: &Path,
+    lock_bytes: &[u8],
+    fault: &mut dyn FnMut(Step) -> io::Result<()>,
+) -> Result<(), ComposeFailure> {
+    let staged = root.join(LOCK_STAGING);
+    let lock_path = root.join(LOCKFILE);
+    let locked = fault(Step::Lock)
+        .and_then(|()| {
+            let _ = fs::remove_file(&staged);
+            write_new(&staged, lock_bytes)
+        })
+        .and_then(|()| fs::rename(&staged, &lock_path));
+    if let Err(error) = locked {
+        let _ = fs::remove_file(&staged);
+        return Err(ComposeFailure::Write {
+            step: WriteStep::Lock,
+            error,
+        });
+    }
+    store::sync_dir(root);
+    Ok(())
+}
+
 /// Recovers from the interrupted composition `journal` records. The lock
 /// is written after every file, so a lock that records the journal's base
 /// means the composition was complete except for the journal's removal,
@@ -1206,11 +1286,14 @@ fn apply(
 /// content, and a removed one is put back; a file with other content is
 /// left, since it is the consumer's now. The directories the composition
 /// created are removed when empty, innermost first, and the journal last.
+/// The `resolving` files are the exception: they are restored whatever
+/// they hold, since an abort gives up the resolution.
 fn recover(
     root: &Path,
     store: &Store,
     journal: &Journal,
     guard: &fs::File,
+    resolving: &[RelativePath],
 ) -> Result<ComposeRecovery, StoreError> {
     if let Ok(Some((
         _,
@@ -1279,6 +1362,12 @@ fn recover(
                 previous_executable,
                 ..
             } => match held {
+                // A file the consumer was resolving holds their edits, not
+                // the planned content, and an abort restores it anyway.
+                Held::File(_) | Held::Absent if resolving.contains(path) => {
+                    put_back(previous, *previous_executable)?;
+                    restored.push(path.clone());
+                }
                 Held::File(bytes) if BlobId::of(&bytes) == *blob => {
                     put_back(previous, *previous_executable)?;
                     restored.push(path.clone());
@@ -1579,6 +1668,7 @@ pub struct Composed {
     unchanged: bool,
     first: bool,
     declaration: Option<DeclarationChange>,
+    pending: BTreeSet<RelativePath>,
 }
 
 impl Composed {
@@ -1641,6 +1731,13 @@ impl Composed {
     pub fn first(&self) -> bool {
         self.first
     }
+
+    /// The files that hold conflict markers. When there are any, the
+    /// composition waits for `compose --continue` or `--abort`, and the
+    /// lock is not written yet.
+    pub fn pending(&self) -> &BTreeSet<RelativePath> {
+        &self.pending
+    }
 }
 
 /// What a composition did to a path of the project.
@@ -1654,6 +1751,9 @@ pub enum FileChange {
     Merged,
     /// Removed it.
     Removed,
+    /// Left its conflict between the project's content and the
+    /// composition's marked in the file, for the consumer to resolve.
+    Conflicted,
 }
 
 /// What recovering from an interrupted composition did.
@@ -1713,6 +1813,9 @@ pub enum WriteStep {
     /// Writing the declaration, which `add` and `remove` change after the
     /// files; the journal records the composition.
     Declaration,
+    /// Recording that the composition waits for the consumer's resolution;
+    /// the files are written, the journal remains.
+    Pending,
     /// Writing the lockfile; the files are written, the journal remains.
     Lock,
     /// Removing the journal; the composition is complete, and the next
@@ -1741,6 +1844,10 @@ impl fmt::Display for ComposeFailure {
                 WriteStep::Journal => write!(f, "could not write the journal: {error}"),
                 WriteStep::File(path) => write!(f, "could not write {}: {error}", path.display()),
                 WriteStep::Declaration => write!(f, "could not write {DECLARATION}: {error}"),
+                WriteStep::Pending => write!(
+                    f,
+                    "could not record the composition as waiting for conflict resolution: {error}"
+                ),
                 WriteStep::Lock => write!(f, "could not write {LOCKFILE}: {error}"),
                 WriteStep::Finish => write!(f, "could not remove the journal: {error}"),
             },
@@ -1807,6 +1914,16 @@ pub enum ComposeProblem {
     /// The project and the declared composition changed the same files
     /// in ways that need the consumer.
     Conflicts(Vec<FileConflict>),
+    /// A composition waits for the consumer to resolve the conflicts
+    /// marked in these files.
+    Pending(Vec<RelativePath>),
+    /// `compose --continue` or `--abort` found no composition waiting.
+    NothingPending,
+    /// `compose --continue` found an interrupted composition, not one
+    /// waiting for the consumer.
+    NotPending,
+    /// `compose --continue` found files that are not resolved, with why.
+    Unresolved(Vec<(RelativePath, String)>),
 }
 
 /// A file the consumer must settle.
@@ -1966,12 +2083,38 @@ impl fmt::Display for ComposeProblem {
             Self::Conflicts(conflicts) => {
                 write!(
                     f,
-                    "the project and the declared composition disagree at {} path(s), and \
-                     resolving conflicts in the project is not supported yet:",
+                    "the project and the declared composition disagree at {} path(s); only a \
+                     conflict between text content can be left in the file for you to resolve, \
+                     and a composition with any other conflict is refused whole:",
                     conflicts.len()
                 )?;
                 for conflict in conflicts {
                     write!(f, "\n  {conflict}")?;
+                }
+                Ok(())
+            }
+            Self::Pending(paths) => {
+                write!(
+                    f,
+                    "a composition is waiting for you to resolve its conflicts in {} file(s):",
+                    paths.len()
+                )?;
+                for path in paths {
+                    write!(f, "\n  {path}")?;
+                }
+                Ok(())
+            }
+            Self::NothingPending => {
+                f.write_str("no composition is waiting for conflict resolution")
+            }
+            Self::NotPending => f.write_str(
+                "no composition is waiting for conflict resolution; an interrupted one is recorded \
+                 in the journal",
+            ),
+            Self::Unresolved(files) => {
+                write!(f, "{} file(s) are not resolved yet:", files.len())?;
+                for (path, why) in files {
+                    write!(f, "\n  {path}: {why}")?;
                 }
                 Ok(())
             }

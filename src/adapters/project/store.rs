@@ -374,6 +374,19 @@ pub(super) struct Journal {
     pub(super) base: BaseIdentity,
     pub(super) files: Vec<(RelativePath, JournalEntry)>,
     pub(super) directories: Vec<RelativePath>,
+    /// Set once every change is written but the lock: the composition
+    /// waits for the consumer to settle the conflicts it left in files.
+    pub(super) pending: Option<Pending>,
+}
+
+/// A composition that is written except for its lock, waiting for the
+/// consumer to resolve the conflicts marked in some files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Pending {
+    /// The lockfile `--continue` writes, kept under `previous/`.
+    pub(super) lock: BlobId,
+    /// The files that hold conflict markers, in path order.
+    pub(super) files: Vec<RelativePath>,
 }
 
 /// What the composition does to one file.
@@ -433,12 +446,22 @@ impl Journal {
             .iter()
             .map(|path| Value::String(path.as_str().to_owned()))
             .collect();
-        let mut bytes = serde_json::to_vec_pretty(&json!({
+        let mut document = json!({
             "format": JOURNAL_FORMAT,
             "base": self.base.as_str(),
             "files": files,
             "directories": directories,
-        }))?;
+        });
+        if let (Some(pending), Some(object)) = (&self.pending, document.as_object_mut()) {
+            object.insert(
+                "pending".to_owned(),
+                json!({
+                    "lock": pending.lock.as_str(),
+                    "files": pending.files.iter().map(RelativePath::as_str).collect::<Vec<_>>(),
+                }),
+            );
+        }
+        let mut bytes = serde_json::to_vec_pretty(&document)?;
         bytes.push(b'\n');
         Ok(bytes)
     }
@@ -518,10 +541,34 @@ impl Journal {
                     .ok_or_else(|| "a `directories` entry is not a valid path".to_owned())
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let pending = match root.get("pending") {
+            None => None,
+            Some(pending) => {
+                let lock = pending
+                    .get("lock")
+                    .and_then(Value::as_str)
+                    .and_then(BlobId::parse)
+                    .ok_or_else(|| "its `pending` has no valid `lock`".to_owned())?;
+                let files = pending
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| "its `pending` has no `files` list".to_owned())?
+                    .iter()
+                    .map(|entry| {
+                        entry
+                            .as_str()
+                            .and_then(|text| RelativePath::parse(text).ok())
+                            .ok_or_else(|| "a `pending` file is not a valid path".to_owned())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Some(Pending { lock, files })
+            }
+        };
         Ok(Self {
             base,
             files,
             directories,
+            pending,
         })
     }
 }

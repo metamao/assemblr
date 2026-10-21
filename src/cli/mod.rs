@@ -22,7 +22,7 @@ enum Command {
     Init(project::InitArgs),
     /// Compose the consumer project in the current directory from the
     /// units its `assemblr.jsonc` declares.
-    Compose,
+    Compose(project::ComposeArgs),
     /// Select a unit in `assemblr.jsonc` and compose the project.
     Add(project::AddArgs),
     /// Remove a unit's selection from `assemblr.jsonc` and compose the
@@ -40,7 +40,7 @@ enum Command {
 pub(crate) fn run() -> ExitCode {
     match Cli::parse().command {
         Command::Init(args) => project::init(&args),
-        Command::Compose => project::compose(),
+        Command::Compose(args) => project::compose(&args),
         Command::Add(args) => project::add(&args),
         Command::Remove(args) => project::remove(&args),
         Command::Registry(command) => registry::run(command),
