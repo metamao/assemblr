@@ -15,8 +15,10 @@ mod render;
 
 pub use build::{
     AmendFailure, AmendProblem, AmendState, Amended, BuildFailure, BuildLockError, BuildProblem,
-    Built, LockfileOutcome, ManifestFileError, Match, OutputProblem, PublishError, PublishState,
-    PublishedProblem, TemplateError, WriteError, amend_unit, build_unit,
+    Built, Carried, FileState, LockfileOutcome, ManifestFileError, Match, OutputProblem,
+    PublishError, PublishState, PublishedProblem, Recovered, RecoveryError, TemplateError,
+    UpdateFailure, UpdateProblem, UpdateState, UpdateWriteError, Updated, WriteError, amend_unit,
+    build_unit, update_unit,
 };
 pub use git::{
     GitError, GitErrorKind, GitRepository, HeadManifestError, InvalidVersion, ObjectTooLarge,
@@ -27,7 +29,7 @@ pub use jsonc::SyntaxError;
 pub use lockfile::{LockfileError, PublishedLockfileError};
 pub use manifest::{
     EditError, FieldPath, IssueKind, JsonKind, ManifestIssue, PathSegment, ReadManifestError,
-    declare_amendment, read_manifest,
+    declare_amendment, read_manifest, rebase_amendments,
 };
 pub use registry::{
     Added, Problem, ReferenceError, Registry, RegistryFailure, StorageError, Synced, TagProblem,

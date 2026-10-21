@@ -2110,3 +2110,571 @@ fn a_published_amender_s_template_errors_name_its_version() {
         "{err}"
     );
 }
+
+fn update(fixture: &Fixture, repo: &Repo, args: &[&str]) -> Output {
+    let mut all = vec!["unit", "update"];
+    all.extend_from_slice(args);
+    fixture.assemblr(&repo.path, &all)
+}
+
+fn sync(fixture: &Fixture) -> Output {
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]))
+}
+
+/// The journal of an interrupted update, as `unit update` records it.
+fn journal(manifest: Option<(&str, &str)>, lockfile: (&str, &str)) -> String {
+    let planned =
+        |(before, after): (&str, &str)| serde_json::json!({ "before": before, "after": after });
+    serde_json::json!({
+        "format": 1,
+        "manifest": manifest.map(planned),
+        "lockfile": planned(lockfile),
+    })
+    .to_string()
+}
+
+#[test]
+fn update_moves_dependencies_to_the_newest_versions_their_ranges_allow() {
+    let fixture = Fixture::new("update");
+    let node = fixture.repo("node");
+    node.write("manifest.jsonc", &manifest("@acme/node", "1.0.0", &[], ""));
+    node.write("src/node.txt", "node 1.0.0");
+    node.publish("1.0.0");
+    fixture.register(&node);
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest("@acme/app", "0.1.0", &[("@acme/node", "^1")], ""),
+    );
+    app.write("src/app.txt", "app");
+    succeeds(fixture.build(&app));
+    let manifest_before = app.read("manifest.jsonc");
+
+    // Newer versions, one outside the range, never change the lock by
+    // themselves.
+    for version in ["1.1.0", "2.0.0"] {
+        node.write("manifest.jsonc", &manifest("@acme/node", version, &[], ""));
+        node.write("src/node.txt", &format!("node {version}"));
+        node.publish(version);
+    }
+    sync(&fixture);
+    succeeds(fixture.build(&app));
+    assert_eq!(app.lockfile()["units"]["@acme/node"]["version"], "1.0.0");
+
+    let output = succeeds(update(&fixture, &app, &[]));
+    assert_eq!(
+        stdout(&output).trim(),
+        "Updated assemblr-lock.json: @acme/node 1.0.0 -> 1.1.0."
+    );
+    assert_eq!(app.lockfile()["units"]["@acme/node"]["version"], "1.1.0");
+    assert_eq!(app.read("manifest.jsonc"), manifest_before);
+    assert!(!app.path.join(".git/assemblr-update.json").exists());
+
+    // Nothing to update now, and a version published but not synchronized
+    // is not seen: an update never fetches.
+    node.write("manifest.jsonc", &manifest("@acme/node", "1.2.0", &[], ""));
+    node.publish("1.2.0");
+    let lockfile = app.read("assemblr-lock.json");
+    let output = succeeds(update(&fixture, &app, &[]));
+    assert!(
+        stdout(&output).starts_with("Nothing to update"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(app.read("assemblr-lock.json"), lockfile);
+
+    succeeds(fixture.build(&app));
+    assert_eq!(
+        app.build_files(),
+        pairs(&[("app.txt", "app"), ("node.txt", "node 1.1.0")])
+    );
+}
+
+#[test]
+fn update_names_units_direct_or_transitive_and_refuses_what_is_not_a_dependency() {
+    let fixture = Fixture::new("update-named");
+    let a = fixture.repo("a");
+    a.write("manifest.jsonc", &manifest("@acme/a", "1.0.0", &[], ""));
+    a.write("src/a.txt", "a 1.0.0");
+    a.publish("1.0.0");
+    let b = fixture.repo("b");
+    b.write(
+        "manifest.jsonc",
+        &manifest("@acme/b", "1.0.0", &[("@acme/a", "^1")], ""),
+    );
+    b.write("src/b.txt", "b 1.0.0");
+    b.publish("1.0.0");
+    fixture.register(&a);
+    fixture.register(&b);
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest("@acme/app", "0.1.0", &[("@acme/b", "^1")], ""),
+    );
+    app.write("src/app.txt", "app");
+
+    // No lockfile yet.
+    let err = stderr(&fails(update(&fixture, &app, &[])));
+    assert!(
+        err.contains("there is no assemblr-lock.json, so there are no locked versions to update"),
+        "{err}"
+    );
+    assert!(
+        err.contains("hint: nothing was changed; run `assemblr unit build` first"),
+        "{err}"
+    );
+    succeeds(fixture.build(&app));
+
+    a.write("manifest.jsonc", &manifest("@acme/a", "1.1.0", &[], ""));
+    a.publish("1.1.0");
+    b.write(
+        "manifest.jsonc",
+        &manifest("@acme/b", "1.1.0", &[("@acme/a", "^1")], ""),
+    );
+    b.publish("1.1.0");
+    sync(&fixture);
+
+    // A transitive dependency, alone.
+    let output = succeeds(update(&fixture, &app, &["@acme/a"]));
+    assert_eq!(
+        stdout(&output).trim(),
+        "Updated assemblr-lock.json: @acme/a 1.0.0 -> 1.1.0."
+    );
+    let lockfile = app.lockfile();
+    assert_eq!(lockfile["units"]["@acme/a"]["version"], "1.1.0");
+    assert_eq!(lockfile["units"]["@acme/b"]["version"], "1.0.0");
+
+    // A lockfile that is not one Assemblr wrote is reported and kept.
+    let before = app.read("assemblr-lock.json");
+    app.write("assemblr-lock.json", "{");
+    let err = stderr(&fails(update(&fixture, &app, &[])));
+    assert!(err.contains("assemblr-lock.json"), "{err}");
+    assert!(
+        err.contains("hint: nothing was changed; fix assemblr-lock.json; deleting assemblr-lock.json is not a repair"),
+        "{err}"
+    );
+    assert_eq!(app.read("assemblr-lock.json"), "{");
+    app.write("assemblr-lock.json", &before);
+
+    // Not a dependency, and not an identity.
+    let err = stderr(&fails(update(&fixture, &app, &["@acme/zzz", "@acme/b"])));
+    assert!(
+        err.contains("@acme/zzz is not a dependency of this unit"),
+        "{err}"
+    );
+    assert!(err.contains("hint: nothing was changed"), "{err}");
+    assert_eq!(app.read("assemblr-lock.json"), before);
+    let err = stderr(&fails(update(&fixture, &app, &["not an identity"])));
+    assert!(err.contains("not an identity"), "{err}");
+    assert_eq!(app.read("assemblr-lock.json"), before);
+
+    // Everything.
+    let output = succeeds(update(&fixture, &app, &[]));
+    assert_eq!(
+        stdout(&output).trim(),
+        "Updated assemblr-lock.json: @acme/b 1.0.0 -> 1.1.0."
+    );
+    assert_eq!(app.lockfile()["units"]["@acme/b"]["version"], "1.1.0");
+}
+
+/// `app_amending_node` with the copy of `config/README.md` edited and
+/// declared in a manifest with a comment, built.
+fn app_with_edited_amendment(fixture: &Fixture) -> (Repo, Repo) {
+    let (node, app) = app_amending_node(fixture);
+    succeeds(amend(fixture, &app, &["config/README.md"]));
+    app.write("amendments/config/README.md", "amended config\n");
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[("@acme/node", "^1")],
+            ", \"params\": {\"title\": {\"type\": \"string\", \"description\": \"A title.\", \
+             \"default\": \"Demo\"}},\n  // The files this unit amends.\n  \"amendments\": {\n    \
+             \"config/README.md\": { \"unit\": \"@acme/node\", \"base\": \"1.0.0\" }, // why\n  }",
+        ),
+    );
+    succeeds(fixture.build(&app));
+    (node, app)
+}
+
+/// Publishes `@acme/node` `to`, currently at `from`, from its working tree
+/// after `change`.
+fn publish_node(fixture: &Fixture, node: &Repo, from: &str, to: &str, change: impl FnOnce(&Repo)) {
+    let text = node.read("manifest.jsonc").replace(
+        &format!("\"version\": \"{from}\""),
+        &format!("\"version\": \"{to}\""),
+    );
+    node.write("manifest.jsonc", &text);
+    change(node);
+    node.publish(to);
+    sync(fixture);
+}
+
+#[test]
+fn an_amendment_whose_base_file_is_unchanged_carries_over() {
+    let fixture = Fixture::new("update-carry");
+    let (node, app) = app_with_edited_amendment(&fixture);
+    let manifest_before = app.read("manifest.jsonc");
+    // The amended file is the same; another file changes.
+    publish_node(&fixture, &node, "1.0.0", "1.1.0", |node| {
+        node.write("src/README.md", "node 1.1.0\n");
+    });
+
+    let output = succeeds(update(&fixture, &app, &[]));
+
+    assert_eq!(
+        stdout(&output).trim(),
+        "Updated assemblr-lock.json: @acme/node 1.0.0 -> 1.1.0. Carried over, in \
+         manifest.jsonc: amendments/config/README.md from @acme/node 1.0.0 to 1.1.0."
+    );
+    assert_eq!(
+        app.read("manifest.jsonc"),
+        manifest_before.replace("\"base\": \"1.0.0\"", "\"base\": \"1.1.0\"")
+    );
+    assert_eq!(app.read("amendments/config/README.md"), "amended config\n");
+    assert_eq!(app.lockfile()["units"]["@acme/node"]["version"], "1.1.0");
+    assert!(!app.path.join(".git/assemblr-update.json").exists());
+    assert!(!app.path.join(".assemblr-manifest.jsonc.new").exists());
+    assert!(!app.path.join(".assemblr-lock.json.new").exists());
+
+    succeeds(fixture.build(&app));
+    let built = app.build_files();
+    assert!(
+        built.contains(&("README.md".to_owned(), "node 1.1.0\n".to_owned())),
+        "{built:?}"
+    );
+    assert!(
+        built.contains(&("config/README.md".to_owned(), "amended config\n".to_owned())),
+        "{built:?}"
+    );
+}
+
+#[test]
+fn an_amendment_whose_base_file_changed_or_vanished_refuses_the_update() {
+    let fixture = Fixture::new("update-refuse");
+    let (node, app) = app_with_edited_amendment(&fixture);
+    let unchanged = |app: &Repo| {
+        (
+            app.read("manifest.jsonc"),
+            app.read("assemblr-lock.json"),
+            app.read("amendments/config/README.md"),
+        )
+    };
+    let before = unchanged(&app);
+
+    publish_node(&fixture, &node, "1.0.0", "1.1.0", |node| {
+        node.write("src/config/README.md", "node config 1.1.0\n");
+    });
+    let err = stderr(&fails(update(&fixture, &app, &[])));
+    assert!(
+        err.contains(
+            "amendments/config/README.md is based on @acme/node 1.0.0, and src/config/README.md \
+             differs in @acme/node 1.1.0, which the update would select; reconciling an \
+             amendment with a changed base is not supported yet"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "hint: nothing was changed; keep the locked version, or narrow the declared range"
+        ),
+        "{err}"
+    );
+    assert_eq!(unchanged(&app), before);
+    assert!(!app.path.join(".git/assemblr-update.json").exists());
+
+    publish_node(&fixture, &node, "1.1.0", "1.2.0", |node| {
+        node.remove("src/config/README.md");
+    });
+    let err = stderr(&fails(update(&fixture, &app, &[])));
+    assert!(
+        err.contains(
+            "@acme/node 1.2.0, which the update would select, no longer has src/config/README.md"
+        ),
+        "{err}"
+    );
+    assert_eq!(unchanged(&app), before);
+
+    // A declaration edited by hand: the real base is unknown.
+    app.write(
+        "manifest.jsonc",
+        &before
+            .0
+            .replace("\"base\": \"1.0.0\"", "\"base\": \"1.1.0\""),
+    );
+    let err = stderr(&fails(update(&fixture, &app, &[])));
+    assert!(
+        err.contains(
+            "amendments/config/README.md declares @acme/node 1.1.0 as its base, but the lockfile \
+             locks @acme/node 1.0.0; revert the declaration to 1.0.0"
+        ),
+        "{err}"
+    );
+    assert_eq!(app.read("assemblr-lock.json"), before.1);
+    app.write("manifest.jsonc", &before.0);
+
+    // The locked dependent still builds.
+    succeeds(fixture.build(&app));
+}
+
+#[test]
+fn a_published_amender_is_refused_unless_updated_together_with_its_provider() {
+    let fixture = Fixture::new("update-published-amender");
+    let (node, app) = published_amender(&fixture, "port: {{ port }}\nname: {{ own.title }}\n");
+    let consumer = consumer(
+        &fixture,
+        "consumer",
+        &[("@acme/app", "^0.1")],
+        r#", "options": {"@acme/app": {"title": "Consumer"}}"#,
+    );
+    succeeds(fixture.build(&consumer));
+    let before = consumer.read("assemblr-lock.json");
+    // The amended files are unchanged in the provider's next version.
+    publish_node(&fixture, &node, "1.0.0", "1.1.0", |node| {
+        node.write("src/README.md", "node 1.1.0\n");
+    });
+
+    for args in [&[][..], &["@acme/node"][..]] {
+        let err = stderr(&fails(update(&fixture, &consumer, args)));
+        assert!(
+            err.contains(
+                "@acme/app 0.1.0 amends bin/run of @acme/node at 1.0.0, but the update would \
+                 select @acme/node 1.1.0; applying a published amendment to another version of \
+                 its provider is not supported yet"
+            ),
+            "{err}"
+        );
+        assert!(
+            err.contains("@acme/app 0.1.0 amends config/app.yaml.assemblr.tmpl of @acme/node"),
+            "{err}"
+        );
+        assert!(
+            err.contains(
+                "hint: nothing was changed; update the amender together with its provider"
+            ),
+            "{err}"
+        );
+        assert_eq!(consumer.read("assemblr-lock.json"), before);
+    }
+
+    // The amender updates, carrying its amendments over, and publishes.
+    let output = succeeds(update(&fixture, &app, &[]));
+    assert!(
+        stdout(&output).contains(
+            "Carried over, in manifest.jsonc: amendments/bin/run from @acme/node 1.0.0 to 1.1.0, \
+             amendments/config/app.yaml.assemblr.tmpl from @acme/node 1.0.0 to 1.1.0."
+        ),
+        "{}",
+        stdout(&output)
+    );
+    succeeds(fixture.build(&app));
+    app.write(
+        "manifest.jsonc",
+        &app.read("manifest.jsonc").replace("\"0.1.0\"", "\"0.1.1\""),
+    );
+    app.publish("0.1.1");
+    sync(&fixture);
+
+    // Both move together, to a combination a build can compose.
+    let output = succeeds(update(&fixture, &consumer, &[]));
+    assert_eq!(
+        stdout(&output).trim(),
+        "Updated assemblr-lock.json: @acme/app 0.1.0 -> 0.1.1, @acme/node 1.0.0 -> 1.1.0."
+    );
+    succeeds(fixture.build(&consumer));
+    let built = consumer.build_files();
+    assert!(
+        built.contains(&("README.md".to_owned(), "node 1.1.0\n".to_owned())),
+        "{built:?}"
+    );
+    assert!(
+        built.contains(&(
+            "config/app.yaml".to_owned(),
+            "port: 80\nname: Consumer\n".to_owned()
+        )),
+        "{built:?}"
+    );
+}
+
+#[test]
+fn an_interrupted_update_is_completed_at_each_write_boundary_and_never_overwrites_edits() {
+    let fixture = Fixture::new("update-interrupted");
+    let (node, app) = app_with_edited_amendment(&fixture);
+    let (manifest_before, lock_before) =
+        (app.read("manifest.jsonc"), app.read("assemblr-lock.json"));
+    publish_node(&fixture, &node, "1.0.0", "1.1.0", |node| {
+        node.write("src/README.md", "node 1.1.0\n");
+    });
+    succeeds(update(&fixture, &app, &[]));
+    let (manifest_after, lock_after) = (app.read("manifest.jsonc"), app.read("assemblr-lock.json"));
+    assert_ne!(manifest_before, manifest_after);
+    assert_ne!(lock_before, lock_after);
+    let journal_path = app.path.join(".git/assemblr-update.json");
+    let journal = journal(
+        Some((&manifest_before, &manifest_after)),
+        (&lock_before, &lock_after),
+    );
+    let restore = |manifest: &str, lock: &str| {
+        app.write("manifest.jsonc", manifest);
+        app.write("assemblr-lock.json", lock);
+        app.write(".git/assemblr-update.json", &journal);
+    };
+    let completed = |app: &Repo| {
+        assert_eq!(app.read("manifest.jsonc"), manifest_after);
+        assert_eq!(app.read("assemblr-lock.json"), lock_after);
+        assert!(!journal_path.exists());
+        assert!(!app.path.join(".assemblr-manifest.jsonc.new").exists());
+        assert!(!app.path.join(".assemblr-lock.json.new").exists());
+    };
+
+    // Interrupted before any file was replaced: builds and amendments
+    // refuse to run, and the next update completes it first.
+    restore(&manifest_before, &lock_before);
+    app.write(".assemblr-lock.json.new", "half written");
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(
+        err.contains("an update of this unit was interrupted and not completed"),
+        "{err}"
+    );
+    assert!(
+        err.contains("hint: the build was rejected; build/ and assemblr-lock.json were not changed; run `assemblr unit update` to complete the interrupted update"),
+        "{err}"
+    );
+    let err = stderr(&fails(amend(&fixture, &app, &["app.yaml"])));
+    assert!(
+        err.contains("an update of this unit was interrupted and not completed"),
+        "{err}"
+    );
+    assert!(
+        !app.path
+            .join("amendments/config/app.yaml.assemblr.tmpl")
+            .exists()
+    );
+    let output = succeeds(update(&fixture, &app, &[]));
+    assert!(
+        stderr(&output).contains(
+            "note: completed an update that was interrupted earlier: manifest.jsonc and \
+             assemblr-lock.json were replaced"
+        ),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        stdout(&output).starts_with("Nothing to update"),
+        "{}",
+        stdout(&output)
+    );
+    completed(&app);
+
+    // Interrupted after the manifest was replaced.
+    restore(&manifest_after, &lock_before);
+    let output = succeeds(update(&fixture, &app, &[]));
+    assert!(
+        stderr(&output).contains("interrupted earlier: assemblr-lock.json was replaced"),
+        "{}",
+        stderr(&output)
+    );
+    completed(&app);
+
+    // Interrupted after both were replaced, before the record was removed.
+    restore(&manifest_after, &lock_after);
+    let output = succeeds(update(&fixture, &app, &[]));
+    assert!(
+        stderr(&output).contains("interrupted earlier: both files were already in place"),
+        "{}",
+        stderr(&output)
+    );
+    completed(&app);
+
+    // The author edited the manifest meanwhile: never overwritten, and the
+    // record stays until the author restores the file or removes it.
+    let edited = format!("{manifest_before}\n// edited meanwhile\n");
+    restore(&edited, &lock_before);
+    let err = stderr(&fails(update(&fixture, &app, &[])));
+    assert!(
+        err.contains(
+            "manifest.jsonc is neither as before the update nor as it planned, and \
+             assemblr-lock.json is as before the update; a file changed since the update \
+             started is never overwritten"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("hint: nothing was changed now; the record of the interrupted update is kept"),
+        "{err}"
+    );
+    assert_eq!(app.read("manifest.jsonc"), edited);
+    assert_eq!(app.read("assemblr-lock.json"), lock_before);
+    assert!(journal_path.exists());
+    app.write("manifest.jsonc", &manifest_before);
+    succeeds(update(&fixture, &app, &[]));
+    completed(&app);
+
+    // A record that is not one Assemblr wrote is reported and kept.
+    restore(&manifest_before, &lock_before);
+    app.write(".git/assemblr-update.json", "{");
+    let err = stderr(&fails(update(&fixture, &app, &[])));
+    assert!(
+        err.contains("an update was interrupted, and its record at"),
+        "{err}"
+    );
+    assert!(err.contains("cannot be used"), "{err}");
+    assert_eq!(app.read("manifest.jsonc"), manifest_before);
+    assert!(journal_path.exists());
+    app.remove(".git/assemblr-update.json");
+    succeeds(update(&fixture, &app, &[]));
+    completed(&app);
+}
+
+#[test]
+fn update_does_not_depend_on_declaration_order() {
+    let fixture = Fixture::new("update-order");
+    for name in ["a", "b"] {
+        let repo = fixture.repo(name);
+        let identity = format!("@acme/{name}");
+        repo.write("manifest.jsonc", &manifest(&identity, "1.0.0", &[], ""));
+        repo.write(&format!("src/{name}.txt"), "1.0.0");
+        repo.publish("1.0.0");
+        fixture.register(&repo);
+        repo.write("manifest.jsonc", &manifest(&identity, "1.1.0", &[], ""));
+        repo.publish("1.1.0");
+    }
+    let apps: Vec<Repo> = [
+        ("one", &[("@acme/a", "^1"), ("@acme/b", "^1")][..]),
+        ("two", &[("@acme/b", "^1"), ("@acme/a", "^1")][..]),
+    ]
+    .into_iter()
+    .map(|(name, dependencies)| {
+        let app = fixture.repo(name);
+        app.write(
+            "manifest.jsonc",
+            &manifest("@acme/app", "0.1.0", dependencies, ""),
+        );
+        app.write("src/app.txt", "app");
+        app
+    })
+    .collect();
+    // Locked at 1.0.0 before 1.1.0 is indexed.
+    let data = fixture.data.clone();
+    for app in &apps {
+        succeeds(fixture.build(app));
+    }
+    sync(&fixture);
+    let _ = data;
+
+    let outputs: Vec<String> = apps
+        .iter()
+        .map(|app| stdout(&succeeds(update(&fixture, app, &[]))))
+        .collect();
+
+    assert_eq!(outputs[0], outputs[1]);
+    assert_eq!(
+        apps[0].read("assemblr-lock.json"),
+        apps[1].read("assemblr-lock.json")
+    );
+    assert_eq!(
+        outputs[0].trim(),
+        "Updated assemblr-lock.json: @acme/a 1.0.0 -> 1.1.0, @acme/b 1.0.0 -> 1.1.0."
+    );
+}

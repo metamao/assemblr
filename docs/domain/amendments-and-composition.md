@@ -247,7 +247,10 @@ change nothing (standing default D2): an amendment whose provider resolves
 to a version other than its base is not applied, and a provider file that
 several units amend, in any combination of the unit being built and
 published amenders, is not amended by any of them. No merge, re-basing, or
-ordering is performed.
+ordering is performed. `unit update` carries a unit's own amendment to the
+provider's new version only when the amended source file is unchanged
+between the two versions, and refuses the update otherwise (see
+[authoring-workflow.md](authoring-workflow.md#update-details--approved)).
 
 Consumer projects reconcile downstream modifications with three inputs: the
 **reconciliation base** (the previously materialized composition), **current**

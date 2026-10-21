@@ -310,7 +310,8 @@ pub fn declare_amendment(
         json_string(&declaration.base().to_string())
     );
     let failure = || EditError {
-        entry: entry.clone(),
+        action: EditAction::Add,
+        entries: vec![entry.clone()],
     };
     let expected = manifest
         .with_amendment(path.clone(), declaration.clone())
@@ -388,6 +389,74 @@ fn insert_amendment(text: &str, entry: &str) -> Option<String> {
     Some(edited)
 }
 
+/// The text of `manifest` with the `base` of each amendment in `bases`
+/// replaced by the given version, as `unit update` carries an amendment to
+/// the provider's new version. Only the value of each `base` member changes;
+/// every other byte of the text, comments and formatting included, is kept.
+///
+/// `text` must be the text `manifest` was read from. The edited text is read
+/// again and must describe exactly `manifest` with those bases; if it does
+/// not, or the text cannot be located precisely, nothing is produced and
+/// the error carries the members to change by hand.
+pub fn rebase_amendments(
+    text: &str,
+    manifest: &Manifest,
+    bases: &BTreeMap<RelativePath, Version>,
+) -> Result<String, EditError> {
+    let entries: Vec<String> = bases
+        .iter()
+        .filter_map(|(path, base)| {
+            let declaration = manifest.amendments().get(path)?;
+            Some(format!(
+                "{}: {{ \"unit\": {}, \"base\": {} }}",
+                json_string(path.as_str()),
+                json_string(&declaration.unit().to_string()),
+                json_string(&base.to_string())
+            ))
+        })
+        .collect();
+    let failure = || EditError {
+        action: EditAction::Replace,
+        entries: entries.clone(),
+    };
+    let expected = manifest.with_bases(bases).ok_or_else(failure)?;
+    let edited = replace_bases(text, bases).ok_or_else(failure)?;
+    match read_manifest(&edited) {
+        Ok(manifest) if manifest == expected => Ok(edited),
+        _ => Err(failure()),
+    }
+}
+
+/// `text` with the `base` value of each declaration in `bases` replaced, or
+/// `None` when a declaration or its `base` cannot be located precisely.
+fn replace_bases(text: &str, bases: &BTreeMap<RelativePath, Version>) -> Option<String> {
+    let strict = jsonc::to_strict_json(text).ok()?;
+    let open = jsonc::root_object(&strict)?;
+    let (members, _) = jsonc::members(&strict, open)?;
+    let amendments = members.iter().find(|member| member.key == "amendments")?;
+    let (declared, _) = jsonc::members(&strict, amendments.value_start)?;
+    // Each replacement's span, from the end of the text backwards, so that
+    // earlier offsets stay valid while later spans are replaced.
+    let mut replacements = Vec::new();
+    for (path, base) in bases {
+        let declaration = declared.iter().find(|member| member.key == path.as_str())?;
+        let (fields, _) = jsonc::members(&strict, declaration.value_start)?;
+        let field = fields.iter().find(|member| member.key == "base")?;
+        replacements.push((
+            field.value_start,
+            field.value_end,
+            json_string(&base.to_string()),
+        ));
+    }
+    replacements.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+    let mut edited = text.to_owned();
+    for (start, end, value) in replacements {
+        edited.get(start..end)?;
+        edited.replace_range(start..end, &value);
+    }
+    Some(edited)
+}
+
 /// `value` as a JSON string literal.
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| format!("{value:?}"))
@@ -396,24 +465,42 @@ fn json_string(value: &str) -> String {
 /// The manifest could not be edited safely. Nothing was changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditError {
-    entry: String,
+    action: EditAction,
+    entries: Vec<String>,
+}
+
+/// What the edit would have done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditAction {
+    /// Add one member to the `amendments` object.
+    Add,
+    /// Replace the `base` of existing members.
+    Replace,
 }
 
 impl EditError {
-    /// The `amendments` member that was to be added, as JSON text.
-    pub fn entry(&self) -> &str {
-        &self.entry
+    /// The `amendments` members the edit would have added or replaced, as
+    /// JSON text.
+    pub fn entries(&self) -> &[String] {
+        &self.entries
     }
 }
 
 impl fmt::Display for EditError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "`manifest.jsonc` could not be edited safely, so it is unchanged; add this member \
-             to its top-level `amendments` object by hand: {}",
-            self.entry
-        )
+        let entries = self.entries.join(", ");
+        match self.action {
+            EditAction::Add => write!(
+                f,
+                "`manifest.jsonc` could not be edited safely, so it is unchanged; add this member \
+                 to its top-level `amendments` object by hand: {entries}"
+            ),
+            EditAction::Replace => write!(
+                f,
+                "`manifest.jsonc` could not be edited safely, so it is unchanged; replace these \
+                 members of its top-level `amendments` object by hand: {entries}"
+            ),
+        }
     }
 }
 
@@ -810,6 +897,7 @@ impl Reader {
 mod tests {
     use super::{
         FieldPath, IssueKind, JsonKind, ReadManifestError, declare_amendment, read_manifest,
+        rebase_amendments,
     };
     use crate::domain::{
         AllowedValuesError, AmendmentDeclaration, IdentityErrorReason, ManifestError,
@@ -1445,6 +1533,77 @@ mod tests {
         let path = RelativePath::parse("a.txt").unwrap();
         assert!(declare_amendment("{}", &manifest, &path, &declaration).is_err());
         assert!(declare_amendment("[]", &manifest, &path, &declaration).is_err());
+    }
+
+    /// `text` with the bases in `bases` replaced.
+    fn rebased(text: &str, bases: &[(&str, &str)]) -> Result<String, String> {
+        let manifest = read_manifest(text).unwrap();
+        let bases = bases
+            .iter()
+            .map(|(path, base)| {
+                (
+                    RelativePath::parse(path).unwrap(),
+                    Version::parse(base).unwrap(),
+                )
+            })
+            .collect();
+        rebase_amendments(text, &manifest, &bases).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn bases_are_replaced_in_place_keeping_everything_else() {
+        let edited = rebased(
+            FULL,
+            &[
+                ("config/wrangler.toml", "2.2.0"),
+                ("package.json.assemblr.tmpl", "1.5.0"),
+            ],
+        )
+        .unwrap();
+        let expected = FULL
+            .replace(r#""base": "2.1.0""#, r#""base": "2.2.0""#)
+            .replace(r#""base": "1.4.2""#, r#""base": "1.5.0""#);
+        assert_eq!(edited, expected);
+        let manifest = read_manifest(&edited).unwrap();
+        assert_eq!(
+            manifest.amendments()[&RelativePath::parse("config/wrangler.toml").unwrap()].base(),
+            &Version::parse("2.2.0").unwrap()
+        );
+        // Comments inside the declaration, and a one-line manifest.
+        let text = with(
+            "\"dependencies\": {\"@metamao/node\": \"^1\"}, \"amendments\": {\"a.txt\": {\"unit\": \"@metamao/node\", /* was */ \"base\": /* 1.0.0 */ \"1.0.0\"}}",
+        );
+        assert_eq!(
+            rebased(&text, &[("a.txt", "1.2.0")]).unwrap(),
+            with(
+                "\"dependencies\": {\"@metamao/node\": \"^1\"}, \"amendments\": {\"a.txt\": {\"unit\": \"@metamao/node\", /* was */ \"base\": /* 1.0.0 */ \"1.2.0\"}}"
+            )
+        );
+    }
+
+    #[test]
+    fn a_rebase_that_cannot_be_made_safely_names_the_members_to_replace() {
+        // A path that is not amended.
+        let error = rebased(FULL, &[("src/index.ts", "1.5.0")]).unwrap_err();
+        assert!(error.contains("unchanged"), "{error}");
+        // The declared members are named with their new bases.
+        let text = with(
+            r#""dependencies": {"@metamao/node": "^1"}, "amendments": {"a.txt": {"unit": "@metamao/node", "base": "1.0.0"}}"#,
+        );
+        let manifest = read_manifest(&text).unwrap();
+        let bases = std::collections::BTreeMap::from([(
+            RelativePath::parse("a.txt").unwrap(),
+            Version::parse("1.2.0").unwrap(),
+        )]);
+        let error = rebase_amendments("{}", &manifest, &bases).unwrap_err();
+        assert_eq!(
+            error.entries(),
+            [r#""a.txt": { "unit": "@metamao/node", "base": "1.2.0" }"#]
+        );
+        assert!(
+            error.to_string().contains("replace these members"),
+            "{error}"
+        );
     }
 
     #[test]

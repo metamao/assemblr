@@ -29,6 +29,12 @@ const LOCKFILE_LIMIT: u64 = 8 * 1024 * 1024;
 
 /// Reads the lockfile in `root`, or `None` if there is none yet.
 pub(crate) fn read(root: &Path) -> Result<Option<UnitLock>, LockfileError> {
+    read_with_text(root).map(|found| found.map(|(_, lock)| lock))
+}
+
+/// Reads the lockfile in `root` together with its exact bytes, or `None` if
+/// there is none yet.
+pub(crate) fn read_with_text(root: &Path) -> Result<Option<(Vec<u8>, UnitLock)>, LockfileError> {
     let path = root.join(LOCKFILE);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -51,9 +57,8 @@ pub(crate) fn read(root: &Path) -> Result<Option<UnitLock>, LockfileError> {
             detail: format!("it is larger than the {LOCKFILE_LIMIT} bytes Assemblr reads"),
         });
     }
-    parse(&bytes)
-        .map(Some)
-        .map_err(|detail| LockfileError::Invalid { path, detail })
+    let lock = parse(&bytes).map_err(|detail| LockfileError::Invalid { path, detail })?;
+    Ok(Some((bytes, lock)))
 }
 
 /// Reads the lockfile committed at the root of `commit`'s tree in

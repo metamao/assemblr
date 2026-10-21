@@ -86,49 +86,13 @@ impl LockedUnit {
 ///
 /// A locked version that `resolution` keeps must still be published with
 /// the content it was locked to. Every one that is not is reported, sorted
-/// by identity.
+/// by identity (see [`update_lock`](super::update_lock)).
 pub fn relock(
     previous: &UnitLock,
     resolution: &Resolution,
     index: &RegistryIndex,
 ) -> Result<UnitLock, Vec<LockError>> {
-    let mut units = BTreeMap::new();
-    let mut errors = Vec::new();
-    for (identity, resolved) in resolution.graph().units() {
-        let version = resolved.version();
-        let Some(published) = index
-            .units()
-            .get(identity)
-            .and_then(|unit| unit.versions().get(version))
-        else {
-            errors.push(LockError::NotIndexed {
-                unit: identity.clone(),
-                version: version.clone(),
-            });
-            continue;
-        };
-        let kept = !resolution.changes().contains_key(identity);
-        if let Some(locked) = previous.units.get(identity).filter(|_| kept) {
-            if locked.provenance != *published {
-                errors.push(LockError::ContentChanged {
-                    unit: identity.clone(),
-                    version: version.clone(),
-                    locked: locked.provenance.clone(),
-                    published: published.clone(),
-                });
-                continue;
-            }
-        }
-        units.insert(
-            identity.clone(),
-            LockedUnit::new(version.clone(), published.clone()),
-        );
-    }
-    if errors.is_empty() {
-        Ok(UnitLock { units })
-    } else {
-        Err(errors)
-    }
+    super::update::update_lock(previous, resolution.graph(), index).map(|(lock, _)| lock)
 }
 
 /// Checks that `resolution` keeps every amended unit of `manifest` at its

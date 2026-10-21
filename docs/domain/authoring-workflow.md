@@ -118,9 +118,11 @@ the manifest already declares; a file of the same provider that a locked
 dependency, direct or transitive, already amends, naming that amender and
 its version, since several amenders of one file are not supported yet; and a
 file at `amendments/<path>` whose content differs from the provider's file,
-or that is not a regular file. A file of another provider with the same name
-is a different file, and delivered-path collisions are found by the build
-as usual.
+or that is not a regular file. While an update of the unit is interrupted,
+it refuses to run at all, until `unit update` completes it (see
+[update details](#update-details--approved)). A file of another provider
+with the same name is a different file, and delivered-path collisions are
+found by the build as usual.
 
 **Writing.** Everything is decided before anything is written. The copy is
 created first, as a new file, and the manifest is replaced afterwards: the
@@ -238,8 +240,10 @@ stdout. Diagnostics, and changes to the unit lockfile, go to stderr.
   [parameters-and-options.md](parameters-and-options.md#rendering--approved)).
 
 The effective-contribution check (OC-11) does not gate a build; it gates
-publication. Neither does a clean or committed working tree. A failed build
-reports every problem it can discover independently. A problem in a later
+publication. Neither does a clean or committed working tree. A build also
+refuses to run while an update of the unit is interrupted, until
+`unit update` completes it (see [update details](#update-details--approved)).
+A failed build reports every problem it can discover independently. A problem in a later
 step that cannot run after an earlier failure, such as composition after a
 failed resolution, is not reported.
 
@@ -370,6 +374,9 @@ Decided by the owner for the first `unit build` (OC-46):
   change is reported. When nothing changes, the file is not touched. A
   change to the locked version of a unit the author amends is the exception:
   the build fails instead (below).
+- `unit update` rewrites it with the versions the author updates, and, for
+  an amendment it carries over, rewrites the declared base in the same
+  operation (see [update details](#update-details--approved)).
 - A locked version that the registry now records with other content than
   the lockfile does is rejected, never used or silently relocked.
 - Deleting the lockfile is not an integrity-preserving repair. It discards
@@ -399,7 +406,7 @@ The lockfile and amendments:
 
 Open:
 
-- Which other operations write the lockfile. **OC-46.**
+- Whether `unit publish` writes the lockfile. **OC-46.**
 
 ## Update — Approved
 
@@ -429,10 +436,79 @@ Open:
 
 - Which version is chosen when the declared range allows several. This
   follows the resolution policy, which is not yet decided. **OC-16.**
-- The command surface for updating a version and for changing a range.
-  **OC-7**, **OC-27.**
+- The command surface for changing a range. **OC-7**, **OC-27.**
 - How reconciliation conflicts are presented to the author, and how the
   update is completed or abandoned. **OC-53.**
+
+### Update details — Approved
+
+These were decided by the owner for the first `unit update`.
+
+**Command.** `assemblr unit update [<identity>...]`, run at the repository's
+top level as `unit build` is. Without arguments it updates every locked
+dependency. With identities it updates those, direct or transitive; an
+identity that is neither locked nor declared as a dependency by the unit or
+by a locked version is an error. It requires a unit lockfile, and fails
+without one, saying to run `unit build` first, which creates it. It never
+changes a declared range, never fetches, and never builds: after it, the
+author rebuilds and checks the result. It takes the same lock as a build.
+The result, every version that changed and every amendment carried over,
+goes to stdout; diagnostics go to stderr.
+
+**Resolution.** The dependencies are resolved as a build resolves them,
+with the [unit lock state](#unit-lock-state--approved) minus the updated
+units, so that the other locked versions keep precedence and change only
+when the updated units' requirements force it (see
+[dependencies.md](dependencies.md#recommended-provisional)). What changed is
+reported against the complete previous lock state, and every kept version,
+named or not, must still be published with the content it was locked to;
+otherwise the update fails, as a build does. A run that changes nothing
+reports that and touches no file.
+
+**Amendments.** For each of the unit's own amendments whose provider moves
+from the declared base to the new version:
+
+- when the provider's source file at the amended path is the same bytes at
+  both versions, the amendment is **carried over**: the copy is untouched,
+  the declaration's `base` becomes the new version, and the lock records
+  that version, in one operation;
+- otherwise the update fails and changes nothing, naming the amendment, the
+  provider, the old base, the new version, and the cause: the file differs
+  between the two versions, so carrying the amendment over needs
+  reconciliation, which is not supported yet (**OC-10**, **OC-53**), or the
+  new version no longer provides the path.
+
+A declaration whose base is not the locked version was edited by hand, and
+fails the update too. No merge, re-basing, or ordering is performed.
+
+**Published amendments.** The update also fails, changing nothing, when in
+the resulting graph a published amendment's provider resolves to a version
+other than its base (see
+[amendments-and-composition.md](amendments-and-composition.md#composition-builds-and-reconciliation)),
+since no build could compose it. The check is made on the newly resolved
+graph: updating a provider together with its amender, to an amender version
+that amends the provider at the selected version, is allowed.
+
+**Writing and recovery.** Everything is decided before anything is written.
+An update replaces `assemblr-lock.json` and, when an amendment is carried
+over, `manifest.jsonc`, whose declarations are rewritten in place so that
+comments and formatting survive, as `unit amend` edits it. Before either
+file is touched, the update records both files' contents before and after
+it in `assemblr-update.json` in the repository's Git directory. It then
+replaces the manifest through the temporary file
+`.assemblr-manifest.jsonc.new` and a rename, then the lockfile through
+`.assemblr-lock.json.new` and a rename, and removes the record last. A
+failure after the record is written says which files were replaced. While
+the record exists, `unit build` and `unit amend` refuse to run and point at
+`unit update`, which completes the interrupted update before anything else:
+a file that still has its recorded content from before the update is
+replaced with the planned content, a file that already has the planned
+content is left as it is, and the record is removed. A file with any other
+content, changed since the update started, is never overwritten: the update
+stops, keeps the record, and says to restore the file to either recorded
+content or to delete the record to abandon the update. A record that
+Assemblr cannot read is reported and kept. Nothing under `src/` or
+`amendments/` is ever written by an update.
 
 ## Testing: native validation vs functional correctness — Approved
 

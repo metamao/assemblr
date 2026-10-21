@@ -19,6 +19,7 @@
 mod amend;
 mod exclusive;
 mod output;
+mod update;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,6 +32,10 @@ pub use amend::{AmendFailure, AmendProblem, AmendState, Amended, Match, WriteErr
 use exclusive::BuildLock;
 pub use exclusive::BuildLockError;
 pub use output::{OutputProblem, PublishError, State as PublishState};
+pub use update::{
+    Carried, FileState, Recovered, RecoveryError, UpdateFailure, UpdateProblem, UpdateState,
+    Updated, WriteError as UpdateWriteError, update_unit,
+};
 
 use super::git::{GitError, GitRepository, InvalidVersion, MANIFEST_LIMIT, ReadSrcError};
 use super::lockfile::{self, LockfileError, PublishedLockfileError};
@@ -77,15 +82,20 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
     // unit may change: its manifest and files, its lockfile, `build/`, and
     // what an interrupted build left. Builds of the unit therefore run one
     // at a time, from here until the build is published.
-    let guard = match repository.git_directory() {
-        Ok(git_dir) => BuildLock::acquire(&git_dir)
-            .map_err(|error| BuildFailure::Rejected(vec![BuildProblem::BuildLock(error)]))?,
-        Err(error) => {
-            return Err(BuildFailure::Rejected(vec![BuildProblem::Repository(
-                error,
-            )]));
-        }
-    };
+    let git_dir = repository
+        .git_directory()
+        .map_err(|error| BuildFailure::Rejected(vec![BuildProblem::Repository(error)]))?;
+    let guard = BuildLock::acquire(&git_dir)
+        .map_err(|error| BuildFailure::Rejected(vec![BuildProblem::BuildLock(error)]))?;
+    // An interrupted update leaves the manifest and the lockfile in a state
+    // only `unit update` can complete.
+    if let Some(journal) = update::interrupted(&git_dir)
+        .map_err(|error| BuildFailure::Rejected(vec![BuildProblem::GitDirectory(error)]))?
+    {
+        return Err(BuildFailure::Rejected(vec![
+            BuildProblem::UpdateInterrupted { journal },
+        ]));
+    }
 
     let manifest = match read_working_manifest(root) {
         Ok(manifest) => Some(manifest),
@@ -470,6 +480,28 @@ impl Dependencies {
         }
     }
 
+    /// Reads the `src/` files of `identity` at `version`, or `None` when
+    /// the index does not record that version.
+    fn read_src_at(
+        &self,
+        identity: &UnitIdentity,
+        version: &Version,
+    ) -> Option<Result<FileTree, BuildProblem>> {
+        let key = (identity.clone(), version.clone());
+        let (repository, commit) = (self.repositories.get(identity)?, self.commits.get(&key)?);
+        Some(repository.read_src(commit).map_err(|error| match error {
+            ReadSrcError::Git(error) => BuildProblem::Source {
+                unit: identity.clone(),
+                error,
+            },
+            error => BuildProblem::Published {
+                unit: identity.clone(),
+                version: version.clone(),
+                problem: PublishedProblem::Src(error),
+            },
+        }))
+    }
+
     /// Reads the content of the locked versions of `identities`: the
     /// `src/` files of each, and, for a version whose manifest declares
     /// amendments, its `amendments/` copies and its lockfile, which must
@@ -666,6 +698,15 @@ pub enum BuildProblem {
     /// The lock that keeps builds of the unit from running at the same time
     /// could not be taken.
     BuildLock(BuildLockError),
+    /// The repository's Git directory could not be examined for the record
+    /// of an interrupted update.
+    GitDirectory(io::Error),
+    /// An update of the unit was interrupted, and only `unit update`
+    /// completes it.
+    UpdateInterrupted {
+        /// The record of the update.
+        journal: PathBuf,
+    },
     /// The working tree's `src/` holds something a unit file cannot be.
     Src(ReadSrcError),
     /// The working tree's `amendments/` holds something a unit file cannot
@@ -736,6 +777,17 @@ impl fmt::Display for BuildProblem {
             Self::Manifest(error) => error.fmt(f),
             Self::Repository(error) => error.fmt(f),
             Self::BuildLock(error) => error.fmt(f),
+            Self::GitDirectory(error) => write!(
+                f,
+                "could not examine the repository's Git directory for an interrupted update: \
+                 {error}"
+            ),
+            Self::UpdateInterrupted { journal } => write!(
+                f,
+                "an update of this unit was interrupted and not completed, as {} records; run \
+                 `assemblr unit update` to complete it first",
+                journal.display()
+            ),
             Self::Src(error) => error.fmt(f),
             Self::Amendments(error) => error.fmt(f),
             Self::Output(problem) => problem.fmt(f),
