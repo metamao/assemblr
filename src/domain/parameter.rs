@@ -6,10 +6,15 @@ use std::str::FromStr;
 /// The name of a parameter, such as `appName` or `node_compat`.
 ///
 /// A name starts with an ASCII letter and continues with ASCII letters,
-/// digits, or underscores. This provisional rule keeps names usable in any
-/// template syntax chosen later (OC-5), and can be widened compatibly.
+/// digits, or underscores. This provisional rule keeps names usable in the
+/// template syntax (OC-5), and can be widened compatibly. The name `own` is
+/// reserved: in an amendment copy it is the root of the amending author's
+/// own template context, so no unit's parameter may be called that.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParameterName(String);
+
+/// The reserved root of the amending author's template context.
+pub const OWN: &str = "own";
 
 impl ParameterName {
     /// Parses a parameter name. Invalid names are rejected, never normalized.
@@ -20,6 +25,7 @@ impl ParameterName {
             Some(first) if !first.is_ascii_alphabetic() => {
                 Some(ParameterNameErrorReason::InvalidStart(first))
             }
+            Some(_) if input == OWN => Some(ParameterNameErrorReason::Reserved),
             Some(_) => chars
                 .find(|c| !(c.is_ascii_alphanumeric() || *c == '_'))
                 .map(ParameterNameErrorReason::InvalidCharacter),
@@ -87,6 +93,10 @@ impl fmt::Display for ParameterNameError {
                 f,
                 "it contains {c:?}; only ASCII letters, digits, and underscores are allowed"
             ),
+            ParameterNameErrorReason::Reserved => write!(
+                f,
+                "`{OWN}` is reserved for the amending author's template context"
+            ),
         }
     }
 }
@@ -102,6 +112,9 @@ pub enum ParameterNameErrorReason {
     InvalidStart(char),
     /// A later character is not an ASCII letter, digit, or underscore.
     InvalidCharacter(char),
+    /// The name is `own`, the reserved root of the amending author's
+    /// template context.
+    Reserved,
 }
 
 /// A required human-readable description that is not empty or only
@@ -425,7 +438,15 @@ mod tests {
 
     #[test]
     fn parameter_names_are_identifiers() {
-        for input in ["appName", "node_compat", "a", "port8080", "A"] {
+        for input in [
+            "appName",
+            "node_compat",
+            "a",
+            "port8080",
+            "A",
+            "owner",
+            "Own",
+        ] {
             assert_eq!(ParameterName::parse(input).unwrap().as_str(), input);
         }
         for (input, reason) in [
@@ -436,6 +457,9 @@ mod tests {
             ("app.name", ParameterNameErrorReason::InvalidCharacter('.')),
             ("app name", ParameterNameErrorReason::InvalidCharacter(' ')),
             ("appNäme", ParameterNameErrorReason::InvalidCharacter('ä')),
+            // Reserved for the amending author's template context. Other
+            // spellings are ordinary names.
+            ("own", ParameterNameErrorReason::Reserved),
         ] {
             let error = ParameterName::parse(input).unwrap_err();
             assert_eq!(error.reason(), &reason, "input {input:?}");

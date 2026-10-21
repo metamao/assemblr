@@ -17,13 +17,14 @@ mod version;
 
 pub use composition::{
     ComposedFile, Composition, CompositionError, ContributedPath, FileTree, OptionRequirement,
-    ParameterValues, Root, RootTargetReason, UnitContent, UnitFile, compose,
+    ParameterValues, Root, RootTargetReason, TEMPLATE_SUFFIX, UnitContent, UnitFile, compose,
+    delivered_path,
 };
 pub use identity::{IdentityError, IdentityErrorReason, Segment, UnitIdentity};
 pub use lock::{LockError, LockedUnit, UnitLock, relock};
 pub use manifest::{Manifest, ManifestError, OptionValues};
 pub use parameter::{
-    AllowedValues, AllowedValuesError, BlankDescription, Description, ParameterDefinition,
+    AllowedValues, AllowedValuesError, BlankDescription, Description, OWN, ParameterDefinition,
     ParameterName, ParameterNameError, ParameterNameErrorReason, ParameterType, ParameterValue,
     ParameterValueError, ValueKind,
 };

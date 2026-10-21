@@ -21,15 +21,18 @@
 //! # Files
 //!
 //! The composed file tree is the union of the units' `src/` files, each
-//! recording the unit that contributed it. File contents are opaque bytes
-//! with an executable bit, delivered unchanged: nothing is interpolated until
-//! a template syntax exists (OC-5). Two files collide when their paths are
-//! equal or differ only in case or in Unicode normalization, which some file
-//! systems cannot keep apart, or when one file's path is a directory of
-//! another's under the same comparison. Case is compared one character at a
-//! time, by simple (one-to-one) case mappings, as case-insensitive file
-//! systems compare it (see `collision_key`). Every collision is reported, whether the
-//! units are independent or one depends on the other, and no unit wins.
+//! recording the unit that contributed it, keyed by the path the file is
+//! **delivered** at. A file whose name ends in [`TEMPLATE_SUFFIX`] is a
+//! template: it is delivered at its path without the suffix, and rendered
+//! with its unit's parameter values when the composition is written. Every
+//! other file is opaque bytes with an executable bit, delivered unchanged.
+//! Two files collide when their delivered paths are equal or differ only in
+//! case or in Unicode normalization, which some file systems cannot keep
+//! apart, or when one file's delivered path is a directory of another's
+//! under the same comparison. Case is compared one character at a time, by
+//! simple (one-to-one) case mappings, as case-insensitive file systems
+//! compare it (see `collision_key`). Every collision is reported, whether
+//! the units are independent or one depends on the other, and no unit wins.
 //!
 //! Every problem is reported, in the order [`compose`] documents.
 
@@ -41,12 +44,31 @@ use unicode_normalization::UnicodeNormalization;
 use super::identity::UnitIdentity;
 use super::manifest::{Manifest, OptionValues};
 use super::parameter::{ParameterName, ParameterValue, ParameterValueError};
-use super::path::RelativePath;
+use super::path::{RelativePath, RelativePathError};
 use super::resolution::{Requirer, ResolvedGraph};
 use super::version::Version;
 
 /// A unit's `src/` files, by path relative to `src/`.
 pub type FileTree = BTreeMap<RelativePath, UnitFile>;
+
+/// The suffix that selects a `src/` file for template rendering. It is
+/// matched exactly, case-sensitively, at the end of the file's name, and it
+/// is removed from the delivered path: `package.json.assemblr.tmpl` is
+/// delivered as `package.json`. A name ending in `.tmpl` alone is an
+/// ordinary file.
+pub const TEMPLATE_SUFFIX: &str = ".assemblr.tmpl";
+
+/// Where a `src/` file is delivered: `Ok(None)` for an ordinary file, at its
+/// own path; `Ok(Some(path))` for a template, at its path without
+/// [`TEMPLATE_SUFFIX`]; and an error when removing the suffix leaves a name
+/// that is not a valid path, such as a bare `.assemblr.tmpl`, or
+/// `notes..assemblr.tmpl`, whose delivered name would end in a dot.
+pub fn delivered_path(source: &RelativePath) -> Result<Option<RelativePath>, RelativePathError> {
+    match source.as_str().strip_suffix(TEMPLATE_SUFFIX) {
+        None => Ok(None),
+        Some(delivered) => RelativePath::parse(delivered).map(Some),
+    }
+}
 
 /// The effective value of each of a unit's parameters.
 pub type ParameterValues = BTreeMap<ParameterName, ParameterValue>;
@@ -119,7 +141,8 @@ pub enum Root<'a> {
 /// 3. requirements naming undeclared parameters or holding invalid values;
 /// 4. options conflicts;
 /// 5. missing required values;
-/// 6. path collisions.
+/// 6. templates whose delivered path is invalid;
+/// 7. path collisions.
 ///
 /// A parameter whose requirements are invalid is not also reported as
 /// missing or conflicting.
@@ -156,7 +179,7 @@ impl<'a> Composition<'a> {
         &self.values
     }
 
-    /// The composed file tree, by path.
+    /// The composed file tree, by delivered path.
     pub fn files(&self) -> &BTreeMap<RelativePath, ComposedFile<'a>> {
         &self.files
     }
@@ -166,7 +189,9 @@ impl<'a> Composition<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComposedFile<'a> {
     unit: &'a UnitIdentity,
+    source: &'a RelativePath,
     file: &'a UnitFile,
+    template: bool,
 }
 
 impl<'a> ComposedFile<'a> {
@@ -175,9 +200,21 @@ impl<'a> ComposedFile<'a> {
         self.unit
     }
 
-    /// The file, unchanged.
+    /// The file's path in that unit's `src/`. For a template it ends in
+    /// [`TEMPLATE_SUFFIX`], which the delivered path does not.
+    pub fn source(&self) -> &'a RelativePath {
+        self.source
+    }
+
+    /// The file as the unit provides it: the bytes to deliver, or, for a
+    /// template, the source to render with the unit's parameter values.
     pub fn file(&self) -> &'a UnitFile {
         self.file
+    }
+
+    /// Whether the file is a template, to be rendered before delivery.
+    pub fn is_template(&self) -> bool {
+        self.template
     }
 }
 
@@ -206,15 +243,17 @@ impl fmt::Display for OptionRequirement {
     }
 }
 
-/// A file a unit contributes, at its path.
+/// A file a unit contributes, at its path in that unit's `src/`. Ordered by
+/// path, then unit.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ContributedPath {
     path: RelativePath,
     unit: UnitIdentity,
+    delivered: RelativePath,
 }
 
 impl ContributedPath {
-    /// The file's path.
+    /// The file's path in its unit's `src/`.
     pub fn path(&self) -> &RelativePath {
         &self.path
     }
@@ -223,11 +262,21 @@ impl ContributedPath {
     pub fn unit(&self) -> &UnitIdentity {
         &self.unit
     }
+
+    /// The path the file is delivered at: its own path, or, for a template,
+    /// that path without [`TEMPLATE_SUFFIX`].
+    pub fn delivered(&self) -> &RelativePath {
+        &self.delivered
+    }
 }
 
 impl fmt::Display for ContributedPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} from {}", self.path, self.unit)
+        write!(f, "{} from {}", self.path, self.unit)?;
+        if self.delivered != self.path {
+            write!(f, " (delivered as {})", self.delivered)?;
+        }
+        Ok(())
     }
 }
 
@@ -314,14 +363,24 @@ pub enum CompositionError {
         /// directly, and the root when it may configure this unit.
         responsible: Vec<Requirer>,
     },
-    /// Files whose paths are equal or differ only in case or in Unicode
-    /// normalization.
+    /// A template whose path without [`TEMPLATE_SUFFIX`] is not a valid
+    /// path, so it cannot be delivered.
+    InvalidDeliveredPath {
+        /// The template's path in its unit's `src/`.
+        path: RelativePath,
+        /// The unit that contributes it.
+        unit: UnitIdentity,
+        /// Why the delivered path is invalid.
+        error: RelativePathError,
+    },
+    /// Files whose delivered paths are equal or differ only in case or in
+    /// Unicode normalization.
     PathCollision {
         /// Every colliding file, ordered by path and then unit.
         files: Vec<ContributedPath>,
     },
-    /// A file's path is a directory of other files' paths, compared
-    /// ignoring case and Unicode normalization.
+    /// A file's delivered path is a directory of other files' delivered
+    /// paths, compared ignoring case and Unicode normalization.
     NestedPathCollision {
         /// The file whose path the others need as a directory.
         file: ContributedPath,
@@ -412,19 +471,28 @@ impl fmt::Display for CompositionError {
                 )?;
                 write_list(f, responsible)
             }
+            Self::InvalidDeliveredPath { path, unit, error } => write!(
+                f,
+                "{path} from {unit} is a template, but without `{TEMPLATE_SUFFIX}` its path is \
+                 invalid: {error}"
+            ),
             Self::PathCollision { files } => {
                 f.write_str("path collision: ")?;
                 write_list(f, files)?;
-                let first = files.first().map(ContributedPath::path);
-                if files.iter().all(|file| Some(file.path()) == first) {
-                    f.write_str(
-                        "; no unit takes precedence, and a unit changes a dependency's file \
-                         through an amendment",
-                    )
-                } else {
+                let first = files.first().map(ContributedPath::delivered);
+                let first_unit = files.first().map(ContributedPath::unit);
+                let one_unit = files.iter().all(|file| Some(file.unit()) == first_unit);
+                if files.iter().any(|file| Some(file.delivered()) != first) {
                     f.write_str(
                         "; these paths differ only in case or in Unicode normalization, which \
                          some file systems cannot keep apart",
+                    )
+                } else if one_unit {
+                    f.write_str("; a unit delivers each path once")
+                } else {
+                    f.write_str(
+                        "; no unit takes precedence, and a unit changes a dependency's file \
+                         through an amendment",
                     )
                 }
             }
@@ -727,29 +795,46 @@ fn compose_files<'a>(
     BTreeMap<RelativePath, ComposedFile<'a>>,
     Vec<CompositionError>,
 ) {
-    // Files by their collision key.
+    // Files by the collision key of their delivered path.
     let mut folded: BTreeMap<String, Vec<ContributedPath>> = BTreeMap::new();
     let mut files = BTreeMap::new();
+    let mut invalid = Vec::new();
     for member in members.values() {
         for (path, file) in member.files {
+            let (delivered, template) = match delivered_path(path) {
+                Ok(None) => (path.clone(), false),
+                Ok(Some(delivered)) => (delivered, true),
+                Err(error) => {
+                    invalid.push((path.clone(), member.identity.clone(), error));
+                    continue;
+                }
+            };
             folded
-                .entry(collision_key(path))
+                .entry(collision_key(&delivered))
                 .or_default()
                 .push(ContributedPath {
                     path: path.clone(),
                     unit: member.identity.clone(),
+                    delivered: delivered.clone(),
                 });
             files.insert(
-                path.clone(),
+                delivered,
                 ComposedFile {
                     unit: member.identity,
+                    source: path,
                     file,
+                    template,
                 },
             );
         }
     }
 
-    let mut collisions: Vec<CompositionError> = folded
+    invalid.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    let mut collisions: Vec<CompositionError> = invalid
+        .into_iter()
+        .map(|(path, unit, error)| CompositionError::InvalidDeliveredPath { path, unit, error })
+        .collect();
+    let groups: Vec<CompositionError> = folded
         .values()
         .filter(|group| group.len() > 1)
         .map(|group| {
@@ -758,6 +843,7 @@ fn compose_files<'a>(
             CompositionError::PathCollision { files }
         })
         .collect();
+    collisions.extend(groups);
 
     let mut nested: BTreeMap<&ContributedPath, Vec<ContributedPath>> = BTreeMap::new();
     for (key, group) in &folded {
@@ -821,7 +907,7 @@ mod tests {
 
     use super::{
         CompositionError, ContributedPath, FileTree, OptionRequirement, Root, RootTargetReason,
-        UnitContent, UnitFile, compose,
+        TEMPLATE_SUFFIX, UnitContent, UnitFile, compose, delivered_path,
     };
     use crate::domain::{
         AllowedValues, AvailableVersions, Dependencies, Description, Lock, Manifest, OptionValues,
@@ -981,7 +1067,10 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     struct Composed {
         values: Vec<(String, Vec<(String, ParameterValue)>)>,
+        /// Delivered path, unit, contents, and executable bit.
         files: Vec<(String, String, Vec<u8>, bool)>,
+        /// The templates: delivered path and source path.
+        templates: Vec<(String, String)>,
     }
 
     type RootValue = (&'static str, &'static str, ParameterValue);
@@ -1067,6 +1156,12 @@ mod tests {
                     )
                 })
                 .collect(),
+            templates: composition
+                .files()
+                .iter()
+                .filter(|(_, composed)| composed.is_template())
+                .map(|(file, composed)| (file.to_string(), composed.source().to_string()))
+                .collect(),
         })
     }
 
@@ -1094,6 +1189,16 @@ mod tests {
         ContributedPath {
             path: path(file),
             unit: identity(contributor),
+            delivered: path(file),
+        }
+    }
+
+    /// A template, delivered at its path without the suffix.
+    fn templated(file: &str, contributor: &str) -> ContributedPath {
+        ContributedPath {
+            path: path(file),
+            unit: identity(contributor),
+            delivered: path(file.strip_suffix(TEMPLATE_SUFFIX).unwrap()),
         }
     }
 
@@ -1755,6 +1860,190 @@ mod tests {
                 ],
             }]
         );
+        assert!(errors[0].to_string().contains("differ only in case"));
+    }
+
+    // Templates.
+
+    #[test]
+    fn templates_are_delivered_without_the_suffix_and_ordinary_files_as_they_are() {
+        let units = [Spec::new("@metamao/app", "1.0.0")
+            .file("package.json.assemblr.tmpl")
+            .file("config/app.yaml.assemblr.tmpl")
+            // `.tmpl` alone, or the suffix elsewhere in the path, selects nothing.
+            .file("notes.tmpl")
+            .file("assemblr.tmpl/README.md")
+            .file("Dockerfile")];
+        let composed = run(&project(&[("@metamao/app", "^1")]), &units, &[]).unwrap();
+        let delivered: Vec<&str> = composed
+            .files
+            .iter()
+            .map(|(file, _, _, _)| file.as_str())
+            .collect();
+        assert_eq!(
+            delivered,
+            [
+                "Dockerfile",
+                "assemblr.tmpl/README.md",
+                "config/app.yaml",
+                "notes.tmpl",
+                "package.json",
+            ]
+        );
+        assert_eq!(
+            composed.templates,
+            [
+                (
+                    "config/app.yaml".to_owned(),
+                    "config/app.yaml.assemblr.tmpl".to_owned()
+                ),
+                (
+                    "package.json".to_owned(),
+                    "package.json.assemblr.tmpl".to_owned()
+                ),
+            ]
+        );
+        // A template's source is delivered for rendering, unchanged here.
+        let (_, _, contents, _) = &composed.files[4];
+        assert_eq!(contents, b"@metamao/app package.json.assemblr.tmpl");
+    }
+
+    #[test]
+    fn a_template_and_an_ordinary_file_delivered_at_the_same_path_collide() {
+        let units = [
+            Spec::new("@metamao/api", "1.0.0").file("package.json.assemblr.tmpl"),
+            Spec::new("@metamao/web", "1.0.0").file("package.json"),
+        ];
+        let errors = run(
+            &project(&[("@metamao/web", "^1"), ("@metamao/api", "^1")]),
+            &units,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            [CompositionError::PathCollision {
+                files: vec![
+                    contributed("package.json", "@metamao/web"),
+                    templated("package.json.assemblr.tmpl", "@metamao/api"),
+                ],
+            }]
+        );
+        let message = errors[0].to_string();
+        for expected in [
+            "package.json from @metamao/web",
+            "package.json.assemblr.tmpl from @metamao/api (delivered as package.json)",
+            "no unit takes precedence",
+        ] {
+            assert!(message.contains(expected), "{message}");
+        }
+    }
+
+    #[test]
+    fn one_unit_s_template_and_ordinary_file_at_the_same_delivered_path_collide() {
+        let units = [Spec::new("@metamao/app", "1.0.0")
+            .file("wrangler.jsonc")
+            .file("wrangler.jsonc.assemblr.tmpl")];
+        let errors = run(&project(&[("@metamao/app", "^1")]), &units, &[]).unwrap_err();
+        assert_eq!(
+            errors,
+            [CompositionError::PathCollision {
+                files: vec![
+                    contributed("wrangler.jsonc", "@metamao/app"),
+                    templated("wrangler.jsonc.assemblr.tmpl", "@metamao/app"),
+                ],
+            }]
+        );
+        let message = errors[0].to_string();
+        assert!(
+            message.contains("a unit delivers each path once"),
+            "{message}"
+        );
+        assert!(!message.contains("amendment"), "{message}");
+    }
+
+    #[test]
+    fn delivered_paths_are_compared_like_any_other_path() {
+        // Case and nesting are checked on the delivered path.
+        let units = [
+            Spec::new("@metamao/api", "1.0.0")
+                .file("README.md.assemblr.tmpl")
+                .file("docs.assemblr.tmpl"),
+            Spec::new("@metamao/web", "1.0.0")
+                .file("readme.md")
+                .file("docs/intro.md"),
+        ];
+        let errors = run(
+            &project(&[("@metamao/web", "^1"), ("@metamao/api", "^1")]),
+            &units,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            errors,
+            [
+                CompositionError::PathCollision {
+                    files: vec![
+                        templated("README.md.assemblr.tmpl", "@metamao/api"),
+                        contributed("readme.md", "@metamao/web"),
+                    ],
+                },
+                CompositionError::NestedPathCollision {
+                    file: templated("docs.assemblr.tmpl", "@metamao/api"),
+                    nested: vec![contributed("docs/intro.md", "@metamao/web")],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_template_whose_delivered_path_is_invalid_is_reported() {
+        // A reserved name such as `con.assemblr.tmpl` is already an invalid
+        // source path; these are valid sources whose delivered path is not.
+        let units = [Spec::new("@metamao/app", "1.0.0")
+            .file("notes..assemblr.tmpl")
+            .file("config/.assemblr.tmpl")];
+        let errors = run(&project(&[("@metamao/app", "^1")]), &units, &[]).unwrap_err();
+        let reported: Vec<String> = errors
+            .iter()
+            .map(|error| match error {
+                CompositionError::InvalidDeliveredPath { path, unit, .. } => {
+                    format!("{path} {unit}")
+                }
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            reported,
+            [
+                "config/.assemblr.tmpl @metamao/app",
+                "notes..assemblr.tmpl @metamao/app"
+            ]
+        );
+        let message = errors[0].to_string();
+        for expected in [
+            "config/.assemblr.tmpl from @metamao/app is a template",
+            "without `.assemblr.tmpl` its path is invalid",
+        ] {
+            assert!(message.contains(expected), "{message}");
+        }
+    }
+
+    #[test]
+    fn delivered_path_strips_the_suffix_exactly() {
+        assert_eq!(delivered_path(&path("a/b.json")), Ok(None));
+        assert_eq!(delivered_path(&path("a/b.tmpl")), Ok(None));
+        assert_eq!(delivered_path(&path("a/b.ASSEMBLR.TMPL")), Ok(None));
+        assert_eq!(
+            delivered_path(&path("a/b.json.assemblr.tmpl")),
+            Ok(Some(path("a/b.json")))
+        );
+        assert_eq!(
+            delivered_path(&path("a/b.assemblr.tmpl.assemblr.tmpl")),
+            Ok(Some(path("a/b.assemblr.tmpl")))
+        );
+        assert!(delivered_path(&path(".assemblr.tmpl")).is_err());
+        assert!(delivered_path(&path("a/.assemblr.tmpl")).is_err());
     }
 
     #[test]
@@ -2089,7 +2378,8 @@ mod tests {
                 .depends("@metamao/db", "^1")
                 .option("@metamao/node", "packageManager", text("bun"))
                 .file("readme.md")
-                .file("docs/index.md"),
+                .file("docs/index.md")
+                .file("notes..assemblr.tmpl"),
             node().file("README.md"),
             Spec::new("@metamao/db", "1.0.0")
                 .param("port", required(ParameterType::Integer))
@@ -2127,6 +2417,9 @@ mod tests {
                 CompositionError::MissingValue {
                     unit, parameter, ..
                 } => format!("missing {unit} {parameter}"),
+                CompositionError::InvalidDeliveredPath { path, unit, .. } => {
+                    format!("undeliverable {path} {unit}")
+                }
                 CompositionError::PathCollision { files } => format!("collision {}", files[0]),
                 CompositionError::NestedPathCollision { file, .. } => format!("nested {file}"),
             })
@@ -2140,6 +2433,7 @@ mod tests {
                 "undeclared @metamao/web theme the root",
                 "conflict @metamao/node packageManager",
                 "missing @metamao/db url",
+                "undeliverable notes..assemblr.tmpl @metamao/web",
                 "collision README.md from @metamao/api",
                 "nested docs from @metamao/api",
             ]

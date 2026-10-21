@@ -41,7 +41,7 @@ const COMMIT_LIMIT: u64 = 1024 * 1024;
 /// The largest directory listing (tree object), in bytes.
 const TREE_LIMIT: u64 = 4 * 1024 * 1024;
 /// The largest `src/` file, in bytes.
-const FILE_LIMIT: u64 = 16 * 1024 * 1024;
+pub(super) const FILE_LIMIT: u64 = 16 * 1024 * 1024;
 /// The largest total size of a unit's `src/` files, in bytes.
 const SRC_SIZE_LIMIT: u64 = 128 * 1024 * 1024;
 /// The most files and directories `src/` may hold, counting each path a
