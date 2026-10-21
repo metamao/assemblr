@@ -458,10 +458,14 @@ fn recover(root: &Path, git_dir: &Path) -> Result<Option<Recovered>, RecoveryErr
         .transpose()?;
     let lockfile = state_of(&root.join(LOCKFILE), &journal.lockfile)?;
     // The update replaces the manifest first, so these are the states it
-    // can have left: nothing yet, the manifest only, or both.
+    // can have left: nothing yet, the manifest only, or both. A lockfile
+    // whose planned content is its current content reads as already
+    // replaced, and is consistent with either state of the manifest.
+    let lock_unchanged = journal.lockfile.before == journal.lockfile.after;
     let (replace_manifest, replace_lock) = match (manifest, lockfile) {
         (None | Some(FileState::Before), FileState::Before) => (manifest.is_some(), true),
         (Some(FileState::After), FileState::Before) => (false, true),
+        (Some(FileState::Before), FileState::After) if lock_unchanged => (true, false),
         (None | Some(FileState::After), FileState::After) => (false, false),
         (manifest, lockfile) => {
             return Err(RecoveryError::Inconsistent {
@@ -1152,6 +1156,24 @@ mod tests {
             ("before manifest".to_owned(), "after lock".to_owned())
         );
         assert!(!root.join(LOCK_STAGING).exists());
+        assert!(!git_dir.join(JOURNAL).exists());
+    }
+
+    #[test]
+    fn a_plan_that_leaves_the_lockfile_as_it_is_is_completed() {
+        let (root, git_dir) = scratch("lock-unchanged");
+        let mut journal = journal(true);
+        journal.lockfile.after = journal.lockfile.before.clone();
+        fs::write(git_dir.join(JOURNAL), journal.serialize().unwrap()).unwrap();
+
+        let recovered = recover(&root, &git_dir).unwrap().unwrap();
+
+        assert!(recovered.manifest());
+        assert!(!recovered.lockfile());
+        assert_eq!(
+            contents(&root),
+            ("after manifest".to_owned(), "before lock".to_owned())
+        );
         assert!(!git_dir.join(JOURNAL).exists());
     }
 
