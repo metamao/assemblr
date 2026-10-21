@@ -164,7 +164,7 @@ pub(crate) fn serialize_lockfile(
 }
 
 /// Reads a lockfile, or describes what is wrong with it.
-fn parse(bytes: &[u8]) -> Result<Lockfile, String> {
+pub(crate) fn parse(bytes: &[u8]) -> Result<Lockfile, String> {
     let value: Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     let root = object(&value, "the lockfile", &["format", "units", "project"])?;
     match root.get("format").and_then(Value::as_u64) {

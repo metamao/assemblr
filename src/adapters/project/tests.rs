@@ -8,10 +8,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use super::pending::{abort_compose, continue_with};
 use super::store::Store;
 use super::{
-    Application, Change, ComposeFailure, ComposeRecovery, DeclarationWrite, Step, WriteStep, apply,
-    recover,
+    Application, Change, ComposeFailure, ComposeProblem, ComposeRecovery, DeclarationWrite, Step,
+    WriteStep, apply, recover,
 };
 use crate::adapters::lockfile::serialize_lockfile;
 use crate::domain::{
@@ -164,6 +165,7 @@ fn apply_with(
         lock_bytes: &plan.lock_bytes,
         directories: &plan.directories,
         declaration: None,
+        marked: &BTreeSet::new(),
     };
     apply(root, &store, &application, &mut fault)
 }
@@ -211,6 +213,7 @@ fn apply_declaring(
             text: text.as_bytes(),
             previous: &previous,
         }),
+        marked: &BTreeSet::new(),
     };
     apply(root, &store, &application, &mut fault)
 }
@@ -276,7 +279,7 @@ fn a_first_composition_interrupted_among_its_files_or_at_the_lock_is_reverted() 
         let journal = store.journal().unwrap().expect("the journal remains");
         assert!(!exists(&root, "assemblr-lock.json"), "{name}");
 
-        let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
+        let recovered = recover(&root, &store, &journal, &guard(&root), &[]).unwrap();
         assert!(
             matches!(&recovered, ComposeRecovery::Reverted { kept, restored, .. } if kept.is_empty() && restored.is_empty()),
             "{name}: {recovered:?}"
@@ -305,7 +308,7 @@ fn a_failure_after_the_lock_is_completed_not_reverted() {
     let store = Store::new(&root);
     let journal = store.journal().unwrap().unwrap();
 
-    let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
+    let recovered = recover(&root, &store, &journal, &guard(&root), &[]).unwrap();
     assert_eq!(recovered, ComposeRecovery::Completed);
     assert_eq!(text(&root, "README.md"), "readme\n");
     assert!(exists(&root, "bin/run"));
@@ -322,7 +325,7 @@ fn an_edited_file_is_kept_by_a_revert() {
     let store = Store::new(&root);
     let journal = store.journal().unwrap().unwrap();
 
-    let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
+    let recovered = recover(&root, &store, &journal, &guard(&root), &[]).unwrap();
     assert_eq!(
         recovered,
         ComposeRecovery::Reverted {
@@ -357,7 +360,7 @@ fn a_reconciliation_interrupted_at_each_file_change_is_reverted_to_the_previous_
         let journal = store.journal().unwrap().expect("the journal remains");
         assert!(exists(&root, ".assemblr/previous"), "{n}");
 
-        let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
+        let recovered = recover(&root, &store, &journal, &guard(&root), &[]).unwrap();
         let ComposeRecovery::Reverted {
             removed,
             restored,
@@ -407,7 +410,7 @@ fn a_reconciliation_interrupted_at_the_lock_is_reverted_and_after_it_completed()
     apply_failing(&root, &plan, Step::Lock, 1);
     let store = Store::new(&root);
     let journal = store.journal().unwrap().unwrap();
-    let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
+    let recovered = recover(&root, &store, &journal, &guard(&root), &[]).unwrap();
     assert_eq!(
         recovered,
         ComposeRecovery::Reverted {
@@ -426,7 +429,7 @@ fn a_reconciliation_interrupted_at_the_lock_is_reverted_and_after_it_completed()
     let store = Store::new(&root);
     let journal = store.journal().unwrap().unwrap();
     assert_eq!(
-        recover(&root, &store, &journal, &guard(&root)).unwrap(),
+        recover(&root, &store, &journal, &guard(&root), &[]).unwrap(),
         ComposeRecovery::Completed
     );
     assert_eq!(text(&root, "README.md"), "readme v2\n");
@@ -448,7 +451,7 @@ fn files_edited_during_an_interrupted_reconciliation_are_kept_and_named() {
     fs::write(root.join("new.txt"), "edited").unwrap();
     let store = Store::new(&root);
     let journal = store.journal().unwrap().unwrap();
-    let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
+    let recovered = recover(&root, &store, &journal, &guard(&root), &[]).unwrap();
     assert_eq!(
         recovered,
         ComposeRecovery::Reverted {
@@ -554,7 +557,7 @@ fn a_declaration_rewritten_by_an_interrupted_composition_is_restored_with_the_fi
 
         let store = Store::new(&root);
         let journal = store.journal().unwrap().unwrap();
-        let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
+        let recovered = recover(&root, &store, &journal, &guard(&root), &[]).unwrap();
         assert!(
             matches!(recovered, ComposeRecovery::Reverted { .. }),
             "{name}: {recovered:?}"
@@ -574,7 +577,7 @@ fn a_declaration_written_before_an_interruption_at_the_end_is_kept() {
     let store = Store::new(&root);
     let journal = store.journal().unwrap().unwrap();
     assert_eq!(
-        recover(&root, &store, &journal, &guard(&root)).unwrap(),
+        recover(&root, &store, &journal, &guard(&root), &[]).unwrap(),
         ComposeRecovery::Completed
     );
     assert_eq!(text(&root, "assemblr.jsonc"), "new\n");
@@ -590,10 +593,236 @@ fn a_declaration_edited_during_an_interruption_is_kept_and_named() {
     fs::write(root.join("assemblr.jsonc"), "edited by hand\n").unwrap();
     let store = Store::new(&root);
     let journal = store.journal().unwrap().unwrap();
-    let recovered = recover(&root, &store, &journal, &guard(&root)).unwrap();
+    let recovered = recover(&root, &store, &journal, &guard(&root), &[]).unwrap();
     let ComposeRecovery::Reverted { kept, .. } = recovered else {
         panic!("expected a revert");
     };
     assert_eq!(kept, vec![path("assemblr.jsonc")]);
     assert_eq!(text(&root, "assemblr.jsonc"), "edited by hand\n");
+}
+
+/// A reconciliation over the first composition that leaves `README.md`
+/// marked: the project's `readme\n` and the composition's `readme v2\n`
+/// are in conflict. `new.txt` is created.
+fn conflicting(root: &Path) -> Plan {
+    let marked = "<<<<<<< current (your file)\nreadme mine\n=======\nreadme v2\n\
+                  >>>>>>> incoming (the declared composition)\n";
+    let changes = BTreeMap::from([
+        (
+            path("README.md"),
+            Change::Modify {
+                file: unit_file(marked, false),
+                previous: b"readme mine\n".to_vec(),
+                previous_executable: false,
+                merged: false,
+            },
+        ),
+        (path("new.txt"), Change::Create(unit_file("new\n", false))),
+    ]);
+    plan_of(
+        root,
+        &[
+            ("README.md", "readme v2\n", false),
+            ("new.txt", "new\n", false),
+        ],
+        changes,
+    )
+}
+
+/// Applies `plan`, whose `README.md` is marked, in `root`, failing at
+/// `step` when given.
+fn apply_marked(
+    root: &Path,
+    plan: &Plan,
+    step: Option<Step>,
+) -> Result<Vec<&'static str>, ComposeFailure> {
+    let mut fault = |current: Step| {
+        if Some(current) == step {
+            return Err(io::Error::other("injected"));
+        }
+        Ok(())
+    };
+    let store = Store::new(root);
+    let marked = BTreeSet::from([path("README.md")]);
+    let application = Application {
+        files: &plan.files,
+        changes: &plan.changes,
+        snapshot: &plan.snapshot,
+        unbased: &BTreeSet::new(),
+        lock_bytes: &plan.lock_bytes,
+        directories: &plan.directories,
+        declaration: None,
+        marked: &marked,
+    };
+    apply(root, &store, &application, &mut fault)
+}
+
+/// The project after the first composition, with the consumer's own
+/// edit to `README.md`, and a conflicting reconciliation applied.
+fn pending(test: &str) -> PathBuf {
+    let root = composed(test);
+    fs::write(root.join("README.md"), "readme mine\n").unwrap();
+    apply_marked(&root, &conflicting(&root), None).unwrap();
+    root
+}
+
+fn continuing(root: &Path, step: Option<Step>) -> Result<(), ComposeFailure> {
+    let mut fault = |current: Step| {
+        if Some(current) == step {
+            return Err(io::Error::other("injected"));
+        }
+        Ok(())
+    };
+    guard(root);
+    continue_with(root, &mut fault).map(|_| ())
+}
+
+#[test]
+fn conflicts_are_written_marked_and_the_lock_waits() {
+    let root = pending("pending-written");
+    assert!(text(&root, "README.md").starts_with("<<<<<<< current"));
+    assert_eq!(text(&root, "new.txt"), "new\n");
+    // The lock is still the first composition's.
+    assert!(!text(&root, "assemblr-lock.json").is_empty());
+    let journal = Store::new(&root).journal().unwrap().unwrap();
+    assert_eq!(
+        journal.pending.map(|pending| pending.files),
+        Some(vec![path("README.md")])
+    );
+}
+
+#[test]
+fn a_failure_recording_the_wait_is_reverted_with_the_marked_files() {
+    let root = composed("pending-fault");
+    fs::write(root.join("README.md"), "readme mine\n").unwrap();
+    let lock = text(&root, "assemblr-lock.json");
+    let plan = conflicting(&root);
+    let failure = apply_marked(&root, &plan, Some(Step::Pending)).unwrap_err();
+    assert!(matches!(
+        failure,
+        ComposeFailure::Write {
+            step: WriteStep::Pending,
+            ..
+        }
+    ));
+    let store = Store::new(&root);
+    let journal = store.journal().unwrap().unwrap();
+    assert!(journal.pending.is_none());
+    recover(&root, &store, &journal, &guard(&root), &[]).unwrap();
+    assert_eq!(text(&root, "README.md"), "readme mine\n");
+    assert!(!exists(&root, "new.txt"));
+    assert_eq!(text(&root, "assemblr-lock.json"), lock);
+    assert!(!exists(&root, ".assemblr/journal.json"));
+}
+
+#[test]
+fn continue_refuses_while_a_marker_remains_and_changes_nothing() {
+    let root = pending("pending-unresolved");
+    let before = text(&root, "README.md");
+    let failure = continuing(&root, None).unwrap_err();
+    match failure {
+        ComposeFailure::Rejected { problems, .. } => match problems.as_slice() {
+            [ComposeProblem::Unresolved(files)] => {
+                assert_eq!(files[0].0, path("README.md"));
+            }
+            other => panic!("unexpected {other:?}"),
+        },
+        other @ ComposeFailure::Write { .. } => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(text(&root, "README.md"), before);
+    assert!(exists(&root, ".assemblr/journal.json"));
+}
+
+#[test]
+fn continue_writes_the_lock_and_removes_the_journal_once_resolved() {
+    let root = pending("pending-continue");
+    let lock = text(&root, "assemblr-lock.json");
+    fs::write(root.join("README.md"), "readme resolved\n").unwrap();
+    continuing(&root, None).unwrap();
+    assert_eq!(text(&root, "README.md"), "readme resolved\n");
+    assert_ne!(text(&root, "assemblr-lock.json"), lock);
+    assert!(!exists(&root, ".assemblr/journal.json"));
+    assert!(!exists(&root, ".assemblr/previous"));
+}
+
+#[test]
+fn a_deleted_file_counts_as_resolved() {
+    let root = pending("pending-deleted");
+    fs::remove_file(root.join("README.md")).unwrap();
+    continuing(&root, None).unwrap();
+    assert!(!exists(&root, "README.md"));
+    assert!(!exists(&root, ".assemblr/journal.json"));
+}
+
+#[test]
+fn a_continue_that_fails_at_the_lock_can_be_repeated() {
+    let root = pending("pending-continue-lock");
+    fs::write(root.join("README.md"), "readme resolved\n").unwrap();
+    assert!(continuing(&root, Some(Step::Lock)).is_err());
+    assert!(exists(&root, ".assemblr/journal.json"));
+    continuing(&root, None).unwrap();
+    assert!(!exists(&root, ".assemblr/journal.json"));
+}
+
+#[test]
+fn a_continue_that_fails_after_the_lock_is_completed_by_the_next() {
+    let root = pending("pending-continue-finish");
+    fs::write(root.join("README.md"), "readme resolved\n").unwrap();
+    assert!(continuing(&root, Some(Step::Finish)).is_err());
+    assert!(exists(&root, ".assemblr/journal.json"));
+    // The lock records the journal's composition: even a marker left in
+    // the file no longer matters, and nothing is reverted.
+    continuing(&root, None).unwrap();
+    assert_eq!(text(&root, "README.md"), "readme resolved\n");
+    assert!(!exists(&root, ".assemblr/journal.json"));
+}
+
+#[test]
+fn abort_restores_the_marked_file_whatever_it_holds_and_the_rest() {
+    let root = pending("pending-abort");
+    fs::write(root.join("README.md"), "half resolved\n").unwrap();
+    let store = Store::new(&root);
+    let journal = store.journal().unwrap().unwrap();
+    let lock = text(&root, "assemblr-lock.json");
+    let resolving = journal.pending.clone().unwrap().files;
+    let recovered = recover(&root, &store, &journal, &guard(&root), &resolving).unwrap();
+    assert!(matches!(recovered, ComposeRecovery::Reverted { .. }));
+    assert_eq!(text(&root, "README.md"), "readme mine\n");
+    assert!(!exists(&root, "new.txt"));
+    assert_eq!(text(&root, "assemblr-lock.json"), lock);
+    assert!(!exists(&root, ".assemblr/journal.json"));
+}
+
+#[test]
+fn continue_without_a_pending_composition_is_refused() {
+    let root = composed("pending-none");
+    guard(&root);
+    assert!(matches!(
+        continue_with(&root, &mut |_| Ok(())),
+        Err(ComposeFailure::Rejected { problems, .. })
+            if matches!(problems.as_slice(), [ComposeProblem::NothingPending])
+    ));
+}
+
+#[test]
+fn abort_and_continue_leave_an_interrupted_composition_to_compose() {
+    let root = composed("pending-interrupted");
+    let failure = apply_failing(&root, &second(&root), Step::Lock, 1);
+    assert!(matches!(failure, ComposeFailure::Write { .. }));
+    guard(&root);
+    let before = text(&root, "README.md");
+    for failure in [
+        abort_compose(&root).map(|_| ()).unwrap_err(),
+        continue_with(&root, &mut |_| Ok(()))
+            .map(|_| ())
+            .unwrap_err(),
+    ] {
+        assert!(matches!(
+            failure,
+            ComposeFailure::Rejected { problems, .. }
+                if matches!(problems.as_slice(), [ComposeProblem::NotPending])
+        ));
+    }
+    assert_eq!(text(&root, "README.md"), before);
+    assert!(exists(&root, ".assemblr/journal.json"));
 }

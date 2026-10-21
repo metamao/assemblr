@@ -696,16 +696,16 @@ fn a_changed_declaration_is_reconciled_three_way_and_a_bad_base_is_detected() {
     let output = fails(fixture.compose(&project));
     let err = stderr(&output);
     assert!(
-        err.contains(
-            "the project and the declared composition disagree at 2 path(s), and resolving \
-             conflicts in the project is not supported yet:\nerror:   README.md: the composition \
-             no longer delivers it, and the project edited it\nerror:   config/app.json: the \
-             composition no longer delivers it, and the project edited it"
-        ),
+        err.contains("disagree at 2 path(s)")
+            && err.contains(
+                "error:   README.md: the composition no longer delivers it, and the project \
+                 edited it\nerror:   config/app.json: the composition no longer delivers it, \
+                 and the project edited it"
+            ),
         "{err}"
     );
     assert!(
-        err.contains("resolving conflicts in place is a later increment"),
+        err.contains("conflicts between text content are left in the files to resolve"),
         "{err}"
     );
     assert_eq!(tree(&project), before);
@@ -776,14 +776,14 @@ fn conflicts_are_refused_before_anything_is_written() {
     let output = fails(fixture.compose(&project));
     let err = stderr(&output);
     assert!(
-        err.contains(
-            "disagree at 3 path(s), and resolving conflicts in the project is not supported \
-             yet:\nerror:   README.md: the project and the composition both changed it, and its \
+        err.contains("disagree at 3 path(s)")
+            && err.contains(
+                "error:   README.md: the project and the composition both changed it, and its \
              format has no merge\nerror:   bin/run: the project deleted it, and the composition \
              changes it\nerror:   config/app.json: the project and the composition change the \
              same values:\nerror:     /port: the project changes 3000 to 9000; the composition \
              changes 3000 to 8080"
-        ),
+            ),
         "{err}"
     );
     assert_eq!(tree(&project), before);
@@ -1707,4 +1707,265 @@ fn add_and_remove_refuse_a_read_only_declaration_before_writing_anything() {
         permissions.set_readonly(false);
         fs::set_permissions(&path, permissions).unwrap();
     }
+}
+
+/// A project composed from `@acme/node` 1.0.0 whose README the consumer
+/// edited, and version 1.1.0 of the unit published with a changed README
+/// and script. Returns the project, declared at `^1.1` already.
+fn text_conflict(fixture: &Fixture) -> PathBuf {
+    let (node, _) = registry(fixture);
+    let project = fixture.project("shop", &[("@acme/node", "^1")], "");
+    succeeds(fixture.compose(&project));
+    fs::write(project.join("README.md"), "mine\n").unwrap();
+    publish_node(
+        fixture,
+        &node,
+        "1.1.0",
+        "node v2\n",
+        "#!/bin/sh\necho run v2\n",
+    );
+    declare(&project, &[("@acme/node", "^1.1")], "");
+    project
+}
+
+#[test]
+fn a_text_conflict_is_left_marked_and_continue_finalizes_it() {
+    let fixture = Fixture::new("pending-continue");
+    let project = text_conflict(&fixture);
+
+    let output = fails(fixture.compose(&project));
+    let out = stdout(&output);
+    assert!(out.contains("1 file(s) hold conflicts"), "{out}");
+    assert!(out.contains("  conflict README.md"), "{out}");
+    assert!(out.contains("  modified bin/run"), "{out}");
+    let err = stderr(&output);
+    assert!(err.contains("compose --continue"), "{err}");
+    assert!(err.contains("compose --abort"), "{err}");
+    // The three versions are in the file; what does not conflict arrived;
+    // the lock still records the previous composition.
+    let readme = read(&project.join("README.md"));
+    assert!(readme.contains("<<<<<<< current"), "{readme}");
+    assert!(readme.contains("\nmine\n"), "{readme}");
+    assert!(readme.contains("||||||| base"), "{readme}");
+    assert!(readme.contains("\nnode\n"), "{readme}");
+    assert!(readme.contains("\nnode v2\n"), "{readme}");
+    assert!(readme.contains(">>>>>>> incoming"), "{readme}");
+    assert_eq!(read(&project.join("bin/run")), "#!/bin/sh\necho run v2\n");
+    assert_eq!(
+        lockfile(&project)["units"]["@acme/node"]["version"],
+        "1.0.0"
+    );
+
+    // Nothing else runs while the resolution is pending, and nothing
+    // changes.
+    let waiting = tree(&project);
+    for args in [
+        &["compose"][..],
+        &["add", "@acme/node@^1.1"],
+        &["remove", "@acme/node"],
+    ] {
+        let output = fails(fixture.assemblr(&project, args));
+        let err = stderr(&output);
+        assert!(
+            err.contains("waiting for you to resolve its conflicts in 1 file(s)")
+                && err.contains("  README.md"),
+            "{err}"
+        );
+        assert!(err.contains("--continue"), "{err}");
+        assert_eq!(tree(&project), waiting, "{args:?}");
+    }
+
+    // A marker left in the file blocks the continuation.
+    let output = fails(fixture.assemblr(&project, &["compose", "--continue"]));
+    let err = stderr(&output);
+    assert!(
+        err.contains("README.md: it still holds conflict markers"),
+        "{err}"
+    );
+    assert_eq!(tree(&project), waiting);
+
+    // Resolved by hand, it finalizes: the lock moves, and the file is the
+    // consumer's resolution.
+    fs::write(project.join("README.md"), "mine and node v2\n").unwrap();
+    let output = succeeds(fixture.assemblr(&project, &["compose", "--continue"]));
+    assert!(
+        stdout(&output).contains("Resolved 1 file(s) and finalized the composition"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(
+        lockfile(&project)["units"]["@acme/node"]["version"],
+        "1.1.0"
+    );
+    assert!(!project.join(".assemblr/journal.json").exists());
+    assert!(!project.join(".assemblr/previous").exists());
+    assert_eq!(read(&project.join("README.md")), "mine and node v2\n");
+
+    // The resolution is the project's own content now: composing again
+    // changes nothing, and neither does continuing.
+    let after = tree(&project);
+    let output = succeeds(fixture.compose(&project));
+    assert!(
+        stdout(&output).contains("Nothing to compose"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(tree(&project), after);
+    let err = stderr(&fails(
+        fixture.assemblr(&project, &["compose", "--continue"]),
+    ));
+    assert!(err.contains("no composition is waiting"), "{err}");
+}
+
+#[test]
+fn abort_restores_the_project_and_the_declaration_byte_for_byte() {
+    let fixture = Fixture::new("pending-abort");
+    let (node, _) = registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/node", "^1")], "");
+    succeeds(fixture.compose(&project));
+    fs::write(project.join("README.md"), "mine\n").unwrap();
+    publish_node(
+        &fixture,
+        &node,
+        "1.1.0",
+        "node v2\n",
+        "#!/bin/sh\necho run v2\n",
+    );
+    let before = tree(&project);
+
+    // `add` changes the declaration, writes what does not conflict, and
+    // leaves the conflict marked.
+    let output = fails(fixture.assemblr(&project, &["add", "@acme/node@^1.1"]));
+    assert!(
+        stdout(&output).contains("Changed the requirement of @acme/node from ^1 to ^1.1"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(read(&project.join("assemblr.jsonc")).contains("^1.1"));
+    assert!(read(&project.join("README.md")).contains("<<<<<<< current"));
+
+    // The consumer has started resolving; abort gives all of it up.
+    fs::write(project.join("README.md"), "half resolved\n").unwrap();
+    let output = succeeds(fixture.assemblr(&project, &["compose", "--abort"]));
+    assert!(
+        stdout(&output).contains("Aborted the composition"),
+        "{}",
+        stdout(&output)
+    );
+    // Every file of the project is as it was. The store only gained the
+    // aborted composition's base, which is content-addressed and harmless:
+    // nothing records it, and an interrupted composition leaves it too.
+    let outside_store = |files: Vec<(String, Vec<u8>)>| -> Vec<(String, Vec<u8>)> {
+        files
+            .into_iter()
+            .filter(|(path, _)| {
+                !path.starts_with(".assemblr/bases/") && !path.starts_with(".assemblr/objects/")
+            })
+            .collect()
+    };
+    let after = tree(&project);
+    assert_eq!(outside_store(after.clone()), outside_store(before.clone()));
+    assert!(before.iter().all(|file| after.contains(file)));
+    assert!(!project.join(".assemblr/journal.json").exists());
+    let err = stderr(&fails(fixture.assemblr(&project, &["compose", "--abort"])));
+    assert!(err.contains("no composition is waiting"), "{err}");
+}
+
+#[test]
+fn value_conflicts_in_json_are_marked_with_the_text_ones() {
+    let fixture = Fixture::new("pending-json");
+    let (node, _) = registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/node", "^1")], "");
+    succeeds(fixture.compose(&project));
+    fs::write(project.join("config/app.json"), "{\n  \"port\": 9000\n}\n").unwrap();
+    fs::write(project.join("README.md"), "mine\n").unwrap();
+    publish_node(
+        &fixture,
+        &node,
+        "1.1.0",
+        "node v2\n",
+        "#!/bin/sh\necho run\n",
+    );
+    declare(
+        &project,
+        &[("@acme/node", "^1.1")],
+        "\"@acme/node\": {\"port\": 8080}",
+    );
+
+    let output = fails(fixture.compose(&project));
+    let out = stdout(&output);
+    assert!(out.contains("2 file(s) hold conflicts"), "{out}");
+    assert!(out.contains("  conflict README.md"), "{out}");
+    assert!(out.contains("  conflict config/app.json"), "{out}");
+    let json = read(&project.join("config/app.json"));
+    assert!(json.contains("9000") && json.contains("8080"), "{json}");
+    assert!(json.contains("<<<<<<< current"), "{json}");
+
+    fs::write(project.join("README.md"), "resolved\n").unwrap();
+    fs::write(project.join("config/app.json"), "{\n  \"port\": 9000\n}\n").unwrap();
+    succeeds(fixture.assemblr(&project, &["compose", "--continue"]));
+    assert_eq!(
+        read(&project.join("config/app.json")),
+        "{\n  \"port\": 9000\n}\n"
+    );
+    assert_eq!(
+        lockfile(&project)["units"]["@acme/node"]["version"],
+        "1.1.0"
+    );
+}
+
+#[test]
+fn continue_and_abort_exclude_each_other() {
+    let fixture = Fixture::new("pending-flags");
+    let project = fixture.project("shop", &[], "");
+    let output = fixture.assemblr(&project, &["compose", "--continue", "--abort"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("cannot be used with"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_clone_of_a_pending_project_marks_the_marked_file_again() {
+    let fixture = Fixture::new("pending-clone");
+    let project = text_conflict(&fixture);
+    fails(fixture.compose(&project));
+
+    // A clone carries the tracked files, not the git-ignored journal.
+    let clone = fixture.dir.join("clone");
+    copy_tree(&project, &clone);
+    fs::remove_file(clone.join(".assemblr/journal.json")).unwrap();
+    fs::remove_dir_all(clone.join(".assemblr/previous")).unwrap();
+
+    // Its lock records the previous composition, and the marked file is
+    // the project's content, so the conflict is found again, around the
+    // markers that are there.
+    let output = fails(fixture.compose(&clone));
+    assert!(
+        stdout(&output).contains("  conflict README.md"),
+        "{}",
+        stdout(&output)
+    );
+    let readme = read(&clone.join("README.md"));
+    assert_eq!(readme.matches("<<<<<<< current").count(), 2, "{readme}");
+
+    // Both sets of markers have to go.
+    fs::write(clone.join("README.md"), "resolved\n").unwrap();
+    succeeds(fixture.assemblr(&clone, &["compose", "--continue"]));
+    assert_eq!(lockfile(&clone)["units"]["@acme/node"]["version"], "1.1.0");
 }
