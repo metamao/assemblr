@@ -72,8 +72,9 @@ jobs:
                locations, or an unchanged line goes in the summary. For an
                earlier inline finding, reply in its thread with
                `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments/<id>/replies -f body=<text>`:
-               one sentence when it is addressed, a follow-up when it still
-               applies. Never post it again; the owner resolves threads. Then
+               a sentence when it is addressed and that is useful, a
+               follow-up when it still applies. Never post it again; the
+               owner resolves threads. Then
                post exactly one top-level comment with `gh pr comment` that
                starts with "Reviewed <first 7 characters of HEAD SHA>" and
                contains only what is new: summary-level findings by severity

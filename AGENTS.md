@@ -602,8 +602,8 @@ be working at the same time.
   [`open-contracts.md`](docs/domain/open-contracts.md).
 - **Decision log:** [#34](https://github.com/metamao/assemblr/issues/34),
   titled `[Owner review] Autonomous decisions` (§1.2). One comment per
-  entry, `D-<n>`. If no open issue with that title exists, create one; keep
-  a single active log.
+  entry, `D-<n>`. If no open issue with that title or an equivalent one
+  exists, create one; keep a single active log.
 - **Interventions:** domain questions belong in the register, and their
   provisional answers and deferred questions in the decision log. A question
   that blocks the next increment gets an `[Owner decision] Decide OC-<n>: …`
@@ -632,7 +632,9 @@ be working at the same time.
   gh issue view 9
   gh api 'repos/{owner}/{repo}/issues/9/sub_issues' --jq '.[] | {number, state, title}'
   gh api 'repos/{owner}/{repo}/issues/<n>/dependencies/blocked_by' --jq '.[] | {number, state, title}'
-  gh issue list --state open --search 'in:title "[Owner"'
+  gh issue list --state open --search 'in:title "[Owner decision]"'
+  gh issue list --state open --search 'in:title "[Owner action]"'
+  gh issue list --state open --search 'in:title "Autonomous decisions"'
   gh pr list --state all --json number,title,state,isDraft,headRefName,closingIssuesReferences
   gh pr view <n> --json headRefOid,isDraft,statusCheckRollup,closingIssuesReferences,comments,reviews
   gh api 'repos/{owner}/{repo}/pulls/<n>/comments' --paginate
