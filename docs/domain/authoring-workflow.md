@@ -252,6 +252,14 @@ reported: consumers resolve the dependency within the declared range, where
 the default may differ, so the explicit value pins it. The check gates
 `unit check` and `unit publish`, never a build (OC-28).
 
+**What a merge would not carry.** For each of the unit's own copies of a
+JSON or JSONC file, `unit check` and `unit build` report, as warnings that
+fail nothing, the comments the copy adds and the member orders it changes.
+A copy alone takes the file's place whole, so nothing is lost today; a second
+unit that amends the same file would make the merge drop them (see
+[the merge engine](amendments-and-composition.md#the-merge-engine--approved)),
+and the author hears of it before a consumer does.
+
 **Required parameters.** Until OC-6 is decided, a unit that declares required
 parameters without defaults cannot be checked or published, for the reason
 it cannot be built: its templates need development values.

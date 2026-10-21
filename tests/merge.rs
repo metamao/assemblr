@@ -756,3 +756,143 @@ fn two_amenders_removing_the_same_member_agree() {
         "{built}"
     );
 }
+
+/// A library whose `package.json` has a conditional `exports`, where Node
+/// reads the conditions in order and the first one that matches wins.
+const LIBRARY: &str = "{\n  \"name\": \"lib\",\n  \"exports\": {\n    \".\": {\n      \
+                       \"import\": \"./dist/index.mjs\",\n      \"require\": \"./dist/index.cjs\",\n      \
+                       \"types\": \"./dist/index.d.ts\"\n    }\n  }\n}\n";
+
+/// The conditions of `exports["."]` in the order the file lists them.
+fn conditions(package: &str) -> Vec<String> {
+    // Read from the text: a parsed map would not keep the order.
+    let start = package.find("\"exports\"").unwrap();
+    package[start..]
+        .lines()
+        .filter_map(|line| line.trim().split_once("\": "))
+        .map(|(key, _)| key.trim_start_matches('"').to_owned())
+        .filter(|key| !["exports", "."].contains(&key.as_str()))
+        .collect()
+}
+
+#[test]
+fn a_reordered_exports_is_kept_alone_and_dropped_with_a_warning_once_another_unit_amends() {
+    // The `types` condition belongs first in `exports`: after the others it
+    // is never reached. An amender fixes that by moving it, which is a
+    // change of order and of nothing else.
+    let fixture = Fixture::new("exports-reorder");
+    let fixed = LIBRARY.replace(
+        "      \"import\": \"./dist/index.mjs\",\n      \"require\": \"./dist/index.cjs\",\n      \
+         \"types\": \"./dist/index.d.ts\"\n",
+        "      \"types\": \"./dist/index.d.ts\",\n      \"import\": \"./dist/index.mjs\",\n      \
+         \"require\": \"./dist/index.cjs\"\n",
+    );
+    assert_ne!(fixed, LIBRARY);
+    let described = LIBRARY.replace(
+        "\"name\": \"lib\"",
+        "\"name\": \"lib\",\n  \"sideEffects\": false",
+    );
+
+    // Alone, the copy takes the file's place and the order applies.
+    let (_worker, app) = scenario_with(&fixture, LIBRARY, &[], &[("package.json", &fixed)]);
+    succeeds(fixture.build(&app));
+    assert_eq!(
+        conditions(&app.read("build/package.json")),
+        ["types", "import", "require"]
+    );
+
+    // With a second amender the merge applies operations, and a move is not
+    // one: the provider's order stands, and the build says the copy's order
+    // was not carried, naming the path. The result is unchanged where the
+    // order matters, and the author is told, never left to find out.
+    let fixture = Fixture::new("exports-reorder-shared");
+    let (_worker, app) = scenario_with(
+        &fixture,
+        LIBRARY,
+        &[("package.json", &described)],
+        &[("package.json", &fixed)],
+    );
+    let output = succeeds(fixture.build(&app));
+    let built = app.read("build/package.json");
+    assert_eq!(conditions(&built), ["import", "require", "types"]);
+    assert!(built.contains("\"sideEffects\": false"), "{built}");
+    let err = stderr(&output);
+    assert!(
+        err.contains(
+            "not carried from the copy of @acme/api: the order of the members of /exports/."
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn the_unit_s_author_hears_early_what_a_second_amender_would_not_carry() {
+    let fixture = Fixture::new("exports-early");
+    let fixed = LIBRARY.replace(
+        "      \"import\": \"./dist/index.mjs\",\n      \"require\": \"./dist/index.cjs\",\n      \
+         \"types\": \"./dist/index.d.ts\"\n",
+        "      \"types\": \"./dist/index.d.ts\",\n      // Types first.\n      \"import\": \
+         \"./dist/index.mjs\",\n      \"require\": \"./dist/index.cjs\"\n",
+    );
+    let (_worker, _app) = scenario_with(&fixture, LIBRARY, &[], &[("package.json", &fixed)]);
+    let api = Repo {
+        path: fixture.dir.join("api"),
+    };
+
+    // `unit check` and `unit build` of the amending unit itself say so,
+    // although its copy is the only one and composes whole.
+    for command in ["check", "build"] {
+        let output = succeeds(fixture.assemblr(&api.path, &["unit", command]));
+        let err = stderr(&output);
+        assert!(
+            err.contains(
+                "amendments/package.json of @acme/api: if another unit amends src/package.json of \
+                 @acme/worker too, the order of the members of /exports/. of this copy is not \
+                 carried"
+            ),
+            "{command}: {err}"
+        );
+        assert!(
+            err.contains("the comment \"// Types first.\" of this copy is not carried"),
+            "{command}: {err}"
+        );
+    }
+    // A copy that only changes values has nothing to say.
+    let plain = LIBRARY.replace("./dist/index.mjs", "./dist/main.mjs");
+    let fixture = Fixture::new("exports-early-plain");
+    let (_worker, _app) = scenario_with(&fixture, LIBRARY, &[], &[("package.json", &plain)]);
+    let output = succeeds(fixture.assemblr(&fixture.dir.join("api"), &["unit", "check"]));
+    assert!(
+        !stderr(&output).contains("not carried"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn conditions_two_units_add_at_one_anchor_are_ordered_by_amender_identity() {
+    // Two units add a condition after the same one, and the merge places
+    // them by amender identity. For `exports` that order can decide which
+    // condition Node picks, so this pins today's behavior while the
+    // question of making it a conflict is open, and changes with the answer.
+    let fixture = Fixture::new("exports-same-anchor");
+    let with = |condition: &str| {
+        LIBRARY.replace(
+            "      \"import\": \"./dist/index.mjs\",\n",
+            &format!("      \"import\": \"./dist/index.mjs\",\n      {condition},\n"),
+        )
+    };
+    let (_worker, app) = scenario_with(
+        &fixture,
+        LIBRARY,
+        &[("package.json", &with("\"browser\": \"./dist/browser.js\""))],
+        &[("package.json", &with("\"node\": \"./dist/node.js\""))],
+    );
+    let output = succeeds(fixture.build(&app));
+    // `@acme/api` sorts before `@acme/db`: its condition comes first.
+    assert_eq!(
+        conditions(&app.read("build/package.json")),
+        ["import", "node", "browser", "require", "types"]
+    );
+    assert!(!stderr(&output).contains("conflict"), "{}", stderr(&output));
+}
