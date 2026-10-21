@@ -106,6 +106,7 @@ pub fn check_unit(root: &Path, registry: &Registry) -> Result<Checked, CheckFail
             version: manifest.version().clone(),
             files: outcome.files,
             dependencies: outcome.dependencies,
+            notes: outcome.notes,
         }),
         _ => Err(CheckFailure::Rejected(problems)),
     }
@@ -113,6 +114,8 @@ pub fn check_unit(root: &Path, registry: &Registry) -> Result<Checked, CheckFail
 
 /// What passing the publication checks tells about the unit.
 pub(super) struct Publishable {
+    /// What the composition reports without failing.
+    pub(super) notes: Vec<String>,
     /// How many files the composition delivers.
     pub(super) files: usize,
     /// How many dependencies, direct and transitive, are locked.
@@ -150,6 +153,7 @@ pub(super) fn publication_checks(
             .map(CheckProblem::Contribution),
     );
     validation.result.map(|validated| Publishable {
+        notes: validated.notes,
         dependencies: validated.lock.units().len(),
         files: validated.files.len(),
     })
@@ -162,6 +166,7 @@ pub struct Checked {
     version: Version,
     files: usize,
     dependencies: usize,
+    notes: Vec<String>,
 }
 
 impl Checked {
@@ -183,6 +188,12 @@ impl Checked {
     /// How many dependencies, direct and transitive, are locked.
     pub fn dependencies(&self) -> usize {
         self.dependencies
+    }
+
+    /// What the composition reports without failing: parts of amendment
+    /// copies the merge could not carry, each naming the file.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
     }
 }
 

@@ -22,8 +22,9 @@ pub(crate) enum Json {
     Null,
     Bool(bool),
     Integer(i64),
-    /// A fraction, an exponent, or an integer outside the 64-bit signed range.
-    OtherNumber,
+    /// A fraction, an exponent, or an integer outside the 64-bit signed
+    /// range, as its canonical JSON text.
+    OtherNumber(String),
     String(String),
     Array(Vec<Json>),
     Object(Vec<(String, Json)>),
@@ -347,11 +348,17 @@ impl<'de> Visitor<'de> for JsonVisitor {
     }
 
     fn visit_u64<E: de::Error>(self, value: u64) -> Result<Json, E> {
-        Ok(i64::try_from(value).map_or(Json::OtherNumber, Json::Integer))
+        Ok(i64::try_from(value)
+            .map_or_else(|_| Json::OtherNumber(value.to_string()), Json::Integer))
     }
 
-    fn visit_f64<E: de::Error>(self, _value: f64) -> Result<Json, E> {
-        Ok(Json::OtherNumber)
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Json, E> {
+        // `serde_json` prints the shortest text that reads back as the
+        // same number, so `1.50` and `1.5` become one text.
+        Ok(Json::OtherNumber(
+            serde_json::Number::from_f64(value)
+                .map_or_else(|| value.to_string(), |n| n.to_string()),
+        ))
     }
 
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Json, E> {
@@ -498,9 +505,9 @@ mod tests {
             Json::Array(vec![
                 Json::Integer(i64::MIN),
                 Json::Integer(i64::MAX),
-                Json::OtherNumber,
-                Json::OtherNumber,
-                Json::OtherNumber,
+                Json::OtherNumber("9223372036854775808".to_owned()),
+                Json::OtherNumber("1.0".to_owned()),
+                Json::OtherNumber("1000.0".to_owned()),
             ])
         );
     }

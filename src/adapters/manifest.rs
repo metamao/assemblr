@@ -184,7 +184,7 @@ impl JsonKind {
             Json::Null => Self::Null,
             Json::Bool(_) => Self::Boolean,
             Json::Integer(_) => Self::Integer,
-            Json::OtherNumber => Self::OtherNumber,
+            Json::OtherNumber(_) => Self::OtherNumber,
             Json::String(_) => Self::String,
             Json::Array(_) => Self::Array,
             Json::Object(_) => Self::Object,

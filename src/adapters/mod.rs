@@ -9,8 +9,10 @@ mod build;
 mod git;
 mod init;
 mod jsonc;
+mod jsonc_edit;
 mod lockfile;
 mod manifest;
+mod merge;
 mod registry;
 mod render;
 mod schema;
@@ -30,11 +32,13 @@ pub use git::{
 };
 pub use init::{FileOutcome, GitOutcome, InitFailure, Initialized, Step as InitStep, init_unit};
 pub use jsonc::SyntaxError;
+pub use jsonc_edit::{EditError as JsonEditError, ValueError};
 pub use lockfile::{LockfileError, PublishedLockfileError};
 pub use manifest::{
     EditError, FieldPath, IssueKind, JsonKind, ManifestIssue, PathSegment, ReadManifestError,
     declare_amendment, read_manifest, rebase_amendments,
 };
+pub use merge::{MergeFailure, MergeNote, Merged};
 pub use registry::{
     Added, Indexed, Problem, ReferenceError, Registry, RegistryFailure, StorageError, Synced,
     TagProblem, local_reference,

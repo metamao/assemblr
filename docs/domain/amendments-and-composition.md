@@ -52,11 +52,12 @@ Amendments are created with `unit amend` and reconciled with `unit update`
   [merge semantics](#merge-semantics--approved)).
 - A unit therefore cannot independently override a value that another unit
   **added or changed through an amendment**: that value is not in its base,
-  and setting it to a different value is a conflict. Whether identical
-  contributions from several amenders are compatible or conflict is
-  **OC-10**. A unit that wants such a value to be configurable exposes it as a
-  parameter of its own, which other units set through `options`. Changing a
-  value from another unit's `src/` is an ordinary amendment.
+  and setting it to a different value is a conflict. Identical contributions
+  from several amenders to one value are compatible and become one change
+  (decided by the owner, #33). A unit that wants such a value to be
+  configurable exposes it as a parameter of its own, which other units set
+  through `options`. Changing a value from another unit's `src/` is an
+  ordinary amendment.
 - Amendments that build on a dependency's composed output, including that
   dependency's own amendments, are outside Alpha.
 
@@ -218,12 +219,61 @@ Open:
 - Unknown or unsupported formats get **conservative** behavior: report rather
   than guess.
 
+### The merge engine — Approved
+
+Decided by the owner on #33, ahead of the consumer lifecycle, for unit
+composition:
+
+- **A value-level N-way merge.** Operations are derived from each amendment
+  copy against its verified base, the operations of every amender are
+  combined, and the result is applied to the provider's file with
+  deterministic conflict detection and strict validation of the output: the
+  written text must parse back to exactly the merged value.
+- **JSON and JSONC first**, with format-aware parsing and a format-preserving
+  writer. TOML, YAML, text, and binary files with several amenders stay
+  refused, and a single amender's copy keeps taking the file's place as it
+  does today, whatever the format.
+- **Identical contributions** from several amenders are one change.
+  **Different changes to one value conflict**, with no precedence and no
+  last-writer-wins. A removal, or a replacement by a scalar or a list,
+  conflicts with another amender's edit inside the removed value.
+- **No layered overrides**: an amender cannot change a value another
+  amendment introduced; the flat model stands.
+- **Lists** are compared whole. No element identity is inferred; a list that
+  several amenders change identically is one change, and lists they change
+  differently conflict, so changes inside one list are never merged
+  independently. Changes to the objects around a list are unaffected.
+  **OC-4** stays open for identity hints.
+- **Insertion order.** When the order of several contributions could affect
+  meaning, a conflict is reported rather than an order invented. **OC-12**
+  stays open; see the implementation notes for JSON objects.
+- **Cross-version application** (**OC-52**) and reconciliation of a changed
+  base in `unit update` (**OC-53**) stay deferred and refused.
+- **Stability.** Results are deterministic for the same inputs and engine
+  version. Byte-identical formatting across Assemblr releases is not
+  promised; semantic compatibility is, and a consequential change to merge
+  behavior is an explicit decision.
+- The same merge model is the foundation for consumer reconciliation, which
+  is not implemented by this decision.
+
+Implementation notes (provisional, decision log D-6 to D-8):
+
+- Object member order carries no meaning in JSON, so members that several
+  amenders add at the same place are placed in a fixed order, by amender
+  identity, which never changes the document's value; a format where order
+  means something gets a conflict under OC-12 when it is supported.
+- What the value model cannot carry from a copy, a comment the copy adds or
+  a member order it changes, is reported as a warning naming the amender,
+  and the composition proceeds with the provider's layout.
+- The format is recognized by the delivered file's extension, `.json` or
+  `.jsonc`, after the template suffix is removed.
+
 Open:
 
 - The manifest representation of list identity hints. **OC-4.**
-- Production merge algorithms and adapter selection, including how an
-  amendment is applied to a provider version other than its base, and whether
-  results stay stable across Assemblr versions. **OC-10.**
+- Further format adapters, how an amendment is applied to a provider
+  version other than its base, Git's part in merging, and the consumer
+  side of OC-10. **OC-10.**
 
 ### Composition, builds, and reconciliation
 
@@ -240,16 +290,20 @@ provider resolves to the declared base. The direct-dependency restriction
 binds the amender to the provider, not the amender to the unit being built.
 A published amender's bases are verified against the composer's registry
 record before composition, as approved above. With the base and the resolved
-version equal, the result is the rendered copy, and no change is derived.
-The cases that need the open decisions above fail explicitly, naming each
-amender, its version, the provider, the base, and the resolved version, and
-change nothing (standing default D2): an amendment whose provider resolves
-to a version other than its base is not applied, and a provider file that
-several units amend, in any combination of the unit being built and
-published amenders, is not amended by any of them. No merge, re-basing, or
-ordering is performed. `unit update` carries a unit's own amendment to the
-provider's new version only when the amended source file is unchanged
-between the two versions, and refuses the update otherwise (see
+version equal, one amender's result is the rendered copy, and no change is
+derived. Several amenders of one JSON or JSONC file are combined by
+[the merge engine](#the-merge-engine--approved) on the rendered content:
+the provider's file and each copy rendered with the provider's values, the
+copy with its amender's as `own`. The cases that need the open decisions
+above fail explicitly, naming each amender, its version, the provider, the
+base, and the resolved version, and change nothing (standing default D2):
+an amendment whose provider resolves to a version other than its base is
+not applied, and a provider file of any other format that several units
+amend, in any combination of the unit being built and published amenders,
+is not amended by any of them. No re-basing is performed. `unit update`
+carries a unit's own amendment to the provider's new version only when the
+amended source file is unchanged between the two versions, and refuses the
+update otherwise (see
 [authoring-workflow.md](authoring-workflow.md#update-details--approved)).
 
 Consumer projects reconcile downstream modifications with three inputs: the
