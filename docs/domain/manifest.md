@@ -28,9 +28,13 @@ These fields make up the accepted conceptual vocabulary:
 | `options` | Strict requirements imposed on dependency parameters. | [parameters-and-options.md](parameters-and-options.md#dependency-options) |
 | amendment declarations | Declare amendments and their provenance. | [amendments-and-composition.md](amendments-and-composition.md) |
 
-The **meaning** of each field above is approved. The amendment declaration
-field name and syntax are **Open (OC-2)**. Do not treat earlier experimental
-syntax, such as `extends` or a `merges` field, as canonical.
+The **meaning** of each field above is approved. An amendment declaration
+names the amended path, the direct dependency that provides it, and the exact
+base version (see
+[amendments-and-composition.md](amendments-and-composition.md#layout-and-declaration)).
+The declaration's field name and syntax are **Open (OC-2)**. Do not treat
+earlier experimental syntax, such as `extends` or a `merges` field, as
+canonical.
 
 ## Serialization of `dependencies`, `options`, and `params` — Approved
 
@@ -119,7 +123,9 @@ Other provisional rules:
 - **Parameter names** start with an ASCII letter and continue with ASCII
   letters, digits, or underscores, such as `appName` or `node_compat`. Names
   stay usable in any template syntax chosen later (OC-5), and the rule can be
-  widened compatibly. **OC-50.**
+  widened compatibly. **OC-50.** Approved, not provisional: `own` is reserved
+  for the amending author's context and is not a valid parameter name (see
+  [parameters-and-options.md](parameters-and-options.md#declaration--approved)).
 - **JSONC.** Comments (`//` and `/* */`) and trailing commas after a value are
   accepted, as in common JSONC tooling. Other JSON5 extensions, such as
   single-quoted strings, unquoted keys, and hexadecimal numbers, are rejected.

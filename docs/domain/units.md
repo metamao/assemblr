@@ -199,7 +199,16 @@ provide. Authors edit ordinary copies of files. They do not hand-write
 low-level merge operations. Assemblr derives the changes. See
 [amendments-and-composition.md](amendments-and-composition.md).
 
+- An amendment targets a file that a **direct dependency** provides in its
+  `src/`.
+- The copy lives at `amendments/<path>`, where `<path>` is the file's path in
+  that dependency's `src/`, under the same path rules. The unit's own `src/`
+  must not hold the same path.
+- An amendment changes a file's content only. It never deletes or renames a
+  file, and never changes its executable bit.
+- Each amendment is declared in the manifest with the dependency's identity
+  and the exact base version.
+
 Open:
 
-- The on-disk layout and naming of amendment copies, and where their provenance
-  metadata is stored. **OC-3.**
+- The manifest schema and syntax of the declaration. **OC-2.**
