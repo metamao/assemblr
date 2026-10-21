@@ -600,7 +600,10 @@ be working at the same time.
   new push cancels the previous run. It posts as `claude`: inline findings
   plus one top-level comment starting `Reviewed <7-character SHA>`. A review
   counts only if that SHA matches the PR's head commit. On a non-draft PR, a
-  missing review means pending, cancelled, or failed, never clean. Its note
+  missing review means pending, cancelled, failed, or skipped, never clean.
+  The action skips itself, with a successful run and no comment, on a PR
+  that changes `claude-review.yml`, because it requires the workflow file to
+  match the default branch; such a PR is reviewed by the owner. Its note
   that changes to `AGENTS.md` or `docs/domain/` need the owner's approval is
   expected and means the PR is awaiting the owner, not that it needs a fix.
 - **Shared account:** agents run with the owner's `gh` credentials, so GitHub
