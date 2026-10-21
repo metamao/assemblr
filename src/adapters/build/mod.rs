@@ -17,11 +17,12 @@
 //! lockfile (see [`output`]).
 
 mod amend;
+mod check;
 mod exclusive;
 mod output;
+mod publish;
 mod update;
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
@@ -29,9 +30,11 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 pub use amend::{AmendFailure, AmendProblem, AmendState, Amended, Match, WriteError, amend_unit};
+pub use check::{CheckFailure, CheckProblem, Checked, check_unit};
 use exclusive::BuildLock;
 pub use exclusive::BuildLockError;
 pub use output::{OutputProblem, PublishError, State as PublishState};
+pub use publish::{IndexOutcome, PublishFailure, PublishProblem, Published, publish_unit};
 pub use update::{
     Carried, FileState, Recovered, RecoveryError, UpdateFailure, UpdateProblem, UpdateState,
     Updated, WriteError as UpdateWriteError, update_unit,
@@ -43,11 +46,11 @@ use super::manifest::{ReadManifestError, read_manifest};
 use super::registry::{Registry, StorageError};
 use super::render::{Context, RenderError, render};
 use crate::domain::{
-    AmendmentBaseError, AvailableVersions, BaseIntegrityError, CompositionError, FileTree,
-    LockChange, LockError, Manifest, ObjectId, ParameterName, ParameterValues,
+    AmendmentBaseError, AvailableVersions, BaseIntegrityError, CompositionError, ContributionError,
+    FileTree, LockChange, LockError, Manifest, ObjectId, ParameterName, ParameterValues,
     PublishedAmendmentError, RelativePath, Requirer, ResolutionError, Root, TEMPLATE_SUFFIX,
     UnitContent, UnitFile, UnitIdentity, UnitLock, Version, amendment_bases, compose,
-    published_amendments, relock, resolve, verify_bases,
+    contribution_problems, published_amendments, relock, resolve, verify_bases,
 };
 
 /// The unit's manifest, at the repository's top level.
@@ -137,20 +140,6 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
     let previous = lockfile::read(root)
         .map_err(|error| problems.push(BuildProblem::Lockfile(error)))
         .ok();
-    if let Some(manifest) = &manifest {
-        let parameters: Vec<ParameterName> = manifest
-            .params()
-            .iter()
-            .filter(|(_, definition)| definition.default().is_none())
-            .map(|(name, _)| name.clone())
-            .collect();
-        if !parameters.is_empty() {
-            problems.push(BuildProblem::DevelopmentValues {
-                unit: manifest.name().clone(),
-                parameters,
-            });
-        }
-    }
     let index = registry
         .index()
         .map_err(|error| problems.push(BuildProblem::Registry(error)))
@@ -161,171 +150,30 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
         return Err(BuildFailure::Rejected(problems));
     };
     let previous_lock = previous.clone().unwrap_or_default();
-    let dependencies = match Dependencies::read(&index, manifest) {
-        Ok(dependencies) => dependencies,
-        Err(found) => {
-            problems.extend(found);
-            return Err(BuildFailure::Rejected(problems));
-        }
+    let inputs = Inputs {
+        manifest,
+        src: src.as_ref(),
+        amendments: amendments.as_ref(),
+        previous: &previous_lock,
     };
-    let resolution = match resolve(
-        Some(manifest.name()),
-        manifest.dependencies(),
-        &dependencies.available,
-        &previous_lock.versions(),
-    ) {
-        Ok(resolution) => resolution,
-        Err(errors) => {
-            problems.extend(errors.into_iter().map(BuildProblem::Resolution));
-            return Err(BuildFailure::Rejected(problems));
-        }
-    };
-    let lock = match relock(&previous_lock, &resolution, &index) {
-        Ok(lock) => lock,
-        Err(errors) => {
-            problems.extend(errors.into_iter().map(BuildProblem::Lock));
-            return Err(BuildFailure::Rejected(problems));
-        }
-    };
-    // A build never moves an amended unit away from its base. The cause is
-    // told apart here, with the previous lock; the composition below would
-    // only see that the base and the resolved version differ.
-    let moved: BTreeSet<RelativePath> = amendment_bases(manifest, &previous_lock, &resolution)
-        .into_iter()
-        .map(|error| {
-            let path = match &error {
-                AmendmentBaseError::ResolutionChanged { path, .. }
-                | AmendmentBaseError::DeclarationChanged { path, .. }
-                | AmendmentBaseError::NotLocked { path, .. } => path.clone(),
-            };
-            problems.push(BuildProblem::AmendmentBase(error));
-            path
-        })
-        .collect();
-    let contents = match dependencies.read_content(&lock, lock.units().keys()) {
-        Ok(contents) => contents,
-        Err(found) => {
-            problems.extend(found);
-            return Err(BuildFailure::Rejected(problems));
-        }
-    };
-    let (Some(src), Some(amendments)) = (src, amendments) else {
+    // A build composes an ineffective unit as readily as any other: the
+    // effective-contribution check gates publication (OC-11).
+    let validated = validate(&inputs, &index, &mut problems).result;
+    let Some(validated) = validated.filter(|_| problems.is_empty()) else {
         return Err(BuildFailure::Rejected(problems));
     };
-
-    // Each published amender's bases are verified against the index here,
-    // whatever else the composition finds: a disagreement is an integrity
-    // conflict in its own right.
-    let mut units = BTreeMap::new();
-    for (identity, locked) in lock.units() {
-        let key = (identity.clone(), locked.version().clone());
-        let (Some(manifest), Some(content)) =
-            (dependencies.manifests.get(&key), contents.get(identity))
-        else {
-            continue;
-        };
-        if let Some(published) = &content.lock {
-            problems.extend(
-                verify_bases(identity, locked.version(), manifest, published, &index)
-                    .into_iter()
-                    .map(BuildProblem::BaseIntegrity),
-            );
-        }
-        units.insert(
-            identity.clone(),
-            UnitContent::new(manifest, &content.files, &content.amendments),
-        );
-    }
-    let root_content = UnitContent::new(manifest, &src, &amendments);
-    let composition = compose(
-        resolution.graph(),
-        Root::Unit(root_content),
-        &units,
-        &BTreeMap::new(),
-    );
-    let composition = match composition {
-        Ok(composition) => Some(composition),
-        Err(errors) => {
-            problems.extend(
-                errors
-                    .into_iter()
-                    // Already reported, from the manifest alone, or with
-                    // the cause, from the lock.
-                    .filter(|error| match error {
-                        CompositionError::MissingValue { unit, .. } => unit != manifest.name(),
-                        CompositionError::AmendmentBase {
-                            amender: Requirer::Root,
-                            path,
-                            ..
-                        } => !moved.contains(path),
-                        _ => true,
-                    })
-                    .map(BuildProblem::Composition),
-            );
-            None
-        }
-    };
-    let Some(composition) = composition.filter(|_| problems.is_empty()) else {
-        return Err(BuildFailure::Rejected(problems));
-    };
+    let lock = validated.lock;
 
     let lockfile = match &previous {
         None => LockfileOutcome::Created,
         Some(previous) if *previous == lock => LockfileOutcome::Unchanged,
         Some(_) => LockfileOutcome::Updated,
     };
-
-    // Templates are rendered with the parameter values of the unit that
-    // provides each one, plus the amending unit's values as `own` for an
-    // amended one. Every template's problems are reported, by delivered path
-    // and then position, and nothing is written when there is any.
-    let no_values = ParameterValues::new();
-    let mut files: Vec<(&RelativePath, Cow<'_, [u8]>, bool)> = Vec::new();
-    for (path, composed) in composition.files() {
-        let executable = composed.is_executable();
-        if !composed.is_template() {
-            files.push((path, Cow::Borrowed(composed.contents()), executable));
-            continue;
-        }
-        let template = |error| BuildProblem::Template {
-            unit: composed.unit().clone(),
-            path: composed.source().clone(),
-            amended_by: composed.amended_by().cloned(),
-            published: composed
-                .amended_by()
-                .filter(|amender| *amender != manifest.name())
-                .and_then(|amender| lock.units().get(amender))
-                .map(|locked| locked.version().clone()),
-            error,
-        };
-        let Ok(text) = std::str::from_utf8(composed.contents()) else {
-            problems.push(template(TemplateError::NotUtf8));
-            continue;
-        };
-        let values_of = |unit| composition.values().get(unit).unwrap_or(&no_values);
-        let values = values_of(composed.unit());
-        let context = match composed.amended_by() {
-            Some(amender) => Context::amended(values, values_of(amender)),
-            None => Context::new(values),
-        };
-        match render(text, &context) {
-            Ok(rendered) => files.push((path, Cow::Owned(rendered.into_bytes()), executable)),
-            Err(errors) => {
-                problems.extend(errors.into_iter().map(TemplateError::Render).map(template))
-            }
-        }
-    }
-    if !problems.is_empty() {
-        return Err(BuildFailure::Rejected(problems));
-    }
-    let files: Vec<(&RelativePath, UnitFile)> = files
-        .into_iter()
-        .map(|(path, contents, executable)| {
-            (path, UnitFile::new(contents.into_owned(), executable))
-        })
+    let files: Vec<(&RelativePath, &UnitFile)> = validated
+        .files
+        .iter()
+        .map(|(path, file)| (path, file))
         .collect();
-    let files: Vec<(&RelativePath, &UnitFile)> =
-        files.iter().map(|(path, file)| (*path, file)).collect();
     let new_lock = (lockfile != LockfileOutcome::Unchanged).then_some(&lock);
     let published =
         output::publish(root, &files, new_lock, &guard).map_err(BuildFailure::Publish)?;
@@ -335,7 +183,7 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
         files: files.len(),
         dependencies: lock.units().len(),
         lockfile,
-        changes: resolution.changes().clone(),
+        changes: validated.changes,
         leftover: published.leftover,
     })
 }
@@ -376,6 +224,247 @@ fn read_working_manifest_text(root: &Path) -> Result<String, ManifestFileError> 
         });
     }
     String::from_utf8(bytes).map_err(|_| ManifestFileError::NotUtf8 { path })
+}
+
+/// What a unit is validated from: its manifest, its `src/` files, its
+/// amendment copies, and the lock it is resolved under. A build and a check
+/// read them from the working tree, a publication from the commit at
+/// `HEAD`.
+pub(super) struct Inputs<'a> {
+    pub(super) manifest: &'a Manifest,
+    /// The `src/` files, or `None` when they could not be read, which is
+    /// reported separately; the dependencies are still validated.
+    pub(super) src: Option<&'a FileTree>,
+    /// The amendment copies, or `None` as for `src`.
+    pub(super) amendments: Option<&'a FileTree>,
+    /// The previous lock, empty when there is no lockfile.
+    pub(super) previous: &'a UnitLock,
+}
+
+/// What validating a unit found.
+pub(super) struct Validation {
+    /// The problems with the unit's contribution, which gate publication
+    /// and never a build (OC-11). Empty when resolution did not finish.
+    pub(super) contribution: Vec<ContributionError>,
+    /// The validated unit, when every validation passed.
+    pub(super) result: Option<Validated>,
+}
+
+/// A unit that passed every validation a build runs.
+pub(super) struct Validated {
+    /// The lock the resolution produces.
+    pub(super) lock: UnitLock,
+    /// How that lock differs from the previous one.
+    pub(super) changes: BTreeMap<UnitIdentity, LockChange>,
+    /// The composed files, rendered, by delivered path.
+    pub(super) files: Vec<(RelativePath, UnitFile)>,
+}
+
+/// Runs every validation that gates a build on `inputs` (see
+/// `docs/domain/authoring-workflow.md`): development values, resolution
+/// under the lock against `index`, the lock's integrity, the amendment
+/// bases, the published content of every locked version, the bases of
+/// published amenders, composition, and rendering. Every problem found is
+/// added to `problems`, and the result is given only when none was.
+pub(super) fn validate(
+    inputs: &Inputs<'_>,
+    index: &crate::domain::RegistryIndex,
+    problems: &mut Vec<BuildProblem>,
+) -> Validation {
+    let Inputs {
+        manifest,
+        src,
+        amendments,
+        previous,
+    } = *inputs;
+    let mut validation = Validation {
+        contribution: Vec::new(),
+        result: None,
+    };
+    let parameters: Vec<ParameterName> = manifest
+        .params()
+        .iter()
+        .filter(|(_, definition)| definition.default().is_none())
+        .map(|(name, _)| name.clone())
+        .collect();
+    if !parameters.is_empty() {
+        problems.push(BuildProblem::DevelopmentValues {
+            unit: manifest.name().clone(),
+            parameters,
+        });
+    }
+    let dependencies = match Dependencies::read(index, manifest) {
+        Ok(dependencies) => dependencies,
+        Err(found) => {
+            problems.extend(found);
+            return validation;
+        }
+    };
+    let resolution = match resolve(
+        Some(manifest.name()),
+        manifest.dependencies(),
+        &dependencies.available,
+        &previous.versions(),
+    ) {
+        Ok(resolution) => resolution,
+        Err(errors) => {
+            problems.extend(errors.into_iter().map(BuildProblem::Resolution));
+            return validation;
+        }
+    };
+    let lock = match relock(previous, &resolution, index) {
+        Ok(lock) => lock,
+        Err(errors) => {
+            problems.extend(errors.into_iter().map(BuildProblem::Lock));
+            return validation;
+        }
+    };
+    // A build never moves an amended unit away from its base. The cause is
+    // told apart here, with the previous lock; the composition below would
+    // only see that the base and the resolved version differ.
+    let moved: BTreeSet<RelativePath> = amendment_bases(manifest, previous, &resolution)
+        .into_iter()
+        .map(|error| {
+            let path = match &error {
+                AmendmentBaseError::ResolutionChanged { path, .. }
+                | AmendmentBaseError::DeclarationChanged { path, .. }
+                | AmendmentBaseError::NotLocked { path, .. } => path.clone(),
+            };
+            problems.push(BuildProblem::AmendmentBase(error));
+            path
+        })
+        .collect();
+    let contents = match dependencies.read_content(&lock, lock.units().keys()) {
+        Ok(contents) => contents,
+        Err(found) => {
+            problems.extend(found);
+            return validation;
+        }
+    };
+
+    // Each published amender's bases are verified against the index here,
+    // whatever else the composition finds: a disagreement is an integrity
+    // conflict in its own right.
+    let mut units = BTreeMap::new();
+    for (identity, locked) in lock.units() {
+        let key = (identity.clone(), locked.version().clone());
+        let (Some(manifest), Some(content)) =
+            (dependencies.manifests.get(&key), contents.get(identity))
+        else {
+            continue;
+        };
+        if let Some(published) = &content.lock {
+            problems.extend(
+                verify_bases(identity, locked.version(), manifest, published, index)
+                    .into_iter()
+                    .map(BuildProblem::BaseIntegrity),
+            );
+        }
+        units.insert(
+            identity.clone(),
+            UnitContent::new(manifest, &content.files, &content.amendments),
+        );
+    }
+    let (Some(src), Some(amendments)) = (src, amendments) else {
+        return validation;
+    };
+    let providers: BTreeMap<&UnitIdentity, (&Version, &FileTree)> = lock
+        .units()
+        .iter()
+        .filter_map(|(identity, locked)| {
+            let content = contents.get(identity)?;
+            Some((identity, (locked.version(), &content.files)))
+        })
+        .collect();
+    validation.contribution = contribution_problems(manifest, src, amendments, &providers);
+    let root_content = UnitContent::new(manifest, src, amendments);
+    let composition = compose(
+        resolution.graph(),
+        Root::Unit(root_content),
+        &units,
+        &BTreeMap::new(),
+    );
+    let composition = match composition {
+        Ok(composition) => composition,
+        Err(errors) => {
+            problems.extend(
+                errors
+                    .into_iter()
+                    // Already reported, from the manifest alone, or with
+                    // the cause, from the lock.
+                    .filter(|error| match error {
+                        CompositionError::MissingValue { unit, .. } => unit != manifest.name(),
+                        CompositionError::AmendmentBase {
+                            amender: Requirer::Root,
+                            path,
+                            ..
+                        } => !moved.contains(path),
+                        _ => true,
+                    })
+                    .map(BuildProblem::Composition),
+            );
+            return validation;
+        }
+    };
+
+    // Templates are rendered with the parameter values of the unit that
+    // provides each one, plus the amending unit's values as `own` for an
+    // amended one. Every template's problems are reported, by delivered path
+    // and then position.
+    let no_values = ParameterValues::new();
+    let mut files: Vec<(RelativePath, UnitFile)> = Vec::new();
+    let mut failed = false;
+    for (path, composed) in composition.files() {
+        let executable = composed.is_executable();
+        if !composed.is_template() {
+            files.push((
+                path.clone(),
+                UnitFile::new(composed.contents().to_vec(), executable),
+            ));
+            continue;
+        }
+        let template = |error| BuildProblem::Template {
+            unit: composed.unit().clone(),
+            path: composed.source().clone(),
+            amended_by: composed.amended_by().cloned(),
+            published: composed
+                .amended_by()
+                .filter(|amender| *amender != manifest.name())
+                .and_then(|amender| lock.units().get(amender))
+                .map(|locked| locked.version().clone()),
+            error,
+        };
+        let Ok(text) = std::str::from_utf8(composed.contents()) else {
+            problems.push(template(TemplateError::NotUtf8));
+            failed = true;
+            continue;
+        };
+        let values_of = |unit| composition.values().get(unit).unwrap_or(&no_values);
+        let values = values_of(composed.unit());
+        let context = match composed.amended_by() {
+            Some(amender) => Context::amended(values, values_of(amender)),
+            None => Context::new(values),
+        };
+        match render(text, &context) {
+            Ok(rendered) => files.push((
+                path.clone(),
+                UnitFile::new(rendered.into_bytes(), executable),
+            )),
+            Err(errors) => {
+                failed = true;
+                problems.extend(errors.into_iter().map(TemplateError::Render).map(template));
+            }
+        }
+    }
+    if failed {
+        return validation;
+    }
+    validation.result = Some(Validated {
+        lock,
+        changes: resolution.changes().clone(),
+        files,
+    });
+    validation
 }
 
 /// The published versions a resolution may choose from, read from the
@@ -797,9 +886,9 @@ impl fmt::Display for BuildProblem {
                     parameters.iter().map(|name| format!("`{name}`")).collect();
                 write!(
                     f,
-                    "{unit} declares required parameters without defaults: {}; a build needs \
-                     development values for them, and supplying development values is not \
-                     supported yet",
+                    "{unit} declares required parameters without defaults: {}; composing it \
+                     needs development values for them, and supplying development values is \
+                     not supported yet",
                     names.join(", ")
                 )
             }

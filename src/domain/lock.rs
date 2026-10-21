@@ -164,7 +164,8 @@ pub enum AmendmentBaseError {
         resolved: Version,
     },
     /// The declaration names a version other than the locked one, which the
-    /// resolution keeps: the declaration was edited by hand.
+    /// resolution keeps: the declaration was edited, or an update that
+    /// replaced the manifest was interrupted and its record deleted.
     DeclarationChanged {
         /// The amended path.
         path: RelativePath,
@@ -216,8 +217,10 @@ impl fmt::Display for AmendmentBaseError {
             } => write!(
                 f,
                 "amendments/{path} declares {unit} {base} as its base, but the lockfile locks \
-                 {unit} {locked} and the dependencies resolve it to {resolved}; the declared base \
-                 was edited by hand, so revert it to {locked}"
+                 {unit} {locked} and the dependencies resolve it to {resolved}; the declaration \
+                 and the lockfile disagree, as after an edit of the declaration or an update \
+                 whose record was deleted: revert the declaration to {locked}, then run `assemblr \
+                 unit update {unit}` if the base should move"
             ),
             Self::NotLocked {
                 path,
@@ -760,7 +763,11 @@ mod tests {
                 resolved: version("1.0.0"),
             }]
         );
-        assert!(errors[0].to_string().contains("revert it to 1.0.0"));
+        assert!(
+            errors[0]
+                .to_string()
+                .contains("revert the declaration to 1.0.0")
+        );
 
         // No lock at all, and the resolution prefers the newest version.
         let errors = bases(&amending("^1", "1.0.0"), &UnitLock::default());

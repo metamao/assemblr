@@ -75,7 +75,7 @@ impl GitRepository {
         }
     }
 
-    fn failed(&self, args: &[&str], status: ExitStatus, stderr: &[u8]) -> GitError {
+    pub(super) fn failed(&self, args: &[&str], status: ExitStatus, stderr: &[u8]) -> GitError {
         self.error(GitErrorKind::Failed {
             command: describe(args),
             status,

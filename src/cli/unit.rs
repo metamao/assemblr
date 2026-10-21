@@ -8,11 +8,15 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use assemblr::adapters::{
-    AmendFailure, AmendProblem, AmendState, BuildFailure, BuildProblem, Built, LockfileOutcome,
-    ManifestFileError, PublishState, RecoveryError, Registry, UpdateFailure, UpdateProblem,
-    UpdateState, Updated, amend_unit, build_unit, update_unit,
+    AmendFailure, AmendProblem, AmendState, BuildFailure, BuildProblem, Built, CheckFailure,
+    CheckProblem, IndexOutcome, LockfileOutcome, ManifestFileError, PublishFailure, PublishProblem,
+    PublishState, Published, RecoveryError, Registry, TagProblem, UpdateFailure, UpdateProblem,
+    UpdateState, Updated, amend_unit, build_unit, check_unit, publish_unit, update_unit,
 };
-use assemblr::domain::{LockChange, LockError, ResolutionError, UnitIdentity};
+use assemblr::domain::{
+    ContributionError, Excluded, IntegrityChange, LockChange, LockError, RegistryError,
+    ResolutionError, UnitIdentity,
+};
 use clap::{Args, Subcommand};
 
 #[derive(Debug, Subcommand)]
@@ -20,6 +24,12 @@ pub(super) enum UnitCommand {
     /// Compose the unit in the current directory with its published
     /// dependencies into `build/`.
     Build,
+    /// Run every validation a build runs, plus the checks that gate
+    /// publication, without writing anything.
+    Check,
+    /// Tag the committed unit as the version its manifest declares, and
+    /// index it in the local registry when the repository is registered.
+    Publish,
     /// Copy a dependency's file to `amendments/` for editing, and declare
     /// the amendment in `manifest.jsonc`.
     Amend(AmendArgs),
@@ -51,6 +61,8 @@ pub(super) struct AmendArgs {
 pub(super) fn run(command: UnitCommand) -> ExitCode {
     match command {
         UnitCommand::Build => build(),
+        UnitCommand::Check => check(),
+        UnitCommand::Publish => publish(),
         UnitCommand::Amend(args) => amend(&args),
         UnitCommand::Update(args) => update(&args),
     }
@@ -323,6 +335,209 @@ fn build() -> ExitCode {
             fail(&failure.to_string(), Some(&hint))
         }
     }
+}
+
+fn check() -> ExitCode {
+    let (root, registry) = match locate() {
+        Ok(located) => located,
+        Err(code) => return code,
+    };
+    match check_unit(&root, &registry) {
+        Ok(checked) => {
+            println!(
+                "Checked {} {}: no problems; a build delivers {} file(s), with {} dependenc{}.",
+                checked.unit(),
+                checked.version(),
+                checked.files(),
+                checked.dependencies(),
+                if checked.dependencies() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
+            );
+            ExitCode::SUCCESS
+        }
+        Err(failure) => {
+            let CheckFailure::Rejected(problems) = &failure;
+            let mut hint = "nothing was changed".to_owned();
+            if let Some(advice) = problems
+                .iter()
+                .find_map(|problem| check_advice(problem, &root, "check"))
+            {
+                hint.push_str("; ");
+                hint.push_str(&advice);
+            }
+            fail(&failure.to_string(), Some(&hint))
+        }
+    }
+}
+
+/// Advice for a problem a check or a publication found, for the command
+/// `command`.
+fn check_advice(problem: &CheckProblem, root: &Path, command: &str) -> Option<String> {
+    Some(match problem {
+        CheckProblem::Build(BuildProblem::Manifest(ManifestFileError::Missing { .. })) => format!(
+            "{} is not a unit repository's top level; run `assemblr unit {command}` in the \
+             directory that holds `manifest.jsonc`",
+            root.display()
+        ),
+        CheckProblem::Build(problem) => return advice(problem, root),
+        CheckProblem::NoLockfile | CheckProblem::LockfileStale { .. } => {
+            "run `assemblr unit build`, which writes the lockfile, and check the result".to_owned()
+        }
+        CheckProblem::Contribution(ContributionError::NoContribution) => {
+            "add files under `src/`, or declare the dependencies the unit composes".to_owned()
+        }
+        CheckProblem::Contribution(ContributionError::RedundantAmendment { .. }) => {
+            return None;
+        }
+    })
+}
+
+fn publish() -> ExitCode {
+    let (root, registry) = match locate() {
+        Ok(located) => located,
+        Err(code) => return code,
+    };
+    match publish_unit(&root, &registry) {
+        Ok(published) => {
+            report_published(&published);
+            ExitCode::SUCCESS
+        }
+        Err(PublishFailure::IndexNotUpdated { published, error }) => {
+            report_published(&published);
+            fail(
+                &format!("the registry index was not updated: {error}"),
+                Some(
+                    "the published tag stands; run `assemblr registry sync` to index the \
+                     version once the problem is fixed",
+                ),
+            )
+        }
+        Err(failure) => {
+            let hint = publish_hint(&failure, &root);
+            fail(&failure.to_string(), Some(&hint))
+        }
+    }
+}
+
+/// Reports a publication: the tag on stdout, and the registry's part.
+fn report_published(published: &Published) {
+    let commit = published.provenance().commit().as_str();
+    let short = commit.get(..12).unwrap_or(commit);
+    if published.already_published() {
+        println!(
+            "{} {} is already published: tag {} points at commit {short}.",
+            published.unit(),
+            published.version(),
+            published.tag()
+        );
+    } else {
+        println!(
+            "Published {} {} as tag {} at commit {short}.",
+            published.unit(),
+            published.version(),
+            published.tag()
+        );
+    }
+    match published.index() {
+        IndexOutcome::Indexed { excluded } => {
+            warn_excluded(excluded);
+            println!("Indexed it in the local registry.");
+        }
+        IndexOutcome::AlreadyIndexed { excluded } => {
+            warn_excluded(excluded);
+            println!("The local registry already indexes it.");
+        }
+        IndexOutcome::RegisteredElsewhere { source } => {
+            println!(
+                "The local registry registers {} from {source}, not from this repository, so the \
+                 version becomes discoverable when `assemblr registry sync` reads that source, \
+                 for example after a push to it.",
+                published.unit()
+            );
+        }
+        IndexOutcome::NotRegistered => {
+            println!(
+                "The local registry does not register {}, so the version is not discoverable \
+                 until `assemblr registry add {}` registers this repository.",
+                published.unit(),
+                root_display()
+            );
+        }
+    }
+}
+
+/// The current directory as the author would name it on the command line.
+fn root_display() -> String {
+    std::env::current_dir().map_or_else(|_| ".".to_owned(), |dir| dir.display().to_string())
+}
+
+/// Explains on stderr why each excluded tag is invalid.
+fn warn_excluded(excluded: &[Excluded<TagProblem>]) {
+    for excluded in excluded {
+        eprintln!(
+            "warning: {}: excluded tag {}, which is not indexed as a published version: {}",
+            excluded.identity(),
+            excluded.tag(),
+            excluded.reason()
+        );
+    }
+}
+
+/// What remains after a refused publication, and what the author can do.
+fn publish_hint(failure: &PublishFailure, root: &Path) -> String {
+    let problems = match failure {
+        PublishFailure::Tag(_) => {
+            return "no tag was created and nothing was changed; a tag needs the author's Git \
+                    identity (`user.name` and `user.email` in the Git configuration) and, if \
+                    signing is configured, a working signing setup"
+                .to_owned();
+        }
+        PublishFailure::IndexNotUpdated { .. } => {
+            return "the published tag stands; run `assemblr registry sync` to index the version"
+                .to_owned();
+        }
+        PublishFailure::Rejected(problems) => problems,
+    };
+    let mut hint =
+        "the publication was rejected; no tag was created and nothing was changed".to_owned();
+    let advice = problems.iter().find_map(|problem| match problem {
+        PublishProblem::Check(problem) => check_advice(problem, root, "publish"),
+        PublishProblem::NoCommit | PublishProblem::Uncommitted { .. } => Some(
+            "commit the unit, build/ excepted, and run `assemblr unit publish` again".to_owned(),
+        ),
+        PublishProblem::CommittedManifest(_) | PublishProblem::CommittedLockfile(_) => {
+            Some("fix the file, commit, and run `assemblr unit publish` again".to_owned())
+        }
+        PublishProblem::TagElsewhere { .. } | PublishProblem::EqualPrecedence { .. } => Some(
+            "published versions never change: raise the version in manifest.jsonc, build, \
+             commit, and publish again"
+                .to_owned(),
+        ),
+        PublishProblem::RegisteredAs { registered, .. } => Some(format!(
+            "restore the name in manifest.jsonc, or run `assemblr registry remove {registered}` \
+             and register the repository again under its new identity"
+        )),
+        PublishProblem::Registry(errors) => errors.iter().find_map(|error| match error {
+            RegistryError::Integrity { change, .. } => Some(match change {
+                IntegrityChange::TagRemoved | IntegrityChange::TagMoved { .. } => {
+                    "published versions never change: restore the tag where it was".to_owned()
+                }
+                IntegrityChange::BecameInvalid(_) => {
+                    "published versions never change: restore the tag where it was".to_owned()
+                }
+            }),
+            _ => None,
+        }),
+        PublishProblem::Reference(_) => None,
+    });
+    if let Some(advice) = advice {
+        hint.push_str("; ");
+        hint.push_str(&advice);
+    }
+    hint
 }
 
 /// Reports on stderr how the lockfile changed.

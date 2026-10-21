@@ -1697,7 +1697,7 @@ fn a_build_never_moves_an_amended_unit_away_from_its_base() {
         ),
         "{err}"
     );
-    assert!(err.contains("revert it to 1.0.0"), "{err}");
+    assert!(err.contains("revert the declaration to 1.0.0"), "{err}");
 
     // No lockfile, and the newest version wins.
     app.write("manifest.jsonc", &declared("1.0.0"));

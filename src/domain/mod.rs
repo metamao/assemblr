@@ -5,6 +5,7 @@
 //! `docs/adr/0001-architecture.md`).
 
 mod composition;
+mod contribution;
 mod identity;
 mod lock;
 mod manifest;
@@ -21,6 +22,7 @@ pub use composition::{
     ParameterValues, Root, RootTargetReason, TEMPLATE_SUFFIX, UnitContent, UnitFile, compose,
     delivered_path,
 };
+pub use contribution::{ContributionError, contribution_problems};
 pub use identity::{IdentityError, IdentityErrorReason, Segment, UnitIdentity};
 pub use lock::{
     AmendmentBaseError, BaseIntegrityError, LockError, LockedUnit, PublishedAmendmentError,

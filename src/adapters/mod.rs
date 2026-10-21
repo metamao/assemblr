@@ -15,10 +15,11 @@ mod render;
 
 pub use build::{
     AmendFailure, AmendProblem, AmendState, Amended, BuildFailure, BuildLockError, BuildProblem,
-    Built, Carried, FileState, LockfileOutcome, ManifestFileError, Match, OutputProblem,
-    PublishError, PublishState, PublishedProblem, Recovered, RecoveryError, TemplateError,
+    Built, Carried, CheckFailure, CheckProblem, Checked, FileState, IndexOutcome, LockfileOutcome,
+    ManifestFileError, Match, OutputProblem, PublishError, PublishFailure, PublishProblem,
+    PublishState, Published, PublishedProblem, Recovered, RecoveryError, TemplateError,
     UpdateFailure, UpdateProblem, UpdateState, UpdateWriteError, Updated, WriteError, amend_unit,
-    build_unit, update_unit,
+    build_unit, check_unit, publish_unit, update_unit,
 };
 pub use git::{
     GitError, GitErrorKind, GitRepository, HeadManifestError, InvalidVersion, ObjectTooLarge,
@@ -32,7 +33,7 @@ pub use manifest::{
     declare_amendment, read_manifest, rebase_amendments,
 };
 pub use registry::{
-    Added, Problem, ReferenceError, Registry, RegistryFailure, StorageError, Synced, TagProblem,
-    local_reference,
+    Added, Indexed, Problem, ReferenceError, Registry, RegistryFailure, StorageError, Synced,
+    TagProblem, local_reference,
 };
 pub use render::{Context as RenderContext, RenderError, RenderErrorKind, render};
