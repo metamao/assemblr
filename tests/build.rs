@@ -2244,8 +2244,19 @@ fn update_names_units_direct_or_transitive_and_refuses_what_is_not_a_dependency(
     assert_eq!(lockfile["units"]["@acme/a"]["version"], "1.1.0");
     assert_eq!(lockfile["units"]["@acme/b"]["version"], "1.0.0");
 
-    // Not a dependency, and not an identity.
+    // A lockfile that is not one Assemblr wrote is reported and kept.
     let before = app.read("assemblr-lock.json");
+    app.write("assemblr-lock.json", "{");
+    let err = stderr(&fails(update(&fixture, &app, &[])));
+    assert!(err.contains("assemblr-lock.json"), "{err}");
+    assert!(
+        err.contains("hint: nothing was changed; fix assemblr-lock.json; deleting assemblr-lock.json is not a repair"),
+        "{err}"
+    );
+    assert_eq!(app.read("assemblr-lock.json"), "{");
+    app.write("assemblr-lock.json", &before);
+
+    // Not a dependency, and not an identity.
     let err = stderr(&fails(update(&fixture, &app, &["@acme/zzz", "@acme/b"])));
     assert!(
         err.contains("@acme/zzz is not a dependency of this unit"),

@@ -264,6 +264,9 @@ fn update_hint(failure: &UpdateFailure, root: &Path) -> Option<String> {
         UpdateProblem::NoLockfile => {
             Some("run `assemblr unit build` first, which creates the lockfile".to_owned())
         }
+        UpdateProblem::Lockfile(_) => {
+            Some(format!("fix assemblr-lock.json; {DELETING_THE_LOCKFILE}"))
+        }
         UpdateProblem::Build(problem) => advice(problem, root),
         UpdateProblem::Resolution(error) => advice(&BuildProblem::Resolution(error.clone()), root),
         UpdateProblem::Lock(error) => advice(&BuildProblem::Lock(error.clone()), root),
