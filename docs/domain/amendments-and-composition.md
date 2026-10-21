@@ -50,9 +50,11 @@ Amendments are created with `unit amend` and reconciled with `unit update`
 - Amendments that several units make to the same file are combined **side by
   side** against that original (see
   [merge semantics](#merge-semantics--approved)).
-- A unit therefore cannot refine a value that another unit **added or changed
-  through an amendment**: that value is not in its base, and setting it is a
-  conflict. A unit that wants such a value to be configurable exposes it as a
+- A unit therefore cannot independently override a value that another unit
+  **added or changed through an amendment**: that value is not in its base,
+  and setting it to a different value is a conflict. Whether identical
+  contributions from several amenders are compatible or conflict is
+  **OC-10**. A unit that wants such a value to be configurable exposes it as a
   parameter of its own, which other units set through `options`. Changing a
   value from another unit's `src/` is an ordinary amendment.
 - Amendments that build on a dependency's composed output, including that
