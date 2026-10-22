@@ -1,4 +1,4 @@
-# 0028: Isolated validation: shared test fixtures and a sandbox for manual runs
+# 0028: Isolated validation: shared test fixtures, a sandbox for manual runs, and a reference scenario
 
 - **Status:** Accepted
 - **Date:** 2026-10-22
@@ -48,6 +48,15 @@ come from how the command is run.
    `[env]` in `.cargo/config.toml`, unless `ASSEMBLR_DATA_DIR` is already
    set. This is a backstop for a development run outside the sandbox. It
    does not isolate Git or the working directory.
+
+4. **`tests/scenario.rs` replays the reference scenario.** Four small units
+   modeled on EXP-12 (#50) are authored, amended, checked, published, and
+   registered through the binary, then composed, edited, updated across two
+   provider releases (a clean merge and a resolved conflict), and reduced by
+   `remove`. It is an ordinary integration test: offline, a few seconds, on
+   both CI platforms. The composed project's own toolchains (npm, Angular,
+   Wrangler, Docker) are not run; EXP-12 does that with its full units, and
+   its cost and network needs keep it out of this suite.
 
 ## Consequences
 
