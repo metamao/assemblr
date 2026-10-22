@@ -110,7 +110,7 @@ jobs:
           else
             tar -xzf "$ARCHIVE"
           fi
-          bin=$(echo assemblr-*/${{ matrix.exe }})
+          bin=$(echo "$PWD"/assemblr-*/${{ matrix.exe }})
           out=$("$bin" --version)
           echo "$out"
           case "$out" in
