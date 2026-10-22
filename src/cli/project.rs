@@ -564,7 +564,14 @@ fn build_advice(problem: &BuildProblem) -> Option<String> {
             ..
         } => {
             let mut advice = merge_advice(failure.as_ref(), Audience::Consumer);
-            if let Some((amender, base)) = crossed.first() {
+            // A rebase collision is already told what to do.
+            if let (Some((amender, base)), false) = (
+                crossed.first(),
+                matches!(
+                    failure,
+                    Some(assemblr::adapters::MergeFailure::Rebase { .. })
+                ),
+            ) {
                 advice.push_str("; ");
                 advice.push_str(&cross_version_advice(
                     unit,

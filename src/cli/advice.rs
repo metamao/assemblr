@@ -120,9 +120,9 @@ pub(super) fn merge_advice(failure: Option<&MergeFailure>, audience: Audience) -
                 .to_owned()
         }
         Some(MergeFailure::Rebase { .. }) => {
-            "the amendment and the provider both changed those lines: pin the provider at the \
-             amendment's base, or the amender's author re-amends the file at the resolved \
-             version and publishes it"
+            "the amendment and the provider both changed those lines: select the provider at the \
+             amendment's base, or a version of the amender whose author amended the file again at \
+             the version resolved"
                 .to_owned()
         }
         Some(MergeFailure::Conflicts(_)) => format!(

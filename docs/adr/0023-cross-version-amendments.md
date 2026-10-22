@@ -63,7 +63,11 @@ amender. This ADR records how that is built.
    must be declared at the resolved version with the same kind of value;
    otherwise `CrossVersion` fails, naming the parameter and both versions.
    `parameters_referenced` lists the names. A parameter that keeps its name
-   and kind and changes meaning is not detected, which the contract says.
+   and kind and changes meaning is not detected, which the contract says. The
+   check runs only for an amendment whose base file differs from the resolved
+   one: when the source is the same bytes at both versions the amendment
+   renders exactly as the provider's own file does, so a retyped or removed
+   parameter is the provider's problem and is reported as any template error.
 7. **`unit update` rebases on source templates (OC-53).** `reconcile_amendments`
    takes the unit's copies. An unchanged file is carried over as before. A
    changed file of text outside the unsupported formats is merged by line from
