@@ -51,6 +51,11 @@ These four fields are **maps**:
   integer, and a boolean as a JSON boolean.
 - Every key of `options` must also be a key of `dependencies` (see
   [parameters-and-options.md](parameters-and-options.md#rules--approved)).
+- In a unit's `options`, a value is either a JSON value of the parameter's
+  type, a literal, or an object `{ "from": "<name>" }`, a **mapping** from the
+  unit's own parameter of that name, which must be declared in `params` (see
+  [parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved)).
+  A consumer's `options` in `assemblr.jsonc` holds literals only.
 - Every `unit` of an amendment must be a key of `dependencies`, and every
   amended path follows the `src/` path rules (see
   [units.md](units.md#src-unit-files)). `base` is an exact version, not a
@@ -110,11 +115,12 @@ A parameter definition has these properties:
 | `description` | Yes | A string that is not empty or only whitespace |
 | `default` | No | A JSON value of the parameter's type. Its presence makes the parameter optional. |
 | `allowed` | No | Only with `"type": "string"`, which makes the parameter an enumerated string. A non-empty array of strings with no duplicates. |
+| `example` | No | A JSON value of the parameter's type that satisfies `allowed`. The value the unit is built, checked, and published with when the parameter is required and has no default. It is not a default and never a consumer value (decision log D-24). |
 
 ```jsonc
 {
   "params": {
-    "appName": { "type": "string", "description": "The application name." },
+    "appName": { "type": "string", "description": "The application name.", "example": "my-app" },
     "port": { "type": "integer", "description": "Local port.", "default": 8080 },
     "packageManager": {
       "type": "string",

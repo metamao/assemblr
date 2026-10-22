@@ -8,7 +8,7 @@
 use std::process::ExitCode;
 
 use assemblr::adapters::{InfoFailure, Registry, UnitInfo};
-use assemblr::domain::{ParameterDefinition, ParameterType, ParameterValue, Version};
+use assemblr::domain::{OptionValue, ParameterDefinition, ParameterType, ParameterValue, Version};
 use clap::Args;
 use serde_json::{Map, Value, json};
 
@@ -142,6 +142,9 @@ fn print_text(info: &UnitInfo) {
                 let shown: Vec<String> = values.iter().map(|value| format!("{value:?}")).collect();
                 facts.push(format!("one of {}", shown.join(", ")));
             }
+            if let Some(example) = parameter.example() {
+                facts.push(format!("example {example}"));
+            }
             println!(
                 "    {name} ({}): {}",
                 facts.join("; "),
@@ -153,7 +156,10 @@ fn print_text(info: &UnitInfo) {
         for (unit, values) in manifest.options() {
             let assigned: Vec<String> = values
                 .iter()
-                .map(|(name, value)| format!("{name} = {value}"))
+                .map(|(name, value)| match value {
+                    OptionValue::Literal(value) => format!("{name} = {value}"),
+                    OptionValue::From(source) => format!("{name} = from {source}"),
+                })
                 .collect();
             println!("    {unit}: {}", assigned.join(", "));
         }
@@ -204,6 +210,9 @@ fn info_json(info: &UnitInfo) -> Value {
             if let Some(values) = allowed(parameter) {
                 entry.insert("allowed".to_owned(), json!(values));
             }
+            if let Some(example) = parameter.example() {
+                entry.insert("example".to_owned(), value_json(example));
+            }
             (name.as_str().to_owned(), Value::Object(entry))
         })
         .collect();
@@ -213,7 +222,13 @@ fn info_json(info: &UnitInfo) -> Value {
         .map(|(unit, values)| {
             let values: Map<String, Value> = values
                 .iter()
-                .map(|(name, value)| (name.as_str().to_owned(), value_json(value)))
+                .map(|(name, value)| {
+                    let value = match value {
+                        OptionValue::Literal(value) => value_json(value),
+                        OptionValue::From(source) => json!({ "from": source.as_str() }),
+                    };
+                    (name.as_str().to_owned(), value)
+                })
                 .collect();
             (unit.to_string(), Value::Object(values))
         })

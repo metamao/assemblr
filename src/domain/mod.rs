@@ -33,7 +33,9 @@ pub use lock::{
     AmendmentBaseError, BaseIntegrityError, LockError, LockedUnit, PublishedAmendmentError,
     UnitLock, amendment_bases, published_amendments, relock, verify_bases,
 };
-pub use manifest::{AmendmentDeclaration, Manifest, ManifestError, OptionValues};
+pub use manifest::{
+    AmendmentDeclaration, Manifest, ManifestError, OptionValue, OptionValues, UnitOptionValues,
+};
 pub use merge::{
     Combined, Conflict, ConflictKind, Derived, Edit, MergeFormat, Operation, Plan, Value,
     ValueChange, combine, derive, plan, show_path, write_json_string,

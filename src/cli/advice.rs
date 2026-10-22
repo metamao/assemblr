@@ -42,10 +42,29 @@ pub(super) fn composition_advice(error: &CompositionError, audience: Audience) -
             "give the option in {options} a value of the parameter's type and, for an \
              enumerated parameter, one of its allowed values"
         ),
-        CompositionError::OptionsConflict { .. } => format!(
-            "make the requirements agree: change the value in {options}, or select versions of \
-             the units whose requirements match"
-        ),
+        CompositionError::MappingIncompatible { .. } => {
+            "the unit's author must change the mapping or the parameters; a mapping never \
+             converts a value"
+                .to_owned()
+        }
+        CompositionError::OptionsConflict { requirements, .. } => {
+            let mapped = requirements.iter().find_map(|requirement| {
+                requirement
+                    .from()
+                    .map(|from| (requirement.requirer(), from))
+            });
+            match mapped {
+                Some((requirer, from)) => format!(
+                    "make the requirements agree: {requirer} carries its `{from}` to this \
+                     parameter, so set `{from}` of that unit in {options} rather than this \
+                     parameter directly, or give both the same value"
+                ),
+                None => format!(
+                    "make the requirements agree: change the value in {options}, or select \
+                     versions of the units whose requirements match"
+                ),
+            }
+        }
         CompositionError::MissingValue { .. } => {
             format!("supply the value in {options}, under the unit's identity")
         }

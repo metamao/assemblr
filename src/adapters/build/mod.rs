@@ -400,12 +400,27 @@ pub(super) fn validate(
         contribution: Vec::new(),
         result: None,
     };
-    let parameters: Vec<ParameterName> = manifest
-        .params()
-        .iter()
-        .filter(|(_, definition)| definition.default().is_none())
-        .map(|(name, _)| name.clone())
-        .collect();
+    // A required parameter is built with its example: development values
+    // are the author's, for this unit only, and a consumer never sees them.
+    let mut development = crate::domain::OptionValues::new();
+    let mut parameters: Vec<ParameterName> = Vec::new();
+    for (name, definition) in manifest.params() {
+        if definition.default().is_some() {
+            continue;
+        }
+        match definition.example() {
+            Some(example) => {
+                development.insert(name.clone(), example.clone());
+            }
+            None => parameters.push(name.clone()),
+        }
+    }
+    let development: BTreeMap<UnitIdentity, crate::domain::OptionValues> = if development.is_empty()
+    {
+        BTreeMap::new()
+    } else {
+        BTreeMap::from([(manifest.name().clone(), development)])
+    };
     if !parameters.is_empty() {
         problems.push(BuildProblem::DevelopmentValues {
             unit: manifest.name().clone(),
@@ -447,7 +462,7 @@ pub(super) fn validate(
         resolved.resolution.graph(),
         Root::Unit(root_content),
         &units,
-        &BTreeMap::new(),
+        &development,
     );
     let composition = match composition {
         Ok(composition) => composition,
@@ -1229,8 +1244,8 @@ pub enum BuildProblem {
     Output(OutputProblem),
     /// The lockfile cannot be read.
     Lockfile(LockfileError),
-    /// The unit being built has required parameters without defaults, and
-    /// supplying development values is not supported yet.
+    /// The unit being built has required parameters with neither a default
+    /// nor an example, so it has no value to be built with.
     DevelopmentValues {
         /// The unit.
         unit: UnitIdentity,
@@ -1345,9 +1360,9 @@ impl fmt::Display for BuildProblem {
                     parameters.iter().map(|name| format!("`{name}`")).collect();
                 write!(
                     f,
-                    "{unit} declares required parameters without defaults: {}; composing it \
-                     needs development values for them, and supplying development values is \
-                     not supported yet",
+                    "{unit} declares required parameters without defaults or examples: {}; \
+                     building it needs a value for each, and an `example` on the parameter \
+                     supplies one",
                     names.join(", ")
                 )
             }

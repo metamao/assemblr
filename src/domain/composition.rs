@@ -66,9 +66,11 @@ use std::fmt;
 use unicode_normalization::UnicodeNormalization;
 
 use super::identity::UnitIdentity;
-use super::manifest::{AmendmentDeclaration, Manifest, OptionValues};
+use super::manifest::{AmendmentDeclaration, Manifest, OptionValue, OptionValues};
 use super::merge::MergeFormat;
-use super::parameter::{ParameterName, ParameterValue, ParameterValueError};
+use super::parameter::{
+    ParameterDefinition, ParameterName, ParameterType, ParameterValue, ParameterValueError,
+};
 use super::path::{RelativePath, RelativePathError};
 use super::resolution::{Requirer, ResolvedGraph};
 use super::text_merge::is_text;
@@ -310,6 +312,9 @@ impl<'a> ComposedFile<'a> {
 pub struct OptionRequirement {
     requirer: Requirer,
     value: ParameterValue,
+    /// The requirer's own parameter the value is mapped from, if it is a
+    /// mapping.
+    from: Option<ParameterName>,
 }
 
 impl OptionRequirement {
@@ -322,11 +327,21 @@ impl OptionRequirement {
     pub fn value(&self) -> &ParameterValue {
         &self.value
     }
+
+    /// The requirer's own parameter the value is mapped from, when the
+    /// requirement is a mapping.
+    pub fn from(&self) -> Option<&ParameterName> {
+        self.from.as_ref()
+    }
 }
 
 impl fmt::Display for OptionRequirement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} from {}", self.value, self.requirer)
+        write!(f, "{} from {}", self.value, self.requirer)?;
+        if let Some(source) = &self.from {
+            write!(f, " (mapped from its `{source}`)")?;
+        }
+        Ok(())
     }
 }
 
@@ -438,6 +453,21 @@ pub enum CompositionError {
         /// Every requirement on the parameter, ordered by requirer.
         requirements: Vec<OptionRequirement>,
     },
+    /// A mapping connects parameters that cannot hold the same values.
+    MappingIncompatible {
+        /// The unit that writes the mapping.
+        unit: UnitIdentity,
+        /// Its resolved version.
+        version: Version,
+        /// The unit's own parameter the mapping reads.
+        source: ParameterName,
+        /// The dependency the mapping configures.
+        target: UnitIdentity,
+        /// The dependency's parameter.
+        parameter: ParameterName,
+        /// Why they are incompatible.
+        reason: String,
+    },
     /// A required parameter receives no value.
     MissingValue {
         /// The unit whose parameter has no value.
@@ -449,6 +479,9 @@ pub enum CompositionError {
         /// Who may supply the value: the units that depend on this one
         /// directly, and the root when it may configure this unit.
         responsible: Vec<Requirer>,
+        /// The parameter's authoring-time example, which only suggests a
+        /// value: it is never used as one.
+        example: Option<ParameterValue>,
     },
     /// Several members amend the same file of the same provider, and the
     /// file is not one whose amendments can be combined (JSON, JSONC, and
@@ -609,18 +642,38 @@ impl fmt::Display for CompositionError {
                 write_list(f, requirements)?;
                 f.write_str("; no requirement takes precedence, so they must agree")
             }
+            Self::MappingIncompatible {
+                unit,
+                version,
+                source,
+                target,
+                parameter,
+                reason,
+            } => write!(
+                f,
+                "{unit} {version} maps its parameter `{source}` to `{parameter}` of {target}, \
+                 but {reason}"
+            ),
             Self::MissingValue {
                 unit,
                 version,
                 parameter,
                 responsible,
+                example,
             } => {
                 write!(
                     f,
                     "required parameter `{parameter}` of {unit} {version} has no value and no \
                      default; it must be supplied by "
                 )?;
-                write_list(f, responsible)
+                write_list(f, responsible)?;
+                if let Some(example) = example {
+                    write!(
+                        f,
+                        " (the unit's example is {example}, which is not used as a value)"
+                    )?;
+                }
+                Ok(())
             }
             Self::SeveralAmenders {
                 path,
@@ -885,11 +938,105 @@ fn root_target_errors(
         .collect()
 }
 
-/// A requirement borrowed from the inputs.
-type Requested<'a> = (&'a Requirer, &'a ParameterValue);
+/// A requirement on one parameter, held while the values are decided.
+#[derive(Debug, Clone)]
+struct Requested {
+    requirer: Requirer,
+    value: ParameterValue,
+    /// The requirer's own parameter the value is mapped from, if it is.
+    from: Option<ParameterName>,
+}
+
+/// The members in the order their values can be decided: every unit before
+/// the units it depends on, since a unit's value is set by what depends on
+/// it. Ties go by identity, so the order is deterministic.
+fn dependents_first<'a>(members: &BTreeMap<&'a UnitIdentity, Member<'a>>) -> Vec<&'a UnitIdentity> {
+    let mut waiting: BTreeMap<&UnitIdentity, usize> =
+        members.keys().map(|unit| (*unit, 0)).collect();
+    for member in members.values() {
+        for dependency in member.manifest.dependencies().keys() {
+            if let Some(count) = waiting.get_mut(dependency) {
+                *count += 1;
+            }
+        }
+    }
+    let mut ready: BTreeSet<&UnitIdentity> = waiting
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(unit, _)| *unit)
+        .collect();
+    let mut order = Vec::with_capacity(members.len());
+    while let Some(unit) = ready.pop_first() {
+        order.push(unit);
+        for dependency in members[unit].manifest.dependencies().keys() {
+            if let Some(count) = waiting.get_mut(dependency) {
+                *count -= 1;
+                if *count == 0 {
+                    ready.insert(
+                        members
+                            .get_key_value(dependency)
+                            .map_or(dependency, |(key, _)| *key),
+                    );
+                }
+            }
+        }
+    }
+    // A cycle cannot come out of resolution; if one did, the rest are
+    // decided in identity order rather than lost.
+    for unit in members.keys() {
+        if !order.contains(unit) {
+            order.push(*unit);
+        }
+    }
+    order
+}
+
+/// Why a parameter cannot be mapped to a dependency's parameter, if it
+/// cannot: only known incompatibilities, never a coercion.
+fn mapping_problem(source: &ParameterDefinition, target: &ParameterDefinition) -> Option<String> {
+    match (source.parameter_type(), target.parameter_type()) {
+        (ParameterType::Integer, ParameterType::Integer)
+        | (ParameterType::Boolean, ParameterType::Boolean)
+        | (ParameterType::String | ParameterType::EnumeratedString(_), ParameterType::String) => {
+            None
+        }
+        (ParameterType::EnumeratedString(own), ParameterType::EnumeratedString(accepted)) => {
+            let outside: Vec<&String> = own
+                .as_slice()
+                .iter()
+                .filter(|value| !accepted.contains(value))
+                .collect();
+            if outside.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "it allows {}, which the dependency's parameter does not",
+                    outside
+                        .iter()
+                        .map(|value| format!("{value:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            }
+        }
+        (ParameterType::String, ParameterType::EnumeratedString(_)) => Some(
+            "a free string may hold values the dependency's parameter does not allow".to_owned(),
+        ),
+        (own, accepted) => Some(format!(
+            "it is {}, and the dependency's parameter is {}",
+            own.value_kind(),
+            accepted.value_kind()
+        )),
+    }
+}
 
 /// The effective parameter values of every member, and the errors that
 /// prevent some of them, in the documented order.
+///
+/// Values are decided from the dependents to the dependencies: what the
+/// root and a unit's `options` require of a unit is known before its own
+/// value is decided, and a mapping carries that decided value on to the
+/// units below. No ordering rule settles a conflict.
 fn parameter_values(
     graph: &ResolvedGraph,
     root: Root<'_>,
@@ -899,132 +1046,192 @@ fn parameter_values(
     BTreeMap<UnitIdentity, ParameterValues>,
     Vec<CompositionError>,
 ) {
-    let root_requirer = Requirer::Root;
-    // Every requirement on each parameter of each unit, from members'
-    // options and from the root values the root may supply.
-    let mut requested: BTreeMap<(&UnitIdentity, &ParameterName), Vec<Requested<'_>>> =
-        BTreeMap::new();
-    for member in members.values() {
-        for (target, values) in member.manifest.options() {
-            for (parameter, value) in values {
-                requested
-                    .entry((target, parameter))
-                    .or_default()
-                    .push((&member.requirer, value));
-            }
-        }
-    }
+    // Every requirement on each parameter of each unit, from the root
+    // values the root may supply and, as the units are decided, from their
+    // `options`.
+    let mut requested: BTreeMap<(UnitIdentity, ParameterName), Vec<Requested>> = BTreeMap::new();
     for (target, values) in root_values {
         if root_target(graph, root, members, target).is_ok() {
             for (parameter, value) in values {
                 requested
-                    .entry((target, parameter))
+                    .entry((target.clone(), parameter.clone()))
                     .or_default()
-                    .push((&root_requirer, value));
+                    .push(Requested {
+                        requirer: Requirer::Root,
+                        value: value.clone(),
+                        from: None,
+                    });
             }
         }
     }
 
-    let mut invalid = Vec::new();
-    let mut conflicts = Vec::new();
-    // The value of each parameter whose requirements agree, and every
-    // parameter whose requirements were reported instead.
-    let mut agreed = BTreeMap::new();
-    let mut reported = BTreeSet::new();
-    for ((target, parameter), mut requirements) in requested {
-        requirements.sort_by(|left, right| left.0.cmp(right.0));
-        // Every target is a member: options target declared dependencies,
-        // which the graph resolved, and root values are kept only for
-        // members.
-        let Some(member) = members.get(target) else {
-            continue;
-        };
+    // Each error with the unit and parameter it belongs to, to be reported
+    // in that order whatever the order the units were decided in.
+    type Keyed = ((UnitIdentity, ParameterName), CompositionError);
+    let mut invalid: Vec<Keyed> = Vec::new();
+    let mut conflicts: Vec<Keyed> = Vec::new();
+    let mut missing: Vec<Keyed> = Vec::new();
+    let mut values = BTreeMap::new();
+    // Parameters a mapping would set, whose source has no value: the source
+    // is the one reported.
+    let mut awaiting: BTreeSet<(UnitIdentity, ParameterName)> = BTreeSet::new();
+    for identity in dependents_first(members) {
+        let member = &members[identity];
         let version = member.manifest.version();
-        let Some(definition) = member.manifest.params().get(parameter) else {
-            let declared: Vec<ParameterName> = member.manifest.params().keys().cloned().collect();
-            invalid.extend(requirements.iter().map(|(requirer, _)| {
-                CompositionError::UndeclaredParameter {
-                    unit: target.clone(),
-                    version: version.clone(),
-                    parameter: parameter.clone(),
-                    requirer: (*requirer).clone(),
-                    declared: declared.clone(),
-                }
-            }));
-            continue;
-        };
-        let invalid_values: Vec<CompositionError> = requirements
-            .iter()
-            .filter_map(|(requirer, value)| {
-                definition
-                    .check(value)
-                    .err()
-                    .map(|error| CompositionError::InvalidValue {
-                        unit: target.clone(),
+        let mut effective = ParameterValues::new();
+        // Requirements on parameters the unit does not declare.
+        let declared: Vec<ParameterName> = member.manifest.params().keys().cloned().collect();
+        for ((unit, parameter), requirements) in &requested {
+            if unit != identity || member.manifest.params().contains_key(parameter) {
+                continue;
+            }
+            let mut requirements = requirements.clone();
+            requirements.sort_by(|left, right| left.requirer.cmp(&right.requirer));
+            for requirement in requirements {
+                invalid.push((
+                    (unit.clone(), parameter.clone()),
+                    CompositionError::UndeclaredParameter {
+                        unit: unit.clone(),
                         version: version.clone(),
                         parameter: parameter.clone(),
-                        requirement: requirement(requirer, value),
-                        error,
-                    })
-            })
-            .collect();
-        match requirements.first() {
-            _ if !invalid_values.is_empty() => {
-                invalid.extend(invalid_values);
-                reported.insert((target, parameter));
-            }
-            Some((_, first)) if requirements.iter().all(|(_, value)| value == first) => {
-                agreed.insert((target, parameter), *first);
-            }
-            _ => {
-                conflicts.push(CompositionError::OptionsConflict {
-                    unit: target.clone(),
-                    version: version.clone(),
-                    parameter: parameter.clone(),
-                    requirements: requirements
-                        .iter()
-                        .map(|(requirer, value)| requirement(requirer, value))
-                        .collect(),
-                });
-                reported.insert((target, parameter));
+                        requirer: requirement.requirer,
+                        declared: declared.clone(),
+                    },
+                ));
             }
         }
-    }
-
-    let mut missing = Vec::new();
-    let mut values = BTreeMap::new();
-    for (&identity, member) in members {
-        let mut effective = ParameterValues::new();
         for (parameter, definition) in member.manifest.params() {
-            let key = (identity, parameter);
-            if let Some(&value) = agreed.get(&key) {
-                effective.insert(parameter.clone(), value.clone());
-            } else if reported.contains(&key) {
-                // Its requirements were reported as invalid or conflicting.
-            } else if let Some(default) = definition.default() {
-                effective.insert(parameter.clone(), default.clone());
-            } else {
-                missing.push(CompositionError::MissingValue {
-                    unit: identity.clone(),
-                    version: member.manifest.version().clone(),
-                    parameter: parameter.clone(),
-                    responsible: responsible(graph, root, members, identity),
+            let key = (identity.clone(), parameter.clone());
+            let mut requirements = requested.get(&key).cloned().unwrap_or_default();
+            requirements.sort_by(|left, right| left.requirer.cmp(&right.requirer));
+            let invalid_values: Vec<Keyed> = requirements
+                .iter()
+                .filter_map(|requirement| {
+                    definition.check(&requirement.value).err().map(|error| {
+                        CompositionError::InvalidValue {
+                            unit: identity.clone(),
+                            version: version.clone(),
+                            parameter: parameter.clone(),
+                            requirement: requirement_of(requirement),
+                            error,
+                        }
+                    })
+                })
+                .map(|error| (key.clone(), error))
+                .collect();
+            match requirements.first() {
+                _ if !invalid_values.is_empty() => invalid.extend(invalid_values),
+                Some(first)
+                    if requirements
+                        .iter()
+                        .all(|requirement| requirement.value == first.value) =>
+                {
+                    effective.insert(parameter.clone(), first.value.clone());
+                }
+                Some(_) => conflicts.push((
+                    key,
+                    CompositionError::OptionsConflict {
+                        unit: identity.clone(),
+                        version: version.clone(),
+                        parameter: parameter.clone(),
+                        requirements: requirements.iter().map(requirement_of).collect(),
+                    },
+                )),
+                None => match definition.default() {
+                    Some(default) => {
+                        effective.insert(parameter.clone(), default.clone());
+                    }
+                    None if awaiting.contains(&key) => {}
+                    None => missing.push((
+                        key,
+                        CompositionError::MissingValue {
+                            unit: identity.clone(),
+                            version: version.clone(),
+                            parameter: parameter.clone(),
+                            responsible: responsible(graph, root, members, identity),
+                            example: definition.example().cloned(),
+                        },
+                    )),
+                },
+            }
+        }
+
+        // What this unit requires of its dependencies, now that its own
+        // values are decided.
+        for (target, options) in member.manifest.options() {
+            let target_member = members.get(target);
+            for (parameter, option) in options {
+                let key = (target.clone(), parameter.clone());
+                let value = match option {
+                    OptionValue::Literal(value) => value.clone(),
+                    OptionValue::From(source) => {
+                        let Some(source_definition) = member.manifest.params().get(source) else {
+                            continue;
+                        };
+                        let Some(target_definition) = target_member
+                            .and_then(|target| target.manifest.params().get(parameter))
+                        else {
+                            // The dependency does not declare it: reported
+                            // once, with the dependency's other undeclared
+                            // parameters, by the value path below.
+                            if let Some(value) = effective.get(source) {
+                                requested.entry(key).or_default().push(Requested {
+                                    requirer: member.requirer.clone(),
+                                    value: value.clone(),
+                                    from: Some(source.clone()),
+                                });
+                            }
+                            continue;
+                        };
+                        if let Some(reason) = mapping_problem(source_definition, target_definition)
+                        {
+                            invalid.push((
+                                key,
+                                CompositionError::MappingIncompatible {
+                                    unit: identity.clone(),
+                                    version: version.clone(),
+                                    source: source.clone(),
+                                    target: target.clone(),
+                                    parameter: parameter.clone(),
+                                    reason,
+                                },
+                            ));
+                            continue;
+                        }
+                        // A source that has no value is reported as such.
+                        let Some(value) = effective.get(source) else {
+                            awaiting.insert(key);
+                            continue;
+                        };
+                        value.clone()
+                    }
+                };
+                requested.entry(key).or_default().push(Requested {
+                    requirer: member.requirer.clone(),
+                    value,
+                    from: match option {
+                        OptionValue::From(source) => Some(source.clone()),
+                        OptionValue::Literal(_) => None,
+                    },
                 });
             }
         }
         values.insert(identity.clone(), effective);
     }
 
-    let mut errors = invalid;
-    errors.extend(conflicts);
-    errors.extend(missing);
+    let mut errors = Vec::new();
+    for mut group in [invalid, conflicts, missing] {
+        group.sort_by(|left, right| left.0.cmp(&right.0));
+        errors.extend(group.into_iter().map(|(_, error)| error));
+    }
     (values, errors)
 }
 
-fn requirement(requirer: &Requirer, value: &ParameterValue) -> OptionRequirement {
+fn requirement_of(requested: &Requested) -> OptionRequirement {
     OptionRequirement {
-        requirer: requirer.clone(),
-        value: value.clone(),
+        requirer: requested.requirer.clone(),
+        value: requested.value.clone(),
+        from: requested.from.clone(),
     }
 }
 
@@ -1341,8 +1548,9 @@ mod tests {
     };
     use crate::domain::{
         AllowedValues, AmendmentDeclaration, AvailableVersions, Dependencies, Description, Lock,
-        Manifest, OptionValues, ParameterDefinition, ParameterName, ParameterType, ParameterValue,
-        ParameterValueError, RelativePath, Requirer, UnitIdentity, ValueKind, Version, resolve,
+        Manifest, OptionValue, OptionValues, ParameterDefinition, ParameterName, ParameterType,
+        ParameterValue, ParameterValueError, RelativePath, Requirer, UnitIdentity,
+        UnitOptionValues, ValueKind, Version, resolve,
     };
 
     fn identity(input: &str) -> UnitIdentity {
@@ -1400,6 +1608,8 @@ mod tests {
         version: &'static str,
         dependencies: Vec<(&'static str, &'static str)>,
         options: Vec<(&'static str, &'static str, ParameterValue)>,
+        /// Mapped options: dependency, its parameter, and the unit's own.
+        mappings: Vec<(&'static str, &'static str, &'static str)>,
         params: Vec<(&'static str, ParameterDefinition)>,
         files: Vec<(&'static str, Vec<u8>, bool)>,
         /// Declared amendments: path, provider, and base version.
@@ -1415,6 +1625,7 @@ mod tests {
                 version,
                 dependencies: Vec::new(),
                 options: Vec::new(),
+                mappings: Vec::new(),
                 params: Vec::new(),
                 files: Vec::new(),
                 amendments: Vec::new(),
@@ -1450,6 +1661,17 @@ mod tests {
             self
         }
 
+        /// Maps the unit's own parameter `source` to `parameter` of `target`.
+        fn map(
+            mut self,
+            target: &'static str,
+            parameter: &'static str,
+            source: &'static str,
+        ) -> Self {
+            self.mappings.push((target, parameter, source));
+            self
+        }
+
         fn option(
             mut self,
             target: &'static str,
@@ -1477,12 +1699,18 @@ mod tests {
         }
 
         fn manifest(&self) -> Manifest {
-            let mut options: BTreeMap<UnitIdentity, OptionValues> = BTreeMap::new();
+            let mut options: BTreeMap<UnitIdentity, UnitOptionValues> = BTreeMap::new();
             for (target, parameter, value) in &self.options {
                 options
                     .entry(identity(target))
                     .or_default()
-                    .insert(name(parameter), value.clone());
+                    .insert(name(parameter), OptionValue::Literal(value.clone()));
+            }
+            for (target, parameter, source) in &self.mappings {
+                options
+                    .entry(identity(target))
+                    .or_default()
+                    .insert(name(parameter), OptionValue::From(name(source)));
             }
             Manifest::new(
                 identity(self.name),
@@ -1694,7 +1922,11 @@ mod tests {
     }
 
     fn requirement(requirer: Requirer, value: ParameterValue) -> OptionRequirement {
-        OptionRequirement { requirer, value }
+        OptionRequirement {
+            requirer,
+            value,
+            from: None,
+        }
     }
 
     fn contributed(file: &str, contributor: &str) -> ContributedPath {
@@ -2027,6 +2259,7 @@ mod tests {
                 version: version("1.0.0"),
                 parameter: name("accountId"),
                 responsible: vec![Requirer::Root],
+                example: None,
             }]
         );
         let message = errors[0].to_string();
@@ -2063,6 +2296,7 @@ mod tests {
                     unit("@metamao/admin", "1.0.0"),
                     unit("@metamao/api", "1.0.0"),
                 ],
+                example: None,
             }]
         );
         let message = errors[0].to_string();
@@ -2208,12 +2442,14 @@ mod tests {
                     version: version("0.1.0"),
                     parameter: name("title"),
                     responsible: vec![Requirer::Root],
+                    example: None,
                 },
                 CompositionError::MissingValue {
                     unit: identity("@metamao/db"),
                     version: version("1.0.0"),
                     parameter: name("url"),
                     responsible: vec![Requirer::Root],
+                    example: None,
                 },
             ]
         );
@@ -3355,6 +3591,9 @@ mod tests {
                 CompositionError::InvalidValue {
                     unit, parameter, ..
                 } => format!("invalid {unit} {parameter}"),
+                CompositionError::MappingIncompatible {
+                    unit, parameter, ..
+                } => format!("mapping {unit} {parameter}"),
                 CompositionError::OptionsConflict {
                     unit, parameter, ..
                 } => format!("conflict {unit} {parameter}"),
@@ -3439,5 +3678,246 @@ mod tests {
                 assert_eq!(run(&reordered_root, &shuffled, &values), expected);
             }
         }
+    }
+
+    // --- parameter mappings ---
+
+    /// A stack that maps its `appName` to a Worker unit, which maps it on to
+    /// the application unit: three levels, one name.
+    fn stack() -> Vec<Spec> {
+        vec![
+            Spec::new("@metamao/app", "1.0.0")
+                .param("appName", optional(ParameterType::String, text("my-app"))),
+            Spec::new("@metamao/worker", "1.0.0")
+                .depends("@metamao/app", "^1")
+                .param("appName", optional(ParameterType::String, text("my-app")))
+                .map("@metamao/app", "appName", "appName"),
+            Spec::new("@metamao/db", "1.0.0")
+                .depends("@metamao/app", "^1")
+                .depends("@metamao/worker", "^1")
+                .param("appName", optional(ParameterType::String, text("my-app")))
+                .param("database", optional(ParameterType::String, text("app")))
+                .map("@metamao/app", "appName", "appName")
+                .map("@metamao/worker", "appName", "appName"),
+        ]
+    }
+
+    #[test]
+    fn a_mapping_carries_the_source_default_through_every_level() {
+        let composed = run(&project(&[("@metamao/db", "^1")]), &stack(), &[]).unwrap();
+        for unit in ["@metamao/app", "@metamao/worker", "@metamao/db"] {
+            assert_eq!(
+                values_of(&composed, unit)
+                    .into_iter()
+                    .find(|(name, _)| name == "appName")
+                    .unwrap()
+                    .1,
+                text("my-app"),
+                "{unit}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_value_the_consumer_gives_reaches_every_dependency_once() {
+        let composed = run(
+            &project(&[("@metamao/db", "^1")]),
+            &stack(),
+            &[("@metamao/db", "appName", text("acme-portal"))],
+        )
+        .unwrap();
+        for unit in ["@metamao/app", "@metamao/worker", "@metamao/db"] {
+            assert!(
+                values_of(&composed, unit).contains(&("appName".to_owned(), text("acme-portal"))),
+                "{unit}"
+            );
+        }
+        // The identical requirements of two paths (the stack's own and the
+        // worker's) agree, and the unit's other parameters are untouched.
+        assert!(
+            values_of(&composed, "@metamao/db").contains(&("database".to_owned(), text("app")))
+        );
+    }
+
+    #[test]
+    fn a_value_set_on_a_dependency_directly_conflicts_with_a_mapping_and_says_so() {
+        let errors = run(
+            &project(&[("@metamao/db", "^1"), ("@metamao/app", "^1")]),
+            &stack(),
+            &[("@metamao/app", "appName", text("other"))],
+        )
+        .unwrap_err();
+        let conflict = errors
+            .iter()
+            .find(|error| matches!(error, CompositionError::OptionsConflict { .. }))
+            .unwrap();
+        let message = conflict.to_string();
+        assert!(message.contains("\"other\" from the root"), "{message}");
+        assert!(
+            message.contains("\"my-app\" from @metamao/worker 1.0.0 (mapped from its `appName`)"),
+            "{message}"
+        );
+        assert!(
+            message.contains("no requirement takes precedence"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn mappings_never_convert_values_and_known_incompatibilities_are_refused() {
+        let incompatible = |source: ParameterDefinition, target: ParameterDefinition| {
+            let units = vec![
+                Spec::new("@metamao/lib", "1.0.0").param("x", target),
+                Spec::new("@metamao/top", "1.0.0")
+                    .depends("@metamao/lib", "^1")
+                    .param("y", source)
+                    .map("@metamao/lib", "x", "y"),
+            ];
+            run(
+                &project(&[("@metamao/top", "^1")]),
+                &units,
+                &[("@metamao/top", "y", text("a"))],
+            )
+        };
+        // A free string cannot configure an enumerated string.
+        let errors = incompatible(
+            optional(ParameterType::String, text("a")),
+            optional(enumerated(&["a", "b"]), text("a")),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                errors.as_slice(),
+                [CompositionError::MappingIncompatible { .. }]
+            ),
+            "{errors:?}"
+        );
+        assert!(
+            errors[0]
+                .to_string()
+                .contains("a free string may hold values"),
+            "{}",
+            errors[0]
+        );
+        // An integer cannot configure a string.
+        let errors = incompatible(
+            optional(ParameterType::Integer, ParameterValue::Integer(1)),
+            optional(ParameterType::String, text("a")),
+        )
+        .unwrap_err();
+        assert!(
+            errors[0].to_string().contains("it is an integer"),
+            "{}",
+            errors[0]
+        );
+        // An enumerated string whose values the target allows, and a plain
+        // string target, are fine; one with a value the target lacks is not.
+        assert!(
+            incompatible(
+                optional(enumerated(&["a"]), text("a")),
+                optional(enumerated(&["a", "b"]), text("a")),
+            )
+            .is_ok()
+        );
+        assert!(
+            incompatible(
+                optional(enumerated(&["a", "c"]), text("a")),
+                optional(ParameterType::String, text("a")),
+            )
+            .is_ok()
+        );
+        let errors = incompatible(
+            optional(enumerated(&["a", "c"]), text("a")),
+            optional(enumerated(&["a", "b"]), text("a")),
+        )
+        .unwrap_err();
+        assert!(
+            errors[0].to_string().contains("allows \"c\""),
+            "{}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn the_resolved_value_is_validated_even_when_the_definitions_are_compatible() {
+        // Both are enumerated and the source's values fit, but the consumer
+        // gives the source a value that is not one of them.
+        let units = vec![
+            Spec::new("@metamao/lib", "1.0.0").param(
+                "mode",
+                optional(enumerated(&["dev", "prod", "test"]), text("dev")),
+            ),
+            Spec::new("@metamao/top", "1.0.0")
+                .depends("@metamao/lib", "^1")
+                .param("mode", optional(enumerated(&["dev", "prod"]), text("dev")))
+                .map("@metamao/lib", "mode", "mode"),
+        ];
+        let errors = run(
+            &project(&[("@metamao/top", "^1")]),
+            &units,
+            &[("@metamao/top", "mode", text("test"))],
+        )
+        .unwrap_err();
+        assert!(
+            errors.iter().all(|error| matches!(error, CompositionError::InvalidValue { unit, .. } if *unit == identity("@metamao/top"))),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_mapping_from_a_required_parameter_without_a_value_reports_the_source_once() {
+        let units = vec![
+            Spec::new("@metamao/lib", "1.0.0").param("name", required(ParameterType::String)),
+            Spec::new("@metamao/top", "1.0.0")
+                .depends("@metamao/lib", "^1")
+                .param("name", required(ParameterType::String))
+                .map("@metamao/lib", "name", "name"),
+        ];
+        let errors = run(&project(&[("@metamao/top", "^1")]), &units, &[]).unwrap_err();
+        // The source is the one to supply; the dependency's parameter is not
+        // also reported, since the source's value will reach it.
+        let missing: Vec<String> = errors
+            .iter()
+            .filter_map(|error| match error {
+                CompositionError::MissingValue { unit, .. } => Some(unit.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(missing, ["@metamao/top"]);
+    }
+
+    #[test]
+    fn a_mapping_to_a_parameter_the_dependency_does_not_declare_is_reported() {
+        let units = vec![
+            Spec::new("@metamao/lib", "1.0.0"),
+            Spec::new("@metamao/top", "1.0.0")
+                .depends("@metamao/lib", "^1")
+                .param("name", optional(ParameterType::String, text("n")))
+                .map("@metamao/lib", "nme", "name"),
+        ];
+        let errors = run(&project(&[("@metamao/top", "^1")]), &units, &[]).unwrap_err();
+        assert!(
+            matches!(errors.as_slice(), [CompositionError::UndeclaredParameter { parameter, .. }] if parameter.as_str() == "nme"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn mappings_give_the_same_values_whatever_order_the_units_come_in() {
+        let forward = run(
+            &project(&[("@metamao/db", "^1")]),
+            &stack(),
+            &[("@metamao/db", "appName", text("acme"))],
+        )
+        .unwrap();
+        let mut reversed = stack();
+        reversed.reverse();
+        let backward = run(
+            &project(&[("@metamao/db", "^1")]),
+            &reversed,
+            &[("@metamao/db", "appName", text("acme"))],
+        )
+        .unwrap();
+        assert_eq!(forward.values, backward.values);
     }
 }

@@ -261,9 +261,10 @@ unit that amends the same file would make the merge drop them (see
 [the merge engine](amendments-and-composition.md#the-merge-engine--approved)),
 and the author hears of it before a consumer does.
 
-**Required parameters.** Until OC-6 is decided, a unit that declares required
-parameters without defaults cannot be checked or published, for the reason
-it cannot be built: its templates need development values.
+**Required parameters.** `unit check` and `unit publish` use the same
+development values as a build (see [development values](#build-details--approved)):
+a required parameter is checked with its `example`. A required parameter with
+neither a default nor an example cannot be checked or published.
 
 ## Build — Approved
 
@@ -347,12 +348,19 @@ A failed build reports every problem it can discover independently. A problem in
 step that cannot run after an earlier failure, such as composition after a
 failed resolution, is not reported.
 
-**Development values** (OC-6 stays open). Until a mechanism for supplying
-development values exists, a unit that declares required parameters without
-defaults cannot be built: the build fails, names each such parameter, and
-says that supplying development values is not supported yet. This concerns
-only the unit being built. Its dependencies' required parameters satisfied
-through its `options` build as usual.
+**Development values** (OC-6, decided by the owner on #62, decision log
+D-24). A unit's build, check, and publication give each of its own required
+parameters, those without a default, the `example` its definition declares.
+They are authoring-time values for the unit being built only: they configure
+nothing else, they never reach a consumer's composition, and a composition
+never uses an example in place of a missing value. A required parameter with
+neither a default nor an example fails the build, naming each such parameter
+and saying to add an `example`. An example must satisfy the parameter's type
+and allowed values, which the manifest checks, and it does not prove that
+every value is valid: the values a composition resolves are validated as
+they are. The unit's dependencies are configured only through its `options`,
+so a mapped parameter carries the example to them in the build. Building a
+unit under several configurations is not offered.
 
 **The working tree's `src/`.** A build reads the files that committing
 everything would publish, with their current working-tree contents:
@@ -442,11 +450,6 @@ The unit's own `src/` file at an amended path is a path collision.
   keep the guarantee above.
 
 The mechanisms and their limits are in [ADR 0008](../adr/0008-unit-build.md).
-
-Open:
-
-- How development input values are supplied for required parameters without
-  defaults. The values must be supplied explicitly. **OC-6.**
 
 ## Unit lock state — Approved
 
