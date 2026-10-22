@@ -151,6 +151,9 @@ pub struct Conflict<'a, C> {
     /// side agrees on at both ends are taken out. A side that did not change
     /// them holds the base's. Ordered like the sides.
     pub sides: Vec<(C, Vec<&'a str>)>,
+    /// For each side, in the same order, whether it changed the lines the
+    /// conflict covers at all.
+    pub changed: Vec<bool>,
 }
 
 /// Insertions by several sides at one position that were all kept, in the
@@ -299,6 +302,10 @@ pub fn merge_text<'a, C: Clone + Ord>(
                 .count();
             text.extend_from_slice(&held[0][..prefix]);
             let inner = |side: &Vec<&'a str>| side[prefix..side.len() - suffix].to_vec();
+            let changed: Vec<bool> = held
+                .iter()
+                .map(|side| side.as_slice() != &base_lines[start..end])
+                .collect();
             if held[0].len() == prefix + suffix
                 && held.iter().all(|side| side.len() == prefix + suffix)
             {
@@ -316,6 +323,7 @@ pub fn merge_text<'a, C: Clone + Ord>(
                         .zip(&held)
                         .map(|(side, lines)| (side.0.clone(), inner(lines)))
                         .collect(),
+                    changed,
                 }));
             }
             text.extend_from_slice(&held[0][held[0].len() - suffix..]);
@@ -414,6 +422,23 @@ mod tests {
         assert_eq!(conflict.sides[1], ("two", vec!["Y\n"]));
         // The lines around it are resolved text.
         assert!(matches!(&merge.segments()[0], Segment::Text(lines) if lines == &["a\n", "b\n"]));
+    }
+
+    #[test]
+    fn a_side_that_left_the_lines_alone_is_not_marked_as_changed() {
+        let merge = merge_text(
+            BASE,
+            &[
+                ("one", "a\nb\nX\nd\ne\nf\ng\n"),
+                ("two", "a\nb\nY\nd\ne\nf\ng\n"),
+                ("three", BASE),
+            ],
+            InsertTie::Chain,
+        );
+        let conflict = merge.conflicts().next().unwrap();
+        let sides: Vec<&str> = conflict.sides.iter().map(|(side, _)| *side).collect();
+        assert_eq!(sides, ["one", "three", "two"]);
+        assert_eq!(conflict.changed, [true, false, true]);
     }
 
     #[test]
