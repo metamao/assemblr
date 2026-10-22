@@ -164,5 +164,6 @@ open until the owner settles it: **OC-16**.
 A dependency is never updated just because a newer version becomes available.
 Updating is an explicit author action (see
 [authoring-workflow.md](authoring-workflow.md#update--approved)). Consumer
-projects keep the same principle. Their explicit update operations are not yet
-defined (**OC-38**).
+projects keep the same principle: their explicit update is
+`assemblr update` (see
+[Update](consumer-projects.md#update--approved)).

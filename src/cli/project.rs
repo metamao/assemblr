@@ -11,6 +11,7 @@ use assemblr::adapters::{
     BuildProblem, ComposeFailure, ComposeProblem, ComposeRecovery, Composed, CrossVersionReason,
     DeclarationChange, FileChange, InitProjectFailure, Registry, StoreError, WriteStep,
     abort_compose, add_unit, compose_project, continue_compose, init_project, remove_unit,
+    update_units,
 };
 use assemblr::domain::{LockChange, LockError, ResolutionError, UnitIdentity};
 use clap::Args;
@@ -125,6 +126,35 @@ pub(super) fn remove(args: &RemoveArgs) -> ExitCode {
 }
 
 #[derive(Debug, Args)]
+pub(super) struct UpdateArgs {
+    /// The locked units to update, `@owner/name`: selected or transitive.
+    /// Without any, every locked unit is updated within its requirements.
+    units: Vec<String>,
+}
+
+pub(super) fn update(args: &UpdateArgs) -> ExitCode {
+    let mut units = Vec::new();
+    for argument in &args.units {
+        match split_unit(argument) {
+            Ok((identity, None)) => units.push(identity),
+            Ok((_, Some(_))) => {
+                return fail(
+                    &format!("`{argument}` names a version requirement"),
+                    Some(
+                        "`assemblr update` takes units only: @owner/name; change a requirement \
+                         with `assemblr add @owner/name@<requirement>`",
+                    ),
+                );
+            }
+            Err(message) => return fail(&message, Some("write each unit as @owner/name")),
+        }
+    }
+    run_with(None, Some(&units), |root, registry| {
+        update_units(root, registry, &units)
+    })
+}
+
+#[derive(Debug, Args)]
 pub(super) struct ComposeArgs {
     /// Finalize a composition that left conflicts in files, once you have
     /// resolved them: no conflict marker may remain.
@@ -143,7 +173,7 @@ pub(super) fn compose(args: &ComposeArgs) -> ExitCode {
     if args.abort {
         return settle(|root| abort_compose(root).map(|recovery| report_aborted(&recovery)));
     }
-    run(None, compose_project)
+    run_with(None, None, compose_project)
 }
 
 /// Runs `--continue` or `--abort` on the project in the current directory.
@@ -219,6 +249,16 @@ fn run(
     unit: Option<&UnitIdentity>,
     operation: impl FnOnce(&Path, &Registry) -> Result<Composed, ComposeFailure>,
 ) -> ExitCode {
+    run_with(unit, None, operation)
+}
+
+/// [`run`] for `update` when `named` is given: the units it was asked to
+/// update, which the report tells apart from the ones that moved with them.
+fn run_with(
+    unit: Option<&UnitIdentity>,
+    named: Option<&[UnitIdentity]>,
+    operation: impl FnOnce(&Path, &Registry) -> Result<Composed, ComposeFailure>,
+) -> ExitCode {
     let root = match std::env::current_dir() {
         Ok(root) => root,
         Err(error) => {
@@ -235,7 +275,7 @@ fn run(
     match operation(&root, &registry) {
         Ok(composed) => {
             report_declaration(unit, &composed);
-            report(&composed);
+            report(&composed, named);
             if composed.pending().is_empty() {
                 ExitCode::SUCCESS
             } else {
@@ -286,7 +326,7 @@ fn report_declaration(unit: Option<&UnitIdentity>, composed: &Composed) {
     }
 }
 
-fn report(composed: &Composed) {
+fn report(composed: &Composed, named: Option<&[UnitIdentity]>) {
     if let Some(recovered) = composed.recovered() {
         report_recovered(recovered);
     }
@@ -303,6 +343,18 @@ fn report(composed: &Composed) {
         && composed.paths().is_empty()
         && composed.changes().is_empty()
         && !composed.first();
+    if composed.unchanged() && named.is_some() {
+        println!(
+            "Nothing to update: every {} is at the newest version its requirements allow ({}).",
+            if named.is_some_and(|named| named.len() == 1) {
+                "named unit"
+            } else {
+                "unit"
+            },
+            composed.base()
+        );
+        return;
+    }
     if composed.unchanged() || declaration_only {
         println!(
             "Nothing to compose: the project already holds the declared composition ({}).",
@@ -315,6 +367,42 @@ fn report(composed: &Composed) {
         .iter()
         .map(|(identity, change)| describe(identity, change))
         .collect();
+    if let Some(named) = named {
+        println!("Updated: {}.", changes.join(", "));
+        // A unit that moved without being named moved because the versions
+        // chosen for the named ones require it.
+        let forced: Vec<String> = composed
+            .changes()
+            .iter()
+            .filter(|(_, change)| !matches!(change, LockChange::Retired(_)))
+            .map(|(identity, _)| identity)
+            .filter(|identity| !named.is_empty() && !named.contains(identity))
+            .map(ToString::to_string)
+            .collect();
+        if !forced.is_empty() {
+            eprintln!(
+                "note: {} moved although not named: the versions selected for {} require it; to \
+                 keep {} where {}, do not update {}",
+                forced.join(", "),
+                if named.len() == 1 {
+                    "the named unit"
+                } else {
+                    "the named units"
+                },
+                if forced.len() == 1 { "it" } else { "them" },
+                if forced.len() == 1 {
+                    "it is"
+                } else {
+                    "they are"
+                },
+                if named.len() == 1 {
+                    "that unit"
+                } else {
+                    "those units"
+                },
+            );
+        }
+    }
     if !changes.is_empty() {
         eprintln!(
             "note: {} assemblr-lock.json: {}",
@@ -479,6 +567,22 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
                 .to_owned()
         } else {
             "assemblr.jsonc lists the units this project selects".to_owned()
+        }),
+        ComposeProblem::NothingLocked => Some(
+            "run `assemblr compose` first: a project is updated from the versions it holds"
+                .to_owned(),
+        ),
+        ComposeProblem::NotLocked { locked, .. } => Some(if locked.is_empty() {
+            "no unit is locked yet; run `assemblr compose` first".to_owned()
+        } else {
+            format!(
+                "`assemblr update` takes the units of the composition: {}",
+                locked
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         }),
         ComposeProblem::InvalidRequirement(_) => Some(
             "write a SemVer requirement such as ^1.2.0, ~1.2, or =1.2.3 after the unit: \
