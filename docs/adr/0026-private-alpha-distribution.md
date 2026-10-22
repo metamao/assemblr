@@ -33,7 +33,10 @@ or self-update is required (#68, D-25).
    packages `assemblr-<version>-<target>.tar.gz` (Linux) or `.zip` (Windows)
    holding one directory with the binary, smoke-tests each archive outside the
    checkout, and creates a **draft prerelease** with `SHA256SUMS`, targeting
-   the commit that was built. Nothing is released on merges. The owner
+   the commit that was built (`github.sha`, which every job checks out, so
+   a later push to `main` cannot change it). The workflow refuses a tag that
+   already exists and verifies that the draft stores that commit. Nothing is
+   released on merges. The owner
    publishes the draft, and publishing creates the tag at that commit; it is
    never moved. Pull requests that touch the packaging run the same jobs
    without the release step.

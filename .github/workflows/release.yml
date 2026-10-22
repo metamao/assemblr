@@ -36,6 +36,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The commit that started the run, so every job builds the same one.
+          ref: ${{ github.sha }}
       - run: rustup toolchain install
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -61,12 +64,22 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The commit that started the run, so every job builds the same one.
+          ref: ${{ github.sha }}
       - run: rustup toolchain install
       - run: rustup target add ${{ matrix.target }}
 
       - name: Check the version
         id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # An existing tag would win over the commit the draft targets.
+          if [ "${{ github.event_name }}" = workflow_dispatch ] && gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/${{ inputs.tag }}" > /dev/null 2>&1; then
+            echo "::error::the tag ${{ inputs.tag }} already exists"
+            exit 1
+          fi
           version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event_name }}" = workflow_dispatch ] && [ "${{ inputs.tag }}" != "v$version" ]; then
@@ -154,4 +167,11 @@ jobs:
             --draft --prerelease \
             --target "$GITHUB_SHA" \
             --title "Assemblr $TAG" \
-            --notes "Private alpha. Install and upgrade: see the README (Installation)."
+            --notes "Private alpha, built from commit $GITHUB_SHA. Install and upgrade: see the README (Installation)."
+          # The tag is created only when the draft is published, at the commit
+          # stored here: the one this run built, however far main has moved.
+          pinned=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)
+          if [ "$pinned" != "$GITHUB_SHA" ]; then
+            echo "::error::the draft targets $pinned, not the built commit $GITHUB_SHA"
+            exit 1
+          fi
