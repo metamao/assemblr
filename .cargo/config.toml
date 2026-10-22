@@ -1,0 +1,10 @@
+# Development defaults for this checkout. See ADR 0028.
+
+[alias]
+# Runs a command against a development build in an isolated environment.
+sandbox = "run --quiet --example sandbox --"
+
+[env]
+# `cargo run` keeps its registry under `target/` unless ASSEMBLR_DATA_DIR is
+# already set, so a development run never changes the user's registry.
+ASSEMBLR_DATA_DIR = { value = "target/dev-data", relative = true }

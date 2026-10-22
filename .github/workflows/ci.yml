@@ -38,6 +38,8 @@ jobs:
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo build --locked --all-targets
       - run: cargo test --locked --all-targets --all-features
+      # The manual-validation sandbox (ADR 0028) finds the binary it built.
+      - run: cargo sandbox --name ci -- assemblr registry list
 
   msrv:
     name: Minimum supported Rust version
