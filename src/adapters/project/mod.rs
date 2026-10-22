@@ -19,6 +19,7 @@
 
 mod declaration;
 mod ignore;
+mod lines;
 mod pending;
 mod store;
 
@@ -553,7 +554,7 @@ fn compose_with(
     let mergeable = |path: &RelativePath| {
         if previously_unbased.contains(path) {
             Mergeability::BaseNotStored
-        } else if MergeFormat::of_path(path) != MergeFormat::Json {
+        } else if MergeFormat::of_path(path) == MergeFormat::Unsupported {
             Mergeability::Format
         } else {
             Mergeability::Mergeable
@@ -1030,6 +1031,11 @@ fn merge_file(
     let base_text = text(&base_bytes, "its base")?;
     let current_text = text(&held.bytes, "the project's file")?;
     let incoming_text = text(incoming.contents(), "the composed file")?;
+    if MergeFormat::of_path(path) == MergeFormat::Text {
+        return lines::reconcile(&base_text, &current_text, &incoming_text)
+            .map(|merged| (merged.into_bytes(), Vec::new()))
+            .map_err(|places| FileConflictKind::Lines { places });
+    }
     match reconcile_json(&base_text, &current_text, &incoming_text) {
         Ok(reconciled) => Ok((reconciled.text.into_bytes(), reconciled.notes)),
         Err(ReconcileFailure::Conflicts(conflicts)) => Err(FileConflictKind::Values(conflicts)),
@@ -1953,6 +1959,12 @@ pub enum FileConflictKind {
     /// The project and the composition change the same values of a
     /// structured file.
     Values(Vec<Conflict<Contributor>>),
+    /// The project and the composition change the same lines of a text
+    /// file, in this many places.
+    Lines {
+        /// How many places conflict.
+        places: usize,
+    },
     /// Both sides changed the file, and the merge could not be done.
     Unmergeable(String),
 }
@@ -1984,6 +1996,10 @@ impl fmt::Display for FileConflict {
             FileConflictKind::Disagreement(Disagreement::NotAFile) => {
                 f.write_str("it is not a regular file in the project")
             }
+            FileConflictKind::Lines { places } => write!(
+                f,
+                "the project and the composition change the same lines, in {places} place(s)"
+            ),
             FileConflictKind::Values(conflicts) => {
                 f.write_str("the project and the composition change the same values:")?;
                 for conflict in conflicts {

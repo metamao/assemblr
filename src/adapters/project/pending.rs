@@ -15,13 +15,17 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use super::lines;
 use super::lockfile::{self, Lockfile};
 use super::store::{Journal, Store};
 use super::{
     Change, ComposeFailure, ComposeProblem, ComposeRecovery, CurrentFile, FileConflict,
     FileConflictKind, Step, StoreError, lock_declaration, recover, write_lock,
 };
-use crate::domain::{BaseIdentity, Disagreement, Mergeability, RelativePath, Snapshot, UnitFile};
+use crate::domain::{
+    BaseIdentity, Contributor, Disagreement, Mergeability, RelativePath, Snapshot, TextSegment,
+    UnitFile,
+};
 
 /// Opens the project's side of a conflict. A marker line starts with one
 /// of the two distinctive prefixes, which is what a leftover is looked for
@@ -45,6 +49,7 @@ pub(super) fn marked_change(
     match &conflict.kind {
         FileConflictKind::Disagreement(Disagreement::BothChanged(Mergeability::Format))
         | FileConflictKind::Values(_)
+        | FileConflictKind::Lines { .. }
         | FileConflictKind::Unmergeable(_) => {}
         FileConflictKind::Disagreement(_) => return None,
     }
@@ -52,7 +57,15 @@ pub(super) fn marked_change(
     let incoming = files.get(&conflict.path)?;
     let base_file = base.files().get(&conflict.path)?;
     let base_bytes = store.read_blob(base_file.blob()).ok()?;
-    let bytes = mark(&base_bytes, &held.bytes, incoming.contents())?;
+    // A text file the merge could not finish marks only the lines that
+    // disagree; every other conflict marks the whole file, because a
+    // structured file's merged parts cannot be told apart from its data.
+    let bytes = match conflict.kind {
+        FileConflictKind::Lines { .. } => {
+            mark_lines(&base_bytes, &held.bytes, incoming.contents())?
+        }
+        _ => mark(&base_bytes, &held.bytes, incoming.contents())?,
+    };
     // The composition's change to the executable bit wins when it made
     // one; otherwise the project's mode stands, as in reconciliation.
     let executable = if incoming.is_executable() == base_file.is_executable() {
@@ -95,6 +108,64 @@ fn mark(base: &[u8], current: &[u8], incoming: &[u8]) -> Option<Vec<u8>> {
     section(SEPARATOR, incoming);
     out.extend_from_slice(format!("{INCOMING_MARK} (the declared composition){eol}").as_bytes());
     Some(out)
+}
+
+/// The project's file with the composition's changes merged in, and a
+/// conflict marked around each place where the two disagree: the project's
+/// lines, the base's, and the composition's. `None` when a version is not
+/// UTF-8 text or the merge finds nothing to mark.
+fn mark_lines(base: &[u8], current: &[u8], incoming: &[u8]) -> Option<Vec<u8>> {
+    fn text(bytes: &[u8]) -> Option<&str> {
+        if bytes.contains(&0) {
+            return None;
+        }
+        std::str::from_utf8(bytes).ok()
+    }
+    let (base, current, incoming) = (text(base)?, text(current)?, text(incoming)?);
+    let versions = lines::Versions::new(base, current, incoming);
+    let merge = versions.merge();
+    merge.conflicts().next()?;
+    // Marker lines end as the file's lines do.
+    let eol = if !versions.crlf && current.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut out = String::new();
+    for segment in merge.segments() {
+        match segment {
+            TextSegment::Text(lines) => lines.iter().for_each(|line| out.push_str(line)),
+            TextSegment::Conflict(conflict) => {
+                let side = |contributor: Contributor| {
+                    conflict
+                        .sides
+                        .iter()
+                        .find(|(side, _)| *side == contributor)
+                        .map(|(_, lines)| lines.as_slice())
+                        .unwrap_or_default()
+                };
+                let mut section = |header: &str, lines: &[&str]| {
+                    out.push_str(header);
+                    out.push_str(eol);
+                    lines.iter().for_each(|line| out.push_str(line));
+                    if lines.last().is_some_and(|line| !line.ends_with('\n')) {
+                        out.push_str(eol);
+                    }
+                };
+                section(
+                    &format!("{CURRENT_MARK} (your file)"),
+                    side(Contributor::Current),
+                );
+                section(
+                    &format!("{BASE_MARK} (the last composition)"),
+                    &conflict.base,
+                );
+                section(SEPARATOR, side(Contributor::Incoming));
+                out.push_str(&format!("{INCOMING_MARK} (the declared composition){eol}"));
+            }
+        }
+    }
+    Some(versions.written(out).into_bytes())
 }
 
 /// Whether `bytes` still holds a line that opens or closes a conflict.
@@ -307,7 +378,7 @@ fn read_resolution(root: &Path, path: &RelativePath) -> Result<Resolution, Compo
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "fixtures are valid by construction")]
 mod tests {
-    use super::{has_markers, mark};
+    use super::{has_markers, mark, mark_lines};
 
     #[test]
     fn the_three_versions_are_kept_between_markers() {
@@ -342,5 +413,47 @@ mod tests {
         assert!(!has_markers(b"Title\n=======\ntext\n"));
         assert!(has_markers(b"x\r\n<<<<<<< current (your file)\r\n"));
         assert!(!has_markers(b"resolved\n"));
+    }
+
+    fn marked(base: &str, current: &str, incoming: &str) -> String {
+        String::from_utf8(
+            mark_lines(base.as_bytes(), current.as_bytes(), incoming.as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    const BASE: &str = "a\nb\nc\nd\ne\nf\ng\n";
+
+    #[test]
+    fn each_place_that_disagrees_is_marked_apart_and_the_rest_is_merged() {
+        let out = marked(
+            BASE,
+            "A\nb\nc\nd\ne\nf\nmine\n",
+            "theirs\nb\nc\nd\ne\nf\nG\n",
+        );
+        assert_eq!(
+            out,
+            "<<<<<<< current (your file)\nA\n||||||| base (the last composition)\na\n=======\n\
+             theirs\n>>>>>>> incoming (the declared composition)\nb\nc\nd\ne\nf\n\
+             <<<<<<< current (your file)\nmine\n||||||| base (the last composition)\ng\n=======\n\
+             G\n>>>>>>> incoming (the declared composition)\n"
+        );
+    }
+
+    #[test]
+    fn a_side_without_a_final_line_ending_still_gets_its_marker_on_its_own_line() {
+        let out = marked("a\nb", "a\nmine", "a\ntheirs");
+        assert_eq!(
+            out,
+            "a\n<<<<<<< current (your file)\nmine\n||||||| base (the last composition)\nb\n\
+             =======\ntheirs\n>>>>>>> incoming (the declared composition)\n"
+        );
+    }
+
+    #[test]
+    fn nothing_is_marked_when_the_merge_has_no_conflict_or_a_side_is_not_text() {
+        assert_eq!(mark_lines(b"a\nb\n", b"A\nb\n", b"a\nb\nC\n"), None);
+        assert_eq!(mark_lines(b"a\n", b"a\0\n", b"b\n"), None);
+        assert_eq!(mark_lines(b"a\n", &[0xff, 0xfe], b"b\n"), None);
     }
 }
