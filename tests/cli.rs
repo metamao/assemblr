@@ -31,14 +31,17 @@ fn help_describes_the_tool() {
 }
 
 #[test]
-fn version_reports_the_package_version() {
+fn version_reports_the_package_version_and_the_source_commit() {
     let output = assemblr(&["--version"]);
 
     assert!(output.status.success());
-    assert_eq!(
-        stdout(&output).trim(),
-        format!("assemblr {}", env!("CARGO_PKG_VERSION"))
+    // The commit is absent when the build had neither Git nor ASSEMBLR_COMMIT.
+    let expected = format!(
+        r"^assemblr {}( \([0-9a-zA-Z]{{1,12}}\))?$",
+        regex_lite::escape(env!("CARGO_PKG_VERSION"))
     );
+    let re = regex_lite::Regex::new(&expected).expect("valid pattern");
+    assert!(re.is_match(stdout(&output).trim()), "{}", stdout(&output));
 }
 
 #[test]

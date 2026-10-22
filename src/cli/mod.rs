@@ -12,7 +12,11 @@ use clap::{Parser, Subcommand};
 
 /// Compose and maintain opinionated, reusable software units.
 #[derive(Debug, Parser)]
-#[command(name = "assemblr", version, arg_required_else_help = true)]
+#[command(
+    name = "assemblr",
+    version = env!("ASSEMBLR_VERSION"),
+    arg_required_else_help = true
+)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     command: Command,

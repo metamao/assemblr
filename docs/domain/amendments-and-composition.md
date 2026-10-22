@@ -419,6 +419,18 @@ until each amender had published again:
 - **Flat model.** Each amender's contribution is derived against its own base.
   Amenders taken from different versions of the provider stay independent:
   applying one never establishes the base or the precedence of another.
+- **Insertions at one place in text.** When the provider's release and an
+  amendment taken from an earlier version both insert lines at the same
+  position of a text file, and neither changes a line there, both insertions
+  are kept, **the provider's first** (decided by the owner after the second
+  decision-log review, #70). The provider's release is the file the amendment
+  is now applied to, so its lines keep their place, and the amender's follow
+  them. Nothing either side wrote is lost, and nothing is reported: it is an
+  ordinary cross-version application. Insertions by several amenders at one
+  place keep the order of their identities, after the provider's, as in
+  [text files](#text-files--approved-direction-details-provisional). Changes
+  that overlap or touch, including an insertion next to a line the other side
+  changed, still collide.
 - **Formats without a merge.** A YAML, TOML, XML, or INI file, and a file that
   is not UTF-8 text, is applied across versions only when the provider's file
   has the same bytes at the base and at the resolved version. Otherwise the
@@ -441,8 +453,9 @@ until each amender had published again:
   moves, an unchanged file is carried over untouched; a file that changed is
   **rebased** on the source templates: the changes the copy makes against the
   old base are merged by line into the file at the new version, neither side
-  taking precedence, and the declared base, the copy, and the lock change
-  together. Source templates are merged as text, never as structured
+  taking precedence, except that insertions both make at one position are both
+  kept with the provider's first, as in a composition, and the declared base,
+  the copy, and the lock change together. Source templates are merged as text, never as structured
   documents, since a template need not be one before it is rendered; a
   rebased JSON file that is not a template must still parse as JSON. On a
   collision, and for a file with no merge or that is not text, the update

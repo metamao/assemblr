@@ -595,7 +595,11 @@ from the declared base to the new version:
   merge (YAML, TOML, XML, INI), the amendment is **rebased**: the changes the
   copy makes against the file at the old base are merged by line into the file
   at the new version, on the source templates and with neither side taking
-  precedence, so the copy keeps its template expressions. The copy is
+  precedence, so the copy keeps its template expressions. Insertions the
+  provider and the copy make at the same position are both kept, the
+  provider's first, as a composition applies them across versions (see
+  [across provider versions](amendments-and-composition.md#across-provider-versions--approved)),
+  so the rebased copy composes to the same file. The copy is
   rewritten, the declaration's `base` becomes the new version, and the lock
   records it, in one operation. Source templates are never parsed as
   structured documents, since a template need not be one; a rebased JSON file
