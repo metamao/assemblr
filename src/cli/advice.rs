@@ -54,25 +54,23 @@ pub(super) fn composition_advice(error: &CompositionError, audience: Audience) -
              of its own"
                 .to_owned()
         }
-        CompositionError::AmendmentBase {
+        CompositionError::AmendmentBase { unit, .. } => format!(
+            "`assemblr unit update` moves the locked version of {unit} and the base of the \
+             amendment together; a build never changes either"
+        ),
+        CompositionError::AmendmentNotProvided {
             amender,
             unit,
-            base,
-            resolved,
+            version,
             ..
         } => match amender {
-            Requirer::Root => format!(
-                "`assemblr unit update` moves the locked version of {unit} and the base of the \
-                 amendment together; a build never changes either"
-            ),
+            Requirer::Root => return None,
             Requirer::Unit(identity, _) => format!(
-                "an amendment is applied only to {unit} {base}: select {unit} at that version \
-                 (`{unit}@={base}`), or a version of {identity} whose amendment is based on \
-                 {resolved}, which its author publishes after `assemblr unit update`"
+                "{unit} {version} does not provide the file: select an earlier version of {unit} \
+                 that provides it, or a version of {identity} taken from a version without it"
             ),
         },
-        CompositionError::AmendmentNotProvided { amender, .. }
-        | CompositionError::AmendmentMissingCopy { amender, .. }
+        CompositionError::AmendmentMissingCopy { amender, .. }
         | CompositionError::AmendmentUndeclared { amender, .. } => match amender {
             Requirer::Root => return None,
             Requirer::Unit(identity, _) => format!(
@@ -121,6 +119,12 @@ pub(super) fn merge_advice(failure: Option<&MergeFailure>, audience: Audience) -
              copy and the provider's file at its base are what a report needs"
                 .to_owned()
         }
+        Some(MergeFailure::Rebase { .. }) => {
+            "the amendment and the provider both changed those lines: pin the provider at the \
+             amendment's base, or the amender's author re-amends the file at the resolved \
+             version and publishes it"
+                .to_owned()
+        }
         Some(MergeFailure::Conflicts(_)) => format!(
             "the amendments of one file must agree: {who} so that no two amenders set one \
              value differently, or expose the value as a parameter of the provider"
@@ -131,6 +135,28 @@ pub(super) fn merge_advice(failure: Option<&MergeFailure>, audience: Audience) -
              its own"
         ),
     }
+}
+
+/// What to do when an amendment cannot be applied to the provider version a
+/// composition resolved, which differs from the one the copy was taken from.
+pub(super) fn cross_version_advice(
+    unit: &assemblr::domain::UnitIdentity,
+    amender: &assemblr::domain::UnitIdentity,
+    base: &assemblr::domain::Version,
+    reason: &assemblr::adapters::CrossVersionReason,
+) -> String {
+    use assemblr::adapters::CrossVersionReason;
+    if matches!(reason, CrossVersionReason::BaseUnavailable) {
+        return format!(
+            "the registered repository of {unit} must still hold {base}: run `assemblr registry \
+             sync`, or register it again"
+        );
+    }
+    format!(
+        "select {unit} at the amendment's base (`{unit}@={base}`), or a version of {amender} \
+         whose amendment was taken from the version resolved, which its author publishes after \
+         amending the file there"
+    )
 }
 
 /// The advice of every problem, once each and in the order of the problems,
@@ -152,17 +178,16 @@ mod tests {
     use assemblr::domain::{CompositionError, Requirer};
 
     #[test]
-    fn an_amendment_base_names_the_versions_it_needs_and_options_are_not_mentioned() {
+    fn an_own_amendment_base_points_at_unit_update_and_not_at_options() {
         let error = CompositionError::AmendmentBase {
-            amender: Requirer::Unit("@acme/web".parse().unwrap(), "1.0.0".parse().unwrap()),
+            amender: Requirer::Root,
             path: "config/app.json".parse().unwrap(),
             unit: "@acme/node".parse().unwrap(),
             base: "1.0.0".parse().unwrap(),
             resolved: "1.1.0".parse().unwrap(),
         };
-        let advice = composition_advice(&error, Audience::Consumer).unwrap();
-        assert!(advice.contains("@acme/node@=1.0.0"), "{advice}");
-        assert!(advice.contains("based on 1.1.0"), "{advice}");
+        let advice = composition_advice(&error, Audience::Author).unwrap();
+        assert!(advice.contains("unit update"), "{advice}");
         assert!(!advice.contains("options"), "{advice}");
     }
 

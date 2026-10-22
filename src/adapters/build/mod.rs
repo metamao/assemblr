@@ -44,13 +44,14 @@ use super::git::{GitError, GitRepository, InvalidVersion, MANIFEST_LIMIT, ReadSr
 use super::lockfile::{self, LockfileError, PublishedLockfileError};
 use super::manifest::{ReadManifestError, read_manifest};
 use super::registry::{Registry, StorageError};
-use super::render::{Context, RenderError, render};
+use super::render::{Context, RenderError, parameters_referenced, render};
 use crate::domain::{
     AmendmentBaseError, AvailableVersions, BaseIntegrityError, CompositionError, ContributionError,
     FileTree, LockChange, LockError, Manifest, MergeFormat, ObjectId, ParameterName,
     ParameterValues, PublishedAmendmentError, RelativePath, Requirer, ResolutionError, Root,
-    TEMPLATE_SUFFIX, UnitContent, UnitFile, UnitIdentity, UnitLock, Version, amendment_bases,
-    compose, contribution_problems, published_amendments, relock, resolve, verify_bases,
+    TEMPLATE_SUFFIX, UnitContent, UnitFile, UnitIdentity, UnitLock, ValueKind, Version,
+    amendment_bases, compose, contribution_problems, is_text, published_amendments, relock,
+    resolve, verify_bases,
 };
 
 /// The unit's manifest, at the repository's top level.
@@ -269,7 +270,7 @@ pub(super) struct Validated {
 pub(crate) struct Resolved {
     pub(crate) resolution: crate::domain::Resolution,
     pub(crate) lock: UnitLock,
-    dependencies: Dependencies,
+    pub(crate) dependencies: Dependencies,
     contents: BTreeMap<UnitIdentity, PublishedContent>,
 }
 
@@ -474,6 +475,7 @@ pub(super) fn validate(
         &composition,
         &resolved.lock,
         Some(manifest.name()),
+        &resolved.dependencies,
         problems,
     ) else {
         return validation;
@@ -504,6 +506,7 @@ pub(crate) fn render_files(
     composition: &crate::domain::Composition<'_>,
     lock: &UnitLock,
     built: Option<&UnitIdentity>,
+    dependencies: &Dependencies,
     problems: &mut Vec<BuildProblem>,
 ) -> Option<Rendered> {
     let no_values = ParameterValues::new();
@@ -511,9 +514,17 @@ pub(crate) fn render_files(
     let mut files: Vec<(RelativePath, UnitFile)> = Vec::new();
     let mut notes = Vec::new();
     let mut failed = false;
+    // Problems are collected here, since the rendering closure below holds
+    // on to the sink while the rest of the loop reports into it too.
+    let sink: std::cell::RefCell<Vec<BuildProblem>> = std::cell::RefCell::new(Vec::new());
+    // The `src/` trees of the versions amendments were taken from, read
+    // when a composition resolves a provider to another version.
+    let history: std::cell::RefCell<BTreeMap<(UnitIdentity, Version), FileTree>> =
+        std::cell::RefCell::new(BTreeMap::new());
     for (path, composed) in composition.files() {
         let executable = composed.is_executable();
         let provider = composed.unit();
+        let resolved_version = lock.units().get(provider).map(|locked| locked.version());
         let published_version = |amender: &UnitIdentity| {
             (Some(amender) != built)
                 .then(|| lock.units().get(amender))
@@ -525,7 +536,7 @@ pub(crate) fn render_files(
         // rendered only to compare, and a base that does not render is
         // not that build's problem.
         let quiet = std::cell::Cell::new(false);
-        let mut side = |bytes: &[u8], amender: Option<&UnitIdentity>| -> Option<Vec<u8>> {
+        let side = |bytes: &[u8], amender: Option<&UnitIdentity>| -> Option<Vec<u8>> {
             if !composed.is_template() {
                 return Some(bytes.to_vec());
             }
@@ -538,7 +549,7 @@ pub(crate) fn render_files(
             };
             let Ok(text) = std::str::from_utf8(bytes) else {
                 if !quiet.get() {
-                    problems.push(template(TemplateError::NotUtf8));
+                    sink.borrow_mut().push(template(TemplateError::NotUtf8));
                 }
                 return None;
             };
@@ -551,21 +562,82 @@ pub(crate) fn render_files(
                 Ok(rendered) => Some(rendered.into_bytes()),
                 Err(errors) => {
                     if !quiet.get() {
-                        problems
+                        sink.borrow_mut()
                             .extend(errors.into_iter().map(TemplateError::Render).map(template));
                     }
                     None
                 }
             }
         };
+        // The amendments taken from another version of the provider than
+        // the one resolved, with the provider's file as it was there.
+        // Amendments whose file is the same bytes at both versions are
+        // applied as if taken from the resolved one.
+        let mut crossing: BTreeMap<&UnitIdentity, (Version, Vec<u8>)> = BTreeMap::new();
+        let mut unreadable = false;
+        for amendment in composed.amendments() {
+            let base = amendment.base();
+            let Some(resolved) = resolved_version.filter(|resolved| *resolved != base) else {
+                continue;
+            };
+            let cross = |reason| BuildProblem::CrossVersion {
+                unit: provider.clone(),
+                path: composed.source().clone(),
+                amender: amendment.amender().clone(),
+                published: published_version(amendment.amender()),
+                base: base.clone(),
+                resolved: resolved.clone(),
+                reason,
+            };
+            let key = (provider.clone(), base.clone());
+            if !history.borrow().contains_key(&key) {
+                match dependencies.read_src_at(provider, base) {
+                    Some(Ok(tree)) => {
+                        history.borrow_mut().insert(key.clone(), tree);
+                    }
+                    Some(Err(problem)) => {
+                        sink.borrow_mut().push(problem);
+                        unreadable = true;
+                        continue;
+                    }
+                    None => {
+                        sink.borrow_mut()
+                            .push(cross(CrossVersionReason::BaseUnavailable));
+                        unreadable = true;
+                        continue;
+                    }
+                }
+            }
+            let tree = history.borrow();
+            match tree
+                .get(&key)
+                .and_then(|tree| tree.get(composed.source()))
+                .map(|file| file.contents().to_vec())
+            {
+                Some(bytes) if bytes == composed.contents() => {}
+                Some(bytes) => {
+                    crossing.insert(amendment.amender(), (base.clone(), bytes));
+                }
+                None => {
+                    sink.borrow_mut()
+                        .push(cross(CrossVersionReason::BaseUnavailable));
+                    unreadable = true;
+                }
+            }
+        }
+        if unreadable {
+            failed = true;
+            continue;
+        }
         let delivered = match composed.amendments() {
             [] => side(composed.contents(), None),
-            [(amender, copy)] => {
+            [only] if crossing.is_empty() => {
+                let (amender, copy) = (only.amender(), only.copy());
                 let delivered = side(copy.contents(), Some(amender));
                 // The unit's own copy takes the file's place whole, but a
                 // second amender would make a merge of it, which carries
                 // members and values only: say so to its author now.
-                if Some(*amender) == built && MergeFormat::of_path(path) == MergeFormat::Json {
+                if Some(amender) == built && MergeFormat::of_path(path) == MergeFormat::Json {
                     quiet.set(true);
                     let base = side(composed.contents(), None);
                     quiet.set(false);
@@ -590,78 +662,182 @@ pub(crate) fn render_files(
                 delivered
             }
             amendments => {
-                let base = side(composed.contents(), None);
-                let copies: Vec<Option<(&UnitIdentity, Vec<u8>)>> = amendments
-                    .iter()
-                    .map(|(amender, copy)| {
-                        side(copy.contents(), Some(amender)).map(|text| (*amender, text))
-                    })
-                    .collect();
-                match (base, copies.into_iter().collect::<Option<Vec<_>>>()) {
-                    (Some(base), Some(copies)) => {
-                        let merge = || BuildProblem::Merge {
-                            unit: provider.clone(),
-                            // An amended file's provider is a locked
-                            // dependency: the root is never amended.
-                            version: lock
-                                .units()
-                                .get(provider)
-                                .map(|locked| locked.version().clone()),
-                            path: composed.source().clone(),
-                            // By identity, as the conflicts name them.
-                            amenders: amendments
-                                .iter()
-                                .map(|(amender, _)| (*amender).clone())
-                                .collect::<std::collections::BTreeSet<_>>()
-                                .into_iter()
-                                .collect(),
-                            failure: None,
+                let merge = || BuildProblem::Merge {
+                    unit: provider.clone(),
+                    // An amended file's provider is a locked dependency:
+                    // the root is never amended.
+                    version: resolved_version.cloned(),
+                    path: composed.source().clone(),
+                    // By identity, as the conflicts name them.
+                    amenders: amendments
+                        .iter()
+                        .map(|amendment| amendment.amender().clone())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                    crossed: crossing
+                        .iter()
+                        .map(|(amender, (base, _))| ((*amender).clone(), base.clone()))
+                        .collect(),
+                    failure: None,
+                };
+                // A merge across versions is made on text, in a format
+                // with a merge; anything else is applied only to the file
+                // it was taken from.
+                let cross_problem = |amender: &UnitIdentity, reason| {
+                    let (base, _) = &crossing[amender];
+                    BuildProblem::CrossVersion {
+                        unit: provider.clone(),
+                        path: composed.source().clone(),
+                        amender: amender.clone(),
+                        published: published_version(amender),
+                        base: base.clone(),
+                        resolved: resolved_version.cloned().unwrap_or_else(|| base.clone()),
+                        reason,
+                    }
+                };
+                let mut refused = false;
+                for amender in crossing.keys() {
+                    let not_text = !is_text(composed.contents())
+                        || !is_text(&crossing[amender].1)
+                        || amendments
+                            .iter()
+                            .any(|amendment| !is_text(amendment.copy().contents()));
+                    if MergeFormat::of_path(path) == MergeFormat::Unsupported || not_text {
+                        sink.borrow_mut()
+                            .push(cross_problem(amender, CrossVersionReason::NoMerge));
+                        refused = true;
+                    }
+                }
+                // A parameter a template names must mean the same at the
+                // resolved version as at the base, or the contribution
+                // cannot be told from the provider's own change.
+                if !refused && composed.is_template() {
+                    for amendment in amendments {
+                        let Some((base_version, base_source)) = crossing.get(amendment.amender())
+                        else {
+                            continue;
                         };
-                        let sides: Option<(&str, Vec<(&UnitIdentity, &str)>)> = utf8(&base)
-                            .and_then(|base| {
-                                copies
-                                    .iter()
-                                    .map(|(amender, copy)| utf8(copy).map(|copy| (*amender, copy)))
-                                    .collect::<Option<Vec<_>>>()
-                                    .map(|copies| (base, copies))
-                            });
-                        match sides {
-                            None => {
-                                problems.push(merge());
-                                None
+                        let mut referenced = utf8(base_source)
+                            .map(parameters_referenced)
+                            .unwrap_or_default();
+                        referenced.extend(
+                            utf8(amendment.copy().contents())
+                                .map(parameters_referenced)
+                                .unwrap_or_default(),
+                        );
+                        let at = |version: &Version| {
+                            dependencies
+                                .manifests
+                                .get(&(provider.clone(), version.clone()))
+                                .map(|manifest| manifest.params())
+                        };
+                        let (Some(then), Some(now)) =
+                            (at(base_version), resolved_version.and_then(at))
+                        else {
+                            continue;
+                        };
+                        for name in referenced {
+                            let kind =
+                                |params: &BTreeMap<_, crate::domain::ParameterDefinition>| {
+                                    params
+                                        .get(&name)
+                                        .map(|definition| definition.parameter_type().value_kind())
+                                };
+                            if kind(now).is_none() || kind(then) != kind(now) {
+                                sink.borrow_mut().push(cross_problem(
+                                    amendment.amender(),
+                                    CrossVersionReason::Parameter {
+                                        name: name.clone(),
+                                        base: kind(then),
+                                        resolved: kind(now),
+                                    },
+                                ));
+                                refused = true;
                             }
-                            Some((base, copies)) => match match MergeFormat::of_path(path) {
-                                MergeFormat::Json => Some(super::merge::merge_json(base, &copies)),
-                                MergeFormat::Text => {
-                                    Some(super::merge::merge_text_files(base, &copies))
-                                }
-                                // The composition refuses these before it
-                                // gets here.
-                                MergeFormat::Unsupported => None,
-                            } {
-                                Some(Ok(merged)) => {
-                                    notes.extend(merged.notes().iter().map(|note| {
-                                        format!("src/{} of {provider}: {note}", composed.source())
-                                    }));
-                                    Some(merged.into_text().into_bytes())
-                                }
-                                Some(Err(failure)) => {
-                                    let mut problem = merge();
-                                    if let BuildProblem::Merge { failure: slot, .. } = &mut problem
-                                    {
-                                        *slot = Some(failure);
-                                    }
-                                    problems.push(problem);
-                                    None
-                                }
-                                None => {
-                                    problems.push(merge());
-                                    None
-                                }
-                            },
                         }
                     }
-                    _ => None,
+                }
+                if refused {
+                    None
+                } else {
+                    let base = side(composed.contents(), None);
+                    let copies: Vec<Option<RenderedCopy<'_>>> = amendments
+                        .iter()
+                        .map(|amendment| {
+                            let copy =
+                                side(amendment.copy().contents(), Some(amendment.amender()))?;
+                            let amender_base = match (&base, crossing.get(amendment.amender())) {
+                                (_, Some((_, source))) => side(source, None)?,
+                                (Some(base), None) => base.clone(),
+                                (None, None) => return None,
+                            };
+                            Some((amendment.amender(), amender_base, copy))
+                        })
+                        .collect();
+                    match (base, copies.into_iter().collect::<Option<Vec<_>>>()) {
+                        (Some(base), Some(copies)) => {
+                            let sides: Option<(&str, Vec<CopyText<'_>>)> =
+                                utf8(&base).and_then(|provider_text| {
+                                    copies
+                                        .iter()
+                                        .map(|(amender, amender_base, copy)| {
+                                            Some((*amender, utf8(amender_base)?, utf8(copy)?))
+                                        })
+                                        .collect::<Option<Vec<_>>>()
+                                        .map(|copies| (provider_text, copies))
+                                });
+                            match sides {
+                                None => {
+                                    sink.borrow_mut().push(merge());
+                                    None
+                                }
+                                Some((provider_text, copies)) => {
+                                    match match MergeFormat::of_path(path) {
+                                        MergeFormat::Json => Some(super::merge::merge_json_from(
+                                            provider_text,
+                                            &copies,
+                                        )),
+                                        MergeFormat::Text => {
+                                            Some(super::merge::merge_text_files_from(
+                                                provider,
+                                                provider_text,
+                                                &copies,
+                                            ))
+                                        }
+                                        // The composition refuses these
+                                        // before it gets here.
+                                        MergeFormat::Unsupported => None,
+                                    } {
+                                        Some(Ok(merged)) => {
+                                            notes.extend(merged.notes().iter().map(|note| {
+                                                format!(
+                                                    "src/{} of {provider}: {note}",
+                                                    composed.source()
+                                                )
+                                            }));
+                                            Some(merged.into_text().into_bytes())
+                                        }
+                                        Some(Err(failure)) => {
+                                            let mut problem = merge();
+                                            if let BuildProblem::Merge { failure: slot, .. } =
+                                                &mut problem
+                                            {
+                                                *slot = Some(failure);
+                                            }
+                                            sink.borrow_mut().push(problem);
+                                            None
+                                        }
+                                        None => {
+                                            sink.borrow_mut().push(merge());
+                                            None
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => None,
+                    }
                 }
             }
         };
@@ -670,11 +846,19 @@ pub(crate) fn render_files(
             None => failed = true,
         }
     }
+    problems.extend(sink.into_inner());
     if failed {
         return None;
     }
     Some(Rendered { files, notes })
 }
+
+/// An amender, the provider's file as it was where the copy was taken from,
+/// and the copy, all rendered.
+type RenderedCopy<'a> = (&'a UnitIdentity, Vec<u8>, Vec<u8>);
+
+/// [`RenderedCopy`] as text.
+type CopyText<'a> = (&'a UnitIdentity, &'a str, &'a str);
 
 /// The effective values of `unit` in `composition`, or none.
 fn values_of<'c>(
@@ -692,7 +876,7 @@ fn utf8(bytes: &[u8]) -> Option<&str> {
 
 /// The published versions a resolution may choose from, read from the
 /// registered repositories.
-struct Dependencies {
+pub(crate) struct Dependencies {
     available: AvailableVersions,
     /// Each available version's manifest.
     manifests: BTreeMap<(UnitIdentity, Version), Manifest>,
@@ -1093,8 +1277,30 @@ pub enum BuildProblem {
         path: RelativePath,
         /// The amenders, by identity.
         amenders: Vec<UnitIdentity>,
+        /// The amenders whose copy was taken from another version of the
+        /// provider than the one resolved, with that version.
+        crossed: Vec<(UnitIdentity, Version)>,
         /// Why, or `None` when a rendered side is not UTF-8 text.
         failure: Option<super::merge::MergeFailure>,
+    },
+    /// An amendment taken from another version of its provider than the one
+    /// resolved cannot be applied to it.
+    CrossVersion {
+        /// The provider.
+        unit: UnitIdentity,
+        /// The amended path in its `src/`.
+        path: RelativePath,
+        /// The amender.
+        amender: UnitIdentity,
+        /// The amender's published version, when it is not the unit being
+        /// built.
+        published: Option<Version>,
+        /// The version the copy was taken from.
+        base: Version,
+        /// The version the provider resolved to.
+        resolved: Version,
+        /// Why it cannot be applied.
+        reason: CrossVersionReason,
     },
     /// A template cannot be rendered.
     Template {
@@ -1167,6 +1373,7 @@ impl fmt::Display for BuildProblem {
                 version,
                 path,
                 amenders,
+                crossed,
                 failure,
             } => {
                 let amenders: Vec<String> = amenders.iter().map(ToString::to_string).collect();
@@ -1182,6 +1389,64 @@ impl fmt::Display for BuildProblem {
                 match failure {
                     Some(failure) => failure.fmt(f),
                     None => f.write_str("a rendered side is not UTF-8 text"),
+                }?;
+                for (amender, base) in crossed {
+                    write!(
+                        f,
+                        "\n  the amendment of {amender} was taken from {unit} {base}, and is \
+                         applied to the version resolved"
+                    )?;
+                }
+                Ok(())
+            }
+            Self::CrossVersion {
+                unit,
+                path,
+                amender,
+                published,
+                base,
+                resolved,
+                reason,
+            } => {
+                let amender = match published {
+                    Some(version) => format!("{amender} {version}"),
+                    None => amender.to_string(),
+                };
+                write!(
+                    f,
+                    "the amendment of src/{path} by {amender} was taken from {unit} {base}, and \
+                     cannot be applied to {unit} {resolved}: "
+                )?;
+                match reason {
+                    CrossVersionReason::BaseUnavailable => write!(
+                        f,
+                        "the file as it was in {unit} {base} cannot be read from the registry"
+                    ),
+                    CrossVersionReason::NoMerge => f.write_str(
+                        "the file differs between the two versions, and its format has no merge \
+                         (it is applied across versions only to a file that is unchanged), or a \
+                         copy or version of it is not UTF-8 text",
+                    ),
+                    CrossVersionReason::Parameter {
+                        name,
+                        base: then,
+                        resolved: now,
+                    } => {
+                        let kind = |kind: &Option<ValueKind>| {
+                            kind.as_ref().map_or_else(
+                                || "not declared".to_owned(),
+                                |kind| format!("declared as {kind}"),
+                            )
+                        };
+                        write!(
+                            f,
+                            "it names parameter `{name}`, which is {} in {unit} {base} and {} in \
+                             {unit} {resolved}, so the amendment's contribution cannot be \
+                             told from the provider's own change",
+                            kind(then),
+                            kind(now)
+                        )
+                    }
                 }
             }
             Self::Template {
@@ -1217,6 +1482,25 @@ impl fmt::Display for BuildProblem {
 }
 
 impl std::error::Error for BuildProblem {}
+
+/// Why an amendment cannot be applied to another version of its provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CrossVersionReason {
+    /// The provider's file as it was in the base version cannot be read.
+    BaseUnavailable,
+    /// The file differs and has no merge, or is not text.
+    NoMerge,
+    /// A parameter a template names is not declared at the resolved
+    /// version, or is declared as another kind of value.
+    Parameter {
+        /// The parameter.
+        name: ParameterName,
+        /// Its kind at the base version, when declared.
+        base: Option<ValueKind>,
+        /// Its kind at the resolved version, when declared.
+        resolved: Option<ValueKind>,
+    },
+}
 
 /// Why a template cannot be rendered.
 #[derive(Debug)]

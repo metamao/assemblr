@@ -141,8 +141,6 @@ Open:
   silently (see
   [amendments-and-composition.md](amendments-and-composition.md#evidence-non-normative)).
   **OC-5.**
-- The contexts used when an amendment is applied to a provider version other
-  than its base. **OC-52.**
 
 ## Dependency options
 

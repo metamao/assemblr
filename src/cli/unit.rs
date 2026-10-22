@@ -4,16 +4,16 @@
 //! The result goes to stdout. Diagnostics, and changes to the lockfile, go to
 //! stderr.
 
-use super::advice::{Audience, composition_advice, distinct, merge_advice};
+use super::advice::{Audience, composition_advice, cross_version_advice, distinct, merge_advice};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use assemblr::adapters::{
     AmendFailure, AmendProblem, AmendState, BuildFailure, BuildProblem, Built, CheckFailure,
-    CheckProblem, FileOutcome, GitOutcome, IndexOutcome, InitFailure, Initialized, LockfileOutcome,
-    ManifestFileError, PublishFailure, PublishProblem, PublishState, Published, RecoveryError,
-    Registry, TagProblem, UpdateFailure, UpdateProblem, UpdateState, Updated, amend_unit,
-    build_unit, check_unit, init_unit, publish_unit, update_unit,
+    CheckProblem, CrossVersionReason, FileOutcome, GitOutcome, IndexOutcome, InitFailure,
+    Initialized, LockfileOutcome, ManifestFileError, PublishFailure, PublishProblem, PublishState,
+    Published, RecoveryError, Registry, TagProblem, UpdateFailure, UpdateProblem, UpdateState,
+    Updated, amend_unit, build_unit, check_unit, init_unit, publish_unit, update_unit,
 };
 use assemblr::domain::{
     ContributionError, Excluded, IntegrityChange, LockChange, LockError, RegistryError,
@@ -367,6 +367,18 @@ fn update(args: &UpdateArgs) -> ExitCode {
                     " Carried over, in manifest.jsonc: {}.",
                     carried.join(", ")
                 ));
+                let rebased: Vec<String> = updated
+                    .carried()
+                    .iter()
+                    .filter(|(_, carried)| carried.rebased())
+                    .map(|(path, _)| format!("amendments/{path}"))
+                    .collect();
+                if !rebased.is_empty() {
+                    result.push_str(&format!(
+                        " Rewritten to follow the provider's changes: {}.",
+                        rebased.join(", ")
+                    ));
+                }
             }
             println!("{result}");
             ExitCode::SUCCESS
@@ -388,7 +400,11 @@ fn report_recovered(updated: &Updated) {
         (false, true) => "assemblr-lock.json was replaced",
         _ => "both files were already in place",
     };
-    eprintln!("note: completed an update that was interrupted earlier: {replaced}");
+    let copies = match recovered.copies() {
+        0 => String::new(),
+        count => format!("; {count} copy file(s) under amendments/ were replaced"),
+    };
+    eprintln!("note: completed an update that was interrupted earlier: {replaced}{copies}");
 }
 
 /// What remains after a failed update, and what the author can do.
@@ -400,6 +416,7 @@ fn update_hint(failure: &UpdateFailure, root: &Path) -> Option<String> {
                     "nothing was changed; fix the problem and run the command again".to_owned()
                 }
                 UpdateState::Interrupted {
+                    copies_replaced,
                     manifest_replaced,
                     lockfile_replaced,
                 } => {
@@ -409,8 +426,8 @@ fn update_hint(failure: &UpdateFailure, root: &Path) -> Option<String> {
                         _ => "neither manifest.jsonc nor assemblr-lock.json was replaced",
                     };
                     format!(
-                        "{replaced}; the update is recorded, and running `assemblr unit update` \
-                         again completes it"
+                        "{replaced}; {copies_replaced} amendment copy file(s) were replaced; the \
+                         update is recorded, and running `assemblr unit update` again completes it"
                     )
                 }
             });
@@ -449,14 +466,14 @@ fn update_hint(failure: &UpdateFailure, root: &Path) -> Option<String> {
         UpdateProblem::Build(problem) => advice(problem, root),
         UpdateProblem::Resolution(error) => advice(&BuildProblem::Resolution(error.clone()), root),
         UpdateProblem::Lock(error) => advice(&BuildProblem::Lock(error.clone()), root),
-        UpdateProblem::PublishedAmender(_) => Some(
-            "update the amender together with its provider, to a version that amends the \
-             provider at the selected version, or leave both as they are"
+        UpdateProblem::Reconcile(_) => Some(
+            "keep the locked version, or resolve what is reported: remove the amendment's \
+             declaration and its copy, update, and amend the file again at the new version"
                 .to_owned(),
         ),
-        UpdateProblem::Reconcile(_) => Some(
-            "keep the locked version, or narrow the declared range to the versions whose file \
-             is unchanged; reconciling a changed base is not supported yet"
+        UpdateProblem::RebasedNotJson { .. } => Some(
+            "remove the amendment's declaration and its copy, update, and amend the file again \
+             at the new version"
                 .to_owned(),
         ),
         _ => None,
@@ -807,8 +824,32 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
                                            content; run `assemblr registry sync` to check the \
                                            registered repositories"
             .to_owned(),
-        BuildProblem::Merge { failure, .. } => merge_advice(failure.as_ref(), Audience::Author),
+        BuildProblem::Merge {
+            unit,
+            failure,
+            crossed,
+            ..
+        } => {
+            let mut advice = merge_advice(failure.as_ref(), Audience::Author);
+            if let Some((amender, base)) = crossed.first() {
+                advice.push_str("; ");
+                advice.push_str(&cross_version_advice(
+                    unit,
+                    amender,
+                    base,
+                    &CrossVersionReason::NoMerge,
+                ));
+            }
+            advice
+        }
         BuildProblem::Composition(error) => composition_advice(error, Audience::Author)?,
+        BuildProblem::CrossVersion {
+            unit,
+            amender,
+            base,
+            reason,
+            ..
+        } => cross_version_advice(unit, amender, base, reason),
         BuildProblem::Resolution(ResolutionError::Unavailable { .. }) => {
             "run `assemblr registry sync` to index newly published versions".to_owned()
         }

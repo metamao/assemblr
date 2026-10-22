@@ -573,9 +573,14 @@ fn hint_of(err: &str) -> &str {
 }
 
 #[test]
-fn a_base_mismatch_is_not_sent_to_options_but_to_the_versions_that_can_meet() {
+fn a_collision_across_versions_is_not_sent_to_options_but_to_the_version_that_can_meet() {
     let fixture = Fixture::new("hint-base");
     let (node, _web) = registry(&fixture);
+    // 1.1.0 sets the key the amender sets, to another value.
+    node.write(
+        "src/config/app.json.assemblr.tmpl",
+        "{\n  \"port\": {{ port }},\n  \"shell\": false\n}\n",
+    );
     publish_node(&fixture, &node, "1.1.0", "node 1.1\n", "#!/bin/sh\n");
     // An amender that accepts any 1.x but is based on 1.0.0.
     let shell = fixture.repo("shell");
@@ -606,12 +611,11 @@ fn a_base_mismatch_is_not_sent_to_options_but_to_the_versions_that_can_meet() {
     let project = fixture.project("shop", &[("@acme/shell", "^1")], "");
     let err = stderr(&fails(fixture.compose(&project)));
     assert!(
-        err.contains("an amendment is applied only to its base version"),
+        err.contains("the amendment of @acme/shell was taken from @acme/node 1.0.0"),
         "{err}"
     );
     let hint = hint_of(&err);
     assert!(hint.contains("@acme/node@=1.0.0"), "{hint}");
-    assert!(hint.contains("based on 1.1.0"), "{hint}");
     assert!(!hint.contains("options"), "{hint}");
     assert_eq!(tree(&project).len(), 1);
 }

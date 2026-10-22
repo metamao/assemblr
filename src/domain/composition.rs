@@ -43,15 +43,20 @@
 //! (see `docs/domain/amendments-and-composition.md`). The copy takes the
 //! place of the provider's file, at the provider's delivered path and with
 //! the provider's executable bit, and it is a template exactly when the
-//! provider's file is. The provider must resolve to the declared base: that
-//! is the one case in which the result is simply the copy, and the only one
-//! supported so far. A declaration whose copy is missing, a copy that is not
-//! declared, and a copy of a file the provider does not have are errors.
-//! One file of one provider may be amended by one member only: when several
-//! members declare the same provider file, none is applied, the file stays
-//! the provider's, and the members are reported together, since combining
-//! contributions to one file is not supported yet (OC-12). Whether a base
-//! is the content the registry records is verified by the build, not here.
+//! provider's file is. A member's copy is taken from the provider version
+//! its declaration names; when the provider resolves to another, the
+//! composer applies the copy's changes to the file at the resolved version
+//! ([`Amendment::base`] says which version the copy was taken from), except
+//! for the unit being built, whose declared base must be the version it is
+//! locked to. A declaration whose copy is missing, a copy that is not
+//! declared, and a copy of a file the provider does not have at the version
+//! resolved are errors. Several members may amend one file of one provider
+//! when the composer can combine their copies (JSON and JSONC by value, other
+//! text by line): their copies are carried with their bases, and the
+//! combining is the composer's business. When it cannot (a structured format
+//! without a merge, or content that is not text), none is applied and the
+//! members are reported together. Whether a base is the content the registry
+//! records is verified by the build, not here.
 //!
 //! Every problem is reported, in the order [`compose`] documents.
 
@@ -230,7 +235,33 @@ pub struct ComposedFile<'a> {
     template: bool,
     /// The copies that amend the file, by amender, in requirer order: the
     /// unit being built first, then by identity.
-    amendments: Vec<(&'a UnitIdentity, &'a UnitFile)>,
+    amendments: Vec<Amendment<'a>>,
+}
+
+/// One amender's copy of a provider's file, with the version the copy was
+/// taken from. The provider may have resolved to another version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Amendment<'a> {
+    amender: &'a UnitIdentity,
+    copy: &'a UnitFile,
+    base: &'a Version,
+}
+
+impl<'a> Amendment<'a> {
+    /// The unit that amends the file.
+    pub fn amender(&self) -> &'a UnitIdentity {
+        self.amender
+    }
+
+    /// The amender's copy.
+    pub fn copy(&self) -> &'a UnitFile {
+        self.copy
+    }
+
+    /// The provider's version the copy was taken from: its exact base.
+    pub fn base(&self) -> &'a Version {
+        self.base
+    }
 }
 
 impl<'a> ComposedFile<'a> {
@@ -269,7 +300,7 @@ impl<'a> ComposedFile<'a> {
     /// merge, on rendered content, by the composer. A copy of a template is
     /// rendered with its amender's values as `own`, in addition to the
     /// provider's.
-    pub fn amendments(&self) -> &[(&'a UnitIdentity, &'a UnitFile)] {
+    pub fn amendments(&self) -> &[Amendment<'a>] {
         &self.amendments
     }
 }
@@ -434,8 +465,10 @@ pub enum CompositionError {
         /// The amenders, ordered: the root first, then by identity.
         amenders: Vec<Requirer>,
     },
-    /// An amendment's declared base is not the version its provider
-    /// resolved to, so the copy cannot be applied.
+    /// The unit being built declares an amendment based on a version other
+    /// than the one its provider resolved to, which the lock state rules
+    /// out for a unit's own amendments. A published amender's base may
+    /// differ from the version resolved, and is applied to it.
     AmendmentBase {
         /// The amending member.
         amender: Requirer,
@@ -618,8 +651,7 @@ impl fmt::Display for CompositionError {
                 Requirer::Unit(..) => write!(
                     f,
                     "{amender} amends src/{path} of {unit} based on {unit} {base}, but {unit} \
-                     resolved to {resolved}; an amendment is applied only to its base version, \
-                     and applying it to another version is not supported yet"
+                     resolved to {resolved}"
                 ),
             },
             Self::AmendmentNotProvided {
@@ -1017,8 +1049,10 @@ fn responsible(
 
 /// The amendments that apply: for each provider's file, the amending units
 /// and their copies, in requirer order.
-type Applied<'a> =
-    BTreeMap<(&'a UnitIdentity, &'a RelativePath), Vec<(Requirer, &'a UnitIdentity, &'a UnitFile)>>;
+type Applied<'a> = BTreeMap<
+    (&'a UnitIdentity, &'a RelativePath),
+    Vec<(Requirer, &'a UnitIdentity, &'a UnitFile, &'a Version)>,
+>;
 
 /// The amendments the members declare that can be applied, and every
 /// problem with the others, in the documented order.
@@ -1123,7 +1157,11 @@ fn amendment<'a>(
     // which the graph resolved.
     let provider = members.get(declaration.unit())?;
     let resolved = provider.manifest.version();
-    if resolved != declaration.base() {
+    // The unit being built amends the version it is locked to, by
+    // construction of the lock state; a published amender's base may differ
+    // from the version a composition resolves, and its changes are applied
+    // to the resolved file (OC-52, OC-53).
+    if resolved != declaration.base() && member.requirer == Requirer::Root {
         return Some(CompositionError::AmendmentBase {
             amender: member.requirer.clone(),
             path: path.clone(),
@@ -1158,6 +1196,7 @@ fn amendment<'a>(
         member.requirer.clone(),
         member.identity,
         copy,
+        declaration.base(),
     ));
     None
 }
@@ -1197,7 +1236,11 @@ fn compose_files<'a>(
                 .map(|copies| {
                     copies
                         .iter()
-                        .map(|(_, amender, copy)| (*amender, *copy))
+                        .map(|(_, amender, copy, base)| Amendment {
+                            amender,
+                            copy,
+                            base,
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -1505,6 +1548,8 @@ mod tests {
         templates: Vec<(String, String)>,
         /// The amended files: delivered path and amending unit.
         amended: Vec<(String, String)>,
+        /// The base version of each amendment: delivered path and version.
+        bases: Vec<(String, String)>,
     }
 
     type RootValue = (&'static str, &'static str, ParameterValue);
@@ -1592,7 +1637,7 @@ mod tests {
                     // One copy takes the file's place, as the build
                     // delivers it; several are the merge's business.
                     let contents = match composed.amendments() {
-                        [(_, copy)] => copy.contents(),
+                        [only] => only.copy().contents(),
                         _ => composed.contents(),
                     };
                     (
@@ -1616,7 +1661,17 @@ mod tests {
                     composed
                         .amendments()
                         .iter()
-                        .map(|(amender, _)| (file.to_string(), amender.to_string()))
+                        .map(|amendment| (file.to_string(), amendment.amender().to_string()))
+                })
+                .collect(),
+            bases: composition
+                .files()
+                .iter()
+                .flat_map(|(file, composed)| {
+                    composed
+                        .amendments()
+                        .iter()
+                        .map(|amendment| (file.to_string(), amendment.base().to_string()))
                 })
                 .collect(),
         })
@@ -2636,9 +2691,10 @@ mod tests {
     }
 
     #[test]
-    fn a_published_amendment_of_another_version_than_its_base_is_refused() {
+    fn a_published_amendment_of_another_version_than_its_base_is_applied_to_the_resolved_one() {
         // The root requires 1.1.0, so the amender's base 1.0.0 is not the
-        // resolved version.
+        // resolved version: the amendment is carried with its base, for the
+        // composer to apply to the resolved file.
         let amender = Spec::new("@metamao/amender", "1.0.0")
             .depends("@metamao/node", "^1")
             .amends("bin/run", "@metamao/node", "1.0.0")
@@ -2649,25 +2705,31 @@ mod tests {
             .depends("@metamao/node", "^1.1");
         let mut published = provider();
         published.push(amender);
-        let errors = run(&For::Build(built), &published, &[]).unwrap_err();
+        let composed = run(&For::Build(built), &published, &[]).unwrap();
         assert_eq!(
-            errors,
-            [CompositionError::AmendmentBase {
-                amender: Requirer::Unit(identity("@metamao/amender"), version("1.0.0")),
-                path: path("bin/run"),
-                unit: identity("@metamao/node"),
-                base: version("1.0.0"),
-                resolved: version("1.1.0"),
-            }]
+            composed.amended,
+            [("bin/run".to_owned(), "@metamao/amender".to_owned())]
         );
-        let message = errors[0].to_string();
-        for part in [
-            "@metamao/amender 1.0.0 amends src/bin/run of @metamao/node based on @metamao/node 1.0.0",
-            "resolved to 1.1.0",
-            "not supported yet",
-        ] {
-            assert!(message.contains(part), "{message}");
-        }
+        assert_eq!(composed.bases, [("bin/run".to_owned(), "1.0.0".to_owned())]);
+    }
+
+    #[test]
+    fn the_unit_being_built_must_amend_the_version_it_resolves() {
+        let built = Spec::new("@metamao/app", "0.1.0")
+            .depends("@metamao/node", "^1.1")
+            .amends("bin/run", "@metamao/node", "1.0.0")
+            .copy("bin/run", "#!/bin/sh\necho amended");
+        let errors = run(&For::Build(built), &provider(), &[]).unwrap_err();
+        assert!(
+            matches!(
+                errors.as_slice(),
+                [CompositionError::AmendmentBase {
+                    amender: Requirer::Root,
+                    ..
+                }]
+            ),
+            "{errors:?}"
+        );
     }
 
     #[test]

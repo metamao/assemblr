@@ -35,14 +35,14 @@ use super::amend::MANIFEST_NEW;
 use super::exclusive::{BuildLock, BuildLockError};
 use super::output::LOCK_STAGING;
 use super::{BuildProblem, Dependencies, MANIFEST, ManifestFileError, read_working_manifest_text};
+use crate::adapters::git::UnitDirectory;
 use crate::adapters::git::{GitError, GitRepository};
 use crate::adapters::lockfile::{self, LOCKFILE, LockfileError, serialize};
 use crate::adapters::manifest::{EditError, read_manifest, rebase_amendments};
 use crate::adapters::registry::{Registry, StorageError};
 use crate::domain::{
-    FileTree, LockChange, LockError, PublishedAmenderError, ReconcileError, RelativePath,
-    ResolutionError, UnitIdentity, Version, published_amenders_at_base, reconcile_amendments,
-    resolve, update_lock,
+    FileTree, LockChange, LockError, MergeFormat, ReconcileError, RelativePath, ResolutionError,
+    UnitIdentity, Version, delivered_path, reconcile_amendments, resolve, update_lock,
 };
 
 /// The journal of an update that has started writing, in the Git directory.
@@ -69,6 +69,8 @@ pub fn update_unit(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
     Journal,
+    StageCopy,
+    ReplaceCopy,
     StageManifest,
     ReplaceManifest,
     StageLock,
@@ -185,11 +187,6 @@ fn update_with(
     let (new_lock, changes) = update_lock(&previous, graph, &index).map_err(|errors| {
         UpdateFailure::Rejected(errors.into_iter().map(UpdateProblem::Lock).collect())
     })?;
-    problems.extend(
-        published_amenders_at_base(graph, &dependencies.manifests)
-            .into_iter()
-            .map(UpdateProblem::PublishedAmender),
-    );
 
     // The provider's files at the old base and at the new version, for
     // each amendment whose provider moves.
@@ -218,26 +215,67 @@ fn update_with(
             }
         }
     }
-    let carried = match reconcile_amendments(&manifest, &previous, graph, &files) {
-        Ok(carried) => carried,
+    // The unit's own copies, which a rebase reads and rewrites.
+    let copies = if manifest.amendments().is_empty() {
+        FileTree::new()
+    } else {
+        match repository.read_working_amendments() {
+            Ok(copies) => copies,
+            Err(error) => {
+                problems.push(UpdateProblem::Copies(error));
+                FileTree::new()
+            }
+        }
+    };
+    let reconciled = match reconcile_amendments(&manifest, &previous, graph, &files, &copies) {
+        Ok(reconciled) => reconciled,
         Err(errors) => {
             problems.extend(errors.into_iter().map(UpdateProblem::Reconcile));
             BTreeMap::new()
         }
     };
+    // A rebased JSON file must still be JSON: a line merge of structured
+    // text could otherwise leave a key twice or a comma missing.
+    for (path, rebased) in &reconciled {
+        let Some(copy) = &rebased.copy else {
+            continue;
+        };
+        let delivered = delivered_path(path).ok().flatten();
+        if MergeFormat::of_path(delivered.as_ref().unwrap_or(path)) == MergeFormat::Json
+            && delivered.is_none()
+        {
+            let parsed = std::str::from_utf8(copy)
+                .map_err(|_| "it is not UTF-8".to_owned())
+                .and_then(|text| {
+                    crate::adapters::jsonc_edit::parse_value(text)
+                        .map_err(|error| error.to_string())
+                });
+            if let Err(detail) = parsed {
+                problems.push(UpdateProblem::RebasedNotJson {
+                    path: path.clone(),
+                    detail,
+                });
+            }
+        }
+    }
     if !problems.is_empty() {
         return Err(UpdateFailure::Rejected(problems));
     }
-    let carried: BTreeMap<RelativePath, Carried> = carried
+    let rebased_copies: BTreeMap<RelativePath, Vec<u8>> = reconciled
+        .iter()
+        .filter_map(|(path, rebased)| Some((path.clone(), rebased.copy.clone()?)))
+        .collect();
+    let carried: BTreeMap<RelativePath, Carried> = reconciled
         .into_iter()
-        .filter_map(|(path, to)| {
+        .filter_map(|(path, rebased)| {
             let declaration = manifest.amendments().get(&path)?;
             Some((
                 path,
                 Carried {
                     unit: declaration.unit().clone(),
                     from: declaration.base().clone(),
-                    to,
+                    to: rebased.base,
+                    rebased: rebased.copy.is_some(),
                 },
             ))
         })
@@ -275,8 +313,18 @@ fn update_with(
             state: UpdateState::Unchanged,
         })
     })?;
-    for name in [MANIFEST_NEW, LOCK_STAGING] {
-        let path = root.join(name);
+    let mut copy_plans = Vec::new();
+    for (path, after) in rebased_copies {
+        let before = copies
+            .get(&path)
+            .map(|file| file.contents().to_vec())
+            .unwrap_or_default();
+        copy_plans.push((path, Planned { before, after }));
+    }
+    let staging_names = [MANIFEST_NEW.to_owned(), LOCK_STAGING.to_owned()];
+    let mut staged: Vec<PathBuf> = staging_names.iter().map(|name| root.join(name)).collect();
+    staged.extend(copy_plans.iter().map(|(path, _)| copy_staging(root, path)));
+    for path in staged {
         if fs::symlink_metadata(&path).is_ok() {
             problems.push(UpdateProblem::StagingOccupied { path });
         }
@@ -285,6 +333,7 @@ fn update_with(
         return Err(UpdateFailure::Rejected(problems));
     }
     let journal = Journal {
+        copies: copy_plans,
         manifest: edited.map(|after| Planned {
             before: text.into_bytes(),
             after: after.into_bytes(),
@@ -325,9 +374,33 @@ fn commit(
         });
     }
     let mut state = UpdateState::Interrupted {
+        copies_replaced: 0,
         manifest_replaced: false,
         lockfile_replaced: false,
     };
+    // The copies go first, then the manifest, then the lockfile.
+    for (index, (path, planned)) in journal.copies.iter().enumerate() {
+        let staged = copy_staging(root, path);
+        let target = copy_target(root, path);
+        if let Err(error) = fault(Step::StageCopy)
+            .and_then(|()| write_synced(&staged, &planned.after, true))
+            .and_then(|()| fault(Step::ReplaceCopy))
+            .and_then(|()| fs::rename(&staged, &target))
+        {
+            let _ = fs::remove_file(&staged);
+            return Err(WriteError {
+                operation: "replace",
+                path: target,
+                error,
+                state,
+            });
+        }
+        state = UpdateState::Interrupted {
+            copies_replaced: index + 1,
+            manifest_replaced: false,
+            lockfile_replaced: false,
+        };
+    }
     if let Some(planned) = &journal.manifest {
         let staged = root.join(MANIFEST_NEW);
         if let Err(error) = fault(Step::StageManifest)
@@ -344,6 +417,7 @@ fn commit(
             });
         }
         state = UpdateState::Interrupted {
+            copies_replaced: journal.copies.len(),
             manifest_replaced: true,
             lockfile_replaced: false,
         };
@@ -369,12 +443,31 @@ fn commit(
             path: journal_path,
             error,
             state: UpdateState::Interrupted {
+                copies_replaced: journal.copies.len(),
                 manifest_replaced: journal.manifest.is_some(),
                 lockfile_replaced: true,
             },
         });
     }
     Ok(())
+}
+
+/// Where the copy at `amendments/<path>` is staged before it replaces the
+/// file: beside it, under a reserved name.
+fn copy_staging(root: &Path, path: &RelativePath) -> PathBuf {
+    let target = copy_target(root, path);
+    let mut name = target
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    name.push(".assemblr-update-new");
+    target.with_file_name(name)
+}
+
+/// The copy at `amendments/<path>`.
+fn copy_target(root: &Path, path: &RelativePath) -> PathBuf {
+    root.join(UnitDirectory::Amendments.as_str())
+        .join(path.as_str())
 }
 
 /// Writes `bytes` to `path`, flushed to disk. With `new`, the file must not
@@ -451,30 +544,59 @@ fn recover(root: &Path, git_dir: &Path) -> Result<Option<Recovered>, RecoveryErr
             FileState::Modified
         })
     };
+    // The update replaces the copies, then the manifest, then the lockfile,
+    // so the files it can have left are some that hold the planned content
+    // followed by some that still hold the old. A file whose planned content
+    // is its current content reads as already replaced and is consistent
+    // anywhere.
+    let mut copy_states = Vec::new();
+    for (path, planned) in &journal.copies {
+        copy_states.push((path.clone(), state_of(&copy_target(root, path), planned)?));
+    }
     let manifest = journal
         .manifest
         .as_ref()
         .map(|planned| state_of(&root.join(MANIFEST), planned))
         .transpose()?;
     let lockfile = state_of(&root.join(LOCKFILE), &journal.lockfile)?;
-    // The update replaces the manifest first, so these are the states it
-    // can have left: nothing yet, the manifest only, or both. A lockfile
-    // whose planned content is its current content reads as already
-    // replaced, and is consistent with either state of the manifest.
-    let lock_unchanged = journal.lockfile.before == journal.lockfile.after;
-    let (replace_manifest, replace_lock) = match (manifest, lockfile) {
-        (None | Some(FileState::Before), FileState::Before) => (manifest.is_some(), true),
-        (Some(FileState::After), FileState::Before) => (false, true),
-        (Some(FileState::Before), FileState::After) if lock_unchanged => (true, false),
-        (None | Some(FileState::After), FileState::After) => (false, false),
-        (manifest, lockfile) => {
-            return Err(RecoveryError::Inconsistent {
-                journal: journal_path,
-                manifest,
-                lockfile,
-            });
+    let unchanged: Vec<bool> = journal
+        .copies
+        .iter()
+        .map(|(_, planned)| planned)
+        .chain(journal.manifest.as_ref())
+        .chain(std::iter::once(&journal.lockfile))
+        .map(|planned| planned.before == planned.after)
+        .collect();
+    let states: Vec<FileState> = copy_states
+        .iter()
+        .map(|(_, state)| *state)
+        .chain(manifest)
+        .chain(std::iter::once(lockfile))
+        .collect();
+    let mut seen_before = false;
+    let mut consistent = true;
+    for (state, unchanged) in states.iter().zip(&unchanged) {
+        match state {
+            FileState::Modified => consistent = false,
+            FileState::Before => seen_before = true,
+            FileState::After if seen_before && !unchanged => consistent = false,
+            FileState::After => {}
         }
-    };
+    }
+    if !consistent {
+        return Err(RecoveryError::Inconsistent {
+            journal: journal_path,
+            copies: copy_states,
+            manifest,
+            lockfile,
+        });
+    }
+    let replace_copies: Vec<bool> = copy_states
+        .iter()
+        .map(|(_, state)| *state == FileState::Before)
+        .collect();
+    let replace_manifest = manifest == Some(FileState::Before);
+    let replace_lock = lockfile == FileState::Before;
     let write = |operation, path: &Path, error| RecoveryError::Write {
         operation,
         path: path.to_owned(),
@@ -499,6 +621,15 @@ fn recover(root: &Path, git_dir: &Path) -> Result<Option<Recovered>, RecoveryErr
         write_synced(staged, bytes, true).map_err(|error| write("write", staged, error))?;
         fs::rename(staged, target).map_err(|error| write("replace", target, error))
     };
+    for ((path, planned), replace_it) in journal.copies.iter().zip(&replace_copies) {
+        if *replace_it {
+            replace(
+                &copy_staging(root, path),
+                &copy_target(root, path),
+                &planned.after,
+            )?;
+        }
+    }
     if replace_manifest {
         if let Some(planned) = &journal.manifest {
             replace(
@@ -516,7 +647,15 @@ fn recover(root: &Path, git_dir: &Path) -> Result<Option<Recovered>, RecoveryErr
         )?;
     }
     sync_directory(root);
-    for staged in [root.join(MANIFEST_NEW), root.join(LOCK_STAGING)] {
+    let leftovers = [root.join(MANIFEST_NEW), root.join(LOCK_STAGING)]
+        .into_iter()
+        .chain(
+            journal
+                .copies
+                .iter()
+                .map(|(path, _)| copy_staging(root, path)),
+        );
+    for staged in leftovers {
         match fs::symlink_metadata(&staged) {
             Ok(metadata) if metadata.is_file() => {
                 fs::remove_file(&staged).map_err(|error| write("delete", &staged, error))?;
@@ -526,6 +665,7 @@ fn recover(root: &Path, git_dir: &Path) -> Result<Option<Recovered>, RecoveryErr
     }
     fs::remove_file(&journal_path).map_err(|error| write("remove", &journal_path, error))?;
     Ok(Some(Recovered {
+        copies: replace_copies.iter().filter(|replaced| **replaced).count(),
         manifest: replace_manifest,
         lockfile: replace_lock,
     }))
@@ -534,6 +674,8 @@ fn recover(root: &Path, git_dir: &Path) -> Result<Option<Recovered>, RecoveryErr
 /// What an update writes: both files' contents before and after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Journal {
+    /// The copies under `amendments/` the update rewrites, by path.
+    copies: Vec<(RelativePath, Planned)>,
     /// The manifest, when the update changes it.
     manifest: Option<Planned>,
     lockfile: Planned,
@@ -559,11 +701,21 @@ impl Journal {
             Some(manifest) => planned(manifest)?,
             None => Value::Null,
         };
-        let mut bytes = serde_json::to_vec_pretty(&json!({
+        let mut copies = Map::new();
+        for (path, copy) in &self.copies {
+            copies.insert(path.to_string(), planned(copy)?);
+        }
+        let mut document = json!({
             "format": JOURNAL_FORMAT,
             "manifest": manifest,
             "lockfile": planned(&self.lockfile)?,
-        }))?;
+        });
+        // Absent when there are none, so that the journal of an update
+        // that rewrites no copy is the journal of earlier versions.
+        if !copies.is_empty() {
+            document["copies"] = Value::Object(copies);
+        }
+        let mut bytes = serde_json::to_vec_pretty(&document)?;
         bytes.push(b'\n');
         Ok(bytes)
     }
@@ -583,7 +735,11 @@ impl Journal {
             ));
         }
         let value: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-        let root = object(&value, "the journal", &["format", "manifest", "lockfile"])?;
+        let root = object(
+            &value,
+            "the journal",
+            &["format", "manifest", "lockfile", "copies"],
+        )?;
         match root.get("format").and_then(Value::as_u64) {
             Some(JOURNAL_FORMAT) => {}
             Some(other) => {
@@ -615,7 +771,23 @@ impl Journal {
             .get("lockfile")
             .ok_or_else(|| "it has no `lockfile`".to_owned())
             .and_then(|value| planned(value, "`lockfile`"))?;
-        Ok(Self { manifest, lockfile })
+        let mut copies = Vec::new();
+        if let Some(value) = root.get("copies") {
+            let members = value
+                .as_object()
+                .ok_or_else(|| "`copies` is not a JSON object".to_owned())?;
+            for (name, value) in members {
+                let path = RelativePath::parse(name)
+                    .map_err(|error| format!("`copies` names {name:?}: {error}"))?;
+                copies.push((path, planned(value, &format!("`copies` entry {name:?}"))?));
+            }
+            copies.sort_by(|left, right| left.0.cmp(&right.0));
+        }
+        Ok(Self {
+            copies,
+            manifest,
+            lockfile,
+        })
     }
 }
 
@@ -673,6 +845,7 @@ pub struct Carried {
     unit: UnitIdentity,
     from: Version,
     to: Version,
+    rebased: bool,
 }
 
 impl Carried {
@@ -690,16 +863,28 @@ impl Carried {
     pub fn to(&self) -> &Version {
         &self.to
     }
+
+    /// Whether the copy was rewritten to follow the provider's changes, and
+    /// not only carried over unchanged.
+    pub fn rebased(&self) -> bool {
+        self.rebased
+    }
 }
 
 /// What completing an interrupted update replaced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Recovered {
+    copies: usize,
     manifest: bool,
     lockfile: bool,
 }
 
 impl Recovered {
+    /// How many copies under `amendments/` were replaced now.
+    pub fn copies(&self) -> usize {
+        self.copies
+    }
+
     /// Whether `manifest.jsonc` was replaced now.
     pub fn manifest(&self) -> bool {
         self.manifest
@@ -780,6 +965,9 @@ pub enum UpdateState {
     Unchanged,
     /// The update is recorded, and the next `unit update` completes it.
     Interrupted {
+        /// How many copies under `amendments/` already hold the updated
+        /// content, in path order.
+        copies_replaced: usize,
         /// Whether `manifest.jsonc` already holds the updated content.
         manifest_replaced: bool,
         /// Whether `assemblr-lock.json` already holds the updated content.
@@ -813,13 +1001,20 @@ pub enum UpdateProblem {
     Resolution(ResolutionError),
     /// A kept version contradicts the lockfile.
     Lock(LockError),
-    /// A published amendment's provider would not resolve to its base.
-    PublishedAmender(PublishedAmenderError),
     /// An amendment of the unit cannot be carried to the provider's new
     /// version.
     Reconcile(ReconcileError),
     /// The manifest cannot be edited safely.
     ManifestEdit(EditError),
+    /// The unit's copies under `amendments/` cannot be read.
+    Copies(crate::adapters::git::ReadSrcError),
+    /// A copy rebased onto the provider's new file is not JSON any more.
+    RebasedNotJson {
+        /// The amended path.
+        path: RelativePath,
+        /// Why.
+        detail: String,
+    },
     /// Something exists at a reserved path the update writes to.
     StagingOccupied {
         /// The path.
@@ -847,9 +1042,15 @@ impl fmt::Display for UpdateProblem {
             ),
             Self::Resolution(error) => error.fmt(f),
             Self::Lock(error) => error.fmt(f),
-            Self::PublishedAmender(error) => error.fmt(f),
             Self::Reconcile(error) => error.fmt(f),
             Self::ManifestEdit(error) => error.fmt(f),
+            Self::Copies(error) => write!(f, "the unit's amendments cannot be read: {error}"),
+            Self::RebasedNotJson { path, detail } => write!(
+                f,
+                "amendments/{path} rebased onto the provider's new file is not valid JSON \
+                 ({detail}); the two sets of changes cannot be combined by line, so re-amend \
+                 the file against the new version"
+            ),
             Self::StagingOccupied { path } => write!(
                 f,
                 "{} exists, and an update writes there; move it away first",
@@ -883,6 +1084,8 @@ pub enum RecoveryError {
     Inconsistent {
         /// The journal.
         journal: PathBuf,
+        /// The state of each copy the update planned to replace.
+        copies: Vec<(RelativePath, FileState)>,
         /// The manifest's state, when the update planned to replace it.
         manifest: Option<FileState>,
         /// The lockfile's state.
@@ -936,10 +1139,14 @@ impl fmt::Display for RecoveryError {
             ),
             Self::Inconsistent {
                 journal,
+                copies,
                 manifest,
                 lockfile,
             } => {
                 write!(f, "an update was interrupted, and could not be completed: ")?;
+                for (path, state) in copies {
+                    write!(f, "amendments/{path} is {state}, and ")?;
+                }
                 if let Some(manifest) = manifest {
                     write!(f, "manifest.jsonc is {manifest}, and ")?;
                 }
@@ -1005,6 +1212,7 @@ mod tests {
 
     fn journal(manifest: bool) -> Journal {
         Journal {
+            copies: Vec::new(),
             manifest: manifest.then(|| Planned {
                 before: b"before manifest".to_vec(),
                 after: b"after manifest".to_vec(),
@@ -1099,6 +1307,7 @@ mod tests {
             assert_eq!(
                 commit_failing_at(&root, &git_dir, step),
                 UpdateState::Interrupted {
+                    copies_replaced: 0,
                     manifest_replaced,
                     lockfile_replaced,
                 },
@@ -1233,5 +1442,122 @@ mod tests {
             contents(&root),
             ("before manifest".to_owned(), "before lock".to_owned())
         );
+    }
+
+    fn journal_with_copy() -> Journal {
+        Journal {
+            copies: vec![(
+                crate::domain::RelativePath::parse("NOTES.md").unwrap(),
+                Planned {
+                    before: b"before copy".to_vec(),
+                    after: b"after copy".to_vec(),
+                },
+            )],
+            ..journal(true)
+        }
+    }
+
+    fn scratch_with_copy(test: &str) -> (PathBuf, PathBuf) {
+        let (root, git_dir) = scratch(test);
+        fs::create_dir_all(root.join("amendments")).unwrap();
+        fs::write(root.join("amendments/NOTES.md"), "before copy").unwrap();
+        (root, git_dir)
+    }
+
+    #[test]
+    fn a_failure_at_each_step_of_an_update_that_rewrites_a_copy_is_completed_by_recovery() {
+        for failing in [
+            Step::Journal,
+            Step::StageCopy,
+            Step::ReplaceCopy,
+            Step::StageManifest,
+            Step::ReplaceManifest,
+            Step::StageLock,
+            Step::ReplaceLock,
+            Step::RemoveJournal,
+        ] {
+            let (root, git_dir) = scratch_with_copy(&format!("copy-{failing:?}"));
+            let result = commit(&root, &git_dir, &journal_with_copy(), &mut |step| {
+                if step == failing {
+                    Err(io::Error::other("injected"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(result.is_err(), "{failing:?}");
+            if failing == Step::Journal {
+                // Nothing was recorded or written.
+                assert!(!git_dir.join(JOURNAL).exists());
+                assert_eq!(
+                    fs::read_to_string(root.join("amendments/NOTES.md")).unwrap(),
+                    "before copy"
+                );
+                continue;
+            }
+            assert!(git_dir.join(JOURNAL).exists(), "{failing:?}");
+            let recovered = recover(&root, &git_dir).unwrap();
+            assert!(recovered.is_some(), "{failing:?}");
+            assert!(!git_dir.join(JOURNAL).exists(), "{failing:?}");
+            assert_eq!(
+                fs::read_to_string(root.join("amendments/NOTES.md")).unwrap(),
+                "after copy",
+                "{failing:?}"
+            );
+            assert_eq!(
+                contents(&root),
+                ("after manifest".to_owned(), "after lock".to_owned()),
+                "{failing:?}"
+            );
+            // Nothing staged is left behind.
+            let leftovers: Vec<_> = fs::read_dir(root.join("amendments"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(leftovers.len(), 1, "{failing:?}: {leftovers:?}");
+        }
+    }
+
+    #[test]
+    fn a_copy_edited_since_the_update_started_stops_its_recovery() {
+        let (root, git_dir) = scratch_with_copy("copy-edited");
+        let result = commit(&root, &git_dir, &journal_with_copy(), &mut |step| {
+            if step == Step::StageManifest {
+                Err(io::Error::other("injected"))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        // The copy was replaced; then the author edited it.
+        fs::write(root.join("amendments/NOTES.md"), "edited meanwhile").unwrap();
+        let error = recover(&root, &git_dir).unwrap_err();
+        assert!(
+            matches!(&error, RecoveryError::Inconsistent { copies, .. }
+                if copies[0].1 == FileState::Modified),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("amendments/NOTES.md is neither as before"),
+            "{error}"
+        );
+        assert!(git_dir.join(JOURNAL).exists());
+        assert_eq!(
+            fs::read_to_string(root.join("amendments/NOTES.md")).unwrap(),
+            "edited meanwhile"
+        );
+    }
+
+    #[test]
+    fn the_journal_of_an_update_that_rewrites_no_copy_has_no_copies_member() {
+        let bytes = journal(true).serialize().unwrap();
+        assert!(!String::from_utf8(bytes).unwrap().contains("copies"));
+        let with = journal_with_copy().serialize().unwrap();
+        let dir = std::env::temp_dir().join(format!("assemblr-journal-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.json");
+        fs::write(&path, with).unwrap();
+        assert_eq!(Journal::read(&path).unwrap(), journal_with_copy());
     }
 }

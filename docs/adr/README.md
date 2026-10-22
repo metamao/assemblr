@@ -27,8 +27,8 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0008](0008-unit-build.md) | Unit builds: working-tree reading, the unit lockfile, and publishing `build/` | Accepted |
 | [0009](0009-rendering.md) | Rendering templates with a purpose-built interpolator | Accepted |
 | [0010](0010-unit-amend.md) | `unit amend`: the search, the manifest edit, and recovery; amendments in a build | Accepted, point 8 superseded by 0011 |
-| [0011](0011-published-amendments.md) | Published amendments: reading them, validating them at index time, and composing them at the base | Accepted, points 5 and 6 narrowed by 0015 |
-| [0012](0012-unit-update.md) | `unit update`: resolving with a partial lock, rewriting bases in place, and the update journal | Accepted |
+| [0011](0011-published-amendments.md) | Published amendments: reading them, validating them at index time, and composing them at the base | Accepted, the composition at the base only narrowed by 0023, points 5 and 6 narrowed by 0015 |
+| [0012](0012-unit-update.md) | `unit update`: resolving with a partial lock, rewriting bases in place, and the update journal | Accepted, the refusal of a changed file and of a published amender off its base lifted by 0023 |
 | [0013](0013-unit-check-and-publish.md) | `unit check` and `unit publish`: shared validation, the committed tree, the tag, and one-source indexing | Accepted |
 | [0014](0014-unit-init.md) | `unit init`: repository discovery and initialization, the scaffold's writes, and the embedded manifest schema | Accepted |
 | [0015](0015-value-merge.md) | The value-level merge of several amendments: the domain engine, the JSONC editor, and the projection and round-trip checks | Accepted, point 6 clarified by 0018, the refusal of other formats narrowed by 0021 |
@@ -39,3 +39,4 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0020](0020-pending-resolution.md) | The pending-resolution state: marked files, a journal that waits, and `compose --continue` and `--abort` | Accepted, the whole-file markers of point 3 narrowed to structured files by 0022 |
 | [0021](0021-text-merge.md) | The line-level merge of text: the domain engine, which files it covers, and what it reports | Accepted |
 | [0022](0022-text-reconciliation.md) | Text reconciliation: the line merge onto the project's file, and conflicts marked where they happen | Accepted |
+| [0023](0023-cross-version-amendments.md) | Amendments across provider versions: deriving against the base, applying to the version resolved, and rebasing in `unit update` | Accepted |

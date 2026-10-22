@@ -162,11 +162,24 @@ kept distinct from values owned by the amending unit.
   keeps its template expressions, including `own.*` and content inside
   template conditions that a particular composition disables.
 
+**Across provider versions — decided by the owner (#59).** When the resolved
+version of the provider is not the base, the copy's contribution is derived
+from the **base file** and the copy, both rendered with **one** context: the
+parameter values the composition gives the provider, with `own` as above. The
+contribution is then applied to the provider's file at the resolved version,
+rendered with the same context. Because the base and the copy are rendered
+alike, what is derived is the author's edit, and a difference between the two
+versions of the provider is the provider's own change. A parameter that a
+template names (the base file or the copy) must be declared at the resolved
+version with the same kind of value (string, integer, or boolean) as at the
+base; otherwise the composition fails, naming the amender, the parameter, and
+both versions, because the contribution cannot be told from the provider's
+change. Assemblr does not fall back to a default the base version declared:
+that would be a guess dressed as compatibility. A parameter whose meaning
+changes while its name and kind stay is not detected.
+
 Open:
 
-- The contexts used to render a base, and the file at the resolved version,
-  when the resolved version of the provider is not the base version, for
-  example when their parameters differ. **OC-52.**
 - Whether template constructs beyond references, such as conditional
   content, are ever supported (see
   [parameters-and-options.md](parameters-and-options.md#rendering--approved)).
@@ -249,7 +262,8 @@ composition:
   meaning, a conflict is reported rather than an order invented. **OC-12**
   stays open; see the implementation notes for JSON objects.
 - **Cross-version application** (**OC-52**) and reconciliation of a changed
-  base in `unit update` (**OC-53**) stay deferred and refused.
+  base in `unit update` (**OC-53**) were deferred here and are decided in
+  [the next section](#across-provider-versions--approved).
 - **Stability.** Results are deterministic for the same inputs and engine
   version. Byte-identical formatting across Assemblr releases is not
   promised; semantic compatibility is, and a consequential change to merge
@@ -339,8 +353,7 @@ review recorded in the decision log):
 Open:
 
 - The manifest representation of list identity hints. **OC-4.**
-- Further format adapters, and how an amendment is applied to a provider
-  version other than its base. **OC-10.** The consumer side is decided
+- Further format adapters. **OC-10.** The consumer side is decided
   provisionally, without Git, in
   [reconciliation details](consumer-projects.md#reconciliation-details--approved).
 
@@ -350,30 +363,30 @@ For unit authoring, composition output goes to `build/`, which is rebuilt from
 scratch and needs no reconciliation history (see
 [authoring-workflow.md](authoring-workflow.md#build--approved)).
 
-**Implemented so far.** A unit's build applies the amendments of every unit
-in its composition: its own, whose providers resolve to the declared bases
-by construction of the
-[unit lock state](authoring-workflow.md#unit-lock-state--approved), and
-those that its resolved dependencies publish, direct or transitive, when the
-provider resolves to the declared base. The direct-dependency restriction
-binds the amender to the provider, not the amender to the unit being built.
-A published amender's bases are verified against the composer's registry
-record before composition, as approved above. With the base and the resolved
-version equal, one amender's result is the rendered copy, and no change is
-derived. Several amenders of one JSON or JSONC file are combined by
-[the merge engine](#the-merge-engine--approved), and of a text file by line,
-on the rendered content:
-the provider's file and each copy rendered with the provider's values, the
-copy with its amender's as `own`. The cases that need the open decisions
-above fail explicitly, naming each amender, its version, the provider, the
-base, and the resolved version, and change nothing (standing default D2):
-an amendment whose provider resolves to a version other than its base is
-not applied, and a provider file of any other format that several units
-amend, in any combination of the unit being built and published amenders,
-is not amended by any of them. No re-basing is performed. `unit update`
-carries a unit's own amendment to the provider's new version only when the
-amended source file is unchanged between the two versions, and refuses the
-update otherwise (see
+**Implemented.** A unit's build applies the amendments of every unit in its
+composition: its own, whose providers resolve to the declared bases by
+construction of the
+[unit lock state](authoring-workflow.md#unit-lock-state--approved), and those
+that its resolved dependencies publish, direct or transitive. The
+direct-dependency restriction binds the amender to the provider, not the
+amender to the unit being built. A published amender's bases are verified
+against the composer's registry record before composition, as approved
+above. With the base and the resolved version equal, one amender's result is
+the rendered copy, and no change is derived. Otherwise, or when several
+amenders share a file, the changes are derived against each copy's base and
+combined on the rendered content: by [the merge engine](#the-merge-engine--approved)
+for a JSON or JSONC file, and by line for text, with the provider's file and
+each copy rendered with the provider's values, the copy with its amender's as
+`own`, and applied to the provider's file at the version resolved ([across
+provider versions](#across-provider-versions--approved)). The cases that
+cannot be applied fail explicitly, naming each amender, its version, the
+provider, the base, and the resolved version, and change nothing (standing
+default D2): a collision, a parameter that changed meaning, a path the
+provider no longer has, a provider file in a structured format without an
+adapter or that is not text that changed between the two versions, and such
+a file that several units amend. `unit update` carries a unit's own
+amendment to the provider's new version, rebasing the copy when the file
+changed, and refuses the update, changing nothing, on a collision (see
 [authoring-workflow.md](authoring-workflow.md#update-details--approved)).
 
 Consumer projects reconcile downstream modifications with three inputs: the
@@ -381,6 +394,60 @@ Consumer projects reconcile downstream modifications with three inputs: the
 (the consumer's actual files), and **incoming** (the newly desired
 composition). The merge semantics above apply. See
 [consumer-projects.md](consumer-projects.md#reconciliation--approved).
+
+### Across provider versions — Approved
+
+Decided by the owner on #59 after the reference scenario showed that each
+release of a provider stopped every composition that mentioned its amenders
+until each amender had published again:
+
+- **Where.** A composition, a dependent unit's build or a consumer's, derives
+  each amendment's changes against its verified base and applies them to the
+  provider's file at the version the composition resolved. The resolved
+  version must satisfy the amender's declared requirement on the provider:
+  that requirement says which versions are eligible, and the merge decides
+  whether the contributions apply.
+- **No republication.** A newer provider release never requires a new version
+  of the amender. An amender needs one when the release falls outside its
+  declared requirement, or when its own contribution must change to fit an
+  incompatible release.
+- **Compatible and colliding.** Changes the engines can apply without a
+  collision (different values, different lines, identical changes) compose.
+  A collision, in a value or in lines of text, is a composition error naming
+  the amender, the file, and the place, with no precedence and no overwrite.
+  The project or unit is left unchanged.
+- **Flat model.** Each amender's contribution is derived against its own base.
+  Amenders taken from different versions of the provider stay independent:
+  applying one never establishes the base or the precedence of another.
+- **Formats without a merge.** A YAML, TOML, XML, or INI file, and a file that
+  is not UTF-8 text, is applied across versions only when the provider's file
+  has the same bytes at the base and at the resolved version. Otherwise the
+  composition is refused, with no fallback and no replacement.
+- **Rendering.** As described under
+  [template contexts](#template-contexts--approved).
+- **The unit's own build** keeps its rule: the declared base is the version the
+  unit is locked to (`unit amend`, `unit build`). Only dependents' builds and
+  consumer compositions apply across versions.
+- **Verification.** Bases are verified exactly as before, against the registry's
+  record of the base version; the base file is read from that immutable
+  version. Results depend on the files at the two versions, the copy, and the
+  composition's values only, so they are deterministic.
+- **Visibility.** A successful cross-version application is an ordinary
+  successful operation: it adds no note to a composition. A merge that is
+  clean shows structural compatibility, not that the result is correct for the
+  software, which the author and the consumer verify with the project's own
+  tools.
+- **`unit update`.** For each of the unit's own amendments whose provider
+  moves, an unchanged file is carried over untouched; a file that changed is
+  **rebased** on the source templates: the changes the copy makes against the
+  old base are merged by line into the file at the new version, neither side
+  taking precedence, and the declared base, the copy, and the lock change
+  together. Source templates are merged as text, never as structured
+  documents, since a template need not be one before it is rendered; a
+  rebased JSON file that is not a template must still parse as JSON. On a
+  collision, and for a file with no merge or that is not text, the update
+  writes nothing and reports each collision with its lines, the provider's
+  change, and the amendment's.
 
 ## Evidence (non-normative)
 

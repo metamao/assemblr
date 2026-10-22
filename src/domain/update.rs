@@ -9,24 +9,29 @@
 //! ([`update_lock`]).
 //!
 //! An amendment whose provider moves is reconciled on the source files
-//! ([`reconcile_amendments`]). Until the merge engine is decided, only the
-//! case that needs no rule is supported: when the provider's file is the
-//! same bytes at the old base and at the new version, the copy carries over
-//! and its declared base follows the lock. Every other case refuses the
-//! update. The update also refuses a resulting graph in which a published
-//! amendment's provider does not resolve to its base
-//! ([`published_amenders_at_base`]), because no build could compose it.
+//! ([`reconcile_amendments`]). When the provider's file is the same bytes at
+//! the old base and at the new version, the copy carries over untouched and
+//! its declared base follows the lock. When it differs, a text or JSON file
+//! is rebased: the amender's changes against the old base are merged by
+//! line into the file at the new version, on the source templates, so that
+//! the copy keeps its template expressions. A collision refuses the update
+//! and says where. Other formats, and files that are not text, are
+//! carried over only when the provider's file is unchanged. A published
+//! amendment whose provider resolves to another version than its base is
+//! not a problem: composition applies it to the version resolved.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
-use super::composition::FileTree;
+use super::composition::{FileTree, UnitFile};
 use super::identity::UnitIdentity;
 use super::lock::{LockError, LockedUnit, UnitLock};
 use super::manifest::Manifest;
+use super::merge::MergeFormat;
 use super::path::RelativePath;
 use super::registry::RegistryIndex;
 use super::resolution::{LockChange, ResolvedGraph};
+use super::text_merge::{InsertTie, describe_change, describe_lines, is_text, merge_text};
 use super::version::Version;
 
 /// The lock that records `graph`, and how it differs from `previous`, with
@@ -112,24 +117,29 @@ fn versions(graph: &ResolvedGraph) -> BTreeMap<&UnitIdentity, &Version> {
 }
 
 /// Reconciles the amendments of `manifest` with `graph`, the resolution of
-/// an update, given `previous`, the lock before it, and `files`, the `src/`
-/// files of each provider at its old base and at its new version.
+/// an update, given `previous`, the lock before it, `files`, the `src/`
+/// files of each provider at its old base and at its new version, and
+/// `copies`, the unit's own copies under `amendments/`.
 ///
 /// An amendment whose provider still resolves to the declared base is
-/// untouched. One whose provider moves carries over when the provider's
-/// file at the amended path has the same bytes at both versions: the result
-/// maps its path to the new base. Every other case is an error, sorted by
-/// path: a declared base that is not the locked version, which the author
-/// edited by hand; a path the provider does not have at the base or no
-/// longer has at the new version; a file that differs between the two
-/// versions, which needs the merge engine; and a version whose files
-/// `files` does not hold.
+/// untouched. One whose provider moves is carried to the new version, its
+/// declared base following the lock: unchanged when the provider's file has
+/// the same bytes at both versions, and otherwise rebased, when the file is
+/// text outside the structured formats without a merge. The rebase merges
+/// the changes the copy makes against the old base into the new version's
+/// file, line by line, neither side taking precedence; the result is the
+/// new copy. Every other case is an error, sorted by path: a declared base
+/// that is not the locked version, which the author edited by hand; a path
+/// the provider does not have at the base or no longer has at the new
+/// version; a file that differs and cannot be merged; lines the copy and the
+/// provider both changed; and a version whose files `files` does not hold.
 pub fn reconcile_amendments(
     manifest: &Manifest,
     previous: &UnitLock,
     graph: &ResolvedGraph,
     files: &BTreeMap<(UnitIdentity, Version), FileTree>,
-) -> Result<BTreeMap<RelativePath, Version>, Vec<ReconcileError>> {
+    copies: &BTreeMap<RelativePath, UnitFile>,
+) -> Result<BTreeMap<RelativePath, Reconciled>, Vec<ReconcileError>> {
     let resolved = versions(graph);
     let mut carried = BTreeMap::new();
     let mut errors = Vec::new();
@@ -165,13 +175,86 @@ pub fn reconcile_amendments(
             errors.push(moved(ReconcileCause::Unavailable(missing.clone())));
             continue;
         };
-        match (old_tree.get(path), new_tree.get(path)) {
-            (None, _) => errors.push(moved(ReconcileCause::NotProvidedAtBase)),
-            (Some(_), None) => errors.push(moved(ReconcileCause::NoLongerProvided)),
-            (Some(old_file), Some(new_file)) if old_file.contents() == new_file.contents() => {
-                carried.insert(path.clone(), new.clone());
+        let (old_file, new_file) = match (old_tree.get(path), new_tree.get(path)) {
+            (None, _) => {
+                errors.push(moved(ReconcileCause::NotProvidedAtBase));
+                continue;
             }
-            (Some(_), Some(_)) => errors.push(moved(ReconcileCause::Changed)),
+            (Some(_), None) => {
+                errors.push(moved(ReconcileCause::NoLongerProvided));
+                continue;
+            }
+            (Some(old_file), Some(new_file)) => (old_file, new_file),
+        };
+        if old_file.contents() == new_file.contents() {
+            carried.insert(
+                path.clone(),
+                Reconciled {
+                    base: new.clone(),
+                    copy: None,
+                },
+            );
+            continue;
+        }
+        // The file changed: rebase the copy on the source text.
+        let delivered = super::composition::delivered_path(path).ok().flatten();
+        let format = MergeFormat::of_path(delivered.as_ref().unwrap_or(path));
+        let copy = copies.get(path);
+        let (Some(copy), MergeFormat::Json | MergeFormat::Text) = (copy, format) else {
+            errors.push(moved(ReconcileCause::Changed));
+            continue;
+        };
+        let (Ok(old_text), Ok(new_text), Ok(copy_text)) = (
+            std::str::from_utf8(old_file.contents()),
+            std::str::from_utf8(new_file.contents()),
+            std::str::from_utf8(copy.contents()),
+        ) else {
+            errors.push(moved(ReconcileCause::Changed));
+            continue;
+        };
+        if ![old_file.contents(), new_file.contents(), copy.contents()]
+            .into_iter()
+            .all(is_text)
+        {
+            errors.push(moved(ReconcileCause::Changed));
+            continue;
+        }
+        let merge = merge_text(
+            old_text,
+            &[(Side::Copy, copy_text), (Side::Provider, new_text)],
+            InsertTie::Conflict,
+        );
+        match merge.text() {
+            Some(text) => {
+                carried.insert(
+                    path.clone(),
+                    Reconciled {
+                        base: new.clone(),
+                        copy: Some(text.into_bytes()),
+                    },
+                );
+            }
+            None => errors.push(moved(ReconcileCause::Collides(
+                merge
+                    .conflicts()
+                    .map(|conflict| {
+                        let side = |wanted: Side| {
+                            conflict
+                                .sides
+                                .iter()
+                                .find(|(side, _)| *side == wanted)
+                                .map(|(_, lines)| describe_change(&conflict.base, lines))
+                                .unwrap_or_default()
+                        };
+                        format!(
+                            "{}: the provider {}; the amendment {}",
+                            describe_lines(&conflict.base_lines),
+                            side(Side::Provider),
+                            side(Side::Copy)
+                        )
+                    })
+                    .collect(),
+            ))),
         }
     }
     if errors.is_empty() {
@@ -179,6 +262,23 @@ pub fn reconcile_amendments(
     } else {
         Err(errors)
     }
+}
+
+/// The two sides of a rebase, in the order that names them in a conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Side {
+    Copy,
+    Provider,
+}
+
+/// An amendment carried to its provider's new version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reconciled {
+    /// The new declared base: the version the update selects.
+    pub base: Version,
+    /// The rebased copy, when the provider's file changed and the copy had
+    /// to follow it; `None` when the copy is untouched.
+    pub copy: Option<Vec<u8>>,
 }
 
 /// An amendment that an update cannot carry to the provider's new version.
@@ -234,9 +334,12 @@ pub enum ReconcileCause {
     NotProvidedAtBase,
     /// The provider no longer has the path at the new version.
     NoLongerProvided,
-    /// The provider's file differs between the two versions, so carrying
-    /// the amendment over needs reconciliation, which is not supported yet.
+    /// The provider's file differs between the two versions, and its format
+    /// has no merge, or it or the copy is not text.
     Changed,
+    /// The copy and the provider changed the same lines of the file between
+    /// the two versions, described one collision each.
+    Collides(Vec<String>),
 }
 
 impl fmt::Display for ReconcileError {
@@ -273,112 +376,27 @@ impl fmt::Display for ReconcileError {
             ReconcileCause::Changed => write!(
                 f,
                 "amendments/{path} is based on {unit} {base}, and src/{path} differs in {unit} \
-                 {resolved}, which the update would select; reconciling an amendment with a \
-                 changed base is not supported yet"
+                 {resolved}, which the update would select; the file is YAML, TOML, XML, or \
+                 INI, or it or the copy is not UTF-8 text, so the copy follows it only when it \
+                 is unchanged"
             ),
+            ReconcileCause::Collides(places) => {
+                write!(
+                    f,
+                    "amendments/{path} is based on {unit} {base}, and {unit} {resolved}, which \
+                     the update would select, changes lines of src/{path} that the amendment \
+                     changes too (lines of {base}):"
+                )?;
+                for place in places {
+                    write!(f, "\n    {place}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
 
 impl std::error::Error for ReconcileError {}
-
-/// Checks that in `graph` every published amendment's provider resolves to
-/// the declared base, where `manifests` holds the manifest of each resolved
-/// unit at its resolved version. A published amendment can be composed only
-/// at its base, so an update that leaves one elsewhere would leave the unit
-/// unbuildable. Errors are sorted by amender and then path.
-pub fn published_amenders_at_base(
-    graph: &ResolvedGraph,
-    manifests: &BTreeMap<(UnitIdentity, Version), Manifest>,
-) -> Vec<PublishedAmenderError> {
-    let resolved = versions(graph);
-    let mut errors = Vec::new();
-    for (amender, version) in &resolved {
-        let Some(manifest) = manifests.get(&((*amender).clone(), (*version).clone())) else {
-            continue;
-        };
-        for (path, declaration) in manifest.amendments() {
-            let provider = declaration.unit();
-            let Some(&selected) = resolved.get(provider) else {
-                continue;
-            };
-            if selected != declaration.base() {
-                errors.push(PublishedAmenderError {
-                    amender: (*amender).clone(),
-                    version: (*version).clone(),
-                    path: path.clone(),
-                    provider: provider.clone(),
-                    base: declaration.base().clone(),
-                    resolved: selected.clone(),
-                });
-            }
-        }
-    }
-    errors
-}
-
-/// A published amendment whose provider the update would resolve to a
-/// version other than its base.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublishedAmenderError {
-    amender: UnitIdentity,
-    version: Version,
-    path: RelativePath,
-    provider: UnitIdentity,
-    base: Version,
-    resolved: Version,
-}
-
-impl PublishedAmenderError {
-    /// The published unit that declares the amendment.
-    pub fn amender(&self) -> &UnitIdentity {
-        &self.amender
-    }
-
-    /// Its resolved version.
-    pub fn version(&self) -> &Version {
-        &self.version
-    }
-
-    /// The amended path.
-    pub fn path(&self) -> &RelativePath {
-        &self.path
-    }
-
-    /// The provider.
-    pub fn provider(&self) -> &UnitIdentity {
-        &self.provider
-    }
-
-    /// The declared base.
-    pub fn base(&self) -> &Version {
-        &self.base
-    }
-
-    /// The version the update would select for the provider.
-    pub fn resolved(&self) -> &Version {
-        &self.resolved
-    }
-}
-
-impl fmt::Display for PublishedAmenderError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} {} amends {} of {} at {}, but the update would select {} {}; applying a \
-             published amendment to another version of its provider is not supported yet",
-            self.amender,
-            self.version,
-            self.path,
-            self.provider,
-            self.base,
-            self.provider,
-            self.resolved
-        )
-    }
-}
-
-impl std::error::Error for PublishedAmenderError {}
 
 #[cfg(test)]
 mod tests {
@@ -607,10 +625,18 @@ mod tests {
     fn reconcile(
         manifest: &Manifest,
         files: &BTreeMap<(UnitIdentity, Version), FileTree>,
-    ) -> Result<BTreeMap<RelativePath, Version>, Vec<ReconcileError>> {
+    ) -> Result<BTreeMap<RelativePath, Reconciled>, Vec<ReconcileError>> {
+        reconcile_with(manifest, files, &BTreeMap::new())
+    }
+
+    fn reconcile_with(
+        manifest: &Manifest,
+        files: &BTreeMap<(UnitIdentity, Version), FileTree>,
+        copies: &BTreeMap<RelativePath, UnitFile>,
+    ) -> Result<BTreeMap<RelativePath, Reconciled>, Vec<ReconcileError>> {
         let previous = lock(&[("@acme/node", "1.0.0", provenance('1', 'a'))]);
         let graph = graph("^1", &UnitLock::default());
-        reconcile_amendments(manifest, &previous, &graph, files)
+        reconcile_amendments(manifest, &previous, &graph, files, copies)
     }
 
     #[test]
@@ -624,7 +650,13 @@ mod tests {
 
         assert_eq!(
             carried,
-            BTreeMap::from([(path("config/app.yaml"), version("1.1.0"))])
+            BTreeMap::from([(
+                path("config/app.yaml"),
+                Reconciled {
+                    base: version("1.1.0"),
+                    copy: None
+                }
+            )])
         );
     }
 
@@ -633,8 +665,14 @@ mod tests {
         let previous = lock(&[("@acme/node", "1.1.0", provenance('2', 'b'))]);
         let graph = graph("^1", &previous);
 
-        let carried =
-            reconcile_amendments(&amending("1.1.0"), &previous, &graph, &BTreeMap::new()).unwrap();
+        let carried = reconcile_amendments(
+            &amending("1.1.0"),
+            &previous,
+            &graph,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
 
         assert!(carried.is_empty());
     }
@@ -679,60 +717,99 @@ mod tests {
         );
     }
 
-    fn amender_manifest(base: &str) -> Manifest {
+    fn amending_path(file: &str, base: &str) -> Manifest {
         Manifest::new(
-            identity("@acme/amender"),
+            identity("@acme/app"),
             version("0.1.0"),
-            Description::new("An amender.").unwrap(),
+            Description::new("An app.").unwrap(),
             requirements("^1"),
             BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::from([(
-                path("config/app.yaml"),
+                path(file),
                 AmendmentDeclaration::new(identity("@acme/node"), version(base)),
             )]),
         )
         .unwrap()
     }
 
-    /// The amender's published manifests: 0.1.0 amends `@acme/node` at
-    /// 1.0.0, and 0.2.0 at 1.1.0.
-    fn amender_manifests() -> BTreeMap<(UnitIdentity, Version), Manifest> {
-        BTreeMap::from([
-            (
-                (identity("@acme/amender"), version("0.1.0")),
-                amender_manifest("1.0.0"),
-            ),
-            (
-                (identity("@acme/amender"), version("0.2.0")),
-                amender_manifest("1.1.0"),
-            ),
-        ])
+    fn copy_of(file: &str, text: &str) -> BTreeMap<RelativePath, UnitFile> {
+        BTreeMap::from([(path(file), UnitFile::new(text.as_bytes().to_vec(), false))])
+    }
+
+    const NOTES_OLD: &str = "# Notes\n\nOne.\n\nTwo.\n\nThree.\n";
+
+    #[test]
+    fn a_changed_text_file_is_rebased_onto_the_new_version() {
+        // The provider rewords the title; the copy adds a section at the end.
+        let new = "# Team notes\n\nOne.\n\nTwo.\n\nThree.\n";
+        let copy = format!("{NOTES_OLD}\n## Mine\n\nExtra.\n");
+        let files = files(&[("NOTES.md", NOTES_OLD)], &[("NOTES.md", new)]);
+
+        let rebased = reconcile_with(
+            &amending_path("NOTES.md", "1.0.0"),
+            &files,
+            &copy_of("NOTES.md", &copy),
+        )
+        .unwrap();
+
+        let reconciled = &rebased[&path("NOTES.md")];
+        assert_eq!(reconciled.base, version("1.1.0"));
+        assert_eq!(
+            String::from_utf8(reconciled.copy.clone().unwrap()).unwrap(),
+            "# Team notes\n\nOne.\n\nTwo.\n\nThree.\n\n## Mine\n\nExtra.\n"
+        );
     }
 
     #[test]
-    fn a_published_amender_is_checked_against_the_new_graph() {
-        let requirements = Dependencies::from([
-            (identity("@acme/node"), "^1".parse().unwrap()),
-            (identity("@acme/amender"), "^0".parse().unwrap()),
-        ]);
-        let manifests = amender_manifests();
+    fn lines_both_the_copy_and_the_provider_changed_are_a_collision_that_names_them() {
+        let new = NOTES_OLD.replace("Two.", "Two, provider.");
+        let copy = NOTES_OLD.replace("Two.", "Two, mine.");
+        let files = files(&[("NOTES.md", NOTES_OLD)], &[("NOTES.md", &new)]);
 
-        // Updating both: the amender's 0.2.0 targets node 1.1.0.
-        let graph = graph_of(&requirements, &UnitLock::default());
-        assert!(published_amenders_at_base(&graph, &manifests).is_empty());
+        let errors = reconcile_with(
+            &amending_path("NOTES.md", "1.0.0"),
+            &files,
+            &copy_of("NOTES.md", &copy),
+        )
+        .unwrap_err();
 
-        // Updating node alone leaves the amender at 0.1.0, whose base is
-        // 1.0.0.
-        let kept = lock(&[("@acme/amender", "0.1.0", provenance('5', 'e'))]);
-        let graph = graph_of(&requirements, &kept);
-        let errors = published_amenders_at_base(&graph, &manifests);
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert_eq!(errors[0].amender(), &identity("@acme/amender"));
-        assert_eq!(errors[0].version(), &version("0.1.0"));
-        assert_eq!(errors[0].path(), &path("config/app.yaml"));
-        assert_eq!(errors[0].provider(), &identity("@acme/node"));
-        assert_eq!(errors[0].base(), &version("1.0.0"));
-        assert_eq!(errors[0].resolved(), &version("1.1.0"));
+        assert_eq!(errors.len(), 1);
+        let ReconcileCause::Collides(places) = errors[0].cause() else {
+            panic!("{:?}", errors[0]);
+        };
+        assert_eq!(
+            places,
+            &["line 5: the provider sets \"Two, provider.\"; the amendment sets \"Two, mine.\""]
+        );
+        let message = errors[0].to_string();
+        assert!(
+            message.contains("changes lines of src/NOTES.md that the amendment changes too"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_changed_file_without_a_merge_or_that_is_not_text_is_not_rebased() {
+        let new = NOTES_OLD.replace("Two.", "Two, provider.");
+        // YAML has no merge.
+        let files_yaml = files(
+            &[("config/app.yaml", "a: 1\n")],
+            &[("config/app.yaml", "a: 2\n")],
+        );
+        let errors = reconcile_with(
+            &amending("1.0.0"),
+            &files_yaml,
+            &copy_of("config/app.yaml", "a: 1\nb: 2\n"),
+        )
+        .unwrap_err();
+        assert_eq!(errors[0].cause(), &ReconcileCause::Changed);
+        // A copy that is not text.
+        let files_text = files(&[("NOTES.md", NOTES_OLD)], &[("NOTES.md", &new)]);
+        let mut binary = copy_of("NOTES.md", NOTES_OLD);
+        binary.insert(path("NOTES.md"), UnitFile::new(b"a\0b".to_vec(), false));
+        let errors =
+            reconcile_with(&amending_path("NOTES.md", "1.0.0"), &files_text, &binary).unwrap_err();
+        assert_eq!(errors[0].cause(), &ReconcileCause::Changed);
     }
 }
