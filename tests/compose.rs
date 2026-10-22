@@ -878,8 +878,8 @@ fn conflicts_are_refused_before_anything_is_written() {
     assert!(
         err.contains("disagree at 3 path(s)")
             && err.contains(
-                "error:   README.md: the project and the composition both changed it, and its \
-             format has no merge\nerror:   bin/run: the project deleted it, and the composition \
+                "error:   README.md: the project and the composition change the same lines, in 1 \
+             place(s)\nerror:   bin/run: the project deleted it, and the composition \
              changes it\nerror:   config/app.json: the project and the composition change the \
              same values:\nerror:     /port: the project changes 3000 to 9000; the composition \
              changes 3000 to 8080"
@@ -2068,4 +2068,316 @@ fn a_clone_of_a_pending_project_marks_the_marked_file_again() {
     fs::write(clone.join("README.md"), "resolved\n").unwrap();
     succeeds(fixture.assemblr(&clone, &["compose", "--continue"]));
     assert_eq!(lockfile(&clone)["units"]["@acme/node"]["version"], "1.1.0");
+}
+
+/// A registered `@acme/guide` 1.0.0 delivering `README.md` and
+/// `compose.yaml`.
+fn guide(fixture: &Fixture, readme: &str) -> Repo {
+    let guide = fixture.repo("guide");
+    guide.write("manifest.jsonc", &manifest("@acme/guide", "1.0.0", &[], ""));
+    guide.write("src/README.md", readme);
+    guide.write("src/compose.yaml", "services:\n  web:\n    image: app\n");
+    guide.publish("1.0.0");
+    fixture.register(&guide);
+    guide
+}
+
+/// Publishes `version` of `guide` with `readme` and `compose`, indexes it,
+/// and declares it in `project`.
+fn republish_guide(
+    fixture: &Fixture,
+    guide: &Repo,
+    project: &Path,
+    version: &str,
+    readme: &str,
+    compose: &str,
+) {
+    guide.write("manifest.jsonc", &manifest("@acme/guide", version, &[], ""));
+    guide.write("src/README.md", readme);
+    guide.write("src/compose.yaml", compose);
+    guide.publish(version);
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    declare(project, &[("@acme/guide", &format!("^{version}"))], "");
+}
+
+const NOTES: &str = "# Notes\n\nOne.\n\nTwo.\n\nThree.\n\nFour.\n\nFive.\n";
+
+#[test]
+fn a_text_file_both_sides_changed_in_different_places_is_merged_without_a_pending_state() {
+    let fixture = Fixture::new("text-merged");
+    let guide = guide(&fixture, NOTES);
+    let project = fixture.project("shop", &[("@acme/guide", "^1")], "");
+    succeeds(fixture.compose(&project));
+    fs::write(
+        project.join("README.md"),
+        NOTES.replace("Five.", "Five, mine."),
+    )
+    .unwrap();
+    republish_guide(
+        &fixture,
+        &guide,
+        &project,
+        "1.1.0",
+        &NOTES.replace("# Notes", "# Team notes"),
+        "services:\n  web:\n    image: app\n",
+    );
+
+    let output = succeeds(fixture.compose(&project));
+    assert!(
+        stdout(&output).contains("  merged README.md"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(
+        read(&project.join("README.md")),
+        "# Team notes\n\nOne.\n\nTwo.\n\nThree.\n\nFour.\n\nFive, mine.\n"
+    );
+    assert_eq!(
+        lockfile(&project)["units"]["@acme/guide"]["version"],
+        "1.1.0"
+    );
+    assert!(!project.join(".assemblr/journal.json").exists());
+    // The merge is the project's own content now.
+    let output = succeeds(fixture.compose(&project));
+    assert!(
+        stdout(&output).contains("Nothing to compose"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn overlapping_edits_mark_only_the_lines_that_disagree() {
+    let fixture = Fixture::new("text-localized");
+    let guide = guide(&fixture, NOTES);
+    let project = fixture.project("shop", &[("@acme/guide", "^1")], "");
+    succeed_compose(&fixture, &project);
+    fs::write(
+        project.join("README.md"),
+        NOTES.replace("Three.", "Three, mine."),
+    )
+    .unwrap();
+    republish_guide(
+        &fixture,
+        &guide,
+        &project,
+        "1.1.0",
+        &NOTES
+            .replace("# Notes", "# Team notes")
+            .replace("Three.", "Three, theirs."),
+        "services:\n  web:\n    image: app\n",
+    );
+    let before = tree(&project);
+
+    let output = fails(fixture.compose(&project));
+    assert!(
+        stdout(&output).contains("  conflict README.md"),
+        "{}",
+        stdout(&output)
+    );
+    // The title the composition changed is applied; only the line both
+    // sides changed is between markers, not the whole file.
+    let readme = read(&project.join("README.md"));
+    assert_eq!(
+        readme,
+        "# Team notes\n\nOne.\n\nTwo.\n\n\
+         <<<<<<< current (your file)\nThree, mine.\n\
+         ||||||| base (the last composition)\nThree.\n\
+         =======\nThree, theirs.\n\
+         >>>>>>> incoming (the declared composition)\n\
+         \nFour.\n\nFive.\n"
+    );
+    assert_eq!(
+        lockfile(&project)["units"]["@acme/guide"]["version"],
+        "1.0.0"
+    );
+
+    // Marked lines block the continuation, and resolving them finalizes it.
+    let err = stderr(&fails(
+        fixture.assemblr(&project, &["compose", "--continue"]),
+    ));
+    assert!(
+        err.contains("README.md: it still holds conflict markers"),
+        "{err}"
+    );
+    fs::write(
+        project.join("README.md"),
+        readme
+            .replace("<<<<<<< current (your file)\nThree, mine.\n||||||| base (the last composition)\nThree.\n=======\nThree, theirs.\n>>>>>>> incoming (the declared composition)\n", "Three, ours.\n"),
+    )
+    .unwrap();
+    succeeds(fixture.assemblr(&project, &["compose", "--continue"]));
+    assert_eq!(
+        lockfile(&project)["units"]["@acme/guide"]["version"],
+        "1.1.0"
+    );
+    assert!(read(&project.join("README.md")).contains("Three, ours.\n\nFour.\n"));
+
+    // Abort gives it all up: the file the consumer edited comes back.
+    let fixture = Fixture::new("text-localized-abort");
+    let guide = self::guide(&fixture, NOTES);
+    let project = fixture.project("shop", &[("@acme/guide", "^1")], "");
+    succeed_compose(&fixture, &project);
+    fs::write(
+        project.join("README.md"),
+        NOTES.replace("Three.", "Three, mine."),
+    )
+    .unwrap();
+    republish_guide(
+        &fixture,
+        &guide,
+        &project,
+        "1.1.0",
+        &NOTES.replace("Three.", "Three, theirs."),
+        "services:\n  web:\n    image: app\n",
+    );
+    fails(fixture.compose(&project));
+    succeeds(fixture.assemblr(&project, &["compose", "--abort"]));
+    assert_eq!(
+        read(&project.join("README.md")),
+        NOTES.replace("Three.", "Three, mine.")
+    );
+    let _ = before;
+}
+
+fn succeed_compose(fixture: &Fixture, project: &Path) {
+    succeeds(fixture.compose(project));
+}
+
+#[test]
+fn insertions_at_one_position_by_both_sides_are_a_conflict_not_an_order() {
+    let fixture = Fixture::new("text-same-position");
+    let guide = guide(&fixture, NOTES);
+    let project = fixture.project("shop", &[("@acme/guide", "^1")], "");
+    succeed_compose(&fixture, &project);
+    fs::write(project.join("README.md"), format!("{NOTES}\nMine.\n")).unwrap();
+    republish_guide(
+        &fixture,
+        &guide,
+        &project,
+        "1.1.0",
+        &format!("{NOTES}\nTheirs.\n"),
+        "services:\n  web:\n    image: app\n",
+    );
+    let output = fails(fixture.compose(&project));
+    assert!(
+        stdout(&output).contains("  conflict README.md"),
+        "{}",
+        stdout(&output)
+    );
+    let readme = read(&project.join("README.md"));
+    assert!(
+        readme.contains(
+            "\n<<<<<<< current (your file)\nMine.\n||||||| base (the last composition)\n=======\nTheirs.\n>>>>>>> incoming (the declared composition)\n"
+        ),
+        "{readme}"
+    );
+    assert!(readme.starts_with("# Notes\n"), "{readme}");
+}
+
+#[test]
+fn crlf_text_is_merged_and_marked_with_its_own_line_endings() {
+    let fixture = Fixture::new("text-crlf");
+    let guide = guide(&fixture, NOTES);
+    let project = fixture.project("shop", &[("@acme/guide", "^1")], "");
+    succeed_compose(&fixture, &project);
+    let crlf = |text: &str| text.replace('\n', "\r\n");
+    fs::write(
+        project.join("README.md"),
+        crlf(&NOTES.replace("Five.", "Five, mine.")),
+    )
+    .unwrap();
+    republish_guide(
+        &fixture,
+        &guide,
+        &project,
+        "1.1.0",
+        &NOTES.replace("# Notes", "# Team notes"),
+        "services:\n  web:\n    image: app\n",
+    );
+    succeeds(fixture.compose(&project));
+    assert_eq!(
+        fs::read(project.join("README.md")).unwrap(),
+        crlf("# Team notes\n\nOne.\n\nTwo.\n\nThree.\n\nFour.\n\nFive, mine.\n").into_bytes()
+    );
+
+    // A conflict is marked with CRLF line endings too.
+    republish_guide(
+        &fixture,
+        &guide,
+        &project,
+        "1.2.0",
+        &NOTES
+            .replace("# Notes", "# Team notes")
+            .replace("Five.", "Five, theirs."),
+        "services:\n  web:\n    image: app\n",
+    );
+    fails(fixture.compose(&project));
+    let readme = fs::read(project.join("README.md")).unwrap();
+    let text = String::from_utf8(readme).unwrap();
+    assert!(
+        text.contains(
+            "<<<<<<< current (your file)\r\nFive, mine.\r\n||||||| base (the last composition)\r\nFive.\r\n=======\r\nFive, theirs.\r\n>>>>>>> incoming (the declared composition)\r\n"
+        ),
+        "{text:?}"
+    );
+    assert!(!text.replace("\r\n", "").contains('\n'), "{text:?}");
+}
+
+#[test]
+fn a_structured_file_both_sides_changed_is_still_marked_whole() {
+    let fixture = Fixture::new("text-structured");
+    let guide = guide(&fixture, NOTES);
+    let project = fixture.project("shop", &[("@acme/guide", "^1")], "");
+    succeed_compose(&fixture, &project);
+    fs::write(
+        project.join("compose.yaml"),
+        "services:\n  web:\n    image: mine\n",
+    )
+    .unwrap();
+    republish_guide(
+        &fixture,
+        &guide,
+        &project,
+        "1.1.0",
+        NOTES,
+        "services:\n  web:\n    image: theirs\n    ports: [\"80\"]\n",
+    );
+    fails(fixture.compose(&project));
+    // A line merge could not tell a key twice from data, so the whole file
+    // is marked: the project's, the base's, and the composition's.
+    let yaml = read(&project.join("compose.yaml"));
+    assert!(
+        yaml.starts_with("<<<<<<< current (your file)\nservices:\n"),
+        "{yaml}"
+    );
+    assert!(yaml.contains("image: mine"), "{yaml}");
+    assert!(yaml.contains("image: app"), "{yaml}");
+    assert!(yaml.contains("image: theirs"), "{yaml}");
+}
+
+#[test]
+fn a_small_binary_file_both_sides_changed_is_a_conflict_never_a_line_merge() {
+    // Valid UTF-8 with NUL bytes behind a text path: both sides changed it
+    // in different places, which a line merge would combine silently.
+    let fixture = Fixture::new("text-binary");
+    let blob = "head\n\0\nmiddle\n\0\nmiddle\n\0\nmiddle\n\0\ntail\n";
+    let guide = guide(&fixture, NOTES);
+    guide.write("src/data.txt", blob);
+    guide.write("manifest.jsonc", &manifest("@acme/guide", "1.0.1", &[], ""));
+    guide.publish("1.0.1");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    let project = fixture.project("shop", &[("@acme/guide", "^1")], "");
+    succeed_compose(&fixture, &project);
+    fs::write(project.join("data.txt"), blob.replace("tail", "mine")).unwrap();
+    guide.write("src/data.txt", &blob.replace("head", "theirs"));
+    guide.write("manifest.jsonc", &manifest("@acme/guide", "1.1.0", &[], ""));
+    guide.publish("1.1.0");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    declare(&project, &[("@acme/guide", "^1.1")], "");
+    let before = tree(&project);
+    let err = stderr(&fails(fixture.compose(&project)));
+    assert!(err.contains("data.txt"), "{err}");
+    assert!(err.contains("is not UTF-8 text"), "{err}");
+    assert_eq!(tree(&project), before);
 }

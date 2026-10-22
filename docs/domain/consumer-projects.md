@@ -516,13 +516,23 @@ each as a mode and a content identity.
   change it, which is reported; one the composition changes is a conflict.
 - A new file of the composition is created; content already at its path is
   refused as existing content (OC-44).
-- A file both sides changed is merged when it is JSON or JSONC and its base
-  is stored: the changes each side made against the base are derived with
-  the [merge engine](amendments-and-composition.md#the-merge-engine--approved),
-  the changes that collide are conflicts, and the composition's own changes
-  are edited into the project's text, whose layout and comments stay. Any
-  other file both sides changed, a text file, a binary file, or one whose
-  base is not stored, is a conflict.
+- A file both sides changed is merged when its base is stored and it is JSON,
+  JSONC, or text:
+  - A JSON or JSONC file is merged by value: the changes each side made
+    against the base are derived with the
+    [merge engine](amendments-and-composition.md#the-merge-engine--approved),
+    the changes that collide are conflicts, and the composition's own changes
+    are edited into the project's text, whose layout and comments stay.
+  - A UTF-8 text file is merged by line (decision log D-21; ADR 0022): the
+    lines each side changed against the base are compared, changes in
+    different places are both kept, an identical change is one change, and
+    changes that overlap or touch, including insertions by both sides at one
+    position, are conflicts. Neither side is placed before the other, so the
+    merge never invents an order between the consumer's lines and the
+    composition's.
+  - YAML, TOML, XML, and INI files, binary files, and files whose base is not
+    stored are conflicts, as before: a line merge could not tell a key twice
+    from data.
 - The executable bit is reconciled like content.
 - A managed path that is not a regular file is a conflict.
 
@@ -639,8 +649,9 @@ the grammar of OC-7 for `compose`; both entries stay open.
 mutually exclusive, run at the project's top level.
 
 **What can be left in a file.** A conflict between text that both the
-consumer and the composition changed: a file of a format with no merge, or
-the values of a JSON or JSONC file that collide. The base, the project's
+consumer and the composition changed: lines of a text file that the line
+merge could not combine, a file of a format with no merge, or the values of a
+JSON or JSONC file that collide. The base, the project's
 file, and the composition's file must be UTF-8 text. A composition with any
 other conflict (file modes, a file one side deleted and the other changed,
 a file the composition removes and the consumer edited, a path that is not a
@@ -663,10 +674,16 @@ composition's:
 >>>>>>> incoming (the declared composition)
 ```
 
-The markers cover the whole file, and end lines as the project's file
-does. The composition's other changes to that file, for a JSON file the
-values that do not collide, are not applied to the project's side: they are
-in the incoming section, and the consumer carries them over. The lock is not written: the journal keeps the lock to write and the
+Markers end lines as the project's file does. For a text file, the file holds
+the merge of the two sides and the markers surround only the lines that
+disagree: every change that does not collide is already applied, and lines
+all three versions agree on at the start and the end of a disagreement stay
+outside it. For a structured file (JSON, JSONC, YAML, TOML, XML, INI) the
+markers cover the whole file, since the merged parts of a structured file
+cannot be told apart from its data, and the composition's other changes to it
+are not applied to the project's side: they are in the incoming section, and
+the consumer carries them over. Marking only the colliding values of a
+structured file is not done. The lock is not written: the journal keeps the lock to write and the
 files that hold markers. The command reports the files and exits non-zero.
 While resolution is pending, `compose`, `add`, and `remove` refuse, naming
 the files and the two ways out, and change nothing.
