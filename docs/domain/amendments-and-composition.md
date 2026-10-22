@@ -293,12 +293,37 @@ file, such as `AGENTS.md`, could not be composed. The details are provisional
 - **Compatible changes.** Changes in different places are all kept. An
   identical change by several amenders is one change. Insertions that several
   amenders make at the same position are all kept, each distinct insertion
-  once, in the order of the amenders' identities. The order is a layout and
-  loses nothing, no amender's text takes precedence over another's, and the
-  build and `unit check` report every such position as a warning, since the
-  order is not something any unit asked for. This is the text counterpart of
-  the placement of members several amenders add at one place in a JSON object,
-  and **OC-12** stays open for both.
+  once, in the order of the amenders' identities. No amender's lines are
+  dropped, and the build and `unit check` report every such position as a
+  warning, since the order is not something any unit asked for. This is the
+  text counterpart of the placement of members several amenders add at one
+  place in a JSON object, and **OC-12** stays open for both.
+- **What a clean merge does not promise.** A line merge compares lines, not
+  what a format makes of them. A merge without a conflict shows that every
+  amender's lines are in the file, not that the file means what each amender
+  intended. In formats where the order or the repetition of lines decides the
+  outcome, the order the merge fixes can decide which line takes effect, for
+  example:
+  - `.env` and other key-value files: two units that each add `PORT=` leave
+    the key twice, and readers that take the last value apply the unit whose
+    identity sorts later;
+  - `CODEOWNERS`: the last matching pattern wins, so the order of two units'
+    rules decides who owns a path;
+  - `.gitignore` and similar ignore files: a `!` pattern re-includes only what
+    the patterns before it excluded, so the order of two units' patterns can
+    decide whether a path is ignored;
+  - XML, TOML, or YAML under an extension the merge does not recognize (for
+    example `.svg`, `.csproj`, or `Cargo.lock`), which is merged as text.
+
+  Such cases are reported only as the warning for insertions at one position.
+  Changes to the same line still conflict. The author verifies the composed
+  file with the format's own tools against `build/` (see
+  [testing](authoring-workflow.md#testing-native-validation-vs-functional-correctness--approved)),
+  and a consumer verifies the composed project the same way. Units
+  that need a precise order in such a file arrange that one of them owns the
+  file or that their lines do not depend on each other. Only the formats
+  listed under **Scope** are refused, by extension; none is refused for being
+  order-sensitive (decision log D-27, OC-12).
 - **Conflicts.** Changes that overlap or touch, including changes to adjacent
   lines, and an insertion next to a changed line, are a conflict unless they
   are identical. The build is rejected naming the file, the lines of the
