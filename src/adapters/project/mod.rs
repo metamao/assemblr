@@ -554,7 +554,13 @@ fn compose_with(
         return Err(rejected_all(problems));
     };
     let files: BTreeMap<RelativePath, UnitFile> = rendered.files.into_iter().collect();
-    let mut notes = rendered.notes;
+    // What the merge reports about a file, its author's to act on, is told
+    // to the consumer when this composition writes the file; the others
+    // are kept for `--verbose`, with the amendments applied across
+    // provider versions.
+    let file_notes = rendered.notes;
+    let crossed: Vec<String> = rendered.crossed.into_iter().map(|(_, line)| line).collect();
+    let mut notes = Vec::new();
 
     // The paths Assemblr keeps for itself.
     let reserved: Vec<RelativePath> = files
@@ -602,6 +608,8 @@ fn compose_with(
                 base: identity,
                 unbased: BTreeSet::new(),
                 notes,
+                unwritten_notes: file_notes.into_iter().map(|(_, note)| note).collect(),
+                crossed,
                 recovered: recovered.clone(),
                 unchanged: true,
                 first: false,
@@ -907,6 +915,14 @@ fn compose_with(
             (path.clone(), change)
         })
         .collect();
+    let (written, unwritten): (Vec<_>, Vec<_>) = file_notes
+        .into_iter()
+        .partition(|(path, _)| changes.contains_key(path));
+    let notes = written
+        .into_iter()
+        .map(|(_, note)| note)
+        .chain(notes)
+        .collect();
     Ok(Composed {
         units: resolved.lock.units().len(),
         files: files.len(),
@@ -915,6 +931,8 @@ fn compose_with(
         base: identity,
         unbased,
         notes,
+        unwritten_notes: unwritten.into_iter().map(|(_, note)| note).collect(),
+        crossed,
         recovered: recovered.clone(),
         unchanged: false,
         first: previous.is_none(),
@@ -1748,6 +1766,8 @@ pub struct Composed {
     base: BaseIdentity,
     unbased: BTreeSet<RelativePath>,
     notes: Vec<String>,
+    unwritten_notes: Vec<String>,
+    crossed: Vec<String>,
     recovered: Option<ComposeRecovery>,
     unchanged: bool,
     first: bool,
@@ -1788,9 +1808,22 @@ impl Composed {
         &self.unbased
     }
 
-    /// What was reported without failing.
+    /// What was reported without failing. What the merge reports about a
+    /// file is here only when this composition wrote the file.
     pub fn notes(&self) -> &[String] {
         &self.notes
+    }
+
+    /// What the merge reports about the files this composition did not
+    /// write, the same every time the composition is the same.
+    pub fn unwritten_notes(&self) -> &[String] {
+        &self.unwritten_notes
+    }
+
+    /// The amendments applied to another version of their provider than the
+    /// one they were taken from, one line each, by delivered path.
+    pub fn crossed(&self) -> &[String] {
+        &self.crossed
     }
 
     /// The interrupted composition that was recovered from first, if any.

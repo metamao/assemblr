@@ -499,7 +499,7 @@ pub(super) fn validate(
         lock: resolved.lock,
         changes: resolved.resolution.changes().clone(),
         files: rendered.files,
-        notes: rendered.notes,
+        notes: rendered.notes.into_iter().map(|(_, note)| note).collect(),
     });
     validation
 }
@@ -507,7 +507,12 @@ pub(super) fn validate(
 /// The rendered files of a composition.
 pub(crate) struct Rendered {
     pub(crate) files: Vec<(RelativePath, UnitFile)>,
-    pub(crate) notes: Vec<String>,
+    /// What the composition reports without failing, each with the
+    /// delivered path it concerns.
+    pub(crate) notes: Vec<(RelativePath, String)>,
+    /// The amendments applied to another version of their provider than
+    /// the one they were taken from, each with its delivered path.
+    pub(crate) crossed: Vec<(RelativePath, String)>,
 }
 
 /// Renders every file of `composition`: templates with the parameter
@@ -528,6 +533,7 @@ pub(crate) fn render_files(
     let values_of = |unit: &UnitIdentity| values_of(composition, &no_values, unit);
     let mut files: Vec<(RelativePath, UnitFile)> = Vec::new();
     let mut notes = Vec::new();
+    let mut crossed = Vec::new();
     let mut failed = false;
     // Problems are collected here, since the rendering closure below holds
     // on to the sink while the rest of the loop reports into it too.
@@ -595,6 +601,14 @@ pub(crate) fn render_files(
             let Some(resolved) = resolved_version.filter(|resolved| *resolved != base) else {
                 continue;
             };
+            crossed.push((
+                path.clone(),
+                format!(
+                    "{path}: the amendment of {} was taken from {provider} {base} and is applied \
+                     to {provider} {resolved}",
+                    amendment.amender()
+                ),
+            ));
             let cross = |reason| BuildProblem::CrossVersion {
                 unit: provider.clone(),
                 path: composed.source().clone(),
@@ -664,12 +678,15 @@ pub(crate) fn render_files(
                             let super::merge::MergeNote::NotCarried { what, .. } = note else {
                                 continue;
                             };
-                            notes.push(format!(
-                                "amendments/{} of {amender}: if another unit amends src/{} of \
-                                 {provider} too, {what} of this copy is not carried; the merge \
-                                 carries members and values, not comments or order",
-                                composed.source(),
-                                composed.source()
+                            notes.push((
+                                path.clone(),
+                                format!(
+                                    "amendments/{} of {amender}: if another unit amends src/{} \
+                                     of {provider} too, {what} of this copy is not carried; the \
+                                     merge carries members and values, not comments or order",
+                                    composed.source(),
+                                    composed.source()
+                                ),
                             ));
                         }
                     }
@@ -826,9 +843,12 @@ pub(crate) fn render_files(
                                     } {
                                         Some(Ok(merged)) => {
                                             notes.extend(merged.notes().iter().map(|note| {
-                                                format!(
-                                                    "src/{} of {provider}: {note}",
-                                                    composed.source()
+                                                (
+                                                    path.clone(),
+                                                    format!(
+                                                        "src/{} of {provider}: {note}",
+                                                        composed.source()
+                                                    ),
                                                 )
                                             }));
                                             Some(merged.into_text().into_bytes())
@@ -865,7 +885,11 @@ pub(crate) fn render_files(
     if failed {
         return None;
     }
-    Some(Rendered { files, notes })
+    Some(Rendered {
+        files,
+        notes,
+        crossed,
+    })
 }
 
 /// An amender, the provider's file as it was where the copy was taken from,

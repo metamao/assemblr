@@ -1863,7 +1863,7 @@ fn a_dependent_builds_with_the_amendments_a_transitive_dependency_publishes() {
         "its format has no merge (it is applied across versions only to a file that is unchanged)",
         "the amendment of @acme/app was taken from @acme/node 1.0.0",
         "hint: the build was rejected; build/ and assemblr-lock.json were not changed",
-        "`@acme/node@=1.0.0`",
+        "`\"@acme/node\": \"=1.0.0\"` in the manifest's `dependencies`",
     ] {
         assert!(err.contains(expected), "{expected:?} in {err}");
     }

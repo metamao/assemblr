@@ -603,3 +603,66 @@ fn unit_amend_creates_a_copy_of_a_text_file_but_not_of_a_structured_one_another_
     );
     assert!(!solo.path.join("amendments").exists());
 }
+
+#[test]
+fn a_consumer_is_warned_about_chained_insertions_only_when_the_file_is_written() {
+    let fixture = Fixture::new("consumer-chained");
+    scenario(
+        &fixture,
+        &[
+            (
+                "neon",
+                &[("AGENTS.md", &with_section("Database", "Use DATABASE_URL."))],
+            ),
+            (
+                "docker",
+                &[(
+                    "AGENTS.md",
+                    &with_section("Development container", "Run commands with docker compose."),
+                )],
+            ),
+            ("plain", &[]),
+        ],
+    );
+    let project = fixture.dir.join("shop");
+    succeeds(fixture.assemblr(&fixture.dir, &["init", "shop"]));
+    git(&project, &["init", "-q"]);
+    fs::write(
+        project.join("assemblr.jsonc"),
+        "{\n  \"dependencies\": {\"@acme/neon\": \"^1\", \"@acme/docker\": \"^1\"},\n  \"options\": {}\n}\n",
+    )
+    .unwrap();
+    let chained = "AGENTS.md of @acme/guide: @acme/docker, @acme/neon each add lines after line 12";
+    // The composition that writes the file says that it chose the order.
+    let first = succeeds(fixture.assemblr(&project, &["compose"]));
+    assert!(stderr(&first).contains(chained), "{}", stderr(&first));
+
+    // One that leaves the file as it is does not repeat it, whether it
+    // changes nothing or only other files.
+    let again = succeeds(fixture.assemblr(&project, &["compose"]));
+    assert!(
+        stdout(&again).contains("Nothing to compose"),
+        "{}",
+        stdout(&again)
+    );
+    assert!(
+        !stderr(&again).contains("each add lines"),
+        "{}",
+        stderr(&again)
+    );
+    let added = succeeds(fixture.assemblr(&project, &["add", "@acme/plain"]));
+    assert!(
+        stdout(&added).contains("created plain.txt"),
+        "{}",
+        stdout(&added)
+    );
+    assert!(
+        !stderr(&added).contains("each add lines"),
+        "{}",
+        stderr(&added)
+    );
+
+    // `--verbose` reports it whatever the composition writes.
+    let verbose = succeeds(fixture.assemblr(&project, &["compose", "--verbose"]));
+    assert!(stderr(&verbose).contains(chained), "{}", stderr(&verbose));
+}

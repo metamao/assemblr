@@ -195,7 +195,11 @@ details](#reconciliation-details--provisional-d-13-to-d-15) describes.
 **Command.** `assemblr compose`, with no arguments, run at the project's top
 level, which holds `assemblr.jsonc`. The result goes to stdout; diagnostics,
 and what the composition could not carry or store, go to stderr. It never
-fetches, runs no external program, and makes no commit.
+fetches, runs no external program, and makes no commit. A warning about the
+merge of a file, which only the units' authors can act on, is given when the
+composition writes that file; `--verbose`, on `compose`, `add`, `remove`, and
+`update`, also gives it for the files left as they are, and lists the
+amendments applied across provider versions (**Provisional (D-30, D-31)**).
 
 **What it does.** It reads the declaration, resolves the explicit
 selections from the local registry under the [lock](#lock-and-reconciliation-state--approved),

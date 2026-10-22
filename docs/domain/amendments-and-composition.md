@@ -295,7 +295,10 @@ such as `AGENTS.md`, could not be composed. The details are **Provisional
   amenders make at the same position are all kept, each distinct insertion
   once, in the order of the amenders' identities. No amender's lines are
   dropped, and the build and `unit check` report every such position as a
-  warning, since the order is not something any unit asked for. This is the
+  warning, since the order is not something any unit asked for. A consumer's
+  composition reports it only when it writes the file, since only the units'
+  authors can act on it, and `--verbose` reports it every time
+  (**Provisional (D-30)**). This is the
   text counterpart of the placement of members several amenders add at one
   place in a JSON object, and **OC-12** stays open for both.
 - **What a clean merge does not promise.** A line merge compares lines, not
@@ -473,7 +476,9 @@ until each amender had published again:
   successful operation: it adds no note to a composition. A merge that is
   clean shows structural compatibility, not that the result is correct for the
   software, which the author and the consumer verify with the project's own
-  tools.
+  tools. `--verbose` on `compose`, `add`, `remove`, and `update` lists, as notes,
+  each amendment applied to another version of its provider than its base,
+  whether or not the composition writes the file (**Provisional (D-31)**).
 - **`unit update`.** For each of the unit's own amendments whose provider
   moves, an unchanged file is carried over untouched; a file that changed is
   **rebased** on the source templates: the changes the copy makes against the

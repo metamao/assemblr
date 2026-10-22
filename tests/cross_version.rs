@@ -343,8 +343,24 @@ fn a_provider_change_to_a_value_an_amender_changed_is_a_collision_and_changes_no
     );
     // The way out the hint names: stay on the version the amendment was
     // taken from.
-    assert!(err.contains("`@acme/worker@=1.0.0`"), "{err}");
+    assert!(err.contains("`assemblr add @acme/worker@=1.0.0`"), "{err}");
     assert_eq!(tree(&shop), before);
+
+    // Following it pins the provider, and an update of every unit then
+    // leaves it where it is.
+    succeed(&fixture.assemblr(&shop, &["add", "@acme/worker@=1.0.0"]));
+    let updated = fixture.assemblr(&shop, &["update"]);
+    succeed(&updated);
+    assert!(
+        stdout(&updated).contains("Nothing to update"),
+        "{}",
+        stdout(&updated)
+    );
+    assert!(
+        fs::read_to_string(shop.join("assemblr.jsonc"))
+            .unwrap()
+            .contains("\"@acme/worker\": \"=1.0.0\"")
+    );
 }
 
 #[test]
@@ -594,7 +610,7 @@ fn a_file_that_changed_without_a_merge_is_refused_explicitly() {
         err.contains("its format has no merge (it is applied across versions only to a file that is unchanged)"),
         "{err}"
     );
-    assert!(err.contains("`@acme/worker@=1.0.1`"), "{err}");
+    assert!(err.contains("`assemblr add @acme/worker@=1.0.1`"), "{err}");
     assert!(!shop.join("config.yaml").exists());
 }
 
@@ -682,6 +698,22 @@ fn a_provider_section_and_an_amender_section_added_at_one_place_are_both_kept_pr
     let output = fixture.assemblr(&shop, &["compose"]);
     succeed(&output);
     assert!(!stderr(&output).contains("warning"), "{}", stderr(&output));
+    let crossed = "AGENTS.md: the amendment of @acme/db was taken from @acme/worker 1.0.0 and is \
+                   applied to @acme/worker 1.1.0";
+    assert!(!stderr(&output).contains(crossed), "{}", stderr(&output));
+    // `--verbose` shows it, also when nothing is written.
+    let verbose = fixture.assemblr(&shop, &["compose", "--verbose"]);
+    succeed(&verbose);
+    assert!(
+        stdout(&verbose).contains("Nothing to compose"),
+        "{}",
+        stdout(&verbose)
+    );
+    assert!(
+        stderr(&verbose).contains(&format!("note: {crossed}")),
+        "{}",
+        stderr(&verbose)
+    );
     assert_eq!(
         fs::read_to_string(shop.join("AGENTS.md")).unwrap(),
         expected
