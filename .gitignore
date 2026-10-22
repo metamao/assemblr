@@ -1,8 +1,7 @@
 /target/
 
-# Local Claude Code settings. Other files under .claude/ (shared skills,
-# agents, or instructions) may be versioned.
-/.claude/settings.json
+# Personal Claude Code settings. The shared .claude/settings.json (hooks,
+# plugins) and other files under .claude/ are versioned.
 /.claude/settings.local.json
 
 # Agent retrospectives (docs/agent-retrospective.md): local, write-only notes
