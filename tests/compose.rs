@@ -2385,3 +2385,330 @@ fn a_small_binary_file_both_sides_changed_is_a_conflict_never_a_line_merge() {
     assert!(err.contains("is not UTF-8 text"), "{err}");
     assert_eq!(tree(&project), before);
 }
+
+fn update(fixture: &Fixture, project: &Path, units: &[&str]) -> Output {
+    let mut args = vec!["update"];
+    args.extend_from_slice(units);
+    fixture.assemblr(project, &args)
+}
+
+fn locked(project: &Path, unit: &str) -> String {
+    lockfile(project)["units"][unit]["version"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn update_moves_the_locked_versions_within_the_declared_requirements_and_never_edits_the_declaration()
+ {
+    let fixture = Fixture::new("update-all");
+    let (node, _) = registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/node", "^1")], "");
+    succeeds(fixture.compose(&project));
+    let declaration = read(&project.join("assemblr.jsonc"));
+    publish_node(
+        &fixture,
+        &node,
+        "1.1.0",
+        "node v2\n",
+        "#!/bin/sh\necho run v2\n",
+    );
+    // 2.0.0 is outside the requirement and stays out.
+    node.write("manifest.jsonc", &manifest("@acme/node", "2.0.0", &[], ""));
+    node.publish("2.0.0");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+
+    // Plain `compose` keeps the lock.
+    let output = succeeds(fixture.compose(&project));
+    assert!(
+        stdout(&output).contains("Nothing to compose"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(locked(&project, "@acme/node"), "1.0.0");
+
+    let output = succeeds(update(&fixture, &project, &[]));
+    assert!(
+        stdout(&output).contains("Updated: @acme/node 1.0.0 -> 1.1.0."),
+        "{}",
+        stdout(&output)
+    );
+    assert!(
+        stdout(&output).contains("  modified README.md"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(locked(&project, "@acme/node"), "1.1.0");
+    assert_eq!(read(&project.join("README.md")), "node v2\n");
+    assert_eq!(read(&project.join("assemblr.jsonc")), declaration);
+
+    // Nothing more to do: the same command touches nothing.
+    let before = tree(&project);
+    let output = succeeds(update(&fixture, &project, &[]));
+    assert!(
+        stdout(&output).contains("Nothing to update: every unit is at the newest version"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(tree(&project), before);
+}
+
+#[test]
+fn update_records_the_new_version_in_the_lock_even_when_no_file_changes() {
+    let fixture = Fixture::new("update-lock-only");
+    let (node, _) = registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/node", "^1")], "");
+    succeeds(fixture.compose(&project));
+    let before_lock = read(&project.join("assemblr-lock.json"));
+    // 1.0.1 delivers exactly what 1.0.0 did.
+    node.write(
+        "manifest.jsonc",
+        &read(&node.path.join("manifest.jsonc")).replace("1.0.0", "1.0.1"),
+    );
+    node.publish("1.0.1");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    let files_before = tree(&project)
+        .into_iter()
+        .filter(|(path, _)| path != "assemblr-lock.json")
+        .collect::<Vec<_>>();
+
+    let output = succeed_update(&fixture, &project, &[]);
+    assert!(
+        stdout(&output).contains("Updated: @acme/node 1.0.0 -> 1.0.1."),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(locked(&project, "@acme/node"), "1.0.1");
+    assert_ne!(read(&project.join("assemblr-lock.json")), before_lock);
+    let files_after = tree(&project)
+        .into_iter()
+        .filter(|(path, _)| path != "assemblr-lock.json")
+        .collect::<Vec<_>>();
+    assert_eq!(files_after, files_before);
+    // The lock also records the provenance of what was composed.
+    let lock = lockfile(&project);
+    assert_eq!(
+        lock["units"]["@acme/node"]["commit"],
+        node.git(&["rev-parse", "v1.0.1"])
+    );
+}
+
+fn succeed_update(fixture: &Fixture, project: &Path, units: &[&str]) -> Output {
+    succeeds(update(fixture, project, units))
+}
+
+#[test]
+fn naming_a_unit_updates_only_it_and_what_it_forces_and_the_report_says_so() {
+    let fixture = Fixture::new("update-named");
+    let (node, _) = registry(&fixture);
+    // `@acme/app` requires node ^1.0 and is published at 1.0.0 and 1.1.0; the
+    // second needs node ^1.1.
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest("@acme/app", "1.0.0", &[("@acme/node", "^1")], ""),
+    );
+    app.write("src/app.txt", "app 1.0\n");
+    app.publish("1.0.0");
+    fixture.register(&app);
+    let other = fixture.repo("other");
+    other.write("manifest.jsonc", &manifest("@acme/other", "1.0.0", &[], ""));
+    other.write("src/other.txt", "other 1.0\n");
+    other.publish("1.0.0");
+    fixture.register(&other);
+    let project = fixture.project("shop", &[("@acme/app", "^1"), ("@acme/other", "^1")], "");
+    succeeds(fixture.compose(&project));
+
+    publish_node(&fixture, &node, "1.1.0", "node v2\n", "#!/bin/sh\n");
+    app.write(
+        "manifest.jsonc",
+        &manifest("@acme/app", "1.1.0", &[("@acme/node", "^1.1")], ""),
+    );
+    app.write("src/app.txt", "app 1.1\n");
+    app.publish("1.1.0");
+    other.write("manifest.jsonc", &manifest("@acme/other", "1.1.0", &[], ""));
+    other.write("src/other.txt", "other 1.1\n");
+    other.publish("1.1.0");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+
+    // Naming `@acme/app` moves it, and node with it, since app 1.1 needs
+    // node ^1.1; `@acme/other` stays.
+    let output = succeed_update(&fixture, &project, &["@acme/app"]);
+    let out = stdout(&output);
+    assert!(out.contains("@acme/app 1.0.0 -> 1.1.0"), "{out}");
+    assert!(out.contains("@acme/node 1.0.0 -> 1.1.0"), "{out}");
+    assert!(!out.contains("@acme/other"), "{out}");
+    let err = stderr(&output);
+    assert!(
+        err.contains("@acme/node moved although not named: the versions selected for the named unit require it; to keep it where it is, do not update that unit"),
+        "{err}"
+    );
+    assert_eq!(locked(&project, "@acme/other"), "1.0.0");
+    assert_eq!(read(&project.join("other.txt")), "other 1.0\n");
+
+    // A transitive unit can be named too: `@acme/node` is in the project
+    // only because `@acme/app` requires it, and moving it alone leaves the
+    // two selected units where they are.
+    node.write("manifest.jsonc", &manifest("@acme/node", "1.2.0", &[], ""));
+    publish_node(&fixture, &node, "1.2.0", "node v3\n", "#!/bin/sh\n");
+    let output = succeed_update(&fixture, &project, &["@acme/node"]);
+    let out = stdout(&output);
+    assert!(out.contains("@acme/node 1.1.0 -> 1.2.0"), "{out}");
+    assert!(
+        !out.contains("@acme/app") && !out.contains("@acme/other"),
+        "{out}"
+    );
+    assert_eq!(locked(&project, "@acme/app"), "1.1.0");
+    assert_eq!(locked(&project, "@acme/other"), "1.0.0");
+    assert_eq!(read(&project.join("README.md")), "node v3\n");
+
+    // A selected unit named alone leaves the transitive one where it is.
+    let output = succeed_update(&fixture, &project, &["@acme/other"]);
+    assert!(
+        stdout(&output).contains("@acme/other 1.0.0 -> 1.1.0"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn update_refuses_unknown_units_and_projects_never_composed_and_changes_nothing() {
+    let fixture = Fixture::new("update-refused");
+    registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/node", "^1")], "");
+    let err = stderr(&fails(update(&fixture, &project, &[])));
+    assert!(err.contains("never composed"), "{err}");
+    assert!(err.contains("run `assemblr compose` first"), "{err}");
+    succeeds(fixture.compose(&project));
+    let before = tree(&project);
+    let err = stderr(&fails(update(&fixture, &project, &["@acme/web"])));
+    assert!(
+        err.contains("@acme/web is not part of the composition this project holds"),
+        "{err}"
+    );
+    assert!(err.contains("@acme/node"), "{err}");
+    let err = stderr(&fails(update(&fixture, &project, &["@acme/node@^1"])));
+    assert!(err.contains("names a version requirement"), "{err}");
+    assert!(err.contains("assemblr add"), "{err}");
+    assert_eq!(tree(&project), before);
+}
+
+#[test]
+fn an_update_reconciles_edits_like_compose_and_a_conflict_waits_for_continue_or_abort() {
+    let fixture = Fixture::new("update-conflict");
+    let (node, _) = registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/node", "^1")], "");
+    succeeds(fixture.compose(&project));
+    fs::write(project.join("README.md"), "mine\n").unwrap();
+    publish_node(
+        &fixture,
+        &node,
+        "1.1.0",
+        "node v2\n",
+        "#!/bin/sh\necho run v2\n",
+    );
+    let before_abort = tree(&project);
+
+    let output = fails(update(&fixture, &project, &[]));
+    assert!(
+        stdout(&output).contains("  conflict README.md"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(read(&project.join("bin/run")), "#!/bin/sh\necho run v2\n");
+    assert_eq!(locked(&project, "@acme/node"), "1.0.0");
+
+    // Nothing else runs while it waits.
+    let err = stderr(&fails(update(&fixture, &project, &[])));
+    assert!(
+        err.contains("--continue") && err.contains("--abort"),
+        "{err}"
+    );
+
+    // Abort restores the project as it was before the update.
+    succeeds(fixture.assemblr(&project, &["compose", "--abort"]));
+    let outside_store = |files: Vec<(String, Vec<u8>)>| -> Vec<(String, Vec<u8>)> {
+        files
+            .into_iter()
+            .filter(|(path, _)| {
+                !path.starts_with(".assemblr/bases/") && !path.starts_with(".assemblr/objects/")
+            })
+            .collect()
+    };
+    assert_eq!(outside_store(tree(&project)), outside_store(before_abort));
+
+    // Again, resolved by hand and continued: the lock moves.
+    fails(update(&fixture, &project, &[]));
+    fs::write(project.join("README.md"), "mine and node v2\n").unwrap();
+    succeeds(fixture.assemblr(&project, &["compose", "--continue"]));
+    assert_eq!(locked(&project, "@acme/node"), "1.1.0");
+}
+
+#[test]
+fn an_update_applies_amendments_across_versions_and_a_collision_refuses_it_whole() {
+    let fixture = Fixture::new("update-amendments");
+    let (node, _web) = registry(&fixture);
+    // `@acme/shell` accepts any node 1.x and amends node's template at 1.0.0.
+    let shell = fixture.repo("shell");
+    shell.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/shell",
+            "1.0.0",
+            &[("@acme/node", "^1")],
+            r#", "amendments": {"config/app.json.assemblr.tmpl": {"unit": "@acme/node", "base": "1.0.0"}}"#,
+        ),
+    );
+    shell.write(
+        "amendments/config/app.json.assemblr.tmpl",
+        "{\n  \"port\": {{ port }},\n  \"shell\": true\n}\n",
+    );
+    shell.write(
+        "assemblr-lock.json",
+        &format!(
+            "{{\n  \"format\": 1,\n  \"units\": {{\n    \"@acme/node\": {{\n      \"commit\": \"{}\",\n      \"tree\": \"{}\",\n      \"version\": \"1.0.0\"\n    }}\n  }}\n}}\n",
+            node.git(&["rev-parse", "v1.0.0"]),
+            node.git(&["rev-parse", "v1.0.0^{tree}"])
+        ),
+    );
+    shell.publish("1.0.0");
+    fixture.register(&shell);
+    let project = fixture.project("shop", &[("@acme/shell", "^1")], "");
+    succeeds(fixture.compose(&project));
+
+    // 1.1.0 changes other files: the amender is not published again.
+    publish_node(
+        &fixture,
+        &node,
+        "1.1.0",
+        "node v2\n",
+        "#!/bin/sh\necho v2\n",
+    );
+    succeed_update(&fixture, &project, &[]);
+    assert_eq!(locked(&project, "@acme/node"), "1.1.0");
+    assert_eq!(locked(&project, "@acme/shell"), "1.0.0");
+    assert!(read(&project.join("config/app.json")).contains("\"shell\": true"));
+
+    // 1.2.0 sets the key the amender sets: the update is refused whole.
+    node.write(
+        "src/config/app.json.assemblr.tmpl",
+        "{\n  \"port\": {{ port }},\n  \"shell\": false\n}\n",
+    );
+    publish_node(
+        &fixture,
+        &node,
+        "1.2.0",
+        "node v3\n",
+        "#!/bin/sh\necho v3\n",
+    );
+    let before = tree(&project);
+    let err = stderr(&fails(update(&fixture, &project, &[])));
+    assert!(
+        err.contains("the amendment of @acme/shell was taken from @acme/node 1.0.0"),
+        "{err}"
+    );
+    assert!(err.contains("`@acme/node@=1.0.0`"), "{err}");
+    assert_eq!(tree(&project), before);
+    assert_eq!(locked(&project, "@acme/node"), "1.1.0");
+}

@@ -280,7 +280,9 @@ Open:
   what happens to a removed unit's `options` entry are decided provisionally
   (see [composition details](#composition-details--approved) and
   [add and remove details](#add-and-remove-details--approved)).
-- Explicit update operations for a consumer project. **OC-38.**
+- Operations beyond updating locked versions within the declared requirements:
+  changing requirements in bulk, updating past them, a dry run, and automatic
+  updates. **OC-38.**
 
 ### Add and remove details — Approved
 
@@ -374,7 +376,45 @@ of **minimal necessary updates** defined in
 [version selection](dependencies.md#version-selection--approved): `add` changes
 locked versions only as far as the new constraints require, and explains every
 version it changed. The lock records the exact resolved versions. Explicit
-update operations are distinct from these minimal changes (**OC-38**).
+updates are distinct from these minimal changes (see
+[Update](#update--approved)).
+
+### Update — Approved
+
+Decided by the owner on #63 (decision log D-23):
+
+- **Command.** `assemblr update [<identity>...]`, at the project's top level.
+  Without identities it moves every locked unit to the newest version the
+  declared requirements allow. With identities it targets those units only,
+  selected or transitive. An identity that is not part of the composition the
+  project holds is an error that lists the locked units, and so is a project
+  that was never composed.
+- **Selection.** The declared requirements are resolved with the lock minus
+  the named units (all of it when none is named), so every other locked version
+  is kept unless a requirement of the new ones forces it to move. The newest
+  stable version that satisfies every requirement is chosen (pre-releases only
+  where a requirement names them). Units that moved without being named are
+  reported with the reason, never silently: the update is not widened into an
+  unrestricted graph update.
+- **Declaration.** The command never edits `assemblr.jsonc`. Changing a
+  requirement stays `add <unit>@<requirement>` or editing the declaration.
+  There is no `--latest`, no dry run, and no automatic update.
+- **Lock.** The lock records the new resolution and each version's
+  provenance, and is rewritten whenever the resolution changes, **even when
+  the composed files are identical** to the previous composition. The same
+  holds for `compose` and `add`.
+- **Reconciliation and recovery.** The command reconciles exactly like
+  `compose`: the three-way decision per file, the journal, the pending-resolution
+  state with `--continue` and `--abort`, and the recovery of an interrupted
+  composition. Amendments are applied across provider versions (see
+  [across provider versions](amendments-and-composition.md#across-provider-versions--approved));
+  a collision between units' contributions is a composition error, never a
+  conflict left in the project, and refuses the whole update with the project
+  unchanged. While a resolution is pending, `update` refuses and names the two
+  ways out.
+- **Output.** Every version that changed, with the units that moved only because
+  of the ones named, goes to stdout; `Nothing to update` says that nothing
+  moved and nothing was touched.
 
 ## Parameters and non-interactive operation — Approved
 
