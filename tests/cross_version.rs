@@ -736,3 +736,97 @@ fn tree(dir: &Path) -> Vec<(String, Vec<u8>)> {
     found.sort();
     found
 }
+
+#[test]
+fn a_provider_section_and_an_amender_section_added_at_one_place_are_both_kept_provider_first() {
+    // The guidance-file case of the reference scenario: the provider's
+    // release adds a section at the end of `AGENTS.md`, where an amender
+    // taken from the earlier version adds its own.
+    let fixture = Fixture::new("appended-sections");
+    let worker = worker(&fixture);
+    let database = format!("{GUIDE}\n## Database\n\nUse DATABASE_URL.\n");
+    let db = amender(
+        &fixture,
+        &worker,
+        "db",
+        "1.0.0",
+        &[("AGENTS.md", &database)],
+    );
+    let security = format!("{GUIDE}\n## Security\n\nNever commit secrets.\n");
+    release(&fixture, &worker, "1.1.0", NAME_PARAM, |worker| {
+        worker.write("src/AGENTS.md", &security);
+    });
+    let expected = format!("{security}\n## Database\n\nUse DATABASE_URL.\n");
+
+    // A consumer composes the release without a new amender version, and
+    // nothing is reported for the order the rule fixes.
+    let declaration = "{\n  \"dependencies\": {\"@acme/db\": \"^1\"},\n  \"options\": {}\n}\n";
+    let shop = project(&fixture, "shop", declaration);
+    let output = fixture.assemblr(&shop, &["compose"]);
+    succeed(&output);
+    assert!(!stderr(&output).contains("warning"), "{}", stderr(&output));
+    assert_eq!(
+        fs::read_to_string(shop.join("AGENTS.md")).unwrap(),
+        expected
+    );
+    assert!(
+        fs::read_to_string(shop.join("assemblr-lock.json"))
+            .unwrap()
+            .contains("\"1.1.0\"")
+    );
+
+    // The amender's author takes the release with `unit update`, which
+    // rebases the copy the same way, and the version published from it
+    // composes to the same file.
+    succeed(&fixture.assemblr(&db.path, &["unit", "update"]));
+    assert_eq!(db.read("amendments/AGENTS.md"), expected);
+    assert!(db.read("manifest.jsonc").contains("\"base\": \"1.1.0\""));
+    let manifest = db.read("manifest.jsonc");
+    db.write(
+        "manifest.jsonc",
+        &manifest.replacen("\"version\": \"1.0.0\"", "\"version\": \"1.0.1\"", 1),
+    );
+    succeed(&fixture.assemblr(&db.path, &["unit", "check"]));
+    db.publish("1.0.1");
+    succeed(&fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    let again = project(&fixture, "again", declaration);
+    succeed(&fixture.assemblr(&again, &["compose"]));
+    assert!(
+        fs::read_to_string(again.join("assemblr-lock.json"))
+            .unwrap()
+            .contains("\"1.0.1\"")
+    );
+    assert_eq!(
+        fs::read_to_string(again.join("AGENTS.md")).unwrap(),
+        expected
+    );
+
+    // A change to a line the provider changed still collides.
+    release(&fixture, &worker, "1.2.0", NAME_PARAM, |worker| {
+        worker.write(
+            "src/AGENTS.md",
+            &security.replace("Keep changes small.", "Keep changes tiny."),
+        );
+    });
+    amender(
+        &fixture,
+        &worker,
+        "editor",
+        "1.0.0",
+        &[(
+            "AGENTS.md",
+            &GUIDE.replace("Keep changes small.", "Keep changes focused."),
+        )],
+    );
+    let clash = project(
+        &fixture,
+        "clash",
+        "{\n  \"dependencies\": {\"@acme/editor\": \"^1\"},\n  \"options\": {}\n}\n",
+    );
+    let err = failure(&fixture.assemblr(&clash, &["compose"]));
+    assert!(
+        err.contains("the amendment of @acme/editor and the provider change the same lines"),
+        "{err}"
+    );
+    assert!(!clash.join("AGENTS.md").exists());
+}
