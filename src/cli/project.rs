@@ -381,8 +381,8 @@ fn report(composed: &Composed, named: Option<&[UnitIdentity]>) {
             .collect();
         if !forced.is_empty() {
             eprintln!(
-                "note: {} moved although not named: a requirement of the versions selected for \
-                 {} needs it; to keep {}, update fewer units or none",
+                "note: {} moved although not named: the versions selected for {} require it; to \
+                 keep {} where {}, do not update {}",
                 forced.join(", "),
                 if named.len() == 1 {
                     "the named unit"
@@ -390,6 +390,16 @@ fn report(composed: &Composed, named: Option<&[UnitIdentity]>) {
                     "the named units"
                 },
                 if forced.len() == 1 { "it" } else { "them" },
+                if forced.len() == 1 {
+                    "it is"
+                } else {
+                    "they are"
+                },
+                if named.len() == 1 {
+                    "that unit"
+                } else {
+                    "those units"
+                },
             );
         }
     }

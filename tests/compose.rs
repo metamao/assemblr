@@ -2541,13 +2541,29 @@ fn naming_a_unit_updates_only_it_and_what_it_forces_and_the_report_says_so() {
     assert!(!out.contains("@acme/other"), "{out}");
     let err = stderr(&output);
     assert!(
-        err.contains("@acme/node moved although not named: a requirement of the versions selected for the named unit needs it"),
+        err.contains("@acme/node moved although not named: the versions selected for the named unit require it; to keep it where it is, do not update that unit"),
         "{err}"
     );
     assert_eq!(locked(&project, "@acme/other"), "1.0.0");
     assert_eq!(read(&project.join("other.txt")), "other 1.0\n");
 
-    // A transitive unit can be named too.
+    // A transitive unit can be named too: `@acme/node` is in the project
+    // only because `@acme/app` requires it, and moving it alone leaves the
+    // two selected units where they are.
+    node.write("manifest.jsonc", &manifest("@acme/node", "1.2.0", &[], ""));
+    publish_node(&fixture, &node, "1.2.0", "node v3\n", "#!/bin/sh\n");
+    let output = succeed_update(&fixture, &project, &["@acme/node"]);
+    let out = stdout(&output);
+    assert!(out.contains("@acme/node 1.1.0 -> 1.2.0"), "{out}");
+    assert!(
+        !out.contains("@acme/app") && !out.contains("@acme/other"),
+        "{out}"
+    );
+    assert_eq!(locked(&project, "@acme/app"), "1.1.0");
+    assert_eq!(locked(&project, "@acme/other"), "1.0.0");
+    assert_eq!(read(&project.join("README.md")), "node v3\n");
+
+    // A selected unit named alone leaves the transitive one where it is.
     let output = succeed_update(&fixture, &project, &["@acme/other"]);
     assert!(
         stdout(&output).contains("@acme/other 1.0.0 -> 1.1.0"),
