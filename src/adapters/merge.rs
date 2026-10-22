@@ -25,8 +25,8 @@ use std::fmt;
 
 use super::jsonc_edit::{EditError, ValueError, apply, comments_of, parse_value};
 use crate::domain::{
-    Conflict, Contributor, Derived, Operation, UnitIdentity, Value, combine, derive, merge_values,
-    plan,
+    Conflict, Contributor, Derived, InsertTie, Operation, UnitIdentity, Value, combine, derive,
+    merge_text, merge_values, plan,
 };
 
 /// Composes `copies`, each amender's rendered copy, onto `base`, the
@@ -73,6 +73,129 @@ pub(crate) fn merge_json(
     notes.sort();
     notes.dedup();
     Ok(Merged { text, notes })
+}
+
+/// Composes `copies`, each amender's rendered copy of a text file, onto
+/// `base`, the provider's rendered file, by a line-level three-way merge
+/// (see [`merge_text`]). Changes in different places are all kept,
+/// identical changes are one change, insertions at one position are all
+/// kept in the order of the amenders' identities, and overlapping or
+/// touching differing changes are conflicts that name the lines and the
+/// amenders. The amenders are ordered by identity, whatever order `copies`
+/// lists them in.
+pub(crate) fn merge_text_files(
+    base: &str,
+    copies: &[(&UnitIdentity, &str)],
+) -> Result<Merged, MergeFailure> {
+    let sides: Vec<(UnitIdentity, &str)> = copies
+        .iter()
+        .map(|(amender, copy)| ((*amender).clone(), *copy))
+        .collect();
+    // The guard of the JSON merge, for text: an amender's changes alone,
+    // replayed on its base, must give its copy back, byte for byte.
+    for (amender, copy) in &sides {
+        let alone = merge_text(base, &[(amender.clone(), *copy)], InsertTie::Chain);
+        if alone.text().as_deref() != Some(copy) {
+            return Err(MergeFailure::RoundTrip {
+                amender: amender.clone(),
+                detail: "its line changes replayed on its base do not give the copy".to_owned(),
+            });
+        }
+    }
+    let merge = merge_text(base, &sides, InsertTie::Chain);
+    match merge.text() {
+        Some(text) => Ok(Merged {
+            text,
+            notes: merge
+                .chained()
+                .iter()
+                .map(|chained| MergeNote::Chained {
+                    amenders: chained.sides.clone(),
+                    after_line: chained.after_line,
+                })
+                .collect(),
+        }),
+        None => Err(MergeFailure::TextConflicts(
+            merge
+                .conflicts()
+                .map(|conflict| TextConflictReport {
+                    base_lines: conflict.base_lines.clone(),
+                    sides: conflict
+                        .sides
+                        .iter()
+                        .filter(|(_, lines)| *lines != conflict.base)
+                        .map(|(amender, lines)| {
+                            (amender.clone(), brief_lines(&conflict.base, lines))
+                        })
+                        .collect(),
+                })
+                .collect(),
+        )),
+    }
+}
+
+/// A line-level conflict between amenders, for a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextConflictReport {
+    /// The base lines the changes cover, as indexes into its lines.
+    base_lines: std::ops::Range<usize>,
+    /// What each amender holds there, briefly, ordered by identity.
+    sides: Vec<(UnitIdentity, String)>,
+}
+
+impl fmt::Display for TextConflictReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (start, end) = (self.base_lines.start, self.base_lines.end);
+        if start == end {
+            if start == 0 {
+                f.write_str("at the start of the file")?;
+            } else {
+                write!(f, "after line {start}")?;
+            }
+        } else if end - start == 1 {
+            write!(f, "line {end}")?;
+        } else {
+            write!(f, "lines {}-{end}", start + 1)?;
+        }
+        f.write_str(":")?;
+        for (index, (amender, held)) in self.sides.iter().enumerate() {
+            write!(f, "{} {amender} {held}", if index == 0 { "" } else { ";" })?;
+        }
+        Ok(())
+    }
+}
+
+/// What a side changes in the base's lines, for a message: the lines it
+/// adds, removes, or sets, leaving out the ones it keeps.
+fn brief_lines(base: &[&str], lines: &[&str]) -> String {
+    let prefix = base
+        .iter()
+        .zip(lines)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let suffix = base[prefix..]
+        .iter()
+        .rev()
+        .zip(lines[prefix..].iter().rev())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let (removed, added) = (
+        base.len() - prefix - suffix,
+        &lines[prefix..lines.len() - suffix],
+    );
+    let verb = match (removed, added.is_empty()) {
+        (count, true) => return format!("removes {count} line(s)"),
+        (0, false) => "adds",
+        (_, false) => "sets",
+    };
+    let Some(first) = added.iter().find(|line| !line.trim().is_empty()) else {
+        return format!("{verb} {} blank line(s)", added.len());
+    };
+    let first: String = first.trim().chars().take(60).collect();
+    match added.len() {
+        1 => format!("{verb} {first:?}"),
+        count => format!("{verb} {first:?} and {} more line(s)", count - 1),
+    }
 }
 
 /// What the value model cannot carry from `copy`, an amender's rendered
@@ -197,10 +320,18 @@ impl Merged {
     }
 }
 
-/// Something the composition could not carry from a copy, reported rather
-/// than dropped in silence.
+/// Something the composition did that no copy asked for, or could not carry
+/// from a copy, reported rather than done in silence.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MergeNote {
+    /// Several amenders add lines at one position of a text file; all are
+    /// kept, in the order of their identities.
+    Chained {
+        /// The amenders whose lines were kept, in the order they stand.
+        amenders: Vec<UnitIdentity>,
+        /// The number of lines of the provider's file before the position.
+        after_line: usize,
+    },
     /// Part of an amender's copy is not expressed by its operations.
     NotCarried {
         /// The amender.
@@ -213,6 +344,23 @@ pub enum MergeNote {
 impl fmt::Display for MergeNote {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Chained {
+                amenders,
+                after_line,
+            } => {
+                let names: Vec<String> = amenders.iter().map(ToString::to_string).collect();
+                let place = if *after_line == 0 {
+                    "at the start".to_owned()
+                } else {
+                    format!("after line {after_line}")
+                };
+                write!(
+                    f,
+                    "{} each add lines {place}; all are kept, in the order of the units' \
+                     identities",
+                    names.join(", ")
+                )
+            }
             Self::NotCarried { amender, what } => write!(
                 f,
                 "not carried from the copy of {amender}: {what}; the value model carries members \
@@ -234,6 +382,9 @@ pub enum MergeFailure {
     /// The amendments conflict, each conflict with its path and amenders,
     /// sorted by path.
     Conflicts(Vec<Conflict>),
+    /// The amendments of a text file change the same lines differently,
+    /// each conflict with its lines and amenders, in the order of the lines.
+    TextConflicts(Vec<TextConflictReport>),
     /// The editor could not locate an edit in the provider's file.
     Edit(EditError),
     /// The edited text does not hold the planned value.
@@ -264,6 +415,16 @@ impl fmt::Display for MergeFailure {
             } => write!(f, "the copy of {amender} cannot be read as JSON: {error}"),
             Self::Conflicts(conflicts) => {
                 write!(f, "the amendments conflict:")?;
+                for conflict in conflicts {
+                    write!(f, "\n  {conflict}")?;
+                }
+                Ok(())
+            }
+            Self::TextConflicts(conflicts) => {
+                write!(
+                    f,
+                    "the amendments change the same lines of the provider's file differently:"
+                )?;
                 for conflict in conflicts {
                     write!(f, "\n  {conflict}")?;
                 }

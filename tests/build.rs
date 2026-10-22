@@ -176,9 +176,18 @@ impl Repo {
         files(&self.path.join("build"))
     }
 
+    /// One file of the last build.
+    fn build_file(&self, path: &str) -> String {
+        self.read(&format!("build/{path}"))
+    }
+
     fn lockfile(&self) -> Value {
         serde_json::from_str(&self.read("assemblr-lock.json")).unwrap()
     }
+}
+
+fn succeed_build(fixture: &Fixture, repo: &Repo) {
+    succeeds(fixture.build(repo));
 }
 
 /// The files under `dir`, by `/`-separated path, with their contents.
@@ -1922,7 +1931,7 @@ fn a_dependent_builds_with_the_amendments_a_transitive_dependency_publishes() {
 }
 
 #[test]
-fn several_amenders_of_one_provider_file_are_refused() {
+fn several_amenders_of_one_text_file_are_combined_by_line() {
     let fixture = Fixture::new("several-amenders");
     let (_node, _app) = published_amender(&fixture, "port: {{ port }}\n");
     let consumer = consumer(
@@ -1932,53 +1941,70 @@ fn several_amenders_of_one_provider_file_are_refused() {
         "",
     );
     succeeds(fixture.build(&consumer));
+
+    // `unit amend` creates the copy of a file a locked dependency already
+    // amends, and says who else amends it.
+    let output = succeeds(amend(&fixture, &consumer, &["bin/run"]));
+    assert!(
+        stdout(&output)
+            .contains("The file is also amended by @acme/app 0.1.0; the build combines the copies"),
+        "{}",
+        stdout(&output)
+    );
+    // The copy as made changes nothing, so the other amender's change stands.
+    succeed_build(&fixture, &consumer);
+    assert_eq!(consumer.build_file("bin/run"), "#!/bin/sh\necho amended\n");
+
+    // Changes in different places are both kept.
+    consumer.write("amendments/bin/run", "# consumer\n#!/bin/sh\necho node\n");
+    succeed_build(&fixture, &consumer);
+    assert_eq!(
+        consumer.build_file("bin/run"),
+        "# consumer\n#!/bin/sh\necho amended\n"
+    );
+
+    // The same change is one change.
+    consumer.write("amendments/bin/run", "#!/bin/sh\necho amended\n");
+    succeed_build(&fixture, &consumer);
+    assert_eq!(consumer.build_file("bin/run"), "#!/bin/sh\necho amended\n");
+
+    // Different changes to the same line are a conflict that names the
+    // lines and the amenders, and nothing is written.
     let build = consumer.build_files();
     let lockfile = consumer.read("assemblr-lock.json");
-    let manifest_text = consumer.read("manifest.jsonc");
-
-    // `unit amend` refuses the file a locked dependency already amends, and
-    // still amends the provider's other files.
-    let err = stderr(&fails(amend(&fixture, &consumer, &["bin/run"])));
-    assert!(
-        err.contains(
-            "src/bin/run of @acme/node is already amended by @acme/app 0.1.0, a locked \
-             dependency, based on @acme/node 1.0.0; several amendments of one file are \
-             combined for JSON and JSONC files only"
-        ),
-        "{err}"
-    );
-    assert!(err.contains("hint: nothing was changed"), "{err}");
-    assert!(!consumer.path.join("amendments").exists());
-    assert_eq!(consumer.read("manifest.jsonc"), manifest_text);
-    succeeds(amend(&fixture, &consumer, &["config/README.md"]));
-
-    // Declared by hand, the build refuses both amenders and changes nothing.
-    consumer.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/consumer",
-            "0.1.0",
-            &[("@acme/app", "^0.1"), ("@acme/node", "=1.0.0")],
-            r#", "amendments": {
-                "config/README.md": {"unit": "@acme/node", "base": "1.0.0"},
-                "bin/run": {"unit": "@acme/node", "base": "1.0.0"}
-            }"#,
-        ),
-    );
     consumer.write("amendments/bin/run", "#!/bin/sh\necho consumer\n");
+    let err = stderr(&fails(fixture.build(&consumer)));
+    for expected in [
+        "src/bin/run of @acme/node 1.0.0 is amended by @acme/app, @acme/consumer, and the \
+         amendments cannot be combined",
+        "change the same lines of the provider's file differently",
+        "line 2: @acme/app sets \"echo amended\"; @acme/consumer sets \"echo consumer\"",
+        "no amender takes precedence over another",
+    ] {
+        assert!(err.contains(expected), "{expected:?} in {err}");
+    }
+    assert_eq!(consumer.build_files(), build);
+    assert_eq!(consumer.read("assemblr-lock.json"), lockfile);
+
+    // A copy that is not text cannot be combined: no amender applies.
+    consumer.write("amendments/bin/run", "#!/bin/sh\n\0");
     let err = stderr(&fails(fixture.build(&consumer)));
     assert!(
         err.contains(
             "src/bin/run of @acme/node 1.0.0 is amended by this unit, @acme/app 0.1.0; several \
-             amendments of one file are combined for JSON and JSONC files only, and no amender \
-             takes precedence, so the file is not amended"
+             amendments of one file are combined for JSON, JSONC, and UTF-8 text files, but not \
+             for YAML, TOML, XML, or INI files or a file that is not text, and no amender takes \
+             precedence, so the file is not amended"
         ),
         "{err}"
     );
     assert_eq!(consumer.build_files(), build);
-    assert_eq!(consumer.read("assemblr-lock.json"), lockfile);
+}
 
-    // Two published amenders of one file are refused together.
+#[test]
+fn two_published_amenders_of_one_text_file_conflict_or_combine_by_line() {
+    let fixture = Fixture::new("two-published-amenders");
+    let (_node, _app) = published_amender(&fixture, "port: {{ port }}\n");
     let other = fixture.repo("other");
     other.write(
         "manifest.jsonc",
@@ -1994,7 +2020,7 @@ fn several_amenders_of_one_provider_file_are_refused() {
     succeeds(fixture.build(&other));
     other.publish("0.1.0");
     fixture.register(&other);
-    let both = self::consumer(
+    let both = consumer(
         &fixture,
         "both",
         &[("@acme/app", "^0.1"), ("@acme/other", "^0.1")],
@@ -2003,8 +2029,49 @@ fn several_amenders_of_one_provider_file_are_refused() {
     let err = stderr(&fails(fixture.build(&both)));
     assert!(
         err.contains(
-            "src/bin/run of @acme/node 1.0.0 is amended by @acme/app 0.1.0, @acme/other 0.1.0"
+            "src/bin/run of @acme/node 1.0.0 is amended by @acme/app, @acme/other, and the \
+             amendments cannot be combined"
         ),
+        "{err}"
+    );
+    assert!(
+        err.contains("line 2: @acme/app sets \"echo amended\"; @acme/other sets \"echo other\""),
+        "{err}"
+    );
+    // The hint says what to change.
+    assert!(
+        err.contains("hint: the build was rejected") && err.contains("change different lines"),
+        "{err}"
+    );
+
+    // A second published amender that appends a section, away from the
+    // other's change, combines with it.
+    other.write(
+        "amendments/bin/run",
+        "#!/bin/sh\necho node\n# more\n# lines\n",
+    );
+    other.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/other",
+            "0.2.0",
+            &[("@acme/node", "=1.0.0")],
+            r#", "amendments": {"bin/run": {"unit": "@acme/node", "base": "1.0.0"}}"#,
+        ),
+    );
+    succeeds(fixture.build(&other));
+    other.publish("0.2.0");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    let together = consumer(
+        &fixture,
+        "together",
+        &[("@acme/app", "^0.1"), ("@acme/other", "^0.2")],
+        "",
+    );
+    let err = stderr(&fails(fixture.build(&together)));
+    // Appending after the line the other amender replaces touches it.
+    assert!(
+        err.contains("line 2: @acme/app sets \"echo amended\"; @acme/other adds \"# more\" and 1 more line(s)"),
         "{err}"
     );
 }
@@ -2030,16 +2097,16 @@ fn files_of_distinct_providers_with_the_same_name_are_amended_independently() {
     );
     succeeds(fixture.build(&consumer));
 
-    // Both providers have a `run`; only the one `@acme/app` amends is
-    // refused.
+    // Both providers have a `run`; the one `@acme/app` amends is amended
+    // together with it.
     let err = stderr(&fails(amend(&fixture, &consumer, &["run"])));
     assert!(err.contains("\"run\" matches 2 files"), "{err}");
-    let err = stderr(&fails(amend(
-        &fixture,
-        &consumer,
-        &["run", "--unit", "@acme/node"],
-    )));
-    assert!(err.contains("already amended by @acme/app 0.1.0"), "{err}");
+    let output = succeeds(amend(&fixture, &consumer, &["run", "--unit", "@acme/node"]));
+    assert!(
+        stdout(&output).contains("also amended by @acme/app 0.1.0"),
+        "{}",
+        stdout(&output)
+    );
     succeeds(amend(
         &fixture,
         &consumer,

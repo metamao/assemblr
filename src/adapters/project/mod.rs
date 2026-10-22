@@ -553,7 +553,7 @@ fn compose_with(
     let mergeable = |path: &RelativePath| {
         if previously_unbased.contains(path) {
             Mergeability::BaseNotStored
-        } else if MergeFormat::of_path(path).is_none() {
+        } else if MergeFormat::of_path(path) != MergeFormat::Json {
             Mergeability::Format
         } else {
             Mergeability::Mergeable

@@ -710,22 +710,40 @@ impl<A: fmt::Display> fmt::Display for Conflict<A> {
 
 impl<A: fmt::Debug + fmt::Display> std::error::Error for Conflict<A> {}
 
-/// The formats several amendments of one file can be combined in.
+/// How several amendments of one file are combined, by the file's format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeFormat {
-    /// JSON, or JSONC with comments and trailing commas.
+    /// JSON, or JSONC with comments and trailing commas: combined by value.
     Json,
+    /// Text: combined by line, when the files are UTF-8 text.
+    Text,
+    /// A structured format with no adapter yet (YAML, TOML, XML, INI, and
+    /// JSON spelled with another case): a line merge could produce a file
+    /// that is valid text and wrong data, such as a key twice, so amendments
+    /// of one such file by several units stay refused.
+    Unsupported,
 }
 
+/// The extensions of structured formats that have no adapter yet.
+const UNSUPPORTED_EXTENSIONS: [&str; 5] = ["yaml", "yml", "toml", "xml", "ini"];
+
 impl MergeFormat {
-    /// The format of the file delivered at `path`, by its extension, or
-    /// `None` for a format whose amendments cannot be combined yet.
-    pub fn of_path(path: &RelativePath) -> Option<Self> {
+    /// The format of the file delivered at `path`, by its extension.
+    pub fn of_path(path: &RelativePath) -> Self {
         let name = path.segments().last().unwrap_or("");
         let extension = name.rsplit_once('.').map(|(_, extension)| extension);
         match extension {
-            Some("json" | "jsonc") => Some(Self::Json),
-            _ => None,
+            Some("json" | "jsonc") => Self::Json,
+            Some(extension)
+                if extension.eq_ignore_ascii_case("json")
+                    || extension.eq_ignore_ascii_case("jsonc")
+                    || UNSUPPORTED_EXTENSIONS
+                        .iter()
+                        .any(|known| extension.eq_ignore_ascii_case(known)) =>
+            {
+                Self::Unsupported
+            }
+            _ => Self::Text,
         }
     }
 }
@@ -1180,14 +1198,25 @@ mod tests {
     }
 
     #[test]
-    fn only_json_and_jsonc_paths_are_merged() {
+    fn json_paths_merge_by_value_text_by_line_and_other_structured_formats_not_at_all() {
         let format = |text: &str| MergeFormat::of_path(&RelativePath::parse(text).unwrap());
-        assert_eq!(format("package.json"), Some(MergeFormat::Json));
-        assert_eq!(format("config/wrangler.jsonc"), Some(MergeFormat::Json));
-        assert_eq!(format("compose.yaml"), None);
-        assert_eq!(format("Cargo.toml"), None);
-        assert_eq!(format("Dockerfile"), None);
-        assert_eq!(format("notes.JSON"), None);
+        assert_eq!(format("package.json"), MergeFormat::Json);
+        assert_eq!(format("config/wrangler.jsonc"), MergeFormat::Json);
+        assert_eq!(format("AGENTS.md"), MergeFormat::Text);
+        assert_eq!(format("Dockerfile"), MergeFormat::Text);
+        assert_eq!(format("src/server/api.ts"), MergeFormat::Text);
+        assert_eq!(format(".gitignore"), MergeFormat::Text);
+        // Structured formats without an adapter, in any case.
+        for refused in [
+            "compose.yaml",
+            "ci.YML",
+            "Cargo.toml",
+            "pom.xml",
+            "x.ini",
+            "notes.JSON",
+        ] {
+            assert_eq!(format(refused), MergeFormat::Unsupported, "{refused}");
+        }
     }
 
     #[test]

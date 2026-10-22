@@ -34,7 +34,7 @@ use crate::adapters::manifest::{EditError, declare_amendment, read_manifest};
 use crate::adapters::registry::{Registry, StorageError};
 use crate::domain::{
     AmendmentDeclaration, LockChange, LockError, MergeFormat, RelativePath, RelativePathError,
-    ResolutionError, UnitIdentity, Version, delivered_path, relock, resolve,
+    ResolutionError, UnitIdentity, Version, delivered_path, is_text, relock, resolve,
 };
 
 /// Where the edited manifest is written before it replaces `manifest.jsonc`.
@@ -221,6 +221,14 @@ pub fn amend_unit(
             base: existing.base().clone(),
         });
     }
+    // Several amendments of a file are combined when it is JSON or JSONC,
+    // or UTF-8 text that is not in a structured format.
+    let delivered = delivered_path(&found.path).ok().flatten();
+    let combinable = match MergeFormat::of_path(delivered.as_ref().unwrap_or(&found.path)) {
+        MergeFormat::Json => true,
+        MergeFormat::Text => is_text(&base),
+        MergeFormat::Unsupported => false,
+    };
     // A locked dependency, direct or transitive, that already amends the
     // same file of the same provider.
     let mut shared_with = Vec::new();
@@ -234,12 +242,11 @@ pub fn amend_unit(
         else {
             continue;
         };
-        // Several amendments of a JSON or JSONC file are combined by the
-        // build (OC-10): the copy is created, and the author is told who
-        // else amends the file. Any other format would make the build
-        // refuse both amenders, so the copy is not created.
-        let delivered = delivered_path(&found.path).ok().flatten();
-        if MergeFormat::of_path(delivered.as_ref().unwrap_or(&found.path)).is_some() {
+        // Several amendments of one file are combined by the build (OC-10):
+        // the copy is created, and the author is told who else amends the
+        // file. A file in a format that cannot be combined would make the
+        // build refuse both amenders, so the copy is not created.
+        if combinable {
             shared_with.push((identity.clone(), locked.version().clone()));
             continue;
         }
@@ -801,7 +808,8 @@ impl fmt::Display for AmendProblem {
                 f,
                 "src/{path} of {provider} is already amended by {amender} {version}, a locked \
                  dependency, based on {provider} {base}; several amendments of one file are \
-                 combined for JSON and JSONC files only, so the file cannot be amended here"
+                 combined for JSON, JSONC, and UTF-8 text files, but not for YAML, TOML, XML, or \
+                 INI files or a file that is not text, so it cannot be amended here"
             ),
             Self::CopyExists { path } => write!(
                 f,

@@ -3,6 +3,7 @@
 //! single sentence for all of them sent people to `options` for problems
 //! that `options` cannot fix.
 
+use assemblr::adapters::MergeFailure;
 use assemblr::domain::{CompositionError, Requirer, RootTargetReason};
 
 /// Who reads the advice, since the same problem is fixed in different
@@ -95,6 +96,41 @@ pub(super) fn composition_advice(error: &CompositionError, audience: Audience) -
             )
         }
     })
+}
+
+/// What to do when the amendments of one file could not be combined.
+pub(super) fn merge_advice(failure: Option<&MergeFailure>, audience: Audience) -> String {
+    let who = match audience {
+        Audience::Consumer => "the amending units' authors must change the copies",
+        Audience::Author => "change the copies",
+    };
+    match failure {
+        Some(MergeFailure::Unreadable { .. }) => {
+            "every side of a JSON merge must be a JSON document: fix the copy, or the \
+             provider's file, so that it reads as JSON"
+                .to_owned()
+        }
+        None => "every side of a merge must be UTF-8 text".to_owned(),
+        Some(MergeFailure::Edit(_) | MergeFailure::Projection { .. }) => {
+            "the provider's file has a layout the merge could not edit safely; nothing was \
+             written, and reformatting that file conventionally works around it"
+                .to_owned()
+        }
+        Some(MergeFailure::RoundTrip { .. }) => {
+            "this is a defect in Assemblr's merge, not in the copy; nothing was written, and the \
+             copy and the provider's file at its base are what a report needs"
+                .to_owned()
+        }
+        Some(MergeFailure::Conflicts(_)) => format!(
+            "the amendments of one file must agree: {who} so that no two amenders set one \
+             value differently, or expose the value as a parameter of the provider"
+        ),
+        Some(MergeFailure::TextConflicts(_)) => format!(
+            "no amender takes precedence over another: {who} so that they change different \
+             lines that are not next to each other, or move an amender's text to a file of \
+             its own"
+        ),
+    }
 }
 
 /// The advice of every problem, once each and in the order of the problems,

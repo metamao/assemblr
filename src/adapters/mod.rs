@@ -39,7 +39,7 @@ pub use manifest::{
     EditError, FieldPath, IssueKind, JsonKind, ManifestIssue, PathSegment, ReadManifestError,
     declare_amendment, read_manifest, read_project, rebase_amendments,
 };
-pub use merge::{MergeFailure, MergeNote, Merged, ReconcileFailure};
+pub use merge::{MergeFailure, MergeNote, Merged, ReconcileFailure, TextConflictReport};
 pub use project::{
     ComposeFailure, ComposeProblem, ComposeRecovery, Composed, Continued, DECLARATION,
     DeclarationChange, FileChange, FileConflict, FileConflictKind, InitProjectFailure,
