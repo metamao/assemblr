@@ -57,11 +57,30 @@ Requiredness follows from the default alone:
   error** naming the unit and the parameter. Assemblr never substitutes a
   value. Who supplies it is described in
   [Satisfying dependency parameters](#satisfying-dependency-parameters--approved)
-  and [Consumer values](#consumer-values--approved). For development builds,
-  see **OC-6**.
+  and [Consumer values](#consumer-values--approved). For a unit's own builds,
+  see [Examples](#examples--approved).
 
 The serialization of parameter declarations is described in
 [manifest.md](manifest.md#serialization-of-dependencies-options-params-and-amendments--approved).
+
+### Examples — Approved
+
+Decided by the owner on #62 (decision log D-24). A parameter may declare an
+**`example`**: a value of its type, and one of its allowed values, that the
+unit is built, checked, and published with while the parameter is required
+and has no default.
+
+- An example is an authoring-time value. It is **not a default**: the
+  parameter stays required, a consumer must supply it, and a composition never
+  uses an example in place of a missing value. It does not change the unit's
+  configuration in any composition and never silently becomes a consumer
+  value. A diagnostic may show it as a suggestion.
+- It must satisfy the parameter's type and allowed values. That does not
+  prove that every value is valid: the values a composition resolves are
+  validated as they are.
+- `assemblr info` shows it. See the
+  [authoring workflow](authoring-workflow.md#build-details--approved) for how
+  a unit's own build uses it.
 
 ### What parameters may do — Approved
 
@@ -191,10 +210,6 @@ Here the unit requires its `@metamao/node` dependency to be configured with
 A consumer's values likewise target only its explicit selections (see
 [Consumer values](#consumer-values--approved)).
 
-Open:
-
-- How option requirements interact with development build inputs. **OC-6.**
-
 ### Satisfying dependency parameters — Approved
 
 A published unit is **responsible for satisfying the required parameters of
@@ -227,10 +242,44 @@ Rules:
   alter the dependency graph or which files exist (see
   [What parameters must not do](#what-parameters-must-not-do--approved)).
 
-Open:
+**Mappings — decided by the owner on #62 (decision log D-24).** In a unit's
+`options`, an option value written `{ "from": "appName" }` is a mapping from
+the unit's own parameter `appName`:
 
-- The syntax of mappings, and how options conflicts are evaluated when an
-  option value is mapped from a parameter. **OC-39.**
+```jsonc
+"params":  { "appName": { "type": "string", "description": "The application name.", "example": "my-app" } },
+"options": { "@metamao/cloudflare-worker": { "appName": { "from": "appName" } } }
+```
+
+- A mapping is a **strict requirement** on the dependency's parameter whose
+  value is the source parameter's **effective value**: the value the
+  composition decided for it, a declared default included. It converts
+  nothing, renames nothing by convention, and invents no value. Other
+  option values are literals, as before. A consumer's `options` hold
+  literals only; a mapping belongs to a unit's manifest.
+- The source must be a parameter the unit declares. Assemblr rejects the
+  known incompatibilities: the same type, or a string (plain or enumerated)
+  mapped to a plain string, or an enumerated string whose allowed values the
+  target also allows. A free string never maps to an enumerated string, and
+  an integer, a boolean, and a string never map to one another. The value that
+  results is validated against the dependency parameter's type and allowed
+  values like any other requirement; an example proves nothing about it.
+- Effective values are decided **from the dependents to the dependencies**: the
+  consumer's values and literal options are requirements; each unit's value is
+  the agreed requirement or its default; its mappings then produce
+  requirements on the units below, through any number of levels. When several
+  paths supply the same parameter, identical values agree, and different ones
+  are an **options conflict** that names the requirements, the mapped ones
+  with the source parameter they come from. No order settles a conflict.
+- A required parameter whose value is missing is reported at the unit that
+  must supply it, not again at the parameters it would have been mapped to.
+- A unit that depends on units with required parameters must satisfy them
+  (by a default, an option, or a mapping), so making a parameter required is a
+  breaking change for the units that depend on it.
+- The consumer-facing pattern: a **composition unit** depends on several
+  units, exposes the configuration its consumers need once, and maps it to
+  each dependency. A consumer of that unit sets the value once and need not
+  know the graph.
 
 ## Consumer values — Approved
 

@@ -9,8 +9,23 @@ use super::parameter::{Description, ParameterDefinition, ParameterName, Paramete
 use super::path::RelativePath;
 use super::version::{Version, VersionRequirement};
 
-/// The values a unit requires for one dependency's parameters.
+/// The values a consumer requires for one unit's parameters.
 pub type OptionValues = BTreeMap<ParameterName, ParameterValue>;
+
+/// One requirement a unit imposes on a dependency's parameter: a value, or a
+/// mapping from one of its own parameters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OptionValue {
+    /// A fixed value.
+    Literal(ParameterValue),
+    /// The effective value of the unit's own parameter of this name, which
+    /// the dependency's parameter is then required to have. Nothing is
+    /// transformed or renamed on the way.
+    From(ParameterName),
+}
+
+/// What a unit requires for one dependency's parameters.
+pub type UnitOptionValues = BTreeMap<ParameterName, OptionValue>;
 
 /// The provenance of one amendment: the direct dependency whose `src/` file
 /// the copy at `amendments/<path>` was taken from, and the exact published
@@ -57,7 +72,7 @@ pub struct Manifest {
     version: Version,
     description: Description,
     dependencies: BTreeMap<UnitIdentity, VersionRequirement>,
-    options: BTreeMap<UnitIdentity, OptionValues>,
+    options: BTreeMap<UnitIdentity, UnitOptionValues>,
     params: BTreeMap<ParameterName, ParameterDefinition>,
     amendments: BTreeMap<RelativePath, AmendmentDeclaration>,
 }
@@ -69,7 +84,7 @@ impl Manifest {
         version: Version,
         description: Description,
         dependencies: BTreeMap<UnitIdentity, VersionRequirement>,
-        options: BTreeMap<UnitIdentity, OptionValues>,
+        options: BTreeMap<UnitIdentity, UnitOptionValues>,
         params: BTreeMap<ParameterName, ParameterDefinition>,
         amendments: BTreeMap<RelativePath, AmendmentDeclaration>,
     ) -> Result<Self, Vec<ManifestError>> {
@@ -82,6 +97,20 @@ impl Manifest {
                 .iter()
                 .map(|(path, declaration)| (path, &declaration.unit)),
         );
+        let mut errors = errors;
+        for (target, values) in &options {
+            for (parameter, value) in values {
+                if let OptionValue::From(source) = value {
+                    if !params.contains_key(source) {
+                        errors.push(ManifestError::UndeclaredMappingSource {
+                            target: target.clone(),
+                            parameter: parameter.clone(),
+                            source: source.clone(),
+                        });
+                    }
+                }
+            }
+        }
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -144,7 +173,7 @@ impl Manifest {
     }
 
     /// The values the unit requires for its direct dependencies' parameters.
-    pub fn options(&self) -> &BTreeMap<UnitIdentity, OptionValues> {
+    pub fn options(&self) -> &BTreeMap<UnitIdentity, UnitOptionValues> {
         &self.options
     }
 
@@ -211,6 +240,15 @@ pub enum ManifestError {
     SelfDependency(UnitIdentity),
     /// `options` targets an identity that is not a declared dependency.
     UndeclaredOptionTarget(UnitIdentity),
+    /// A mapping in `options` names a parameter the unit does not declare.
+    UndeclaredMappingSource {
+        /// The dependency the option targets.
+        target: UnitIdentity,
+        /// The dependency's parameter the mapping configures.
+        parameter: ParameterName,
+        /// The parameter the mapping names.
+        source: ParameterName,
+    },
     /// An amendment targets an identity that is not a declared dependency.
     UndeclaredAmendmentTarget {
         /// The amended path.
@@ -230,6 +268,15 @@ impl fmt::Display for ManifestError {
                 f,
                 "{target} is not declared in `dependencies`; options may only target direct dependencies"
             ),
+            Self::UndeclaredMappingSource {
+                target,
+                parameter,
+                source,
+            } => write!(
+                f,
+                "the option `{parameter}` of {target} is mapped from `{source}`, which is not a \
+                 parameter this unit declares in `params`"
+            ),
             Self::UndeclaredAmendmentTarget { path, unit } => write!(
                 f,
                 "the amendment of {path} names {unit}, which is not declared in `dependencies`; \
@@ -245,7 +292,7 @@ impl std::error::Error for ManifestError {}
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{AmendmentDeclaration, Manifest, ManifestError, OptionValues};
+    use super::{AmendmentDeclaration, Manifest, ManifestError, OptionValue, UnitOptionValues};
     use crate::domain::{
         Description, ParameterName, ParameterValue, RelativePath, UnitIdentity, Version,
         VersionRequirement,
@@ -272,9 +319,9 @@ mod tests {
             .iter()
             .map(|name| (identity(name), VersionRequirement::parse("^1.0.0").unwrap()))
             .collect();
-        let option_values: OptionValues = [(
+        let option_values: UnitOptionValues = [(
             ParameterName::parse("enabled").unwrap(),
-            ParameterValue::Boolean(true),
+            OptionValue::Literal(ParameterValue::Boolean(true)),
         )]
         .into();
         let options = option_targets

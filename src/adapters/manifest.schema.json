@@ -40,7 +40,12 @@
         "type": "object",
         "description": "The required values, by parameter name.",
         "propertyNames": { "$ref": "#/definitions/parameterName" },
-        "additionalProperties": { "$ref": "#/definitions/value" }
+        "additionalProperties": {
+          "oneOf": [
+            { "$ref": "#/definitions/value" },
+            { "$ref": "#/definitions/mapping" }
+          ]
+        }
       }
     },
     "params": {
@@ -99,6 +104,10 @@
           "$ref": "#/definitions/value",
           "description": "The value used when a consumer supplies none. Its presence makes the parameter optional."
         },
+        "example": {
+          "$ref": "#/definitions/value",
+          "description": "A value this unit is built, checked, and published with while the parameter is required and has no default. It is not a default: a consumer must still supply the parameter, and the example is never used as its value."
+        },
         "allowed": {
           "type": "array",
           "items": { "type": "string" },
@@ -110,18 +119,30 @@
       "allOf": [
         {
           "if": { "properties": { "type": { "const": "string" } } },
-          "then": { "properties": { "default": { "type": "string" } } },
+          "then": { "properties": { "default": { "type": "string" }, "example": { "type": "string" } } },
           "else": { "properties": { "allowed": false } }
         },
         {
           "if": { "properties": { "type": { "const": "integer" } } },
-          "then": { "properties": { "default": { "type": "integer" } } }
+          "then": { "properties": { "default": { "type": "integer" }, "example": { "type": "integer" } } }
         },
         {
           "if": { "properties": { "type": { "const": "boolean" } } },
-          "then": { "properties": { "default": { "type": "boolean" } } }
+          "then": { "properties": { "default": { "type": "boolean" }, "example": { "type": "boolean" } } }
         }
       ]
+    },
+    "mapping": {
+      "type": "object",
+      "description": "Requires the dependency's parameter to have the value of one of this unit's own parameters, as it is decided for the composition. Nothing is converted.",
+      "required": ["from"],
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "$ref": "#/definitions/parameterName",
+          "description": "The unit's own parameter."
+        }
+      }
     },
     "amendment": {
       "type": "object",

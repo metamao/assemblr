@@ -373,6 +373,7 @@ pub struct ParameterDefinition {
     parameter_type: ParameterType,
     description: Description,
     default: Option<ParameterValue>,
+    example: Option<ParameterValue>,
 }
 
 impl ParameterDefinition {
@@ -390,7 +391,26 @@ impl ParameterDefinition {
             parameter_type,
             description,
             default,
+            example: None,
         })
+    }
+
+    /// The same definition with an authoring-time example, rejecting one that
+    /// does not satisfy the parameter's type and allowed values.
+    ///
+    /// An example is not a default: it never makes the parameter optional and
+    /// never supplies a value to a composition. It is the value a unit's own
+    /// build, check, and publication use when the parameter is required and
+    /// has no default.
+    pub fn with_example(mut self, example: ParameterValue) -> Result<Self, ParameterValueError> {
+        self.parameter_type.check(&example)?;
+        self.example = Some(example);
+        Ok(self)
+    }
+
+    /// The authoring-time example, if the parameter has one.
+    pub fn example(&self) -> Option<&ParameterValue> {
+        self.example.as_ref()
     }
 
     /// The parameter's type.

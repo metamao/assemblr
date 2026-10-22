@@ -474,8 +474,8 @@ fn a_rejected_build_reports_every_problem_and_changes_nothing() {
     let stderr = stderr(&output);
     for expected in [
         "amendments/node/node.txt is not declared in the manifest",
-        "@acme/app declares required parameters without defaults: `appName`",
-        "supplying development values is not supported yet",
+        "@acme/app declares required parameters without defaults or examples: `appName`",
+        "an `example` on the parameter supplies one",
         "path collision: node.txt from @acme/app, node.txt from @acme/node",
         "hint: the build was rejected; build/ and assemblr-lock.json were not changed",
         "remove one of the dependencies from the manifest",

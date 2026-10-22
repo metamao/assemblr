@@ -10,9 +10,10 @@ use std::fmt;
 use super::jsonc::{self, Json, SyntaxError};
 use crate::domain::{
     self, AllowedValues, AllowedValuesError, AmendmentDeclaration, BlankDescription, Description,
-    IdentityError, Manifest, ManifestError, OptionValues, ParameterDefinition, ParameterName,
-    ParameterNameError, ParameterType, ParameterValue, ParameterValueError, Project, RelativePath,
-    RelativePathError, RequirementError, UnitIdentity, Version, VersionError, VersionRequirement,
+    IdentityError, Manifest, ManifestError, OptionValue, OptionValues, ParameterDefinition,
+    ParameterName, ParameterNameError, ParameterType, ParameterValue, ParameterValueError, Project,
+    RelativePath, RelativePathError, RequirementError, UnitIdentity, UnitOptionValues, Version,
+    VersionError, VersionRequirement,
 };
 
 pub(crate) const MANIFEST_FIELDS: &[&str] = &[
@@ -26,7 +27,8 @@ pub(crate) const MANIFEST_FIELDS: &[&str] = &[
     "amendments",
 ];
 const PROJECT_FIELDS: &[&str] = &["$schema", "dependencies", "options"];
-const PARAMETER_FIELDS: &[&str] = &["type", "description", "default", "allowed"];
+const PARAMETER_FIELDS: &[&str] = &["type", "description", "default", "allowed", "example"];
+const MAPPING_FIELDS: &[&str] = &["from"];
 const AMENDMENT_FIELDS: &[&str] = &["unit", "base"];
 const SCALAR: &[JsonKind] = &[JsonKind::String, JsonKind::Integer, JsonKind::Boolean];
 
@@ -259,6 +261,11 @@ pub enum IssueKind {
     InvalidAllowedValues(AllowedValuesError),
     /// The default does not satisfy the parameter's type.
     InvalidDefault(ParameterValueError),
+    /// The example does not satisfy the parameter's type.
+    InvalidExample(ParameterValueError),
+    /// A consumer's `options` holds a mapping, which only a unit's manifest
+    /// can write.
+    MappingInConsumer,
     /// The manifest's fields are inconsistent with each other.
     Inconsistent(ManifestError),
 }
@@ -297,6 +304,11 @@ impl fmt::Display for IssueKind {
             }
             Self::InvalidAllowedValues(error) => error.fmt(f),
             Self::InvalidDefault(error) => write!(f, "invalid default: {error}"),
+            Self::InvalidExample(error) => write!(f, "invalid example: {error}"),
+            Self::MappingInConsumer => f.write_str(
+                "a mapping names a parameter of a unit's own `params`, so only a unit's \
+                 manifest can write one; a project supplies values",
+            ),
             Self::Inconsistent(error) => error.fmt(f),
         }
     }
@@ -578,7 +590,7 @@ impl Reader {
             .get("dependencies")
             .map(|json| self.dependencies(&root.key("dependencies"), json));
         let options = fields.get("options").map_or_else(BTreeMap::new, |json| {
-            self.options(&root.key("options"), json)
+            self.options(&root.key("options"), json, true)
         });
         let params = fields
             .get("params")
@@ -591,6 +603,19 @@ impl Reader {
         // target can be judged undeclared, so only its type error is
         // reported.
         let dependencies = dependencies.unwrap_or_else(|| Some(Dependencies::default()))?;
+        for (target, values) in &options {
+            for (parameter, value) in values {
+                if let OptionValue::From(source) = value {
+                    if !params.contains_key(source) {
+                        self.inconsistent(ManifestError::UndeclaredMappingSource {
+                            target: target.clone(),
+                            parameter: parameter.clone(),
+                            source: source.clone(),
+                        });
+                    }
+                }
+            }
+        }
         for error in domain::relation_errors(
             name.as_ref(),
             &dependencies.declared,
@@ -626,7 +651,7 @@ impl Reader {
             .get("dependencies")
             .map(|json| self.dependencies(&root.key("dependencies"), json));
         let options = fields.get("options").map_or_else(BTreeMap::new, |json| {
-            self.options(&root.key("options"), json)
+            self.options(&root.key("options"), json, false)
         });
         let dependencies = dependencies.unwrap_or_else(|| Some(Dependencies::default()))?;
         for error in domain::relation_errors(
@@ -637,6 +662,20 @@ impl Reader {
         ) {
             self.inconsistent(error);
         }
+        let options = options
+            .into_iter()
+            .map(|(target, values)| {
+                let values: OptionValues = values
+                    .into_iter()
+                    .filter_map(|(name, value)| match value {
+                        OptionValue::Literal(value) => Some((name, value)),
+                        // Reported while reading.
+                        OptionValue::From(_) => None,
+                    })
+                    .collect();
+                (target, values)
+            })
+            .collect();
         Project::new(dependencies.requirements, options).ok()
     }
 
@@ -648,6 +687,13 @@ impl Reader {
             ManifestError::UndeclaredOptionTarget(target) => {
                 FieldPath::default().key("options").key(&target.to_string())
             }
+            ManifestError::UndeclaredMappingSource {
+                target, parameter, ..
+            } => FieldPath::default()
+                .key("options")
+                .key(&target.to_string())
+                .key(parameter.as_str())
+                .key("from"),
             ManifestError::UndeclaredAmendmentTarget { path, .. } => FieldPath::default()
                 .key("amendments")
                 .key(path.as_str())
@@ -779,7 +825,12 @@ impl Reader {
         Some(dependencies)
     }
 
-    fn options(&mut self, path: &FieldPath, json: &Json) -> BTreeMap<UnitIdentity, OptionValues> {
+    fn options(
+        &mut self,
+        path: &FieldPath,
+        json: &Json,
+        mappings: bool,
+    ) -> BTreeMap<UnitIdentity, UnitOptionValues> {
         let Some(members) = self.object(path, json) else {
             return BTreeMap::new();
         };
@@ -787,7 +838,7 @@ impl Reader {
         for (key, value) in members {
             let path = path.key(key);
             let identity = self.identity_key(&path, key);
-            let values = self.option_values(&path, value);
+            let values = self.option_values(&path, value, mappings);
             if let Some(identity) = identity {
                 options.insert(identity, values);
             }
@@ -795,20 +846,37 @@ impl Reader {
         options
     }
 
-    fn option_values(&mut self, path: &FieldPath, json: &Json) -> OptionValues {
+    /// The options of one dependency. A value is a scalar, or, in a unit's
+    /// manifest only, `{ "from": "<own parameter>" }`, a mapping.
+    fn option_values(&mut self, path: &FieldPath, json: &Json, mappings: bool) -> UnitOptionValues {
         let Some(members) = self.object(path, json) else {
-            return OptionValues::new();
+            return UnitOptionValues::new();
         };
-        let mut values = OptionValues::new();
+        let mut values = UnitOptionValues::new();
         for (key, value) in members {
             let path = path.key(key);
             let name = self.parameter_name_key(&path, key);
-            let value = self.scalar(&path, value);
+            let value = match value {
+                Json::Object(_) if !mappings => {
+                    self.report(path.clone(), IssueKind::MappingInConsumer);
+                    None
+                }
+                Json::Object(_) => self.mapping(&path, value),
+                _ => self.scalar(&path, value).map(OptionValue::Literal),
+            };
             if let (Some(name), Some(value)) = (name, value) {
                 values.insert(name, value);
             }
         }
         values
+    }
+
+    fn mapping(&mut self, path: &FieldPath, json: &Json) -> Option<OptionValue> {
+        let fields = self.fields(path, json, MAPPING_FIELDS)?;
+        let source = self.required(path, &fields, "from")?;
+        let text = self.string(&path.key("from"), source)?;
+        self.parameter_name_key(&path.key("from"), text)
+            .map(OptionValue::From)
     }
 
     fn params(
@@ -860,7 +928,18 @@ impl Reader {
             self.report(path.key("default"), IssueKind::InvalidDefault(error));
             return None;
         }
-        ParameterDefinition::new(parameter_type, description?, default).ok()
+        let example = fields
+            .get("example")
+            .and_then(|json| self.scalar(&path.key("example"), json));
+        if let Some(Err(error)) = example.as_ref().map(|value| parameter_type.check(value)) {
+            self.report(path.key("example"), IssueKind::InvalidExample(error));
+            return None;
+        }
+        let definition = ParameterDefinition::new(parameter_type, description?, default).ok()?;
+        match example {
+            Some(example) => definition.with_example(example).ok(),
+            None => Some(definition),
+        }
     }
 
     fn amendments(
@@ -944,6 +1023,7 @@ mod tests {
         ParameterType, ParameterValue, ParameterValueError, RelativePath, Segment, UnitIdentity,
         ValueKind, Version,
     };
+    use crate::domain::{OptionValue, ParameterName};
 
     const FULL: &str = r#"{
   // Editor support only.
@@ -1028,7 +1108,10 @@ mod tests {
         let node = &manifest.options()[&identity("@metamao/node")];
         let values: Vec<(String, ParameterValue)> = node
             .iter()
-            .map(|(name, value)| (name.to_string(), value.clone()))
+            .map(|(name, value)| match value {
+                OptionValue::Literal(value) => (name.to_string(), value.clone()),
+                OptionValue::From(_) => panic!("a literal was expected"),
+            })
             .collect();
         assert_eq!(
             values,
@@ -1664,5 +1747,103 @@ mod tests {
             "{message}"
         );
         assert_eq!(FieldPath::default().to_string(), "(manifest)");
+    }
+
+    #[test]
+    fn an_example_is_read_checked_against_the_parameter_and_is_not_a_default() {
+        let manifest = read_manifest(&with(
+            r#""params": {
+              "appName": {"type": "string", "description": "The name.", "example": "acme"},
+              "mode": {"type": "string", "description": "M.", "allowed": ["dev", "prod"], "example": "prod"}
+            }"#,
+        ))
+        .unwrap();
+        let app = &manifest.params()[&ParameterName::parse("appName").unwrap()];
+        assert_eq!(
+            app.example(),
+            Some(&ParameterValue::String("acme".to_owned()))
+        );
+        // Still required: an example is not a default.
+        assert!(app.is_required());
+        assert_eq!(app.default(), None);
+
+        let text = with(
+            r#""params": {
+              "bad": {"type": "integer", "description": "A.", "example": "x"},
+              "mode": {"type": "string", "description": "M.", "allowed": ["dev"], "example": "prod"}
+            }"#,
+        );
+        let issues = issues(&text);
+        let paths: Vec<&str> = issues.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(paths, ["params.bad.example", "params.mode.example"]);
+        assert!(
+            issues
+                .iter()
+                .all(|(_, kind)| matches!(kind, IssueKind::InvalidExample(_)))
+        );
+    }
+
+    #[test]
+    fn a_mapping_names_a_declared_parameter_of_the_unit_and_a_project_cannot_write_one() {
+        let manifest = read_manifest(&with(
+            r#""dependencies": {"@metamao/node": "^1"},
+               "options": {"@metamao/node": {"major": {"from": "nodeMajor"}, "pm": "pnpm"}},
+               "params": {"nodeMajor": {"type": "integer", "description": "N.", "default": 22}}"#,
+        ))
+        .unwrap();
+        let node = &manifest.options()[&identity("@metamao/node")];
+        assert_eq!(
+            node[&ParameterName::parse("major").unwrap()],
+            OptionValue::From(ParameterName::parse("nodeMajor").unwrap())
+        );
+        assert_eq!(
+            node[&ParameterName::parse("pm").unwrap()],
+            OptionValue::Literal(ParameterValue::String("pnpm".to_owned()))
+        );
+
+        // An undeclared source, another key beside `from`, and a non-name.
+        let text = with(
+            r#""dependencies": {"@metamao/node": "^1"},
+               "options": {"@metamao/node": {
+                 "a": {"from": "missing"},
+                 "b": {"from": "x", "also": 1},
+                 "c": {"from": "bad-name"}
+               }}"#,
+        );
+        let issues = issues(&text);
+        let paths: Vec<&str> = issues.iter().map(|(path, _)| path.as_str()).collect();
+        assert!(
+            paths.contains(&"options[\"@metamao/node\"].a.from"),
+            "{paths:?}"
+        );
+        assert!(
+            paths.contains(&"options[\"@metamao/node\"].b.also"),
+            "{paths:?}"
+        );
+        assert!(
+            paths.contains(&"options[\"@metamao/node\"].c.from"),
+            "{paths:?}"
+        );
+        assert!(issues.iter().any(|(path, kind)| path.ends_with("a.from")
+            && matches!(
+                kind,
+                IssueKind::Inconsistent(ManifestError::UndeclaredMappingSource { .. })
+            )));
+
+        // A consumer supplies values; a mapping belongs to a unit.
+        let error = super::read_project(
+            r#"{"dependencies": {"@metamao/node": "^1"},
+                "options": {"@metamao/node": {"major": {"from": "x"}}}}"#,
+        )
+        .unwrap_err();
+        let ReadManifestError::Invalid(issues) = error else {
+            panic!("{error:?}");
+        };
+        assert!(
+            issues
+                .iter()
+                .any(|issue| *issue.kind() == IssueKind::MappingInConsumer),
+            "{issues:?}"
+        );
     }
 }

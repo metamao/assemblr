@@ -83,7 +83,10 @@ mod tests {
             .map(String::as_str)
             .collect();
         properties.sort_unstable();
-        assert_eq!(properties, ["allowed", "default", "description", "type"]);
+        assert_eq!(
+            properties,
+            ["allowed", "default", "description", "example", "type"]
+        );
         assert_eq!(
             parameter["properties"]["type"]["enum"],
             serde_json::json!(["string", "integer", "boolean"])
