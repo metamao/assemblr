@@ -14,8 +14,10 @@
 //! its declared base follows the lock. When it differs, a text or JSON file
 //! is rebased: the amender's changes against the old base are merged by
 //! line into the file at the new version, on the source templates, so that
-//! the copy keeps its template expressions. A collision refuses the update
-//! and says where. Other formats, and files that are not text, are
+//! the copy keeps its template expressions. Insertions the provider and the
+//! amendment make at one position are both kept, the provider's first, as
+//! composition does when it applies an amendment across versions. A
+//! collision refuses the update and says where. Other formats, and files that are not text, are
 //! carried over only when the provider's file is unchanged. A published
 //! amendment whose provider resolves to another version than its base is
 //! not a problem: composition applies it to the version resolved.
@@ -222,7 +224,7 @@ pub fn reconcile_amendments(
         let merge = merge_text(
             old_text,
             &[(Side::Copy, copy_text), (Side::Provider, new_text)],
-            InsertTie::Conflict,
+            InsertTie::Chain,
         );
         match merge.text() {
             Some(text) => {
@@ -264,11 +266,13 @@ pub fn reconcile_amendments(
     }
 }
 
-/// The two sides of a rebase, in the order that names them in a conflict.
+/// The two sides of a rebase. The provider orders first, so that
+/// insertions both make at one position keep the provider's lines before
+/// the amendment's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Side {
-    Copy,
     Provider,
+    Copy,
 }
 
 /// An amendment carried to its provider's new version.
@@ -758,6 +762,27 @@ mod tests {
         assert_eq!(
             String::from_utf8(reconciled.copy.clone().unwrap()).unwrap(),
             "# Team notes\n\nOne.\n\nTwo.\n\nThree.\n\n## Mine\n\nExtra.\n"
+        );
+    }
+
+    #[test]
+    fn insertions_the_provider_and_the_copy_make_at_one_place_are_both_kept_provider_first() {
+        // Both add a section at the end of the file: the provider in its new
+        // version, the copy against the old one.
+        let new = format!("{NOTES_OLD}\n## Provider\n\nTheirs.\n");
+        let copy = format!("{NOTES_OLD}\n## Mine\n\nExtra.\n");
+        let files = files(&[("NOTES.md", NOTES_OLD)], &[("NOTES.md", &new)]);
+
+        let rebased = reconcile_with(
+            &amending_path("NOTES.md", "1.0.0"),
+            &files,
+            &copy_of("NOTES.md", &copy),
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(rebased[&path("NOTES.md")].copy.clone().unwrap()).unwrap(),
+            format!("{NOTES_OLD}\n## Provider\n\nTheirs.\n\n## Mine\n\nExtra.\n")
         );
     }
 

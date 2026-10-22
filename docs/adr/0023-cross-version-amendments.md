@@ -1,6 +1,6 @@
 # 0023: Amendments across provider versions: deriving against the base, applying to the version resolved, and rebasing in `unit update`
 
-- **Status:** Accepted
+- **Status:** Accepted, point 4 amended by #70
 - **Date:** 2026-10-22
 
 ## Context
@@ -42,10 +42,17 @@ amender. This ADR records how that is built.
    file.
 4. **Text is rebased, then combined.** For text, an amender whose base is not
    the provider's file is first moved: the copy, its base, and the provider's
-   file are merged by line with neither side placed before the other
-   (`InsertTie::Conflict`). Then every amender's moved copy is combined
+   file are merged by line. Then every amender's moved copy is combined
    against the provider's file as before (ADR 0021). A collision of the first
    step is a `Rebase` failure naming the amender and the lines of its base.
+   *Amended (#70, owner decision after the second decision-log review):* the
+   first step chains insertions both sides make at one position, with the
+   provider's side ordered first (`RebaseSide`), instead of reporting them
+   as a conflict (`InsertTie::Conflict` originally). A provider release that
+   appends a section where an older amendment appends one no longer stops
+   the composition. `unit update` rebases the same way (point 7), so the
+   copy it writes composes to the same file. Conflict reports still name the
+   two sides in the order of their identities.
 5. **Formats without a merge, and non-text.** YAML, TOML, XML, INI, and any
    file or copy that is not UTF-8 text is applied across versions only when
    the provider's file is the same bytes at both versions (point 2).

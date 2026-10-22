@@ -125,8 +125,10 @@ pub(crate) fn merge_text_files(
 /// [`merge_text_files`] where each copy has its own base (see
 /// [`merge_json_from`]). A copy whose base is not `provider` is first moved
 /// onto it, by a three-way merge of the copy, its base, and the provider's
-/// file in which neither side takes precedence, so that what remains of
-/// every copy is the amender's own contribution to the provider's file.
+/// file, so that what remains of every copy is the amender's own
+/// contribution to the provider's file. Changes that overlap or touch
+/// conflict; insertions both make at one position are both kept, the
+/// provider's first (see [`RebaseSide`]).
 pub(crate) fn merge_text_files_from(
     provider_unit: &UnitIdentity,
     provider: &str,
@@ -148,19 +150,17 @@ pub(crate) fn merge_text_files_from(
             moved.push(((*amender).clone(), (*copy).to_owned()));
             continue;
         }
-        // The provider takes the amender's place in the order only to
-        // name its side in a conflict; neither is placed before the other.
         let sides = [
-            ((*amender).clone(), *copy),
-            (provider_unit.clone(), provider),
+            (RebaseSide::Amender((*amender).clone()), *copy),
+            (RebaseSide::Provider(provider_unit.clone()), provider),
         ];
-        let rebased = merge_text(base, &sides, InsertTie::Conflict);
+        let rebased = merge_text(base, &sides, InsertTie::Chain);
         match rebased.text() {
             Some(text) => moved.push(((*amender).clone(), text)),
             None => {
                 return Err(MergeFailure::Rebase {
                     amender: (*amender).clone(),
-                    conflicts: conflict_reports(&rebased),
+                    conflicts: conflict_reports(&rebased, RebaseSide::unit),
                 });
             }
         }
@@ -182,26 +182,56 @@ pub(crate) fn merge_text_files_from(
                 })
                 .collect(),
         }),
-        None => Err(MergeFailure::TextConflicts(conflict_reports(&merge))),
+        None => Err(MergeFailure::TextConflicts(conflict_reports(
+            &merge,
+            |unit| unit,
+        ))),
+    }
+}
+
+/// The two sides of moving an amender's copy onto the provider's file at
+/// the version resolved. The provider orders first, so that when both
+/// insert at one position the provider's lines come before the amender's:
+/// the provider's release is the file the amender now amends, and nothing
+/// either side wrote is lost.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum RebaseSide {
+    Provider(UnitIdentity),
+    Amender(UnitIdentity),
+}
+
+impl RebaseSide {
+    fn unit(&self) -> &UnitIdentity {
+        match self {
+            Self::Provider(unit) | Self::Amender(unit) => unit,
+        }
     }
 }
 
 /// The conflicts of a text merge, for a message, naming only the sides that
-/// changed the lines.
-fn conflict_reports(merge: &TextMerge<'_, UnitIdentity>) -> Vec<TextConflictReport> {
+/// changed the lines, each by the unit `unit` gives for it, in the order of
+/// their identities.
+fn conflict_reports<C>(
+    merge: &TextMerge<'_, C>,
+    unit: impl Fn(&C) -> &UnitIdentity,
+) -> Vec<TextConflictReport> {
     merge
         .conflicts()
-        .map(|conflict| TextConflictReport {
-            base_lines: conflict.base_lines.clone(),
-            sides: conflict
+        .map(|conflict| {
+            let mut sides: Vec<(UnitIdentity, String)> = conflict
                 .sides
                 .iter()
                 .zip(&conflict.changed)
                 .filter(|(_, changed)| **changed)
-                .map(|((amender, lines), _)| {
-                    (amender.clone(), describe_change(&conflict.base, lines))
+                .map(|((side, lines), _)| {
+                    (unit(side).clone(), describe_change(&conflict.base, lines))
                 })
-                .collect(),
+                .collect();
+            sides.sort_by(|left, right| left.0.cmp(&right.0));
+            TextConflictReport {
+                base_lines: conflict.base_lines.clone(),
+                sides,
+            }
         })
         .collect()
 }
@@ -615,7 +645,9 @@ impl std::error::Error for ReconcileFailure {}
 mod tests {
     #![allow(clippy::unwrap_used, reason = "fixtures are valid by construction")]
 
-    use super::{MergeFailure, MergeNote, merge_json, merge_text_files, round_trip};
+    use super::{
+        MergeFailure, MergeNote, merge_json, merge_text_files, merge_text_files_from, round_trip,
+    };
     use crate::adapters::jsonc_edit::parse_value;
     use crate::domain::{UnitIdentity, derive};
 
@@ -760,6 +792,48 @@ mod tests {
         );
         let merged = merge_json(BASE, &[(&amender, &reordered)]).unwrap();
         assert_eq!(merged.notes().len(), 1);
+    }
+
+    #[test]
+    fn across_versions_a_provider_s_insertion_and_an_amender_s_at_one_place_are_both_kept() {
+        const OLD: &str = "# Guide\n\nRead the README.\n";
+        let provider = format!("{OLD}\n## Security\n\nNo secrets.\n");
+        let (guide, db, api) = (
+            identity("@acme/guide"),
+            identity("@acme/db"),
+            identity("@acme/api"),
+        );
+        let db_copy = format!("{OLD}\n## Database\n\nUse DATABASE_URL.\n");
+        // Taken from the version resolved, after the provider's section.
+        let api_copy = format!("{provider}\n## API\n\nPort 8080.\n");
+
+        let merged = merge_text_files_from(
+            &guide,
+            &provider,
+            &[(&db, OLD, &db_copy), (&api, &provider, &api_copy)],
+        )
+        .unwrap();
+
+        // The provider's section keeps its place, each amender's follows it,
+        // and the amenders are in the order of their identities.
+        assert_eq!(
+            merged.text(),
+            format!("{provider}\n## API\n\nPort 8080.\n\n## Database\n\nUse DATABASE_URL.\n")
+        );
+
+        // A change to a line the provider changed still collides, and names
+        // both, in the order of their identities.
+        let reworded = OLD.replace("Read the README.", "Read the docs.");
+        let provider = OLD.replace("Read the README.", "Read the guide.");
+        let error = merge_text_files_from(&guide, &provider, &[(&db, OLD, &reworded)]).unwrap_err();
+        assert!(matches!(error, MergeFailure::Rebase { .. }), "{error}");
+        let text = error.to_string();
+        assert!(
+            text.contains(
+                "line 3: @acme/db sets \"Read the docs.\"; @acme/guide sets \"Read the guide.\""
+            ),
+            "{text}"
+        );
     }
 
     #[test]
