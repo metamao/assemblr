@@ -4,15 +4,16 @@
 //! The result goes to stdout. Diagnostics, and changes to the lockfile, go to
 //! stderr.
 
+use super::advice::{Audience, composition_advice, distinct, merge_advice};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use assemblr::adapters::{
     AmendFailure, AmendProblem, AmendState, BuildFailure, BuildProblem, Built, CheckFailure,
     CheckProblem, FileOutcome, GitOutcome, IndexOutcome, InitFailure, Initialized, LockfileOutcome,
-    ManifestFileError, MergeFailure, PublishFailure, PublishProblem, PublishState, Published,
-    RecoveryError, Registry, TagProblem, UpdateFailure, UpdateProblem, UpdateState, Updated,
-    amend_unit, build_unit, check_unit, init_unit, publish_unit, update_unit,
+    ManifestFileError, PublishFailure, PublishProblem, PublishState, Published, RecoveryError,
+    Registry, TagProblem, UpdateFailure, UpdateProblem, UpdateState, Updated, amend_unit,
+    build_unit, check_unit, init_unit, publish_unit, update_unit,
 };
 use assemblr::domain::{
     ContributionError, Excluded, IntegrityChange, LockChange, LockError, RegistryError,
@@ -768,9 +769,10 @@ fn hint(failure: &BuildFailure, root: &Path) -> String {
     };
     let mut hint =
         "the build was rejected; build/ and assemblr-lock.json were not changed".to_owned();
-    if let Some(advice) = problems.iter().find_map(|problem| advice(problem, root)) {
+    let advice = distinct(problems.iter().filter_map(|problem| advice(problem, root)));
+    if !advice.is_empty() {
         hint.push_str("; ");
-        hint.push_str(&advice);
+        hint.push_str(&advice.join("; "));
     }
     hint
 }
@@ -805,28 +807,8 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
                                            content; run `assemblr registry sync` to check the \
                                            registered repositories"
             .to_owned(),
-        BuildProblem::Merge { failure, .. } => match failure {
-            Some(MergeFailure::Unreadable { .. }) | None => {
-                "every side of a merge must be a JSON document: fix the copy, or the \
-                 provider's file, so that it reads as JSON"
-                    .to_owned()
-            }
-            Some(MergeFailure::Edit(_) | MergeFailure::Projection { .. }) => {
-                "the provider's file has a layout the merge could not edit safely; nothing was \
-                 written, and reformatting that file conventionally works around it"
-                    .to_owned()
-            }
-            Some(MergeFailure::RoundTrip { .. }) => {
-                "this is a defect in Assemblr's merge, not in the copy; nothing was written, and \
-                 the copy and the provider's file at its base are what a report needs"
-                    .to_owned()
-            }
-            Some(MergeFailure::Conflicts(_)) => "the amendments of one file must agree: change \
-                                                 the copies so that no two amenders set one \
-                                                 value differently, or expose the value as a \
-                                                 parameter of the provider"
-                .to_owned(),
-        },
+        BuildProblem::Merge { failure, .. } => merge_advice(failure.as_ref(), Audience::Author),
+        BuildProblem::Composition(error) => composition_advice(error, Audience::Author)?,
         BuildProblem::Resolution(ResolutionError::Unavailable { .. }) => {
             "run `assemblr registry sync` to index newly published versions".to_owned()
         }

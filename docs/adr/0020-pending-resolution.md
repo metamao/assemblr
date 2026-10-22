@@ -1,6 +1,6 @@
 # 0020: The pending-resolution state: marked files, a journal that waits, and `compose --continue` and `--abort`
 
-- **Status:** Accepted
+- **Status:** Accepted, the whole-file markers of point 3 narrowed to structured files by 0022
 - **Date:** 2026-10-21
 
 ## Context

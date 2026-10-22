@@ -565,7 +565,7 @@ pub(crate) fn render_files(
                 // The unit's own copy takes the file's place whole, but a
                 // second amender would make a merge of it, which carries
                 // members and values only: say so to its author now.
-                if Some(*amender) == built && MergeFormat::of_path(path).is_some() {
+                if Some(*amender) == built && MergeFormat::of_path(path) == MergeFormat::Json {
                     quiet.set(true);
                     let base = side(composed.contents(), None);
                     quiet.set(false);
@@ -574,7 +574,9 @@ pub(crate) fn render_files(
                         delivered.as_deref().and_then(utf8),
                     ) {
                         for note in super::merge::unshared_notes(base, amender, copy) {
-                            let super::merge::MergeNote::NotCarried { what, .. } = note;
+                            let super::merge::MergeNote::NotCarried { what, .. } = note else {
+                                continue;
+                            };
                             notes.push(format!(
                                 "amendments/{} of {amender}: if another unit amends src/{} of \
                                  {provider} too, {what} of this copy is not carried; the merge \
@@ -628,20 +630,32 @@ pub(crate) fn render_files(
                                 problems.push(merge());
                                 None
                             }
-                            Some((base, copies)) => match super::merge::merge_json(base, &copies) {
-                                Ok(merged) => {
+                            Some((base, copies)) => match match MergeFormat::of_path(path) {
+                                MergeFormat::Json => Some(super::merge::merge_json(base, &copies)),
+                                MergeFormat::Text => {
+                                    Some(super::merge::merge_text_files(base, &copies))
+                                }
+                                // The composition refuses these before it
+                                // gets here.
+                                MergeFormat::Unsupported => None,
+                            } {
+                                Some(Ok(merged)) => {
                                     notes.extend(merged.notes().iter().map(|note| {
                                         format!("src/{} of {provider}: {note}", composed.source())
                                     }));
                                     Some(merged.into_text().into_bytes())
                                 }
-                                Err(failure) => {
+                                Some(Err(failure)) => {
                                     let mut problem = merge();
                                     if let BuildProblem::Merge { failure: slot, .. } = &mut problem
                                     {
                                         *slot = Some(failure);
                                     }
                                     problems.push(problem);
+                                    None
+                                }
+                                None => {
+                                    problems.push(merge());
                                     None
                                 }
                             },
@@ -1167,7 +1181,7 @@ impl fmt::Display for BuildProblem {
                 )?;
                 match failure {
                     Some(failure) => failure.fmt(f),
-                    None => f.write_str("a rendered side is not UTF-8 text, which a JSON file is"),
+                    None => f.write_str("a rendered side is not UTF-8 text"),
                 }
             }
             Self::Template {

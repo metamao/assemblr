@@ -3,6 +3,7 @@
 //! The result goes to stdout. Diagnostics, and what a composition could
 //! not carry or store, go to stderr.
 
+use super::advice::{Audience, composition_advice, distinct, merge_advice};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -454,7 +455,8 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
         ComposeFailure::Rejected { problems, .. } => problems,
     };
     let mut hint = "the composition was rejected and the project was not changed".to_owned();
-    let advice = problems.iter().find_map(|problem| match problem {
+    let advice = distinct(problems.iter().filter_map(|problem| {
+        match problem {
         ComposeProblem::NoDeclaration(_) => Some(format!(
             "{} is not a consumer project's top level; run `assemblr init` to create one, or \
              `assemblr compose` in the directory that holds `assemblr.jsonc`",
@@ -527,10 +529,11 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
         ),
         ComposeProblem::Build(problem) => build_advice(problem),
         _ => None,
-    });
-    if let Some(advice) = advice {
+    }
+    }));
+    if !advice.is_empty() {
         hint.push_str("; ");
-        hint.push_str(&advice);
+        hint.push_str(&advice.join("; "));
     }
     hint
 }
@@ -554,15 +557,8 @@ fn build_advice(problem: &BuildProblem) -> Option<String> {
         BuildProblem::Published { .. } => {
             "run `assemblr registry sync` to check the registered repositories again".to_owned()
         }
-        BuildProblem::Merge { .. } => {
-            "the units' amendments of one file must agree; the amenders' authors must change \
-             the copies or expose the value as a parameter"
-                .to_owned()
-        }
-        BuildProblem::Composition(_) => {
-            "supply the missing values in assemblr.jsonc `options`, or change the selection"
-                .to_owned()
-        }
+        BuildProblem::Merge { failure, .. } => merge_advice(failure.as_ref(), Audience::Consumer),
+        BuildProblem::Composition(error) => composition_advice(error, Audience::Consumer)?,
         _ => return None,
     })
 }

@@ -230,9 +230,10 @@ composition:
   deterministic conflict detection and strict validation of the output: the
   written text must parse back to exactly the merged value.
 - **JSON and JSONC first**, with format-aware parsing and a format-preserving
-  writer. TOML, YAML, text, and binary files with several amenders stay
+  writer. TOML, YAML, XML, INI, and binary files with several amenders stay
   refused, and a single amender's copy keeps taking the file's place as it
-  does today, whatever the format.
+  does today, whatever the format. Other UTF-8 text is combined by line, as
+  the next section describes.
 - **Identical contributions** from several amenders are one change.
   **Different changes to one value conflict**, with no precedence and no
   last-writer-wins. A removal, or a replacement by a scalar or a list,
@@ -256,6 +257,45 @@ composition:
 - The same merge model is the foundation for consumer reconciliation, which
   [reconciliation details](consumer-projects.md#reconciliation-details--approved)
   implements provisionally.
+
+### Text files — Approved direction, details provisional
+
+Several amendments of one text file are combined by a conservative
+**line-level three-way merge**, decided by the owner after the reference
+scenario showed that units which each add a section to a shared guidance
+file, such as `AGENTS.md`, could not be composed. The details are provisional
+(decision log D-20; ADR 0021):
+
+- **Scope.** Any file whose provider file and copies are UTF-8 text without a
+  NUL, outside the structured formats the merge does not support: YAML, TOML,
+  XML, and INI files, and JSON in another case, stay refused with several
+  amenders, because a line merge can produce valid text and wrong data such
+  as a key twice. A file or copy that is not text stays refused. A single
+  amender's copy keeps taking the file's place whole.
+- **Method.** The provider's file and each copy are rendered as for any
+  amendment, compared line by line (a line keeps its terminator), and each
+  copy's changes against the verified base are combined. The result is the
+  base with every amender's changes applied.
+- **Compatible changes.** Changes in different places are all kept. An
+  identical change by several amenders is one change. Insertions that several
+  amenders make at the same position are all kept, each distinct insertion
+  once, in the order of the amenders' identities. The order is a layout and
+  loses nothing, no amender's text takes precedence over another's, and the
+  build and `unit check` report every such position as a warning, since the
+  order is not something any unit asked for. This is the text counterpart of
+  the placement of members several amenders add at one place in a JSON object,
+  and **OC-12** stays open for both.
+- **Conflicts.** Changes that overlap or touch, including changes to adjacent
+  lines, and an insertion next to a changed line, are a conflict unless they
+  are identical. The build is rejected naming the file, the lines of the
+  provider's file, and what each amender does there, and writes nothing.
+  Lines every amender agrees on at the start and the end of a conflict are not
+  part of it.
+- **Guard.** An amender's changes alone, replayed on the base, must give its
+  copy back byte for byte. A mismatch is a defect in the merge and rejects
+  the build, never a silent difference.
+- **Determinism.** The result depends on the files and the amenders'
+  identities only.
 
 Implementation notes (provisional, decision log D-6 to D-8, corrected by the
 review recorded in the decision log):
@@ -291,8 +331,10 @@ review recorded in the decision log):
 - A copy whose derived operations do not reproduce its value when replayed
   on its base is not a formatting matter but a defect in the derivation, and
   it is an error naming the amender, never a warning.
-- The format is recognized by the delivered file's extension, `.json` or
-  `.jsonc`, after the template suffix is removed.
+- The format is recognized by the delivered file's extension, after the
+  template suffix is removed: `.json` or `.jsonc` is JSON; `.yaml`, `.yml`,
+  `.toml`, `.xml`, `.ini`, and `.json` or `.jsonc` in another case are
+  structured formats without an adapter; any other path is text.
 
 Open:
 
@@ -319,7 +361,8 @@ A published amender's bases are verified against the composer's registry
 record before composition, as approved above. With the base and the resolved
 version equal, one amender's result is the rendered copy, and no change is
 derived. Several amenders of one JSON or JSONC file are combined by
-[the merge engine](#the-merge-engine--approved) on the rendered content:
+[the merge engine](#the-merge-engine--approved), and of a text file by line,
+on the rendered content:
 the provider's file and each copy rendered with the provider's values, the
 copy with its amender's as `own`. The cases that need the open decisions
 above fail explicitly, naming each amender, its version, the provider, the

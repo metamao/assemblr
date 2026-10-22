@@ -18,6 +18,7 @@ mod reconcile;
 mod registry;
 mod resolution;
 mod snapshot;
+mod text_merge;
 mod update;
 mod version;
 
@@ -58,6 +59,10 @@ pub use resolution::{
     ResolutionError, ResolvedGraph, ResolvedUnit, resolve,
 };
 pub use snapshot::{BaseIdentity, BlobId, ListingError, Snapshot, SnapshotFile};
+pub use text_merge::{
+    Chained, Conflict as TextConflict, InsertTie, Segment as TextSegment, TextMerge, is_text,
+    merge_text, split_lines,
+};
 pub use update::{
     PublishedAmenderError, ReconcileCause, ReconcileError, published_amenders_at_base,
     reconcile_amendments, update_lock,

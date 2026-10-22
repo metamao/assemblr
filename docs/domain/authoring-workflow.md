@@ -164,7 +164,8 @@ either before or after the amendment.
 dependency; a path the unit's own `src/` holds, which would collide; a path
 the manifest already declares; a file of the same provider that a locked
 dependency, direct or transitive, already amends, naming that amender and
-its version, unless the file is JSON or JSONC, whose amendments the build
+its version, unless the file is JSON, JSONC, or UTF-8 text outside the
+structured formats the merge does not support, whose amendments the build
 combines (see
 [amendments-and-composition.md](amendments-and-composition.md#the-merge-engine--approved)),
 in which case the copy is created and the result names the other amenders;
@@ -405,8 +406,12 @@ other than the base is reported as not supported yet, naming each amender
 and version. A JSON or JSONC file that several units amend is composed by
 the merge engine, and a conflict between the amendments rejects the build
 naming the path and every amender; what a copy carries beyond values is
-reported as a warning. A file of any other format that several units amend
-is not amended by any of them, and the build is rejected (see
+reported as a warning. A text file that several units amend is composed by
+line, with a conflict naming the lines and every amender; insertions several
+units make at one position are all kept in the order of the units'
+identities, and the build reports it. A YAML, TOML, XML, or INI file that
+several units amend, or a file or copy that is not UTF-8 text, is not amended
+by any of them, and the build is rejected (see
 [amendments-and-composition.md](amendments-and-composition.md#the-merge-engine--approved)).
 The unit's own `src/` file at an amended path is a path collision.
 
