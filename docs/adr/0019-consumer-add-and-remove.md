@@ -7,7 +7,7 @@
 
 The second part of item 14 (#43) adds `assemblr add` and `assemblr remove`.
 The product rules are in
-[`consumer-projects.md`](../domain/consumer-projects.md#add-and-remove-details--approved)
+[`consumer-projects.md`](../domain/consumer-projects.md#add-and-remove-details--provisional-d-17)
 and the decisions behind them in the autonomous decision log (D-17). Both
 commands change the declaration and then compose it, and the declaration is
 also the handle that serializes compositions (ADR 0016 point 8). This ADR

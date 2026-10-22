@@ -44,6 +44,7 @@ Every contract in this directory carries one of these labels:
 | **Conceptual** | Illustrates approved intent. The syntax, serialization, or command grammar shown is *not* canonical. |
 | **Approved direction** | The intent is approved. The details are listed explicitly as Open items in the same section. |
 | **Recommended (provisional)** | A default mechanism or policy the owner has accepted for Alpha. Alpha implementations may follow it; doing so is not implementing by assumption. It is not a verified guarantee or a final decision: the contract that cites it stays open until the owner settles it, and the default may be revised when technical evidence shows a better approach. A revision that affects approved user-visible semantics needs owner review. |
+| **Provisional (D-n)** | Implemented behavior an agent decided on an open point under [AGENTS.md §1.1](../../AGENTS.md#11-decisions-autonomy-by-default-escalation-by-exception), recorded as entry D-n of the [autonomous decision log](https://github.com/metamao/assemblr/issues/34). Implementations follow it, but it is not approved: the open contract it answers stays open, and the owner may revise it. Merging the pull request that implements it is not that approval. Only the owner's explicit decision, such as an answer on an issue, makes it **Approved**, and the label changes with that decision. In a section labeled Provisional, a statement that cites an owner decision is approved. |
 | **Open (OC-n)** | A listed point that is not decided. Must not be implemented by assumption. Tracked in [open-contracts.md](open-contracts.md), which separates genuinely unresolved contracts from open details of approved semantics. |
 
 Statements in **Approved** sections are **normative**: "must", "must not",
@@ -65,7 +66,9 @@ appears in an open contract's context. An agent may implement a
 ([AGENTS.md §1.1](../../AGENTS.md#11-decisions-autonomy-by-default-escalation-by-exception)),
 recorded in the autonomous decision log. That is neither approval nor
 resolution: the behavior stays provisional, the open contract stays open, and
-only the owner's decision makes it approved.
+only the owner's decision makes it approved. Such a statement is labeled
+**Provisional (D-n)**, inline or in a section heading, so it is never read as
+approved text.
 
 ## Scope
 

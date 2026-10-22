@@ -8,7 +8,7 @@
 Item 14 of the trajectory (#43) evolves a composed project: a changed
 declaration is reconciled against the stored base and the project's
 current files. The product rules are in
-[`consumer-projects.md`](../domain/consumer-projects.md#reconciliation-details--approved).
+[`consumer-projects.md`](../domain/consumer-projects.md#reconciliation-details--provisional-d-13-to-d-15).
 The owner's merge-engine decision (ADR 0015) left the consumer side of
 OC-10, and Git's part, to this item. The research in `system-design`
 (EXP-10, EXP-11) compared Git's `merge-tree`, index stages, a private

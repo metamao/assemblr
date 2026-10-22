@@ -269,16 +269,16 @@ composition:
   promised; semantic compatibility is, and a consequential change to merge
   behavior is an explicit decision.
 - The same merge model is the foundation for consumer reconciliation, which
-  [reconciliation details](consumer-projects.md#reconciliation-details--approved)
-  implements provisionally.
+  [reconciliation details](consumer-projects.md#reconciliation-details--provisional-d-13-to-d-15)
+  implements as **Provisional (D-13)**.
 
-### Text files — Approved direction, details provisional
+### Text files — Approved direction, details Provisional (D-20)
 
 Several amendments of one text file are combined by a conservative
 **line-level three-way merge**, decided by the owner after the reference
-scenario showed that units which each add a section to a shared guidance
-file, such as `AGENTS.md`, could not be composed. The details are provisional
-(decision log D-20; ADR 0021):
+scenario showed that units which each add a section to a shared guidance file,
+such as `AGENTS.md`, could not be composed. The details are **Provisional
+(D-20)** (ADR 0021):
 
 - **Scope.** Any file whose provider file and copies are UTF-8 text without a
   NUL, outside the structured formats the merge does not support: YAML, TOML,
@@ -323,7 +323,7 @@ file, such as `AGENTS.md`, could not be composed. The details are provisional
   that need a precise order in such a file arrange that one of them owns the
   file or that their lines do not depend on each other. Only the formats
   listed under **Scope** are refused, by extension; none is refused for being
-  order-sensitive (decision log D-27, OC-12).
+  order-sensitive (owner decision D-27, OC-12).
 - **Conflicts.** Changes that overlap or touch, including changes to adjacent
   lines, and an insertion next to a changed line, are a conflict unless they
   are identical. The build is rejected naming the file, the lines of the
@@ -336,8 +336,8 @@ file, such as `AGENTS.md`, could not be composed. The details are provisional
 - **Determinism.** The result depends on the files and the amenders'
   identities only.
 
-Implementation notes (provisional, decision log D-6 to D-8, corrected by the
-review recorded in the decision log):
+Implementation notes, **Provisional (D-6 to D-8)**, corrected by the review
+recorded in the decision log:
 
 - Object member order carries no meaning in the JSON grammar, so members
   that several amenders add at the same place are placed in a fixed order,
@@ -378,9 +378,9 @@ review recorded in the decision log):
 Open:
 
 - The manifest representation of list identity hints. **OC-4.**
-- Further format adapters. **OC-10.** The consumer side is decided
-  provisionally, without Git, in
-  [reconciliation details](consumer-projects.md#reconciliation-details--approved).
+- Further format adapters. **OC-10.** The consumer side is
+  **Provisional (D-13)**, without Git, in
+  [reconciliation details](consumer-projects.md#reconciliation-details--provisional-d-13-to-d-15).
 
 ### Composition, builds, and reconciliation
 
@@ -453,7 +453,7 @@ until each amender had published again:
   them. Nothing either side wrote is lost, and nothing is reported: it is an
   ordinary cross-version application. Insertions by several amenders at one
   place keep the order of their identities, after the provider's, as in
-  [text files](#text-files--approved-direction-details-provisional). Changes
+  [text files](#text-files--approved-direction-details-provisional-d-20). Changes
   that overlap or touch, including an insertion next to a line the other side
   changed, still collide.
 - **Formats without a merge.** A YAML, TOML, XML, or INI file, and a file that

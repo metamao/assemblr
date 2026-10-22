@@ -111,9 +111,9 @@ assemblr-lock.json    the unit lockfile: CLI-managed, tracked, resolved versions
 Open:
 
 - The file name and location of the generated local manifest schema, and
-  whether it is tracked in Git. **OC-17.** Decided provisionally (decision
-  log D-2): `manifest.schema.json` at the top level, tracked; see
-  [authoring-workflow.md](authoring-workflow.md#initialization-details--approved).
+  whether it is tracked in Git. **OC-17.** **Provisional (D-2)**:
+  `manifest.schema.json` at the top level, tracked; see
+  [authoring-workflow.md](authoring-workflow.md#initialization-details--provisional-d-2-d-5).
 
 ## Unit contents — Approved
 
