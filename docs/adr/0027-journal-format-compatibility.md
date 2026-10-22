@@ -28,9 +28,11 @@ is where this must stop (#73, from the second decision-log review).
    The project or repository is left as it is, and the diagnostic names the
    journal and what is unknown. For the consumer journal it is
    `StoreError::Journal`, with a hint that a newer version may have written
-   it and should finish it. It is no longer reported as a base that does not
-   verify. The unit-update journal's reader was already strict about members
-   (ADR 0012) and reports `RecoveryError::Invalid`.
+   it and should finish it, instead of a base that does not verify. A
+   journal that is damaged (not JSON, or a member missing or invalid) is
+   not one a newer version wrote and stays `StoreError::Corrupt`. The
+   unit-update journal's reader was already strict about members (ADR 0012)
+   and reports `RecoveryError::Invalid`.
 3. **The consumer journal moves to format 2**, with the same members as
    format 1. The number is what protects against versions built before this
    change: they read only format 1 and ignored unknown members, so they

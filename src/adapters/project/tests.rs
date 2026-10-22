@@ -521,7 +521,8 @@ fn a_journal_is_written_in_format_2_and_both_formats_are_read() {
 }
 
 #[test]
-fn a_journal_with_a_newer_format_or_an_unknown_member_is_refused_as_a_journal() {
+fn a_journal_with_a_newer_format_or_an_unknown_member_is_refused_as_a_journal_and_a_damaged_one_as_damaged()
+ {
     let root = composed("journal-unknown");
     let base = first(&root).snapshot.identity();
     let blob = crate::domain::BlobId::of(b"readme\n");
@@ -561,6 +562,31 @@ fn a_journal_with_a_newer_format_or_an_unknown_member_is_refused_as_a_journal() 
             "{text}: {error}"
         );
         assert!(error.to_string().contains("is left as it is"), "{error}");
+    }
+
+    // A damaged journal is not one a newer version wrote, and is reported
+    // as damaged.
+    let damaged = [
+        ("{\"format\": 2, \"base\": ".to_owned(), "EOF while parsing"),
+        (
+            "{\"format\": 2, \"files\": [], \"directories\": []}".to_owned(),
+            "it has no valid `base` identity",
+        ),
+        (
+            format!(
+                "{{\"format\": 2, \"base\": \"{base}\", \"files\": [{}], \"directories\": []}}",
+                entry.replace("create", "rename")
+            ),
+            "has the action \"rename\"",
+        ),
+    ];
+    for (text, detail) in damaged {
+        fs::write(root.join(".assemblr/journal.json"), &text).unwrap();
+        let error = store.journal().unwrap_err();
+        assert!(
+            matches!(&error, super::StoreError::Corrupt { detail: found, .. } if found.contains(detail)),
+            "{text}: {error}"
+        );
     }
 }
 
