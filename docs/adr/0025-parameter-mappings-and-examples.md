@@ -88,3 +88,6 @@ they are built.
 - Examples add one optional property to the definition. A unit cannot be built
   under several configurations; flags or a file for that are not offered until
   an author needs them.
+- A target parameter that has a default gets no effective value while a
+  mapping's source has none. That is harmless only because the source's error
+  already fails the composition, so no output depends on the missing value.
