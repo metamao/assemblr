@@ -567,7 +567,7 @@ impl std::error::Error for ReconcileFailure {}
 mod tests {
     #![allow(clippy::unwrap_used, reason = "fixtures are valid by construction")]
 
-    use super::{MergeFailure, MergeNote, merge_json, round_trip};
+    use super::{MergeFailure, MergeNote, merge_json, merge_text_files, round_trip};
     use crate::adapters::jsonc_edit::parse_value;
     use crate::domain::{UnitIdentity, derive};
 
@@ -712,5 +712,30 @@ mod tests {
         );
         let merged = merge_json(BASE, &[(&amender, &reordered)]).unwrap();
         assert_eq!(merged.notes().len(), 1);
+    }
+
+    #[test]
+    fn a_text_conflict_names_only_the_amenders_that_changed_the_lines() {
+        let base = "a\nb\nc\nd\ne\nf\ng\n";
+        let (one, two, three) = (
+            identity("@acme/one"),
+            identity("@acme/two"),
+            identity("@acme/three"),
+        );
+        let error = merge_text_files(
+            base,
+            &[
+                (&one, "a\nb\nX\nd\ne\nf\ng\n"),
+                (&two, "a\nb\nY\nd\ne\nf\ng\n"),
+                (&three, "a\nb\nc\nd\ne\nf\ng\nh\n"),
+            ],
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("line 3: @acme/one sets \"X\"; @acme/two sets \"Y\""),
+            "{message}"
+        );
+        assert!(!message.contains("@acme/three"), "{message}");
     }
 }
