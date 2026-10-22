@@ -23,9 +23,9 @@ mod update;
 mod version;
 
 pub use composition::{
-    ComposedFile, Composition, CompositionError, ContributedPath, FileTree, OptionRequirement,
-    ParameterValues, Root, RootTargetReason, TEMPLATE_SUFFIX, UnitContent, UnitFile, compose,
-    delivered_path,
+    Amendment, ComposedFile, Composition, CompositionError, ContributedPath, FileTree,
+    OptionRequirement, ParameterValues, Root, RootTargetReason, TEMPLATE_SUFFIX, UnitContent,
+    UnitFile, compose, delivered_path,
 };
 pub use contribution::{ContributionError, contribution_problems};
 pub use identity::{IdentityError, IdentityErrorReason, Segment, UnitIdentity};
@@ -60,13 +60,10 @@ pub use resolution::{
 };
 pub use snapshot::{BaseIdentity, BlobId, ListingError, Snapshot, SnapshotFile};
 pub use text_merge::{
-    Chained, Conflict as TextConflict, InsertTie, Segment as TextSegment, TextMerge, is_text,
-    merge_text, split_lines,
+    Chained, Conflict as TextConflict, InsertTie, Segment as TextSegment, TextMerge,
+    describe_change, describe_lines, is_text, merge_text, split_lines,
 };
-pub use update::{
-    PublishedAmenderError, ReconcileCause, ReconcileError, published_amenders_at_base,
-    reconcile_amendments, update_lock,
-};
+pub use update::{ReconcileCause, ReconcileError, Reconciled, reconcile_amendments, update_lock};
 pub use version::{RequirementError, Version, VersionError, VersionRequirement};
 
 pub(crate) use manifest::relation_errors;

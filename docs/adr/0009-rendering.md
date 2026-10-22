@@ -1,6 +1,6 @@
 # 0009: Rendering templates with a purpose-built interpolator
 
-- **Status:** Accepted
+- **Status:** Accepted, the context rule across provider versions decided by 0023
 - **Date:** 2026-10-21
 
 ## Context

@@ -474,7 +474,13 @@ fn compose_with(
             return Err(rejected_all(problems));
         }
     };
-    let rendered = render_files(&composition, &resolved.lock, None, &mut found);
+    let rendered = render_files(
+        &composition,
+        &resolved.lock,
+        None,
+        &resolved.dependencies,
+        &mut found,
+    );
     problems.extend(
         found
             .into_iter()

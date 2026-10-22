@@ -3,14 +3,14 @@
 //! The result goes to stdout. Diagnostics, and what a composition could
 //! not carry or store, go to stderr.
 
-use super::advice::{Audience, composition_advice, distinct, merge_advice};
+use super::advice::{Audience, composition_advice, cross_version_advice, distinct, merge_advice};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use assemblr::adapters::{
-    BuildProblem, ComposeFailure, ComposeProblem, ComposeRecovery, Composed, DeclarationChange,
-    FileChange, InitProjectFailure, Registry, StoreError, WriteStep, abort_compose, add_unit,
-    compose_project, continue_compose, init_project, remove_unit,
+    BuildProblem, ComposeFailure, ComposeProblem, ComposeRecovery, Composed, CrossVersionReason,
+    DeclarationChange, FileChange, InitProjectFailure, Registry, StoreError, WriteStep,
+    abort_compose, add_unit, compose_project, continue_compose, init_project, remove_unit,
 };
 use assemblr::domain::{LockChange, LockError, ResolutionError, UnitIdentity};
 use clap::Args;
@@ -557,8 +557,39 @@ fn build_advice(problem: &BuildProblem) -> Option<String> {
         BuildProblem::Published { .. } => {
             "run `assemblr registry sync` to check the registered repositories again".to_owned()
         }
-        BuildProblem::Merge { failure, .. } => merge_advice(failure.as_ref(), Audience::Consumer),
+        BuildProblem::Merge {
+            unit,
+            failure,
+            crossed,
+            ..
+        } => {
+            let mut advice = merge_advice(failure.as_ref(), Audience::Consumer);
+            // A rebase collision is already told what to do.
+            if let (Some((amender, base)), false) = (
+                crossed.first(),
+                matches!(
+                    failure,
+                    Some(assemblr::adapters::MergeFailure::Rebase { .. })
+                ),
+            ) {
+                advice.push_str("; ");
+                advice.push_str(&cross_version_advice(
+                    unit,
+                    amender,
+                    base,
+                    &CrossVersionReason::NoMerge,
+                ));
+            }
+            advice
+        }
         BuildProblem::Composition(error) => composition_advice(error, Audience::Consumer)?,
+        BuildProblem::CrossVersion {
+            unit,
+            amender,
+            base,
+            reason,
+            ..
+        } => cross_version_advice(unit, amender, base, reason),
         _ => return None,
     })
 }

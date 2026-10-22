@@ -402,8 +402,10 @@ only the suffix differs, a declaration without a copy, and a copy without a
 declaration. For a published amender, its lockfile's identity of each base
 is compared with the registry record for the provider at that version, and a
 disagreement is an integrity conflict; a provider resolved to a version
-other than the base is reported as not supported yet, naming each amender
-and version. A JSON or JSONC file that several units amend is composed by
+other than the base is not a problem for a published amender, whose copy is
+applied to the version resolved (see
+[amendments-and-composition.md](amendments-and-composition.md#across-provider-versions--approved)),
+and is for the unit's own amendment, whose base is its locked version. A JSON or JSONC file that several units amend is composed by
 the merge engine, and a conflict between the amendments rejects the build
 naming the path and every amender; what a copy carries beyond values is
 reported as a warning. A text file that several units amend is composed by
@@ -552,12 +554,11 @@ Open:
 - Which version is chosen when the declared range allows several. This
   follows the resolution policy, which is not yet decided. **OC-16.**
 - The command surface for changing a range. **OC-7**, **OC-27.**
-- How reconciliation conflicts are presented to the author, and how the
-  update is completed or abandoned. **OC-53.**
 
 ### Update details — Approved
 
-These were decided by the owner for the first `unit update`.
+These were decided by the owner for the first `unit update`, and extended on
+#59 to rebase a copy when the provider's file changed.
 
 **Command.** `assemblr unit update [<identity>...]`, run at the repository's
 top level as `unit build` is. Without arguments it updates every locked
@@ -587,32 +588,44 @@ from the declared base to the new version:
   both versions, the amendment is **carried over**: the copy is untouched,
   the declaration's `base` becomes the new version, and the lock records
   that version, in one operation;
+- when the file differs and is text outside the structured formats without a
+  merge (YAML, TOML, XML, INI), the amendment is **rebased**: the changes the
+  copy makes against the file at the old base are merged by line into the file
+  at the new version, on the source templates and with neither side taking
+  precedence, so the copy keeps its template expressions. The copy is
+  rewritten, the declaration's `base` becomes the new version, and the lock
+  records it, in one operation. Source templates are never parsed as
+  structured documents, since a template need not be one; a rebased JSON file
+  that is not a template must still parse as JSON, or the update fails;
 - otherwise the update fails and changes nothing, naming the amendment, the
-  provider, the old base, the new version, and the cause: the file differs
-  between the two versions, so carrying the amendment over needs
-  reconciliation, which is not supported yet (**OC-10**, **OC-53**), or the
-  new version no longer provides the path.
+  provider, the old base, the new version, and the cause: the copy and the
+  provider changed the same lines (each collision is reported with its lines,
+  what the provider does there, and what the amendment does), the file
+  differs and has no merge or is not text, or the new version no longer
+  provides the path. The author resolves it by removing the declaration and
+  the copy and amending the file again at the new version; no marker-based
+  resolution is offered for a unit's amendments.
 
 A declaration whose base is not the locked version was edited by hand, and
-fails the update too. No merge, re-basing, or ordering is performed.
+fails the update too.
 
-**Published amendments.** The update also fails, changing nothing, when in
-the resulting graph a published amendment's provider resolves to a version
-other than its base (see
-[amendments-and-composition.md](amendments-and-composition.md#composition-builds-and-reconciliation)),
-since no build could compose it. The check is made on the newly resolved
-graph: updating a provider together with its amender, to an amender version
-that amends the provider at the selected version, is allowed.
+**Published amendments.** An amendment published by a dependency, whose
+provider resolves to a version other than its base, does not block the
+update: composition applies it to the version resolved (see
+[amendments-and-composition.md](amendments-and-composition.md#across-provider-versions--approved)).
+The declared requirement on the provider still decides which versions the
+resolution may choose.
 
 **Writing and recovery.** Everything is decided before anything is written.
 An update replaces `assemblr-lock.json` and, when an amendment is carried
 over, `manifest.jsonc`, whose declarations are rewritten in place so that
-comments and formatting survive, as `unit amend` edits it. Before either
-file is touched, the update records both files' contents before and after
-it in `assemblr-update.json` in the repository's Git directory. It then
-replaces the manifest through the temporary file
-`.assemblr-manifest.jsonc.new` and a rename, then the lockfile through
-`.assemblr-lock.json.new` and a rename, and removes the record last. A
+comments and formatting survive, as `unit amend` edits it, and the copies it
+rebased under `amendments/`. Before any file is touched, the update records
+every file's contents before and after it in `assemblr-update.json` in the
+repository's Git directory. It then replaces the copies, in path order, each
+through a temporary file beside it and a rename, then the manifest through the
+temporary file `.assemblr-manifest.jsonc.new` and a rename, then the lockfile
+through `.assemblr-lock.json.new` and a rename, and removes the record last. A
 failure after the record is written says which files were replaced. While
 the record exists, `unit build` and `unit amend` refuse to run and point at
 `unit update`, which completes the interrupted update before anything else:
@@ -622,8 +635,8 @@ content is left as it is, and the record is removed. A file with any other
 content, changed since the update started, is never overwritten: the update
 stops, keeps the record, and says to restore the file to either recorded
 content or to delete the record to abandon the update. A record that
-Assemblr cannot read is reported and kept. Nothing under `src/` or
-`amendments/` is ever written by an update.
+Assemblr cannot read is reported and kept. Nothing under `src/` is ever
+written by an update, and under `amendments/` only the copies it rebased.
 
 ## Testing: native validation vs functional correctness — Approved
 

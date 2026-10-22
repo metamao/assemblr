@@ -1,6 +1,6 @@
 # 0012: `unit update`: resolving with a partial lock, rewriting bases in place, and the update journal
 
-- **Status:** Accepted
+- **Status:** Accepted, the refusal of a changed file and of a published amender off its base lifted by 0023
 - **Date:** 2026-10-21
 
 ## Context

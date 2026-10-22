@@ -204,9 +204,8 @@ impl fmt::Display for AmendmentBaseError {
                 f,
                 "amendments/{path} is based on {unit} {base}, the locked version, but the \
                  dependencies now resolve {unit} to {resolved}; a build never changes the locked \
-                 version of an amended unit, and reconciling the amendment to another version \
-                 (`unit update`) is not supported yet, so restore a requirement that {base} \
-                 satisfies"
+                 version of an amended unit; `unit update` moves it and reconciles the \
+                 amendment, or restore a requirement that {base} satisfies"
             ),
             Self::DeclarationChanged {
                 path,
@@ -480,8 +479,8 @@ impl fmt::Display for BaseIntegrityError {
             f,
             "integrity conflict: {} {} amends {} of {} {}, whose content its lockfile identifies \
              as commit {} (tree {}), but the registry records commit {} (tree {}) for {} {}; a \
-             published version's content must not change, and an amendment is applied only to \
-             its verified base",
+             published version's content must not change, and an amendment's changes are derived \
+             only against its verified base",
             self.amender,
             self.version,
             self.path,
@@ -749,7 +748,7 @@ mod tests {
                 resolved: version("1.1.0"),
             }]
         );
-        assert!(errors[0].to_string().contains("not supported yet"));
+        assert!(errors[0].to_string().contains("`unit update` moves it"));
 
         // The declaration was edited; the lock still holds.
         let errors = bases(&amending("^1", "1.1.0"), &previous);

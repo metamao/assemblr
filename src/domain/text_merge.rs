@@ -131,6 +131,58 @@ fn diff(base: &[&str], other: &[&str]) -> Vec<Hunk> {
     hunks
 }
 
+/// Where `lines` of a text are, for a message: `line 8`, `lines 7-9`,
+/// `after line 12`, or `at the start of the file`. `lines` indexes the
+/// text's lines from zero.
+pub fn describe_lines(lines: &Range<usize>) -> String {
+    let (start, end) = (lines.start, lines.end);
+    if start == end {
+        if start == 0 {
+            "at the start of the file".to_owned()
+        } else {
+            format!("after line {start}")
+        }
+    } else if end - start == 1 {
+        format!("line {end}")
+    } else {
+        format!("lines {}-{end}", start + 1)
+    }
+}
+
+/// What a side does to the base's `base` lines when it holds `lines` in
+/// their place, for a message: the lines it adds, removes, or sets, leaving
+/// out the ones it keeps.
+pub fn describe_change(base: &[&str], lines: &[&str]) -> String {
+    let prefix = base
+        .iter()
+        .zip(lines)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let suffix = base[prefix..]
+        .iter()
+        .rev()
+        .zip(lines[prefix..].iter().rev())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let (removed, added) = (
+        base.len() - prefix - suffix,
+        &lines[prefix..lines.len() - suffix],
+    );
+    let verb = match (removed, added.is_empty()) {
+        (count, true) => return format!("removes {count} line(s)"),
+        (0, false) => "adds",
+        (_, false) => "sets",
+    };
+    let Some(first) = added.iter().find(|line| !line.trim().is_empty()) else {
+        return format!("{verb} {} blank line(s)", added.len());
+    };
+    let first: String = first.trim().chars().take(60).collect();
+    match added.len() {
+        1 => format!("{verb} {first:?}"),
+        count => format!("{verb} {first:?} and {} more line(s)", count - 1),
+    }
+}
+
 /// One part of a merged text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Segment<'a, C> {

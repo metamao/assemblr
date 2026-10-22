@@ -20,11 +20,11 @@ mod schema;
 
 pub use build::{
     AmendFailure, AmendProblem, AmendState, Amended, BuildFailure, BuildLockError, BuildProblem,
-    Built, Carried, CheckFailure, CheckProblem, Checked, FileState, IndexOutcome, LockfileOutcome,
-    ManifestFileError, Match, OutputProblem, PublishError, PublishFailure, PublishProblem,
-    PublishState, Published, PublishedProblem, Recovered, RecoveryError, TemplateError,
-    UpdateFailure, UpdateProblem, UpdateState, UpdateWriteError, Updated, WriteError, amend_unit,
-    build_unit, check_unit, publish_unit, update_unit,
+    Built, Carried, CheckFailure, CheckProblem, Checked, CrossVersionReason, FileState,
+    IndexOutcome, LockfileOutcome, ManifestFileError, Match, OutputProblem, PublishError,
+    PublishFailure, PublishProblem, PublishState, Published, PublishedProblem, Recovered,
+    RecoveryError, TemplateError, UpdateFailure, UpdateProblem, UpdateState, UpdateWriteError,
+    Updated, WriteError, amend_unit, build_unit, check_unit, publish_unit, update_unit,
 };
 pub use git::{
     Discovered, GitError, GitErrorKind, GitRepository, HeadManifestError, InvalidVersion,
@@ -50,5 +50,7 @@ pub use registry::{
     Added, Indexed, InfoFailure, Problem, ReferenceError, Registry, RegistryFailure, StorageError,
     Synced, TagProblem, UnitInfo, local_reference,
 };
-pub use render::{Context as RenderContext, RenderError, RenderErrorKind, render};
+pub use render::{
+    Context as RenderContext, RenderError, RenderErrorKind, parameters_referenced, render,
+};
 pub use schema::{MANIFEST_SCHEMA, MANIFEST_SCHEMA_REFERENCE, manifest_schema};

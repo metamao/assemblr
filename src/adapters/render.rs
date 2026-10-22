@@ -23,6 +23,7 @@
 //! they are. Inserted values are never scanned again, so a value that
 //! contains `{{ name }}` renders as that text.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use super::git::FILE_LIMIT;
@@ -170,6 +171,27 @@ pub fn render(source: &str, context: &Context<'_>) -> Result<String, Vec<RenderE
     } else {
         Err(errors)
     }
+}
+
+/// The provider parameters `source` names: the plain `{{ name }}`
+/// references, not `own.name`. Constructs that are not references are not
+/// listed; rendering reports them.
+pub fn parameters_referenced(source: &str) -> BTreeSet<ParameterName> {
+    let mut names = BTreeSet::new();
+    let mut rest = source;
+    while let Some((start, opener)) = next_opener(rest) {
+        let after = &rest[start + 2..];
+        let Some(length) = after.find(opener.closer()) else {
+            break;
+        };
+        if opener == Opener::Expression {
+            if let Expression::Reference(Reference::Parameter(name)) = parse(&after[..length]) {
+                names.insert(name);
+            }
+        }
+        rest = &after[length + 2..];
+    }
+    names
 }
 
 /// The three openers the grammar recognizes. Only expressions have meaning;
@@ -408,6 +430,22 @@ impl fmt::Display for RenderErrorKind {
                 )
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod references_tests {
+    use super::parameters_referenced;
+
+    #[test]
+    fn only_plain_references_are_listed_once_each() {
+        let names: Vec<String> = parameters_referenced(
+            "{{ port }} {{port}} {{ own.title }} {{ \"{{\" }} {% if x %} {{ name }} {{ unterminated",
+        )
+        .iter()
+        .map(|name| name.as_str().to_owned())
+        .collect();
+        assert_eq!(names, ["name", "port"]);
     }
 }
 

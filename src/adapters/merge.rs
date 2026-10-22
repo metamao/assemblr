@@ -25,24 +25,50 @@ use std::fmt;
 
 use super::jsonc_edit::{EditError, ValueError, apply, comments_of, parse_value};
 use crate::domain::{
-    Conflict, Contributor, Derived, InsertTie, Operation, UnitIdentity, Value, combine, derive,
-    merge_text, merge_values, plan,
+    Conflict, Contributor, Derived, InsertTie, Operation, TextMerge, UnitIdentity, Value, combine,
+    derive, describe_change, describe_lines, merge_text, merge_values, plan,
 };
 
 /// Composes `copies`, each amender's rendered copy, onto `base`, the
 /// provider's rendered file. The amenders are ordered by identity, whatever
 /// order `copies` lists them in.
+#[cfg(test)]
 pub(crate) fn merge_json(
     base: &str,
     copies: &[(&UnitIdentity, &str)],
 ) -> Result<Merged, MergeFailure> {
-    let base_value = parse_value(base).map_err(|error| MergeFailure::Unreadable {
+    let copies: Vec<(&UnitIdentity, &str, &str)> = copies
+        .iter()
+        .map(|(amender, copy)| (*amender, base, *copy))
+        .collect();
+    merge_json_from(base, &copies)
+}
+
+/// [`merge_json`] where each copy has its own base: the provider's file at
+/// the version the copy was taken from, rendered with the same context as
+/// the copy. Each amender's operations are derived against its own base and
+/// planned against `provider`, the file at the resolved version, so that
+/// the provider's own changes between the two stay and a change that
+/// collides with an amender's is a conflict.
+pub(crate) fn merge_json_from(
+    provider: &str,
+    copies: &[(&UnitIdentity, &str, &str)],
+) -> Result<Merged, MergeFailure> {
+    let provider_value = parse_value(provider).map_err(|error| MergeFailure::Unreadable {
         amender: None,
         error,
     })?;
     let mut sets: BTreeMap<UnitIdentity, Vec<Operation>> = BTreeMap::new();
     let mut notes = Vec::new();
-    for (amender, copy) in copies {
+    for (amender, base, copy) in copies {
+        let base_value = if *base == provider {
+            provider_value.clone()
+        } else {
+            parse_value(base).map_err(|error| MergeFailure::Unreadable {
+                amender: Some((*amender).clone()),
+                error,
+            })?
+        };
         let copy_value = parse_value(copy).map_err(|error| MergeFailure::Unreadable {
             amender: Some((*amender).clone()),
             error,
@@ -56,8 +82,8 @@ pub(crate) fn merge_json(
         sets.insert((*amender).clone(), derived.operations);
     }
     let combined = combine(&sets).map_err(MergeFailure::Conflicts)?;
-    let planned = plan(&base_value, combined).map_err(MergeFailure::Conflicts)?;
-    let text = apply(base, &planned.edits).map_err(MergeFailure::Edit)?;
+    let planned = plan(&provider_value, combined).map_err(MergeFailure::Conflicts)?;
+    let text = apply(provider, &planned.edits).map_err(MergeFailure::Edit)?;
     let written = parse_value(&text).map_err(|error| MergeFailure::Projection {
         detail: error.to_string(),
     })?;
@@ -83,26 +109,67 @@ pub(crate) fn merge_json(
 /// touching differing changes are conflicts that name the lines and the
 /// amenders. The amenders are ordered by identity, whatever order `copies`
 /// lists them in.
+#[cfg(test)]
 pub(crate) fn merge_text_files(
     base: &str,
     copies: &[(&UnitIdentity, &str)],
 ) -> Result<Merged, MergeFailure> {
-    let sides: Vec<(UnitIdentity, &str)> = copies
+    let copies: Vec<(&UnitIdentity, &str, &str)> = copies
         .iter()
-        .map(|(amender, copy)| ((*amender).clone(), *copy))
+        .map(|(amender, copy)| (*amender, base, *copy))
         .collect();
-    // The guard of the JSON merge, for text: an amender's changes alone,
-    // replayed on its base, must give its copy back, byte for byte.
-    for (amender, copy) in &sides {
-        let alone = merge_text(base, &[(amender.clone(), *copy)], InsertTie::Chain);
+    let provider_unit = copies[0].0.clone();
+    merge_text_files_from(&provider_unit, base, &copies)
+}
+
+/// [`merge_text_files`] where each copy has its own base (see
+/// [`merge_json_from`]). A copy whose base is not `provider` is first moved
+/// onto it, by a three-way merge of the copy, its base, and the provider's
+/// file in which neither side takes precedence, so that what remains of
+/// every copy is the amender's own contribution to the provider's file.
+pub(crate) fn merge_text_files_from(
+    provider_unit: &UnitIdentity,
+    provider: &str,
+    copies: &[(&UnitIdentity, &str, &str)],
+) -> Result<Merged, MergeFailure> {
+    let mut moved: Vec<(UnitIdentity, String)> = Vec::new();
+    for (amender, base, copy) in copies {
+        // The guard of the JSON merge, for text: an amender's changes
+        // alone, replayed on its base, must give its copy back, byte for
+        // byte.
+        let alone = merge_text(base, &[((*amender).clone(), *copy)], InsertTie::Chain);
         if alone.text().as_deref() != Some(copy) {
             return Err(MergeFailure::RoundTrip {
-                amender: amender.clone(),
+                amender: (*amender).clone(),
                 detail: "its line changes replayed on its base do not give the copy".to_owned(),
             });
         }
+        if *base == provider {
+            moved.push(((*amender).clone(), (*copy).to_owned()));
+            continue;
+        }
+        // The provider takes the amender's place in the order only to
+        // name its side in a conflict; neither is placed before the other.
+        let sides = [
+            ((*amender).clone(), *copy),
+            (provider_unit.clone(), provider),
+        ];
+        let rebased = merge_text(base, &sides, InsertTie::Conflict);
+        match rebased.text() {
+            Some(text) => moved.push(((*amender).clone(), text)),
+            None => {
+                return Err(MergeFailure::Rebase {
+                    amender: (*amender).clone(),
+                    conflicts: conflict_reports(&rebased),
+                });
+            }
+        }
     }
-    let merge = merge_text(base, &sides, InsertTie::Chain);
+    let sides: Vec<(UnitIdentity, &str)> = moved
+        .iter()
+        .map(|(amender, text)| (amender.clone(), text.as_str()))
+        .collect();
+    let merge = merge_text(provider, &sides, InsertTie::Chain);
     match merge.text() {
         Some(text) => Ok(Merged {
             text,
@@ -115,23 +182,28 @@ pub(crate) fn merge_text_files(
                 })
                 .collect(),
         }),
-        None => Err(MergeFailure::TextConflicts(
-            merge
-                .conflicts()
-                .map(|conflict| TextConflictReport {
-                    base_lines: conflict.base_lines.clone(),
-                    sides: conflict
-                        .sides
-                        .iter()
-                        .filter(|(_, lines)| *lines != conflict.base)
-                        .map(|(amender, lines)| {
-                            (amender.clone(), brief_lines(&conflict.base, lines))
-                        })
-                        .collect(),
+        None => Err(MergeFailure::TextConflicts(conflict_reports(&merge))),
+    }
+}
+
+/// The conflicts of a text merge, for a message, naming only the sides that
+/// changed the lines.
+fn conflict_reports(merge: &TextMerge<'_, UnitIdentity>) -> Vec<TextConflictReport> {
+    merge
+        .conflicts()
+        .map(|conflict| TextConflictReport {
+            base_lines: conflict.base_lines.clone(),
+            sides: conflict
+                .sides
+                .iter()
+                .zip(&conflict.changed)
+                .filter(|(_, changed)| **changed)
+                .map(|((amender, lines), _)| {
+                    (amender.clone(), describe_change(&conflict.base, lines))
                 })
                 .collect(),
-        )),
-    }
+        })
+        .collect()
 }
 
 /// A line-level conflict between amenders, for a message.
@@ -145,56 +217,12 @@ pub struct TextConflictReport {
 
 impl fmt::Display for TextConflictReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (start, end) = (self.base_lines.start, self.base_lines.end);
-        if start == end {
-            if start == 0 {
-                f.write_str("at the start of the file")?;
-            } else {
-                write!(f, "after line {start}")?;
-            }
-        } else if end - start == 1 {
-            write!(f, "line {end}")?;
-        } else {
-            write!(f, "lines {}-{end}", start + 1)?;
-        }
+        f.write_str(&describe_lines(&self.base_lines))?;
         f.write_str(":")?;
         for (index, (amender, held)) in self.sides.iter().enumerate() {
             write!(f, "{} {amender} {held}", if index == 0 { "" } else { ";" })?;
         }
         Ok(())
-    }
-}
-
-/// What a side changes in the base's lines, for a message: the lines it
-/// adds, removes, or sets, leaving out the ones it keeps.
-fn brief_lines(base: &[&str], lines: &[&str]) -> String {
-    let prefix = base
-        .iter()
-        .zip(lines)
-        .take_while(|(left, right)| left == right)
-        .count();
-    let suffix = base[prefix..]
-        .iter()
-        .rev()
-        .zip(lines[prefix..].iter().rev())
-        .take_while(|(left, right)| left == right)
-        .count();
-    let (removed, added) = (
-        base.len() - prefix - suffix,
-        &lines[prefix..lines.len() - suffix],
-    );
-    let verb = match (removed, added.is_empty()) {
-        (count, true) => return format!("removes {count} line(s)"),
-        (0, false) => "adds",
-        (_, false) => "sets",
-    };
-    let Some(first) = added.iter().find(|line| !line.trim().is_empty()) else {
-        return format!("{verb} {} blank line(s)", added.len());
-    };
-    let first: String = first.trim().chars().take(60).collect();
-    match added.len() {
-        1 => format!("{verb} {first:?}"),
-        count => format!("{verb} {first:?} and {} more line(s)", count - 1),
     }
 }
 
@@ -385,6 +413,15 @@ pub enum MergeFailure {
     /// The amendments of a text file change the same lines differently,
     /// each conflict with its lines and amenders, in the order of the lines.
     TextConflicts(Vec<TextConflictReport>),
+    /// An amendment based on another version of the provider than the one
+    /// resolved changes lines that the provider changed too, between the
+    /// two versions. The lines are those of the amender's base.
+    Rebase {
+        /// The amender whose contribution collides.
+        amender: UnitIdentity,
+        /// The collisions, in the order of the lines.
+        conflicts: Vec<TextConflictReport>,
+    },
     /// The editor could not locate an edit in the provider's file.
     Edit(EditError),
     /// The edited text does not hold the planned value.
@@ -424,6 +461,17 @@ impl fmt::Display for MergeFailure {
                 write!(
                     f,
                     "the amendments change the same lines of the provider's file differently:"
+                )?;
+                for conflict in conflicts {
+                    write!(f, "\n  {conflict}")?;
+                }
+                Ok(())
+            }
+            Self::Rebase { amender, conflicts } => {
+                write!(
+                    f,
+                    "the amendment of {amender} and the provider change the same lines between the \
+                     amendment's base and the resolved version (lines of the base):"
                 )?;
                 for conflict in conflicts {
                     write!(f, "\n  {conflict}")?;

@@ -1679,7 +1679,7 @@ fn a_build_never_moves_an_amended_unit_away_from_its_base() {
         "{err}"
     );
     assert!(
-        err.contains("(`unit update`) is not supported yet"),
+        err.contains("`unit update` moves it and reconciles the amendment"),
         "{err}"
     );
     assert!(
@@ -1908,25 +1908,90 @@ fn a_dependent_builds_with_the_amendments_a_transitive_dependency_publishes() {
         assert_eq!(mode & 0o111, 0o111, "{mode:o}");
     }
 
-    // Once the provider publishes a newer version, a fresh dependent
-    // resolves to it, and the amendment cannot be applied; the locked
-    // dependent keeps building.
-    node.write("manifest.jsonc", &manifest("@acme/node", "1.1.0", &[], ""));
+    // The provider publishes versions the amender was not taken from. A
+    // fresh dependent resolves to the newest one, and the amender's
+    // contributions are applied to it without the amender being published
+    // again.
+    let node_manifest = |version: &str| {
+        manifest(
+            "@acme/node",
+            version,
+            &[],
+            r#", "params": {"port": {"type": "integer", "description": "The port.", "default": 80}}"#,
+        )
+    };
+    // 1.1.0 changes a file nobody amends.
+    node.write("manifest.jsonc", &node_manifest("1.1.0"));
+    node.write("src/README.md", "node v2\n");
     node.publish("1.1.0");
     succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
     let fresh = self::consumer(&fixture, "fresh", &[("@acme/app", "^0.1")], "");
-    let err = stderr(&fails(fixture.build(&fresh)));
+    succeeds(fixture.build(&fresh));
+    assert_eq!(
+        fresh.build_files(),
+        pairs(&[
+            ("README.md", "node v2\n"),
+            ("app.txt", "app"),
+            ("bin/run", "#!/bin/sh\necho amended\n"),
+            ("config/README.md", "node config\n"),
+            ("config/app.yaml", "port: 80\nname: Demo\n"),
+            ("consumer.txt", "consumer"),
+        ])
+    );
+    assert!(fresh.read("assemblr-lock.json").contains("\"1.1.0\""));
+
+    // 1.2.0 changes a line of `bin/run` that the amender changed too, which
+    // collides, and the YAML template the amender amends, which has no merge
+    // and is applied across versions only when unchanged. Nothing is built.
+    node.write("manifest.jsonc", &node_manifest("1.2.0"));
+    node.write("src/bin/run", "#!/bin/sh\necho node v3\n");
+    node.write(
+        "src/config/app.yaml.assemblr.tmpl",
+        "port: {{ port }}\nname: node\nowner: node\n",
+    );
+    node.publish("1.2.0");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    let clash = self::consumer(&fixture, "clash", &[("@acme/app", "^0.1")], "");
+    let err = stderr(&fails(fixture.build(&clash)));
     for expected in [
-        "@acme/app 0.1.0 amends src/bin/run of @acme/node based on @acme/node 1.0.0, but \
-         @acme/node resolved to 1.1.0; an amendment is applied only to its base version, and \
-         applying it to another version is not supported yet",
-        "@acme/app 0.1.0 amends src/config/app.yaml.assemblr.tmpl of @acme/node",
+        "src/bin/run of @acme/node 1.2.0 is amended by @acme/app, and the amendments cannot be \
+         combined: the amendment of @acme/app and the provider change the same lines",
+        "line 2: @acme/app sets \"echo amended\"; @acme/node sets \"echo node v3\"",
+        "its format has no merge (it is applied across versions only to a file that is unchanged)",
+        "the amendment of @acme/app was taken from @acme/node 1.0.0",
         "hint: the build was rejected; build/ and assemblr-lock.json were not changed",
+        "`@acme/node@=1.0.0`",
     ] {
         assert!(err.contains(expected), "{expected:?} in {err}");
     }
-    assert!(!fresh.path.join("build").exists());
-    assert!(!fresh.path.join("assemblr-lock.json").exists());
+    assert!(!clash.path.join("build").exists());
+    assert!(!clash.path.join("assemblr-lock.json").exists());
+
+    // Pinned to the version the amendment was taken from, the same
+    // dependent builds as before.
+    let pinned = self::consumer(
+        &fixture,
+        "pinned",
+        &[("@acme/app", "^0.1"), ("@acme/node", "=1.0.0")],
+        "",
+    );
+    succeeds(fixture.build(&pinned));
+    assert_eq!(pinned.build_file("bin/run"), "#!/bin/sh\necho amended\n");
+
+    // A provider version outside the amender's declared range is never
+    // chosen for it: the range says which versions the amender accepts.
+    node.write("manifest.jsonc", &manifest("@acme/node", "2.0.0", &[], ""));
+    node.publish("2.0.0");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    let outside = self::consumer(
+        &fixture,
+        "outside",
+        &[("@acme/app", "^0.1"), ("@acme/node", "^2")],
+        "",
+    );
+    let err = stderr(&fails(fixture.build(&outside)));
+    assert!(err.contains("@acme/node"), "{err}");
+    assert!(!outside.path.join("build").exists());
     succeeds(fixture.build(&consumer));
 }
 
@@ -2419,7 +2484,7 @@ fn an_amendment_whose_base_file_is_unchanged_carries_over() {
 }
 
 #[test]
-fn an_amendment_whose_base_file_changed_or_vanished_refuses_the_update() {
+fn an_amendment_that_collides_with_the_provider_or_whose_file_vanished_refuses_the_update() {
     let fixture = Fixture::new("update-refuse");
     let (node, app) = app_with_edited_amendment(&fixture);
     let unchanged = |app: &Repo| {
@@ -2435,17 +2500,24 @@ fn an_amendment_whose_base_file_changed_or_vanished_refuses_the_update() {
         node.write("src/config/README.md", "node config 1.1.0\n");
     });
     let err = stderr(&fails(update(&fixture, &app, &[])));
+    // The provider and the amendment change the one line of the file.
     assert!(
         err.contains(
-            "amendments/config/README.md is based on @acme/node 1.0.0, and src/config/README.md \
-             differs in @acme/node 1.1.0, which the update would select; reconciling an \
-             amendment with a changed base is not supported yet"
+            "amendments/config/README.md is based on @acme/node 1.0.0, and @acme/node 1.1.0, \
+             which the update would select, changes lines of src/config/README.md that the \
+             amendment changes too (lines of 1.0.0):"
         ),
         "{err}"
     );
     assert!(
         err.contains(
-            "hint: nothing was changed; keep the locked version, or narrow the declared range"
+            "line 1: the provider sets \"node config 1.1.0\"; the amendment sets \"amended config\""
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "hint: nothing was changed; keep the locked version, or resolve what is reported"
         ),
         "{err}"
     );
@@ -2487,7 +2559,7 @@ fn an_amendment_whose_base_file_changed_or_vanished_refuses_the_update() {
 }
 
 #[test]
-fn a_published_amender_is_refused_unless_updated_together_with_its_provider() {
+fn a_published_amender_does_not_block_updating_its_provider() {
     let fixture = Fixture::new("update-published-amender");
     let (node, app) = published_amender(&fixture, "port: {{ port }}\nname: {{ own.title }}\n");
     let consumer = consumer(
@@ -2497,36 +2569,38 @@ fn a_published_amender_is_refused_unless_updated_together_with_its_provider() {
         r#", "options": {"@acme/app": {"title": "Consumer"}}"#,
     );
     succeeds(fixture.build(&consumer));
-    let before = consumer.read("assemblr-lock.json");
     // The amended files are unchanged in the provider's next version.
     publish_node(&fixture, &node, "1.0.0", "1.1.0", |node| {
         node.write("src/README.md", "node 1.1.0\n");
     });
 
-    for args in [&[][..], &["@acme/node"][..]] {
-        let err = stderr(&fails(update(&fixture, &consumer, args)));
-        assert!(
-            err.contains(
-                "@acme/app 0.1.0 amends bin/run of @acme/node at 1.0.0, but the update would \
-                 select @acme/node 1.1.0; applying a published amendment to another version of \
-                 its provider is not supported yet"
-            ),
-            "{err}"
-        );
-        assert!(
-            err.contains("@acme/app 0.1.0 amends config/app.yaml.assemblr.tmpl of @acme/node"),
-            "{err}"
-        );
-        assert!(
-            err.contains(
-                "hint: nothing was changed; update the amender together with its provider"
-            ),
-            "{err}"
-        );
-        assert_eq!(consumer.read("assemblr-lock.json"), before);
-    }
+    // The provider moves alone: the amender's copies, taken from 1.0.0, are
+    // applied to 1.1.0 when the consumer builds.
+    let output = succeeds(update(&fixture, &consumer, &["@acme/node"]));
+    assert_eq!(
+        stdout(&output).trim(),
+        "Updated assemblr-lock.json: @acme/node 1.0.0 -> 1.1.0."
+    );
+    succeeds(fixture.build(&consumer));
+    let built = consumer.build_files();
+    assert!(
+        built.contains(&("README.md".to_owned(), "node 1.1.0\n".to_owned())),
+        "{built:?}"
+    );
+    assert!(
+        built.contains(&("bin/run".to_owned(), "#!/bin/sh\necho amended\n".to_owned())),
+        "{built:?}"
+    );
+    assert!(
+        built.contains(&(
+            "config/app.yaml".to_owned(),
+            "port: 80\nname: Consumer\n".to_owned()
+        )),
+        "{built:?}"
+    );
 
-    // The amender updates, carrying its amendments over, and publishes.
+    // The amender updates too, carrying its amendments over, at its own
+    // pace.
     let output = succeeds(update(&fixture, &app, &[]));
     assert!(
         stdout(&output).contains(
@@ -2543,25 +2617,65 @@ fn a_published_amender_is_refused_unless_updated_together_with_its_provider() {
     );
     app.publish("0.1.1");
     sync(&fixture);
-
-    // Both move together, to a combination a build can compose.
     let output = succeeds(update(&fixture, &consumer, &[]));
     assert_eq!(
         stdout(&output).trim(),
-        "Updated assemblr-lock.json: @acme/app 0.1.0 -> 0.1.1, @acme/node 1.0.0 -> 1.1.0."
+        "Updated assemblr-lock.json: @acme/app 0.1.0 -> 0.1.1."
     );
     succeeds(fixture.build(&consumer));
-    let built = consumer.build_files();
-    assert!(
-        built.contains(&("README.md".to_owned(), "node 1.1.0\n".to_owned())),
-        "{built:?}"
+}
+
+#[test]
+fn an_amendment_is_rebased_onto_the_provider_s_new_version_when_other_lines_changed() {
+    let fixture = Fixture::new("update-rebase");
+    let (node, app) = app_amending_node(&fixture);
+    let notes = "# Config\n\nOne.\n\nTwo.\n\nThree.\n";
+    publish_node(&fixture, &node, "1.0.0", "1.0.1", |node| {
+        node.write("src/config/README.md", notes);
+    });
+    succeeds(update(&fixture, &app, &[]));
+    succeeds(amend(&fixture, &app, &["config/README.md"]));
+    app.write(
+        "amendments/config/README.md",
+        &notes.replace("Three.", "Three, amended."),
     );
+    succeeds(fixture.build(&app));
+
+    // The provider rewords the title; the amendment changed the end.
+    publish_node(&fixture, &node, "1.0.1", "1.1.0", |node| {
+        node.write(
+            "src/config/README.md",
+            &notes.replace("# Config", "# Node config"),
+        );
+    });
+    let output = succeeds(update(&fixture, &app, &[]));
+    let out = stdout(&output);
     assert!(
-        built.contains(&(
-            "config/app.yaml".to_owned(),
-            "port: 80\nname: Consumer\n".to_owned()
-        )),
-        "{built:?}"
+        out.contains(
+            "Carried over, in manifest.jsonc: amendments/config/README.md from @acme/node 1.0.1 \
+             to 1.1.0. Rewritten to follow the provider's changes: amendments/config/README.md."
+        ),
+        "{out}"
+    );
+    assert_eq!(
+        app.read("amendments/config/README.md"),
+        "# Node config\n\nOne.\n\nTwo.\n\nThree, amended.\n"
+    );
+    assert!(app.read("manifest.jsonc").contains("\"base\": \"1.1.0\""));
+    assert!(app.read("assemblr-lock.json").contains("\"1.1.0\""));
+    assert!(!app.path.join(".git/assemblr-update.json").exists());
+    succeeds(fixture.build(&app));
+    assert_eq!(
+        app.build_file("config/README.md"),
+        "# Node config\n\nOne.\n\nTwo.\n\nThree, amended.\n"
+    );
+    // The result is the amendment's own contribution on the new file: a
+    // second update has nothing to do.
+    let output = succeeds(update(&fixture, &app, &[]));
+    assert!(
+        stdout(&output).contains("Nothing to update"),
+        "{}",
+        stdout(&output)
     );
 }
 
