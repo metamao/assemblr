@@ -627,6 +627,12 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
             "restore .assemblr/ from version control; a base that does not verify is never used"
                 .to_owned(),
         ),
+        ComposeProblem::Store(StoreError::Journal { .. }) => Some(
+            "a journal this version cannot read may come from a newer version of Assemblr: \
+             finish the composition with that version (`assemblr compose`, or `assemblr compose \
+             --continue` or `--abort` when it waits); nothing was changed"
+                .to_owned(),
+        ),
         ComposeProblem::ForeignLockfile(_) => Some(
             "remove or move the unit's lockfile; `assemblr compose` writes the project's own"
                 .to_owned(),

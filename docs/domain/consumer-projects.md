@@ -272,6 +272,14 @@ created are removed when empty, the journal and the previous content are
 removed, and the composition continues with a fresh plan, in which a kept
 file counts as the project's content.
 
+**A journal this version cannot read.** A journal whose format number, or
+one of whose members, this version of Assemblr does not know is never
+recovered, completed, or reverted by it: `compose`, `add`, `remove`,
+`update`, `--continue`, and `--abort` refuse, name the journal and what they
+do not know, and change nothing. The version that wrote it finishes the
+composition. A member it did not know could change what recovery must keep,
+so guessing would risk reverting what it should keep (#73, ADR 0027).
+
 Open:
 
 - Exact grammar, including how `add` accepts parameter values. **OC-7.** The

@@ -488,6 +488,109 @@ fn a_journal_without_actions_is_read_as_a_first_composition_s() {
 }
 
 #[test]
+fn a_journal_is_written_in_format_2_and_both_formats_are_read() {
+    let root = composed("journal-formats");
+    let base = first(&root).snapshot.identity();
+    let blob = crate::domain::BlobId::of(b"readme\n");
+    let store = Store::new(&root);
+    let journal = super::store::Journal {
+        base: base.clone(),
+        files: vec![(
+            path("README.md"),
+            super::JournalEntry::Create { blob: blob.clone() },
+        )],
+        directories: vec![],
+        pending: Some(super::store::Pending {
+            lock: blob.clone(),
+            files: vec![path("README.md")],
+        }),
+    };
+    store.begin(&journal).unwrap();
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join(".assemblr/journal.json")).unwrap()).unwrap();
+    assert_eq!(written["format"], 2);
+    assert_eq!(store.journal().unwrap().unwrap(), journal);
+
+    // Format 1 has the same members, `pending` included: a journal an
+    // earlier version left is still recovered.
+    let one = String::from_utf8(fs::read(root.join(".assemblr/journal.json")).unwrap())
+        .unwrap()
+        .replace("\"format\": 2", "\"format\": 1");
+    fs::write(root.join(".assemblr/journal.json"), one).unwrap();
+    assert_eq!(store.journal().unwrap().unwrap(), journal);
+}
+
+#[test]
+fn a_journal_with_a_newer_format_or_an_unknown_member_is_refused_as_a_journal_and_a_damaged_one_as_damaged()
+ {
+    let root = composed("journal-unknown");
+    let base = first(&root).snapshot.identity();
+    let blob = crate::domain::BlobId::of(b"readme\n");
+    let entry =
+        format!("{{\"path\": \"README.md\", \"action\": \"create\", \"blob\": \"{blob}\"}}");
+    let cases = [
+        (
+            format!("{{\"format\": 3, \"base\": \"{base}\", \"files\": [], \"directories\": []}}"),
+            "it has format 3, which this version of Assemblr does not read",
+        ),
+        (
+            format!(
+                "{{\"format\": 2, \"base\": \"{base}\", \"files\": [], \"directories\": [], \"keep\": true}}"
+            ),
+            "it has the member `keep`",
+        ),
+        (
+            format!(
+                "{{\"format\": 2, \"base\": \"{base}\", \"files\": [{}], \"directories\": []}}",
+                entry.replace("}", ", \"mode\": \"755\"}")
+            ),
+            "a `files` entry has the member `mode`",
+        ),
+        (
+            format!(
+                "{{\"format\": 1, \"base\": \"{base}\", \"files\": [{entry}], \"directories\": [], \"pending\": {{\"lock\": \"{blob}\", \"files\": [], \"since\": 1}}}}"
+            ),
+            "its `pending` has the member `since`",
+        ),
+    ];
+    let store = Store::new(&root);
+    for (text, detail) in cases {
+        fs::write(root.join(".assemblr/journal.json"), &text).unwrap();
+        let error = store.journal().unwrap_err();
+        assert!(
+            matches!(&error, super::StoreError::Journal { detail: found, .. } if found.contains(detail)),
+            "{text}: {error}"
+        );
+        assert!(error.to_string().contains("is left as it is"), "{error}");
+    }
+
+    // A damaged journal is not one a newer version wrote, and is reported
+    // as damaged.
+    let damaged = [
+        ("{\"format\": 2, \"base\": ".to_owned(), "EOF while parsing"),
+        (
+            "{\"format\": 2, \"files\": [], \"directories\": []}".to_owned(),
+            "it has no valid `base` identity",
+        ),
+        (
+            format!(
+                "{{\"format\": 2, \"base\": \"{base}\", \"files\": [{}], \"directories\": []}}",
+                entry.replace("create", "rename")
+            ),
+            "has the action \"rename\"",
+        ),
+    ];
+    for (text, detail) in damaged {
+        fs::write(root.join(".assemblr/journal.json"), &text).unwrap();
+        let error = store.journal().unwrap_err();
+        assert!(
+            matches!(&error, super::StoreError::Corrupt { detail: found, .. } if found.contains(detail)),
+            "{text}: {error}"
+        );
+    }
+}
+
+#[test]
 fn a_file_created_in_a_directory_another_leaves_finds_the_directory() {
     // `bin/run` leaves and `bin/zzz` arrives: the removal would empty and
     // remove `bin/` first in path order, so creations go first.
