@@ -45,7 +45,7 @@ use crate::domain::{
     Action, BaseIdentity, BlobId, Conflict, Contributor, Current, Disagreement, LockChange,
     MergeFormat, Mergeability, Project, ReconciliationState, RegistryIndex, RelativePath, Root,
     Snapshot, SnapshotFile, UnitFile, UnitIdentity, UnitLock, VersionRequirement, compose, is_text,
-    reconcile,
+    reconcile, update_lock,
 };
 
 /// The project's declaration, at its top level.
@@ -206,7 +206,21 @@ impl std::error::Error for InitProjectFailure {}
 /// Composes the project whose top level is `root`, resolving its units
 /// from `registry`.
 pub fn compose_project(root: &Path, registry: &Registry) -> Result<Composed, ComposeFailure> {
-    compose_with(root, registry, None, &mut |_| Ok(()))
+    compose_with(root, registry, None, None, &mut |_| Ok(()))
+}
+
+/// Moves the locked versions of `units`, or of every locked unit when none
+/// is named, to the newest versions the declared requirements allow, then
+/// reconciles the project as [`compose_project`] does. The declaration is
+/// never edited. The other locked versions are kept unless a requirement of
+/// the new ones forces them to move. A unit that is not locked is refused,
+/// and so is a project that was never composed.
+pub fn update_units(
+    root: &Path,
+    registry: &Registry,
+    units: &[UnitIdentity],
+) -> Result<Composed, ComposeFailure> {
+    compose_with(root, registry, None, Some(units), &mut |_| Ok(()))
 }
 
 /// Selects `identity` in the declaration of the project whose top level is
@@ -224,7 +238,7 @@ pub fn add_unit(
         identity: identity.clone(),
         requirement: requirement.map(str::to_owned),
     };
-    compose_with(root, registry, Some(&edit), &mut |_| Ok(()))
+    compose_with(root, registry, Some(&edit), None, &mut |_| Ok(()))
 }
 
 /// Removes the selection of `identity`, and its `options` entry, from the
@@ -238,7 +252,7 @@ pub fn remove_unit(
     let edit = DeclarationEdit::Remove {
         identity: identity.clone(),
     };
-    compose_with(root, registry, Some(&edit), &mut |_| Ok(()))
+    compose_with(root, registry, Some(&edit), None, &mut |_| Ok(()))
 }
 
 /// What `add` and `remove` change in the declaration.
@@ -300,6 +314,7 @@ fn compose_with(
     root: &Path,
     registry: &Registry,
     edit: Option<&DeclarationEdit>,
+    update: Option<&[UnitIdentity]>,
     fault: &mut dyn FnMut(Step) -> io::Result<()>,
 ) -> Result<Composed, ComposeFailure> {
     let rejected = |problem| ComposeFailure::Rejected {
@@ -441,11 +456,45 @@ fn compose_with(
     let declaration_changes = planned_declaration
         .as_ref()
         .is_some_and(|planned| Some(planned.text.as_str()) != declaration_text.as_deref());
+    // An update resolves without the locked versions of the units it
+    // moves, so that the others keep precedence (see `unit update`).
+    let resolution_lock = match update {
+        None => previous_lock.clone(),
+        Some(named) => {
+            if previous.is_none() {
+                problems.push(ComposeProblem::NothingLocked);
+                return Err(rejected_all(problems));
+            }
+            for unit in named {
+                if !previous_lock.units().contains_key(unit) {
+                    problems.push(ComposeProblem::NotLocked {
+                        unit: unit.clone(),
+                        locked: previous_lock.units().keys().cloned().collect(),
+                    });
+                }
+            }
+            if !problems.is_empty() {
+                return Err(rejected_all(problems));
+            }
+            if named.is_empty() {
+                UnitLock::default()
+            } else {
+                UnitLock::new(
+                    previous_lock
+                        .units()
+                        .iter()
+                        .filter(|(identity, _)| !named.contains(identity))
+                        .map(|(identity, locked)| (identity.clone(), locked.clone()))
+                        .collect(),
+                )
+            }
+        }
+    };
     let mut found = Vec::new();
     let Some(resolved) = resolve_graph(
         None,
         project.dependencies(),
-        &previous_lock,
+        &resolution_lock,
         &index,
         &mut found,
     ) else {
@@ -455,6 +504,21 @@ fn compose_with(
                 .map(|problem| ComposeProblem::Build(Box::new(problem))),
         );
         return Err(rejected_all(problems));
+    };
+    // What changed is told against the whole previous lock, and a kept
+    // version must still be published with the content it was locked to,
+    // whatever lock the resolver was given.
+    let lock_changes = match update_lock(&previous_lock, resolved.resolution.graph(), &index) {
+        Ok((_, changes)) => changes,
+        Err(errors) => {
+            found.extend(errors.into_iter().map(BuildProblem::Lock));
+            problems.extend(
+                found
+                    .into_iter()
+                    .map(|problem| ComposeProblem::Build(Box::new(problem))),
+            );
+            return Err(rejected_all(problems));
+        }
     };
     let units = resolved.units();
     let composition = match compose(
@@ -526,7 +590,10 @@ fn compose_with(
         if !problems.is_empty() {
             return Err(rejected_all(problems));
         }
-        if *state.base() == identity && !declaration_changes {
+        // The lock is rewritten when the resolution changed, whether or not
+        // a file did: it records the versions and provenance the project was
+        // composed from.
+        if *state.base() == identity && !declaration_changes && resolved.lock == previous_lock {
             return Ok(Composed {
                 units: resolved.lock.units().len(),
                 files: 0,
@@ -843,7 +910,7 @@ fn compose_with(
     Ok(Composed {
         units: resolved.lock.units().len(),
         files: files.len(),
-        changes: resolved.resolution.changes().clone(),
+        changes: lock_changes,
         paths,
         base: identity,
         unbased,
@@ -1913,6 +1980,15 @@ pub enum ComposeProblem {
     Existing(Vec<RelativePath>),
     /// The project's ignore rules could not be read.
     Ignore(IgnoreError),
+    /// `update` found no lock: the project was never composed.
+    NothingLocked,
+    /// `update` named a unit that is not locked.
+    NotLocked {
+        /// The unit.
+        unit: UnitIdentity,
+        /// The locked units.
+        locked: Vec<UnitIdentity>,
+    },
     /// `remove` named a unit that is not an explicit selection.
     NotSelected {
         /// The unit.
@@ -2071,6 +2147,14 @@ impl fmt::Display for ComposeProblem {
                 Ok(())
             }
             Self::Ignore(error) => error.fmt(f),
+            Self::NothingLocked => f.write_str(
+                "this project was never composed, so there are no locked versions to update",
+            ),
+            Self::NotLocked { unit, .. } => write!(
+                f,
+                "{unit} is not part of the composition this project holds, so it has no locked \
+                 version to update"
+            ),
             Self::NotSelected {
                 identity,
                 transitive,

@@ -31,6 +31,9 @@ enum Command {
     /// Remove a unit's selection from `assemblr.jsonc` and compose the
     /// project.
     Remove(project::RemoveArgs),
+    /// Move locked unit versions to the newest their declared requirements
+    /// allow, and compose the project.
+    Update(project::UpdateArgs),
     /// Show what the local registry knows about a unit: its versions,
     /// description, dependencies, parameters, options, and amendments.
     Info(info::InfoArgs),
@@ -49,6 +52,7 @@ pub(crate) fn run() -> ExitCode {
         Command::Compose(args) => project::compose(&args),
         Command::Add(args) => project::add(&args),
         Command::Remove(args) => project::remove(&args),
+        Command::Update(args) => project::update(&args),
         Command::Info(args) => info::run(&args),
         Command::Registry(command) => registry::run(command),
         Command::Unit(command) => unit::run(command),
