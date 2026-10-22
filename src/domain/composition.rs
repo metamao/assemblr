@@ -66,6 +66,7 @@ use super::merge::MergeFormat;
 use super::parameter::{ParameterName, ParameterValue, ParameterValueError};
 use super::path::{RelativePath, RelativePathError};
 use super::resolution::{Requirer, ResolvedGraph};
+use super::text_merge::is_text;
 use super::version::Version;
 
 /// A unit's `src/` files, by path relative to `src/`.
@@ -419,8 +420,10 @@ pub enum CompositionError {
         responsible: Vec<Requirer>,
     },
     /// Several members amend the same file of the same provider, and the
-    /// file is not one whose amendments can be combined (JSON and JSONC
-    /// are). No amender takes precedence, so none is applied.
+    /// file is not one whose amendments can be combined (JSON, JSONC, and
+    /// UTF-8 text are; YAML, TOML, XML, and INI are not, and neither is a
+    /// file or copy that is not text). No amender takes precedence, so none
+    /// is applied.
     SeveralAmenders {
         /// The amended path.
         path: RelativePath,
@@ -595,8 +598,9 @@ impl fmt::Display for CompositionError {
                 write!(f, "src/{path} of {unit} {version} is amended by ")?;
                 write_list(f, amenders.iter().map(amender_name))?;
                 f.write_str(
-                    "; several amendments of one file are combined for JSON and JSONC files only, \
-                     and no amender takes precedence, so the file is not amended",
+                    "; several amendments of one file are combined for JSON, JSONC, and UTF-8 \
+                     text files, but not for YAML, TOML, XML, or INI files or a file that is not \
+                     text, and no amender takes precedence, so the file is not amended",
                 )
             }
             Self::AmendmentBase {
@@ -1039,11 +1043,30 @@ fn amendments<'a>(
         let (Some(member), true) = (members.get(provider), requirers.len() > 1) else {
             continue;
         };
-        // Several amendments of one file are combined by the composer when
-        // the delivered file's format allows it (OC-10); otherwise none
-        // applies.
+        // Several amendments of one file are combined by the composer
+        // (OC-10): by value for JSON and JSONC, by line for any other file
+        // whose provider file and copies are all text. Anything else could
+        // only be combined by letting one amender win, so none applies.
         let delivered = delivered_path(path).ok().flatten();
-        if MergeFormat::of_path(delivered.as_ref().unwrap_or(path)).is_some() {
+        let all_text = || {
+            member
+                .files
+                .get(*path)
+                .is_none_or(|file| is_text(file.contents()))
+                && requirers.iter().all(|requirer| {
+                    members
+                        .values()
+                        .filter(|candidate| candidate.requirer == **requirer)
+                        .filter_map(|candidate| candidate.amendments.get(*path))
+                        .all(|copy| is_text(copy.contents()))
+                })
+        };
+        let combinable = match MergeFormat::of_path(delivered.as_ref().unwrap_or(path)) {
+            MergeFormat::Json => true,
+            MergeFormat::Text => all_text(),
+            MergeFormat::Unsupported => false,
+        };
+        if combinable {
             continue;
         }
         let mut requirers: Vec<Requirer> = requirers.iter().map(|r| (*r).clone()).collect();
@@ -1370,6 +1393,12 @@ mod tests {
         /// Adds a copy under `amendments/`.
         fn copy(mut self, file: &'static str, contents: &str) -> Self {
             self.copies.push((file, contents.as_bytes().to_vec()));
+            self
+        }
+
+        /// Adds a copy under `amendments/` that is not necessarily text.
+        fn copy_bytes(mut self, file: &'static str, contents: &[u8]) -> Self {
+            self.copies.push((file, contents.to_vec()));
             self
         }
 
@@ -2643,8 +2672,9 @@ mod tests {
 
     #[test]
     fn several_amenders_of_one_provider_file_are_refused_together() {
-        // The root and a published unit amend `bin/run`, a text file, which
-        // is refused for every amender; two published units amend
+        // The root and a published unit amend `bin/run`, one of the copies
+        // not being text, which is refused for every amender; two published
+        // units amend
         // `package.json.assemblr.tmpl`, a JSON file, whose copies are
         // carried for the merge; and a file only one member amends still
         // takes that copy.
@@ -2660,7 +2690,7 @@ mod tests {
             .depends("@metamao/other", "^1")
             .depends("@metamao/node", "=1.0.0")
             .amends("bin/run", "@metamao/node", "1.0.0")
-            .copy("bin/run", "#!/bin/sh\necho amended by app")
+            .copy_bytes("bin/run", b"#!/bin/sh\0binary")
             .file("index.ts");
         let mut published = provider();
         published[0] = published[0].clone().file("README.md");
@@ -2682,7 +2712,7 @@ mod tests {
         let message = errors[0].to_string();
         for part in [
             "src/bin/run of @metamao/node 1.0.0 is amended by this unit, @metamao/amender 1.0.0",
-            "combined for JSON and JSONC files only",
+            "combined for JSON, JSONC, and UTF-8 text files, but not for YAML, TOML, XML, or INI",
             "no amender takes precedence",
         ] {
             assert!(message.contains(part), "{message}");
@@ -2720,6 +2750,37 @@ mod tests {
             .find(|(file, _, _, _)| file == "README.md")
             .unwrap();
         assert_eq!(readme.2, b"amended readme");
+    }
+
+    #[test]
+    fn several_text_amenders_of_one_file_are_carried_for_the_merge() {
+        // The root and a published unit both amend `bin/run`, and both
+        // copies are text: the composer keeps both, in requirer order, with
+        // the provider's own contents, for the line merge.
+        let built = Spec::new("@metamao/app", "0.1.0")
+            .depends("@metamao/amender", "^1")
+            .depends("@metamao/node", "=1.0.0")
+            .amends("bin/run", "@metamao/node", "1.0.0")
+            .copy("bin/run", "#!/bin/sh\necho amended by app")
+            .file("index.ts");
+        let mut published = provider();
+        published.push(amender());
+        let composed = run(&For::Build(built), &published, &[]).unwrap();
+        assert_eq!(
+            composed.amended,
+            [
+                ("bin/run".to_owned(), "@metamao/app".to_owned()),
+                ("bin/run".to_owned(), "@metamao/amender".to_owned()),
+                // The published unit's other amendment, of a JSON file.
+                ("package.json".to_owned(), "@metamao/amender".to_owned()),
+            ]
+        );
+        let run_file = composed
+            .files
+            .iter()
+            .find(|(file, _, _, _)| file == "bin/run")
+            .unwrap();
+        assert_eq!(run_file.2, b"#!/bin/sh");
     }
 
     #[test]
@@ -3195,7 +3256,7 @@ mod tests {
                 .depends("@metamao/db", "^1")
                 .option("@metamao/node", "packageManager", text("bun"))
                 .amends("README.md", "@metamao/node", "1.0.0")
-                .copy("README.md", "web readme")
+                .copy_bytes("README.md", b"web readme\0")
                 .amends("missing.txt", "@metamao/node", "1.0.0")
                 .copy("stray.txt", "stray")
                 .file("readme.md")

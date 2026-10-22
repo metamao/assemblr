@@ -3,7 +3,7 @@
 //! The result goes to stdout. Diagnostics, and what a composition could
 //! not carry or store, go to stderr.
 
-use super::advice::{Audience, composition_advice, distinct};
+use super::advice::{Audience, composition_advice, distinct, merge_advice};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -557,11 +557,7 @@ fn build_advice(problem: &BuildProblem) -> Option<String> {
         BuildProblem::Published { .. } => {
             "run `assemblr registry sync` to check the registered repositories again".to_owned()
         }
-        BuildProblem::Merge { .. } => {
-            "the units' amendments of one file must agree; the amenders' authors must change \
-             the copies or expose the value as a parameter"
-                .to_owned()
-        }
+        BuildProblem::Merge { failure, .. } => merge_advice(failure.as_ref(), Audience::Consumer),
         BuildProblem::Composition(error) => composition_advice(error, Audience::Consumer)?,
         _ => return None,
     })

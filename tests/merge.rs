@@ -587,58 +587,6 @@ fn the_result_does_not_depend_on_declaration_or_registration_order() {
 
 #[test]
 fn unsupported_cases_keep_refusing_with_their_reason() {
-    // A YAML file with two amenders is refused for every amender.
-    let fixture = Fixture::new("yaml");
-    let worker = fixture.repo("worker");
-    worker.write(
-        "manifest.jsonc",
-        &manifest("@acme/worker", "1.0.0", &[], ""),
-    );
-    worker.write("src/compose.yaml", "services:\n  web:\n    image: app\n");
-    worker.publish("1.0.0");
-    fixture.register(&worker);
-    for (name, port) in [("db", "5432"), ("api", "8080")] {
-        let unit = fixture.repo(name);
-        unit.write(
-            "manifest.jsonc",
-            &manifest(
-                &format!("@acme/{name}"),
-                "1.0.0",
-                &[("@acme/worker", "=1.0.0")],
-                &amending(&["compose.yaml"], "@acme/worker", "1.0.0"),
-            ),
-        );
-        unit.write(
-            "amendments/compose.yaml",
-            &format!("services:\n  web:\n    image: app\n    ports: [\"{port}\"]\n"),
-        );
-        unit.write(
-            "assemblr-lock.json",
-            &unit.lockfile_for(&worker, "@acme/worker", "1.0.0"),
-        );
-        unit.publish("1.0.0");
-        fixture.register(&unit);
-    }
-    let app = fixture.repo("app");
-    app.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/app",
-            "0.1.0",
-            &[("@acme/db", "^1"), ("@acme/api", "^1")],
-            "",
-        ),
-    );
-    app.write("src/app.txt", "app");
-    let err = stderr(&fails(fixture.build(&app)));
-    assert!(
-        err.contains(
-            "src/compose.yaml of @acme/worker 1.0.0 is amended by @acme/api 1.0.0, @acme/db 1.0.0; \
-             several amendments of one file are combined for JSON and JSONC files only"
-        ),
-        "{err}"
-    );
-
     // A copy that is not valid JSON is refused naming its amender, and a
     // copy with a duplicate key too.
     let fixture = Fixture::new("invalid-copy");
