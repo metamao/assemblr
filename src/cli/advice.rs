@@ -3,8 +3,8 @@
 //! single sentence for all of them sent people to `options` for problems
 //! that `options` cannot fix.
 
-use assemblr::adapters::MergeFailure;
-use assemblr::domain::{CompositionError, Requirer, RootTargetReason};
+use assemblr::adapters::{CrossVersionReason, MergeFailure};
+use assemblr::domain::{CompositionError, Requirer, RootTargetReason, UnitIdentity, Version};
 
 /// Who reads the advice, since the same problem is fixed in different
 /// files: a consumer edits `assemblr.jsonc`, and an author edits the
@@ -116,7 +116,7 @@ pub(super) fn composition_advice(error: &CompositionError, audience: Audience) -
 }
 
 /// What to do when the amendments of one file could not be combined.
-pub(super) fn merge_advice(failure: Option<&MergeFailure>, audience: Audience) -> String {
+fn merge_advice(failure: Option<&MergeFailure>, audience: Audience) -> String {
     let who = match audience {
         Audience::Consumer => "the amending units' authors must change the copies",
         Audience::Author => "change the copies",
@@ -139,10 +139,7 @@ pub(super) fn merge_advice(failure: Option<&MergeFailure>, audience: Audience) -
                 .to_owned()
         }
         Some(MergeFailure::Rebase { .. }) => {
-            "the amendment and the provider both changed those lines: select the provider at the \
-             amendment's base, or a version of the amender whose author amended the file again at \
-             the version resolved"
-                .to_owned()
+            "the amendment and the provider both changed those lines".to_owned()
         }
         Some(MergeFailure::Conflicts(_)) => format!(
             "the amendments of one file must agree: {who} so that no two amenders set one \
@@ -156,25 +153,69 @@ pub(super) fn merge_advice(failure: Option<&MergeFailure>, audience: Audience) -
     }
 }
 
+/// What to do when the amendments of one file could not be combined, with
+/// the way back to the provider's version when an amendment was taken from
+/// another one.
+pub(super) fn merge_problem_advice(
+    unit: &UnitIdentity,
+    failure: Option<&MergeFailure>,
+    crossed: &[(UnitIdentity, Version)],
+    audience: Audience,
+) -> String {
+    let mut advice = merge_advice(failure, audience);
+    // A rebase collision names the amender it concerns.
+    let crossing = match failure {
+        Some(MergeFailure::Rebase { amender, .. }) => crossed
+            .iter()
+            .find(|(crossing, _)| crossing == amender)
+            .or(crossed.first()),
+        _ => crossed.first(),
+    };
+    if let Some((amender, base)) = crossing {
+        advice.push_str("; ");
+        advice.push_str(&cross_version_advice(
+            unit,
+            amender,
+            base,
+            &CrossVersionReason::NoMerge,
+            audience,
+        ));
+    }
+    advice
+}
+
 /// What to do when an amendment cannot be applied to the provider version a
 /// composition resolved, which differs from the one the copy was taken from.
+/// A consumer pins the provider with `add`, which also makes it an explicit
+/// selection that `update` no longer moves, so the advice says how to undo
+/// it; an author pins it in the manifest.
 pub(super) fn cross_version_advice(
-    unit: &assemblr::domain::UnitIdentity,
-    amender: &assemblr::domain::UnitIdentity,
-    base: &assemblr::domain::Version,
-    reason: &assemblr::adapters::CrossVersionReason,
+    unit: &UnitIdentity,
+    amender: &UnitIdentity,
+    base: &Version,
+    reason: &CrossVersionReason,
+    audience: Audience,
 ) -> String {
-    use assemblr::adapters::CrossVersionReason;
     if matches!(reason, CrossVersionReason::BaseUnavailable) {
         return format!(
             "the registered repository of {unit} must still hold {base}: run `assemblr registry \
              sync`, or register it again"
         );
     }
+    let pin = match audience {
+        Audience::Consumer => format!(
+            "pin {unit} to the amendment's base with `assemblr add {unit}@={base}`, which \
+             `assemblr update` then leaves where it is (`assemblr add {unit}@^{base}` lets it move \
+             again, and `assemblr remove {unit}` undoes a selection made only to pin it)"
+        ),
+        Audience::Author => format!(
+            "pin {unit} to the amendment's base with `\"{unit}\": \"={base}\"` in the \
+             manifest's `dependencies`"
+        ),
+    };
     format!(
-        "select {unit} at the amendment's base (`{unit}@={base}`), or a version of {amender} \
-         whose amendment was taken from the version resolved, which its author publishes after \
-         amending the file there"
+        "{pin}, or select a version of {amender} whose amendment was taken from the version \
+         resolved, which its author publishes after amending the file there"
     )
 }
 

@@ -2689,7 +2689,12 @@ fn an_update_applies_amendments_across_versions_and_a_collision_refuses_it_whole
         err.contains("the amendment of @acme/shell was taken from @acme/node 1.0.0"),
         "{err}"
     );
-    assert!(err.contains("`@acme/node@=1.0.0`"), "{err}");
+    assert!(err.contains("`assemblr add @acme/node@=1.0.0`"), "{err}");
+    // An update of every unit says how to update the others.
+    assert!(
+        err.contains("`assemblr update` with the units to move updates only those"),
+        "{err}"
+    );
     assert_eq!(tree(&project), before);
     assert_eq!(locked(&project, "@acme/node"), "1.1.0");
 }

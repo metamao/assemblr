@@ -4,16 +4,18 @@
 //! The result goes to stdout. Diagnostics, and changes to the lockfile, go to
 //! stderr.
 
-use super::advice::{Audience, composition_advice, cross_version_advice, distinct, merge_advice};
+use super::advice::{
+    Audience, composition_advice, cross_version_advice, distinct, merge_problem_advice,
+};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use assemblr::adapters::{
     AmendFailure, AmendProblem, AmendState, BuildFailure, BuildProblem, Built, CheckFailure,
-    CheckProblem, CrossVersionReason, FileOutcome, GitOutcome, IndexOutcome, InitFailure,
-    Initialized, LockfileOutcome, ManifestFileError, PublishFailure, PublishProblem, PublishState,
-    Published, RecoveryError, Registry, TagProblem, UpdateFailure, UpdateProblem, UpdateState,
-    Updated, amend_unit, build_unit, check_unit, init_unit, publish_unit, update_unit,
+    CheckProblem, FileOutcome, GitOutcome, IndexOutcome, InitFailure, Initialized, LockfileOutcome,
+    ManifestFileError, PublishFailure, PublishProblem, PublishState, Published, RecoveryError,
+    Registry, TagProblem, UpdateFailure, UpdateProblem, UpdateState, Updated, amend_unit,
+    build_unit, check_unit, init_unit, publish_unit, update_unit,
 };
 use assemblr::domain::{
     ContributionError, Excluded, IntegrityChange, LockChange, LockError, RegistryError,
@@ -829,26 +831,7 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
             failure,
             crossed,
             ..
-        } => {
-            let mut advice = merge_advice(failure.as_ref(), Audience::Author);
-            // A rebase collision is already told what to do.
-            if let (Some((amender, base)), false) = (
-                crossed.first(),
-                matches!(
-                    failure,
-                    Some(assemblr::adapters::MergeFailure::Rebase { .. })
-                ),
-            ) {
-                advice.push_str("; ");
-                advice.push_str(&cross_version_advice(
-                    unit,
-                    amender,
-                    base,
-                    &CrossVersionReason::NoMerge,
-                ));
-            }
-            advice
-        }
+        } => merge_problem_advice(unit, failure.as_ref(), crossed, Audience::Author),
         BuildProblem::Composition(error) => composition_advice(error, Audience::Author)?,
         BuildProblem::CrossVersion {
             unit,
@@ -856,7 +839,7 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
             base,
             reason,
             ..
-        } => cross_version_advice(unit, amender, base, reason),
+        } => cross_version_advice(unit, amender, base, reason, Audience::Author),
         BuildProblem::Resolution(ResolutionError::Unavailable { .. }) => {
             "run `assemblr registry sync` to index newly published versions".to_owned()
         }

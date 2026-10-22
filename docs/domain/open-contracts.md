@@ -336,8 +336,9 @@ How the status of a statement affects implementation:
   create`, catalog refresh) are grouped; whether `add` accepts parameter
   values as arguments, which it does not. The grammar of `unit init`, `unit
   check`, `unit publish`, `init`, `compose` (with `--continue` and `--abort`,
-  **Provisional (D-18)**), `add`, and `remove` stays open until the owner closes
-  it.
+  **Provisional (D-18)**), `add`, and `remove`, and `--verbose` on `compose`,
+  `add`, `remove`, and `update` (**Provisional (D-31)**), stays open until the
+  owner closes it.
 - **Origin:** Owner
 - **Context:** [commands](authoring-workflow.md#commands--conceptual),
   [initialization](authoring-workflow.md#initialization--approved), [registry

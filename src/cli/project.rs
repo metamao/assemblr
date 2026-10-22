@@ -3,15 +3,16 @@
 //! The result goes to stdout. Diagnostics, and what a composition could
 //! not carry or store, go to stderr.
 
-use super::advice::{Audience, composition_advice, cross_version_advice, distinct, merge_advice};
+use super::advice::{
+    Audience, composition_advice, cross_version_advice, distinct, merge_problem_advice,
+};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use assemblr::adapters::{
-    BuildProblem, ComposeFailure, ComposeProblem, ComposeRecovery, Composed, CrossVersionReason,
-    DeclarationChange, FileChange, InitProjectFailure, Registry, StoreError, WriteStep,
-    abort_compose, add_unit, compose_project, continue_compose, init_project, remove_unit,
-    update_units,
+    BuildProblem, ComposeFailure, ComposeProblem, ComposeRecovery, Composed, DeclarationChange,
+    FileChange, InitProjectFailure, Registry, StoreError, WriteStep, abort_compose, add_unit,
+    compose_project, continue_compose, init_project, remove_unit, update_units,
 };
 use assemblr::domain::{LockChange, LockError, ResolutionError, UnitIdentity};
 use clap::Args;
@@ -69,12 +70,22 @@ pub(super) struct AddArgs {
     /// unit is recorded with a caret requirement on the version the
     /// resolution picks.
     unit: String,
+    /// Also report the warnings about files this composition does not
+    /// write, and each amendment applied to another version of its
+    /// provider than the one it was taken from.
+    #[arg(long)]
+    verbose: bool,
 }
 
 #[derive(Debug, Args)]
 pub(super) struct RemoveArgs {
     /// The explicitly selected unit to remove, `@owner/name`.
     unit: String,
+    /// Also report the warnings about files this composition does not
+    /// write, and each amendment applied to another version of its
+    /// provider than the one it was taken from.
+    #[arg(long)]
+    verbose: bool,
 }
 
 /// `@owner/name` and the requirement after a second `@`, if any.
@@ -104,7 +115,7 @@ pub(super) fn add(args: &AddArgs) -> ExitCode {
             );
         }
     };
-    run(Some(&identity), |root, registry| {
+    run(Some(&identity), args.verbose, |root, registry| {
         add_unit(root, registry, &identity, requirement.as_deref())
     })
 }
@@ -120,7 +131,7 @@ pub(super) fn remove(args: &RemoveArgs) -> ExitCode {
             Some("`assemblr remove` takes the unit only: @owner/name"),
         );
     }
-    run(Some(&identity), |root, registry| {
+    run(Some(&identity), args.verbose, |root, registry| {
         remove_unit(root, registry, &identity)
     })
 }
@@ -130,6 +141,11 @@ pub(super) struct UpdateArgs {
     /// The locked units to update, `@owner/name`: selected or transitive.
     /// Without any, every locked unit is updated within its requirements.
     units: Vec<String>,
+    /// Also report the warnings about files this composition does not
+    /// write, and each amendment applied to another version of its
+    /// provider than the one it was taken from.
+    #[arg(long)]
+    verbose: bool,
 }
 
 pub(super) fn update(args: &UpdateArgs) -> ExitCode {
@@ -149,7 +165,7 @@ pub(super) fn update(args: &UpdateArgs) -> ExitCode {
             Err(message) => return fail(&message, Some("write each unit as @owner/name")),
         }
     }
-    run_with(None, Some(&units), |root, registry| {
+    run_with(None, Some(&units), args.verbose, |root, registry| {
         update_units(root, registry, &units)
     })
 }
@@ -164,6 +180,11 @@ pub(super) struct ComposeArgs {
     /// project, `assemblr.jsonc` included, to what it held before.
     #[arg(long)]
     abort: bool,
+    /// Also report the warnings about files this composition does not
+    /// write, and each amendment applied to another version of its
+    /// provider than the one it was taken from.
+    #[arg(long, conflicts_with_all = ["resume", "abort"])]
+    verbose: bool,
 }
 
 pub(super) fn compose(args: &ComposeArgs) -> ExitCode {
@@ -173,7 +194,7 @@ pub(super) fn compose(args: &ComposeArgs) -> ExitCode {
     if args.abort {
         return settle(|root| abort_compose(root).map(|recovery| report_aborted(&recovery)));
     }
-    run_with(None, None, compose_project)
+    run_with(None, None, args.verbose, compose_project)
 }
 
 /// Runs `--continue` or `--abort` on the project in the current directory.
@@ -244,12 +265,14 @@ fn report_aborted(recovery: &ComposeRecovery) {
 }
 
 /// Runs `operation` on the project in the current directory and reports
-/// it. `unit` is the unit `add` or `remove` was given.
+/// it. `unit` is the unit `add` or `remove` was given, and `verbose` says
+/// whether `--verbose` was.
 fn run(
     unit: Option<&UnitIdentity>,
+    verbose: bool,
     operation: impl FnOnce(&Path, &Registry) -> Result<Composed, ComposeFailure>,
 ) -> ExitCode {
-    run_with(unit, None, operation)
+    run_with(unit, None, verbose, operation)
 }
 
 /// [`run`] for `update` when `named` is given: the units it was asked to
@@ -257,6 +280,7 @@ fn run(
 fn run_with(
     unit: Option<&UnitIdentity>,
     named: Option<&[UnitIdentity]>,
+    verbose: bool,
     operation: impl FnOnce(&Path, &Registry) -> Result<Composed, ComposeFailure>,
 ) -> ExitCode {
     let root = match std::env::current_dir() {
@@ -275,7 +299,7 @@ fn run_with(
     match operation(&root, &registry) {
         Ok(composed) => {
             report_declaration(unit, &composed);
-            report(&composed, named);
+            report(&composed, named, verbose);
             if composed.pending().is_empty() {
                 ExitCode::SUCCESS
             } else {
@@ -299,10 +323,33 @@ fn run_with(
             {
                 report_recovered(recovered);
             }
-            let hint = hint(&failure, &root);
+            let mut hint = hint(&failure, &root);
+            if named.is_some_and(<[UnitIdentity]>::is_empty) && crosses_versions(&failure) {
+                hint.push_str(
+                    "; `assemblr update` with the units to move updates only those, and the \
+                     units they do not require to move stay where they are",
+                );
+            }
             fail(&failure.to_string(), Some(&hint))
         }
     }
+}
+
+/// Whether `failure` holds an amendment that cannot be applied to the
+/// provider version resolved, which an update of every unit runs into
+/// when only one provider moves too far.
+fn crosses_versions(failure: &ComposeFailure) -> bool {
+    let ComposeFailure::Rejected { problems, .. } = failure else {
+        return false;
+    };
+    problems.iter().any(|problem| match problem {
+        ComposeProblem::Build(problem) => match problem.as_ref() {
+            BuildProblem::CrossVersion { .. } => true,
+            BuildProblem::Merge { crossed, .. } => !crossed.is_empty(),
+            _ => false,
+        },
+        _ => false,
+    })
 }
 
 fn report_declaration(unit: Option<&UnitIdentity>, composed: &Composed) {
@@ -326,12 +373,20 @@ fn report_declaration(unit: Option<&UnitIdentity>, composed: &Composed) {
     }
 }
 
-fn report(composed: &Composed, named: Option<&[UnitIdentity]>) {
+fn report(composed: &Composed, named: Option<&[UnitIdentity]>, verbose: bool) {
     if let Some(recovered) = composed.recovered() {
         report_recovered(recovered);
     }
     for note in composed.notes() {
         eprintln!("warning: {note}");
+    }
+    if verbose {
+        for note in composed.unwritten_notes() {
+            eprintln!("warning: {note}");
+        }
+        for line in composed.crossed() {
+            eprintln!("note: {line}");
+        }
     }
     if !composed.pending().is_empty() {
         report_pending(composed);
@@ -672,26 +727,7 @@ fn build_advice(problem: &BuildProblem) -> Option<String> {
             failure,
             crossed,
             ..
-        } => {
-            let mut advice = merge_advice(failure.as_ref(), Audience::Consumer);
-            // A rebase collision is already told what to do.
-            if let (Some((amender, base)), false) = (
-                crossed.first(),
-                matches!(
-                    failure,
-                    Some(assemblr::adapters::MergeFailure::Rebase { .. })
-                ),
-            ) {
-                advice.push_str("; ");
-                advice.push_str(&cross_version_advice(
-                    unit,
-                    amender,
-                    base,
-                    &CrossVersionReason::NoMerge,
-                ));
-            }
-            advice
-        }
+        } => merge_problem_advice(unit, failure.as_ref(), crossed, Audience::Consumer),
         BuildProblem::Composition(error) => composition_advice(error, Audience::Consumer)?,
         BuildProblem::CrossVersion {
             unit,
@@ -699,7 +735,7 @@ fn build_advice(problem: &BuildProblem) -> Option<String> {
             base,
             reason,
             ..
-        } => cross_version_advice(unit, amender, base, reason),
+        } => cross_version_advice(unit, amender, base, reason, Audience::Consumer),
         _ => return None,
     })
 }
