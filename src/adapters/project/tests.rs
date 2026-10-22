@@ -929,3 +929,63 @@ fn abort_and_continue_leave_an_interrupted_composition_to_compose() {
     assert_eq!(text(&root, "README.md"), before);
     assert!(exists(&root, ".assemblr/journal.json"));
 }
+
+#[test]
+fn discarding_a_base_keeps_every_object_another_base_names_and_the_kept_base() {
+    let root = project("discard-base");
+    let store = Store::new(&root);
+    let snapshot = |files: &[(&str, &[u8])]| {
+        Snapshot::new(
+            files
+                .iter()
+                .map(|(name, bytes)| (path(name), SnapshotFile::new(bytes, false)))
+                .collect(),
+        )
+    };
+    let write = |snapshot: &Snapshot, files: &[(&str, &[u8])]| {
+        let paths: Vec<(RelativePath, &[u8])> = files
+            .iter()
+            .map(|(name, bytes)| (path(name), *bytes))
+            .collect();
+        let refs: Vec<(&RelativePath, &[u8])> =
+            paths.iter().map(|(path, bytes)| (path, *bytes)).collect();
+        store.write_base(snapshot, &refs).unwrap();
+    };
+    // An old base, the lock's base, and an aborted one sharing objects with
+    // both.
+    let old_files: [(&str, &[u8]); 1] = [("a", b"old")];
+    let locked_files: [(&str, &[u8]); 2] = [("a", b"shared"), ("b", b"locked")];
+    let aborted_files: [(&str, &[u8]); 3] =
+        [("a", b"shared"), ("b", b"old"), ("c", b"only aborted")];
+    let (old, locked, aborted) = (
+        snapshot(&old_files),
+        snapshot(&locked_files),
+        snapshot(&aborted_files),
+    );
+    write(&old, &old_files);
+    write(&locked, &locked_files);
+    write(&aborted, &aborted_files);
+
+    // The lock's base is never discarded.
+    store.discard_base(&locked.identity(), Some(&locked.identity()));
+    assert!(
+        store
+            .verify_base(&locked.identity(), &BTreeSet::new())
+            .is_ok()
+    );
+
+    store.discard_base(&aborted.identity(), Some(&locked.identity()));
+    assert!(store.verify_base(&old.identity(), &BTreeSet::new()).is_ok());
+    assert!(
+        store
+            .verify_base(&locked.identity(), &BTreeSet::new())
+            .is_ok()
+    );
+    assert!(
+        store
+            .verify_base(&aborted.identity(), &BTreeSet::new())
+            .is_err()
+    );
+    let only = SnapshotFile::new(b"only aborted", false);
+    assert!(store.read_blob(only.blob()).is_err());
+}

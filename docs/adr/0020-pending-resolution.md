@@ -1,6 +1,6 @@
 # 0020: The pending-resolution state: marked files, a journal that waits, and `compose --continue` and `--abort`
 
-- **Status:** Accepted, the whole-file markers of point 3 narrowed to structured files by 0022
+- **Status:** Accepted, the whole-file markers of point 3 narrowed to structured files by 0022, points 5 and 6 amended by #72
 - **Date:** 2026-10-21
 
 ## Context
@@ -83,7 +83,13 @@ represented, entered, finalized, and left, on top of the journal of ADR
   the stored base.
 - An aborted or interrupted composition leaves its base's objects in the
   store, as an interrupted one already did; collecting unreferenced objects
-  is not done.
+  is not done. *Amended (#72):* `--abort` now removes the aborted base's
+  listing and the objects no other stored listing names
+  (`Store::discard_base`), keeping the lock's base and, when a listing
+  cannot be read, every object. An interrupted composition's revert still
+  leaves them. `--continue` also refuses a line starting `||||||| base`,
+  so a base section left behind by a partial clean-up is not finalized; the
+  `=======` separator stays unchecked for the reason below.
 - The markers cover the whole file, so the composition's non-conflicting
   changes to a marked file are not applied to the project's side: the
   consumer carries them over from the incoming section. This is the cost a

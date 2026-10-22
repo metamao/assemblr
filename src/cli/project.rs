@@ -609,8 +609,8 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
                 .to_owned(),
         ),
         ComposeProblem::Unresolved(_) => Some(
-            "edit each file to the content you want, with no <<<<<<< current or >>>>>>> incoming \
-             line left, then run `assemblr compose --continue` again"
+            "edit each file to the content you want, with no <<<<<<< current, ||||||| base, or \
+             >>>>>>> incoming line left, then run `assemblr compose --continue` again"
                 .to_owned(),
         ),
         ComposeProblem::NothingPending | ComposeProblem::NotPending => Some(

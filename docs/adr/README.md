@@ -36,7 +36,7 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0017](0017-consumer-reconciliation.md) | Consumer reconciliation: the per-path three-way decision, the value merge onto the project's text, the journal of changes, and recovery | Accepted, point 8 revised by 0018, the refusal of text conflicts replaced by 0020, text merged by line by 0022 |
 | [0018](0018-ignore-classification-and-merge-integrity.md) | Which ignore rules decide the lock, and what a failed merge check is | Accepted |
 | [0019](0019-consumer-add-and-remove.md) | `add` and `remove`: editing the declaration, the default requirement, and writing it through the locked handle | Accepted |
-| [0020](0020-pending-resolution.md) | The pending-resolution state: marked files, a journal that waits, and `compose --continue` and `--abort` | Accepted, the whole-file markers of point 3 narrowed to structured files by 0022 |
+| [0020](0020-pending-resolution.md) | The pending-resolution state: marked files, a journal that waits, and `compose --continue` and `--abort` | Accepted, the whole-file markers of point 3 narrowed to structured files by 0022, points 5 and 6 amended by #72 |
 | [0021](0021-text-merge.md) | The line-level merge of text: the domain engine, which files it covers, and what it reports | Accepted |
 | [0022](0022-text-reconciliation.md) | Text reconciliation: the line merge onto the project's file, and conflicts marked where they happen | Accepted |
 | [0023](0023-cross-version-amendments.md) | Amendments across provider versions: deriving against the base, applying to the version resolved, and rebasing in `unit update` | Accepted, point 4 amended by #70 |
