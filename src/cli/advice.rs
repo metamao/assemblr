@@ -35,8 +35,8 @@ pub(super) fn composition_advice(error: &CompositionError, audience: Audience) -
             }
         },
         CompositionError::UndeclaredParameter { .. } => format!(
-            "spell the parameter as the unit declares it in {options}, or remove the entry; the \
-             message lists the parameters the unit declares"
+            "spell the parameter as the unit declares it in {options}, or remove the entry; `assemblr \
+             info <unit>` lists the parameters the unit declares"
         ),
         CompositionError::InvalidValue { .. } => format!(
             "give the option in {options} a value of the parameter's type and, for an \

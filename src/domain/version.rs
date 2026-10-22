@@ -32,6 +32,11 @@ impl Version {
         self.0.cmp_precedence(&other.0)
     }
 
+    /// Whether this is a pre-release such as `2.0.0-beta.1`.
+    pub fn is_prerelease(&self) -> bool {
+        !self.0.pre.is_empty()
+    }
+
     /// The version a Git tag publishes. Only tags of the form `v<version>`,
     /// with an exact SemVer version, publish one: `v1.2.3` publishes `1.2.3`,
     /// while `1.2.3`, `v1.0`, and `latest` publish nothing.

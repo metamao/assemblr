@@ -675,6 +675,36 @@ assemblr registry sync
   tag is reported with its reason on stderr, and the result names the indexed
   versions and, separately, the tags excluded and not indexed.
 
+For a registered unit, the top-level `info` command (decision log D-19):
+
+```text
+assemblr info <identity>
+assemblr info <identity>@<version>
+assemblr info <identity> --json
+```
+
+- `info` reads the local index and the unit's repository, offline. It
+  describes the newest stable version (the newest one when every version is
+  a pre-release), or the exact version named after a second `@`. A version
+  requirement is not accepted. The manifest is read at the commit the index
+  records, so a version whose content no longer matches the index is an
+  error, never described from what the repository holds now.
+- The text lists the identity and version, description, source, the
+  published versions in SemVer order, the commit and tree, the dependencies,
+  the parameters (type, default or `required`, allowed values, description),
+  the options, and the amendments. A section with nothing to list says
+  `none`. Names are in sorted order, so the output depends only on the
+  registry and the repository.
+- `--json` prints one object from the same data: `identity`, `version`,
+  `description`, `source`, `versions`, `commit`, `tree`, `dependencies`
+  (identity to requirement), `params` (name to `type`, `description`,
+  `required`, and `default` and `allowed` when present), `options` (identity
+  to parameter values), and `amendments` (path to `unit` and `base`). The
+  order of keys is not significant, and fields may be added.
+- An unknown unit or version, a unit without a published version, an
+  unreadable repository, and a version that no longer matches the index each
+  fail with exit status 1 and a hint.
+
 Open:
 
 - Exact grammar, arguments, and flags beyond the implemented grammar above,

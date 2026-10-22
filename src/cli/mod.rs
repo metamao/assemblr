@@ -1,6 +1,7 @@
 //! Argument parsing and dispatch.
 
 mod advice;
+mod info;
 mod project;
 mod registry;
 mod unit;
@@ -30,6 +31,9 @@ enum Command {
     /// Remove a unit's selection from `assemblr.jsonc` and compose the
     /// project.
     Remove(project::RemoveArgs),
+    /// Show what the local registry knows about a unit: its versions,
+    /// description, dependencies, parameters, options, and amendments.
+    Info(info::InfoArgs),
     /// Manage the local registry of unit repositories.
     #[command(subcommand)]
     Registry(registry::RegistryCommand),
@@ -45,6 +49,7 @@ pub(crate) fn run() -> ExitCode {
         Command::Compose(args) => project::compose(&args),
         Command::Add(args) => project::add(&args),
         Command::Remove(args) => project::remove(&args),
+        Command::Info(args) => info::run(&args),
         Command::Registry(command) => registry::run(command),
         Command::Unit(command) => unit::run(command),
     }

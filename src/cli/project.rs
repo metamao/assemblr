@@ -77,7 +77,7 @@ pub(super) struct RemoveArgs {
 }
 
 /// `@owner/name` and the requirement after a second `@`, if any.
-fn split_unit(argument: &str) -> Result<(UnitIdentity, Option<String>), String> {
+pub(super) fn split_unit(argument: &str) -> Result<(UnitIdentity, Option<String>), String> {
     let (identity, requirement) = match argument.get(1..).and_then(|rest| rest.find('@')) {
         Some(at) => (&argument[..=at], Some(argument[at + 2..].to_owned())),
         None => (argument, None),
