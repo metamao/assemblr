@@ -2,7 +2,7 @@
 # starting this workflow by hand: it validates, builds and packages the
 # binaries, and creates a *draft* prerelease. The owner publishes the draft,
 # which creates the tag at the validated commit. Pull requests that touch the
-# packaging run the same build and packaging, without creating a release.
+# packaging run the same validation, build, and packaging, without creating a release.
 
 name: Release
 
