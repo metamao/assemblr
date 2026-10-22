@@ -44,7 +44,7 @@ use super::registry::Registry;
 use crate::domain::{
     Action, BaseIdentity, BlobId, Conflict, Contributor, Current, Disagreement, LockChange,
     MergeFormat, Mergeability, Project, ReconciliationState, RegistryIndex, RelativePath, Root,
-    Snapshot, SnapshotFile, UnitFile, UnitIdentity, UnitLock, VersionRequirement, compose,
+    Snapshot, SnapshotFile, UnitFile, UnitIdentity, UnitLock, VersionRequirement, compose, is_text,
     reconcile,
 };
 
@@ -1023,10 +1023,15 @@ fn merge_file(
     let base_bytes = store
         .read_blob(base_file.blob())
         .map_err(|error| FileConflictKind::Unmergeable(error.to_string()))?;
+    // Text is UTF-8 without a NUL: a small binary file is valid UTF-8 and
+    // must not be merged by line.
     let text = |bytes: &[u8], what: &str| {
-        std::str::from_utf8(bytes)
-            .map(str::to_owned)
-            .map_err(|_| FileConflictKind::Unmergeable(format!("{what} is not UTF-8 text")))
+        if !is_text(bytes) {
+            return Err(FileConflictKind::Unmergeable(format!(
+                "{what} is not UTF-8 text"
+            )));
+        }
+        Ok(String::from_utf8_lossy(bytes).into_owned())
     };
     let base_text = text(&base_bytes, "its base")?;
     let current_text = text(&held.bytes, "the project's file")?;

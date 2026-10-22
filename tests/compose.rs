@@ -2355,3 +2355,29 @@ fn a_structured_file_both_sides_changed_is_still_marked_whole() {
     assert!(yaml.contains("image: app"), "{yaml}");
     assert!(yaml.contains("image: theirs"), "{yaml}");
 }
+
+#[test]
+fn a_small_binary_file_both_sides_changed_is_a_conflict_never_a_line_merge() {
+    // Valid UTF-8 with NUL bytes behind a text path: both sides changed it
+    // in different places, which a line merge would combine silently.
+    let fixture = Fixture::new("text-binary");
+    let blob = "head\n\0\nmiddle\n\0\nmiddle\n\0\nmiddle\n\0\ntail\n";
+    let guide = guide(&fixture, NOTES);
+    guide.write("src/data.txt", blob);
+    guide.write("manifest.jsonc", &manifest("@acme/guide", "1.0.1", &[], ""));
+    guide.publish("1.0.1");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    let project = fixture.project("shop", &[("@acme/guide", "^1")], "");
+    succeed_compose(&fixture, &project);
+    fs::write(project.join("data.txt"), blob.replace("tail", "mine")).unwrap();
+    guide.write("src/data.txt", &blob.replace("head", "theirs"));
+    guide.write("manifest.jsonc", &manifest("@acme/guide", "1.1.0", &[], ""));
+    guide.publish("1.1.0");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    declare(&project, &[("@acme/guide", "^1.1")], "");
+    let before = tree(&project);
+    let err = stderr(&fails(fixture.compose(&project)));
+    assert!(err.contains("data.txt"), "{err}");
+    assert!(err.contains("is not UTF-8 text"), "{err}");
+    assert_eq!(tree(&project), before);
+}
