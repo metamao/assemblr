@@ -357,6 +357,59 @@ impl Store {
         Ok(())
     }
 
+    /// Removes the listing of `base` and the objects no other stored
+    /// listing names, once nothing records `base`: an aborted composition's.
+    /// The listing of `keep`, the lock's base, is never removed. When a
+    /// listing cannot be read, no object is removed, since it may name
+    /// them. This is cleanup of content nothing refers to, so a failure
+    /// leaves files that are harmless, as an interrupted removal would, and
+    /// is not reported.
+    pub(super) fn discard_base(&self, base: &BaseIdentity, keep: Option<&BaseIdentity>) {
+        if keep == Some(base) {
+            return;
+        }
+        let listing = self.listing_path(base);
+        let Some(discarded) = self.read_listing(&listing) else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(self.dir.join(BASES)) else {
+            return;
+        };
+        let mut named = BTreeSet::new();
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return;
+            };
+            let path = entry.path();
+            if path == listing {
+                continue;
+            }
+            let Some(other) = self.read_listing(&path) else {
+                return;
+            };
+            named.extend(other.files().values().map(|file| file.blob().clone()));
+        }
+        for file in discarded.files().values() {
+            if named.contains(file.blob()) {
+                continue;
+            }
+            let blob = self.blob_path(file.blob());
+            let _ = fs::remove_file(&blob);
+            // A prefix directory left empty goes too; one that still holds
+            // objects is not removed.
+            if let Some(parent) = blob.parent() {
+                let _ = fs::remove_dir(parent);
+            }
+        }
+        let _ = fs::remove_file(&listing);
+    }
+
+    /// The listing stored at `path`, or `None` when it cannot be read.
+    fn read_listing(&self, path: &Path) -> Option<Snapshot> {
+        let bytes = read_bounded(path, TEXT_LIMIT).ok()?;
+        Snapshot::parse_listing(&String::from_utf8(bytes).ok()?).ok()
+    }
+
     /// Removes the journal and the previous content it refers to: the
     /// composition is complete, or reverted.
     pub(super) fn finish(&self) -> Result<(), StoreError> {

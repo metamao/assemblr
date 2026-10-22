@@ -27,9 +27,9 @@ use crate::domain::{
     UnitFile,
 };
 
-/// Opens the project's side of a conflict. A marker line starts with one
-/// of the two distinctive prefixes, which is what a leftover is looked for
-/// by.
+/// Opens the project's side of a conflict. A leftover is looked for by
+/// the three distinctive prefixes; the separator is not one, since a line
+/// of `=` signs underlines a Markdown heading.
 const CURRENT_MARK: &str = "<<<<<<< current";
 const BASE_MARK: &str = "||||||| base";
 const SEPARATOR: &str = "=======";
@@ -168,10 +168,13 @@ fn mark_lines(base: &[u8], current: &[u8], incoming: &[u8]) -> Option<Vec<u8>> {
     Some(versions.written(out).into_bytes())
 }
 
-/// Whether `bytes` still holds a line that opens or closes a conflict.
+/// Whether `bytes` still holds a line that opens a conflict, starts its
+/// base section, or closes it.
 fn has_markers(bytes: &[u8]) -> bool {
     bytes.split(|byte| *byte == b'\n').any(|line| {
-        line.starts_with(CURRENT_MARK.as_bytes()) || line.starts_with(INCOMING_MARK.as_bytes())
+        [CURRENT_MARK, BASE_MARK, INCOMING_MARK]
+            .iter()
+            .any(|mark| line.starts_with(mark.as_bytes()))
     })
 }
 
@@ -323,8 +326,26 @@ pub fn abort_compose(root: &Path) -> Result<ComposeRecovery, ComposeFailure> {
         None if lock_records(root, &journal) => Vec::new(),
         None => return Err(rejected(ComposeProblem::NotPending)),
     };
-    recover(root, &store, &journal, &guard, &resolving)
-        .map_err(|error| rejected(ComposeProblem::Store(error)))
+    let recovery = recover(root, &store, &journal, &guard, &resolving)
+        .map_err(|error| rejected(ComposeProblem::Store(error)))?;
+    // The aborted composition's base is recorded nowhere now. Its listing
+    // and the objects only it names would stay in the tracked store as
+    // untracked files; the lock's base, and every object another stored
+    // base names, are kept.
+    if !matches!(recovery, ComposeRecovery::Completed) {
+        let locked = match lockfile::read_lockfile(root) {
+            Ok(Some((
+                _,
+                Lockfile {
+                    project: Some(state),
+                    ..
+                },
+            ))) => Some(state.base().clone()),
+            _ => None,
+        };
+        store.discard_base(&journal.base, locked.as_ref());
+    }
+    Ok(recovery)
 }
 
 /// Takes the project's lock and reads the journal.

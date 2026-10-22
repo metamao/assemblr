@@ -730,8 +730,9 @@ the files and the two ways out, and change nothing.
 
 **Resolving.** The consumer edits each file with their own tools to the
 content they want. Nothing marks a file resolved but the absence of a line
-starting `<<<<<<< current` or `>>>>>>> incoming`; a file the consumer
-deleted counts as resolved.
+starting `<<<<<<< current`, `||||||| base`, or `>>>>>>> incoming`; a file the
+consumer deleted counts as resolved. A line of `=` signs is not looked for,
+since it also underlines a Markdown heading (#72).
 
 **`--continue`** refuses while any file holds such a line, listing every
 such file and leaving the project unchanged. Otherwise it writes the lock
@@ -744,7 +745,9 @@ the consumer's resolution is their own content over it, so a later
 every file the composition changed, the conflicted files whatever they hold
 now, and `assemblr.jsonc` where `add` or `remove` rewrote it. A file the
 composition changed without conflict and the consumer edited since is kept
-and named. The new composition's base stays in the store, unreferenced.
+and named. The aborted composition's base is removed from the store with
+the objects only it names, so the store is as it was too; every object the
+lock's base or another stored base names is kept (#72).
 Like `--continue`, it refuses when the journal is an interrupted
 composition's rather than a waiting one: the next `compose` completes or
 reverts that.
