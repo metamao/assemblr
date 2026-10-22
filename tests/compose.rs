@@ -12,44 +12,17 @@
     reason = "a fixture that cannot be built fails the test"
 )]
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::Output;
 
 use serde_json::Value;
 
-#[cfg(windows)]
-const NULL_DEVICE: &str = "NUL";
-#[cfg(not(windows))]
-const NULL_DEVICE: &str = "/dev/null";
-
-struct Fixture {
-    dir: PathBuf,
-    data: PathBuf,
-    home: PathBuf,
-}
+use common::{Fixture, NULL_DEVICE, fails, git, stderr, stdout, succeeds};
 
 impl Fixture {
-    fn new(test: &str) -> Self {
-        // Outside the repository: a project's ignore rules come from the
-        // repository that encloses it, and this crate's own `target/` is
-        // ignored, which would make every composed file look ignored.
-        let dir = std::env::temp_dir()
-            .join("assemblr-compose-tests")
-            .join(test);
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap();
-        }
-        let fixture = Self {
-            data: dir.join("data"),
-            home: dir.join("home"),
-            dir,
-        };
-        fs::create_dir_all(&fixture.data).unwrap();
-        fs::create_dir_all(&fixture.home).unwrap();
-        fixture
-    }
-
     fn repo(&self, name: &str) -> Repo {
         git(&self.dir, &["init", "-q", name]);
         Repo {
@@ -58,19 +31,13 @@ impl Fixture {
     }
 
     fn assemblr(&self, dir: &Path, args: &[&str]) -> Output {
-        self.assemblr_with_global_config(dir, Path::new(NULL_DEVICE), args)
+        self.command(dir, args).output().unwrap()
     }
 
     /// Runs `assemblr` with `global` as the user's Git configuration.
     fn assemblr_with_global_config(&self, dir: &Path, global: &Path, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_assemblr"))
-            .current_dir(dir)
-            .env("ASSEMBLR_DATA_DIR", &self.data)
-            .env("HOME", &self.home)
-            .env("USERPROFILE", &self.home)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
+        self.command(dir, args)
             .env("GIT_CONFIG_GLOBAL", global)
-            .args(args)
             .output()
             .unwrap()
     }
@@ -109,40 +76,6 @@ fn declare(project: &Path, dependencies: &[(&str, &str)], options: &str) {
     .unwrap();
 }
 
-fn git(dir: &Path, args: &[&str]) -> String {
-    let mut command = Command::new("git");
-    for (name, _) in std::env::vars_os() {
-        if name
-            .to_string_lossy()
-            .to_ascii_uppercase()
-            .starts_with("GIT_")
-        {
-            command.env_remove(name);
-        }
-    }
-    let output = command
-        .current_dir(dir)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", NULL_DEVICE)
-        .env("GIT_AUTHOR_NAME", "Author")
-        .env("GIT_AUTHOR_EMAIL", "author@example.com")
-        .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
-        .env("GIT_COMMITTER_NAME", "Author")
-        .env("GIT_COMMITTER_EMAIL", "author@example.com")
-        .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
-        .args(["-c", "core.autocrlf=false", "-c", "init.defaultBranch=main"])
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
-
 fn manifest(name: &str, version: &str, dependencies: &[(&str, &str)], extra: &str) -> String {
     let dependencies: Vec<String> = dependencies
         .iter()
@@ -175,35 +108,6 @@ impl Repo {
         self.git(&["commit", "-q", "--allow-empty", "-m", version]);
         self.git(&["tag", &format!("v{version}")]);
     }
-}
-
-fn stdout(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-fn stderr(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
-}
-
-fn succeeds(output: Output) -> Output {
-    assert!(
-        output.status.success(),
-        "stdout: {}\nstderr: {}",
-        stdout(&output),
-        stderr(&output)
-    );
-    output
-}
-
-fn fails(output: Output) -> Output {
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "stdout: {}\nstderr: {}",
-        stdout(&output),
-        stderr(&output)
-    );
-    output
 }
 
 fn read(path: &Path) -> String {
