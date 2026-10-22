@@ -268,6 +268,11 @@ and Windows with `--locked`, and checks the MSRV.
   in temporary directories inside the test. Never depend on the network, the
   developer's global Git config, or machine-specific paths. Never read or
   modify the developer's real Assemblr registry or configuration directories.
+  Integration tests get this isolation from
+  [`tests/common`](tests/common/mod.rs) ([ADR 0028](docs/adr/0028-isolated-validation.md)).
+- Run the CLI by hand through `cargo sandbox -- <command>`, which sets up an
+  isolated registry, Git configuration, and working directory on every call
+  (ADR 0028).
 - Test conflict and error paths as thoroughly as success paths, and assert
   that diagnostics are useful.
 - Assert on stable substrings or structured data rather than whole

@@ -44,3 +44,4 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0025](0025-parameter-mappings-and-examples.md) | Parameter mappings and examples: option values as a union, values decided from dependents to dependencies, and development values | Accepted |
 | [0026](0026-private-alpha-distribution.md) | Private alpha distribution: prebuilt binaries as draft GitHub Releases | Accepted |
 | [0027](0027-journal-format-compatibility.md) | Journal formats: a number for every change, and readers that refuse what they do not know | Accepted |
+| [0028](0028-isolated-validation.md) | Isolated validation: shared test fixtures, a sandbox for manual runs, and a reference scenario | Accepted |

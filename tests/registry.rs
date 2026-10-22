@@ -10,64 +10,15 @@
     reason = "a fixture that cannot be built fails the test"
 )]
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
 
-#[cfg(windows)]
-const NULL_DEVICE: &str = "NUL";
-#[cfg(not(windows))]
-const NULL_DEVICE: &str = "/dev/null";
-
-/// An empty directory for one test.
-fn scratch(test: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("registry")
-        .join(test);
-    if dir.exists() {
-        fs::remove_dir_all(&dir).unwrap();
-    }
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-/// `git` in `dir`, isolated from the developer's configuration, with fixed
-/// identities and dates so that object ids are reproducible.
-fn git(dir: &Path, args: &[&str]) -> String {
-    let mut command = Command::new("git");
-    for (name, _) in std::env::vars_os() {
-        if name
-            .to_string_lossy()
-            .to_ascii_uppercase()
-            .starts_with("GIT_")
-        {
-            command.env_remove(name);
-        }
-    }
-    let output = command
-        .current_dir(dir)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", NULL_DEVICE)
-        .env("GIT_AUTHOR_NAME", "Author")
-        .env("GIT_AUTHOR_EMAIL", "author@example.com")
-        .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
-        .env("GIT_COMMITTER_NAME", "Author")
-        .env("GIT_COMMITTER_EMAIL", "author@example.com")
-        .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
-        .args(["-c", "core.autocrlf=false", "-c", "init.defaultBranch=main"])
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
+use common::{fails, git, scratch, stderr, stdout, succeeds};
 
 fn manifest(name: &str, version: &str) -> String {
     format!(r#"{{"name": "{name}", "version": "{version}", "description": "A unit."}}"#)
@@ -121,42 +72,12 @@ fn assemblr(data: &Path, dir: &Path, args: &[&str]) -> Output {
     command(data, dir, args).output().unwrap()
 }
 
+/// The home is a sibling of `data`, never created.
 fn command(data: &Path, dir: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_assemblr"));
+    let home = data.with_file_name("home");
+    let mut command = common::assemblr(dir, data, &home);
+    command.args(args);
     command
-        .current_dir(dir)
-        .env("ASSEMBLR_DATA_DIR", data)
-        .args(args);
-    command
-}
-
-fn stdout(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-fn stderr(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
-}
-
-fn succeeds(output: Output) -> Output {
-    assert!(
-        output.status.success(),
-        "stdout: {}\nstderr: {}",
-        stdout(&output),
-        stderr(&output)
-    );
-    output
-}
-
-fn fails(output: Output) -> Output {
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "stdout: {}\nstderr: {}",
-        stdout(&output),
-        stderr(&output)
-    );
-    output
 }
 
 fn list_json(data: &Path, dir: &Path) -> Value {
