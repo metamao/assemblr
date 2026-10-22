@@ -67,17 +67,17 @@ Assemblr's own validation remains authoritative over the schema.
 Open:
 
 - The schema's name, location, and tracking. **OC-17.** **Provisional (D-2)**;
-  see [initialization details](#initialization-details--approved).
+  see [initialization details](#initialization-details--provisional-d-2-d-5).
 - How `init` establishes the Git repository: for example, whether it
   initializes a new repository or adopts an existing one, how it treats a
   target inside another repository, and whether it creates an initial commit.
   Part of **OC-7.** **Provisional (D-5)**; see
-  [initialization details](#initialization-details--approved).
+  [initialization details](#initialization-details--provisional-d-2-d-5).
 
-### Initialization details — Approved
+### Initialization details — Provisional (D-2, D-5)
 
-Decided for the first `unit init` under AGENTS.md §1.1 (decision log D-2
-and D-5) and accepted by the owner with PR #37.
+Decided for the first `unit init` under AGENTS.md §1.1 (decision log D-2 and
+D-5) and merged with PR #37. The owner has not approved it explicitly.
 
 **Command.** `assemblr unit init <identity> [<directory>]
 [--description <text>]`. The directory defaults to the current one and is
@@ -217,12 +217,12 @@ Open:
 
 - The exact no-op / effective-contribution algorithm. **OC-11.** **Provisional
   (D-1)** for the first `unit check`; see [check
-  details](#check-details--approved).
+  details](#check-details--provisional-d-1-d-3).
 
-### Check details — Approved
+### Check details — Provisional (D-1, D-3)
 
-Decided for the first `unit check` under AGENTS.md §1.1 (decision log D-1
-and D-3) and accepted by the owner with PR #36.
+Decided for the first `unit check` under AGENTS.md §1.1 (decision log D-1 and
+D-3) and merged with PR #36. The owner has not approved it explicitly.
 
 **Command.** `assemblr unit check`, with no arguments, run at the
 repository's top level as `unit build` is. It reads the unit as a build does,
@@ -518,7 +518,7 @@ The lockfile and amendments:
 `unit amend` reads the lockfile and never writes it (see
 [amend details](#amend-details--approved)). `unit publish` never writes it
 either: it requires the lockfile to be committed and to record the current
-resolution (see [publication details](#publication-details--approved)), so
+resolution (see [publication details](#publication-details--provisional-d-3-d-4)), so
 the lockfile's writers are `unit build` and `unit update`.
 
 Open:
@@ -707,10 +707,10 @@ Publishing locally is distinct from **pushing** to a remote Git server.
 `unit publish` establishes the published version locally and **never pushes**
 commits or tags as a side effect. Pushing is an explicit, separate operation.
 
-### Publication details — Approved
+### Publication details — Provisional (D-3, D-4)
 
 Decided for the first `unit publish` under AGENTS.md §1.1 (decision log D-3
-and D-4) and accepted by the owner with PR #36.
+and D-4) and merged with PR #36. The owner has not approved it explicitly.
 
 **Command.** `assemblr unit publish`, with no arguments, run at the
 repository's top level as `unit build` is. The version is the one the

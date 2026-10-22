@@ -180,4 +180,4 @@ Open:
   **Provisional (D-2)**: `manifest.schema.json` next to
   the manifest, tracked, written by `unit init` and refreshed by running it
   again; no command compares it (see
-  [authoring-workflow.md](authoring-workflow.md#initialization-details--approved)).
+  [authoring-workflow.md](authoring-workflow.md#initialization-details--provisional-d-2-d-5)).

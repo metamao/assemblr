@@ -269,7 +269,7 @@ composition:
   promised; semantic compatibility is, and a consequential change to merge
   behavior is an explicit decision.
 - The same merge model is the foundation for consumer reconciliation, which
-  [reconciliation details](consumer-projects.md#reconciliation-details--approved)
+  [reconciliation details](consumer-projects.md#reconciliation-details--provisional-d-13-to-d-15)
   implements as **Provisional (D-13)**.
 
 ### Text files — Approved direction, details Provisional (D-20)
@@ -323,7 +323,7 @@ such as `AGENTS.md`, could not be composed. The details are **Provisional
   that need a precise order in such a file arrange that one of them owns the
   file or that their lines do not depend on each other. Only the formats
   listed under **Scope** are refused, by extension; none is refused for being
-  order-sensitive (decision log D-27, OC-12).
+  order-sensitive (owner decision D-27, OC-12).
 - **Conflicts.** Changes that overlap or touch, including changes to adjacent
   lines, and an insertion next to a changed line, are a conflict unless they
   are identical. The build is rejected naming the file, the lines of the
@@ -380,7 +380,7 @@ Open:
 - The manifest representation of list identity hints. **OC-4.**
 - Further format adapters. **OC-10.** The consumer side is
   **Provisional (D-13)**, without Git, in
-  [reconciliation details](consumer-projects.md#reconciliation-details--approved).
+  [reconciliation details](consumer-projects.md#reconciliation-details--provisional-d-13-to-d-15).
 
 ### Composition, builds, and reconciliation
 

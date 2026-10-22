@@ -36,12 +36,12 @@ Open:
 
 - The initial contents and full schema of `assemblr.jsonc`. **OC-36.** The
   initial contents: **Provisional (D-9)**; see
-  [initialization details](#initialization-details--approved).
+  [initialization details](#initialization-details--provisional-d-9).
 
-### Initialization details — Approved
+### Initialization details — Provisional (D-9)
 
-Decided for the first `assemblr init` under AGENTS.md §1.1 (decision log
-D-9) and accepted by the owner with PR #42.
+Decided for the first `assemblr init` under AGENTS.md §1.1 (decision log D-9)
+and merged with PR #42. The owner has not approved it explicitly.
 
 **Command.** `assemblr init [<directory>]`. The directory defaults to the
 current one and is created, parents included, when it does not exist. It
@@ -184,12 +184,13 @@ assemblr add @metamao/neonpg-drizzle
 
 Both workflows produce the same composition from the same declaration.
 
-### Composition details — Approved
+### Composition details — Provisional (D-10 to D-12)
 
 Decided for the first `assemblr compose` under AGENTS.md §1.1 (decision log
-D-10 to D-12) and accepted by the owner with PR #42. They cover a project
-composed for the first time; a project composed before is reconciled as
-[reconciliation details](#reconciliation-details--approved) describes.
+D-10 to D-12) and merged with PR #42; the owner has not approved it
+explicitly. They cover a project composed for the first time; a project
+composed before is reconciled as [reconciliation
+details](#reconciliation-details--provisional-d-13-to-d-15) describes.
 
 **Command.** `assemblr compose`, with no arguments, run at the project's top
 level, which holds `assemblr.jsonc`. The result goes to stdout; diagnostics,
@@ -225,7 +226,7 @@ state; a directory holding `manifest.jsonc`.
 read-only, which delivered paths it ignores, and which rule decides. Only
 the project's own rules, its `.gitignore` files, decide what is unbased,
 because the lock records it and every clone of the project must lock the
-same way (decision log D-16, which revises D-11 and D-15). A file a
+same way (**Provisional (D-16)**, which revises D-11 and D-15). A file a
 `.gitignore` ignores is written to the project, but its content is not
 stored in the tracked base: the lock lists it as unbased, and a warning says
 a later composition cannot reconcile edits to it. A `!` pattern in a
@@ -257,7 +258,7 @@ from version control. Then the declaration is composed and compared with
 the base by identity: the same composition means nothing to compose, and
 nothing is written, whatever the consumer did to the files since; a
 different one is reconciled with the project (see
-[reconciliation details](#reconciliation-details--approved)).
+[reconciliation details](#reconciliation-details--provisional-d-13-to-d-15)).
 
 **Interrupted compositions.** While the journal exists, a composition was
 interrupted. The next `compose` recovers from it before anything else. The
@@ -286,17 +287,17 @@ Open:
   grammar of `init`, `compose`, `add`, and `remove`, the requirement `add`
   records, how `remove` treats a unit that is not an explicit selection, and
   what happens to a removed unit's `options` entry are **Provisional (D-9,
-  D-17)** (see [composition details](#composition-details--approved) and
-  [add and remove details](#add-and-remove-details--approved)).
+  D-17)** (see [composition details](#composition-details--provisional-d-10-to-d-12) and
+  [add and remove details](#add-and-remove-details--provisional-d-17)).
 - Operations beyond updating locked versions within the declared requirements:
   changing requirements in bulk, updating past them, a dry run, and automatic
   updates. **OC-38.**
 
-### Add and remove details — Approved
+### Add and remove details — Provisional (D-17)
 
 Decided for `assemblr add` and `assemblr remove` under AGENTS.md §1.1
-(decision log D-17) and accepted by the owner with the merge of the pull
-request that implements them.
+(decision log D-17) and merged with the pull request that implements them.
+The owner has not approved them explicitly.
 
 **Commands.** `assemblr add <identity>[@<requirement>]` and `assemblr remove
 <identity>`, one unit per invocation, run at the project's top level. Each
@@ -504,16 +505,16 @@ Open:
 
 - How a composition treats a path that already holds content Assemblr did not
   materialize, for example in an existing project. **OC-44.** The first
-  `compose` refuses it (decision log D-10); see
-  [composition details](#composition-details--approved).
+  `compose` refuses it (**Provisional (D-10)**); see
+  [composition details](#composition-details--provisional-d-10-to-d-12).
 - File-system semantics of contributed files, including executable bits,
   symbolic links, binary content, line endings, paths that differ only in
   case, and paths reserved for Assemblr's own files such as `assemblr.jsonc`
   and the lockfile. **OC-48.** The first `compose` writes bytes and the
   executable bit as composed, never through a symbolic link, and reserves
-  `assemblr.jsonc`, `assemblr-lock.json`, and `.assemblr/` (decision log
-  D-10). A project file that differs from its base only by CRLF line
-  endings counts as unchanged (decision log D-15).
+  `assemblr.jsonc`, `assemblr-lock.json`, and `.assemblr/` (**Provisional
+  (D-10)**). A project file that differs from its base only by CRLF line
+  endings counts as unchanged (**Provisional (D-15)**).
 
 ## Reconciliation — Approved
 
@@ -538,15 +539,15 @@ Composition reconciles three inputs:
 - Repeating `compose` without relevant changes does not rewrite the project.
 
 The reconciliation strategy is **Provisional (D-13 to D-15)**, described in
-[reconciliation details](#reconciliation-details--approved); Git takes no
+[reconciliation details](#reconciliation-details--provisional-d-13-to-d-15); Git takes no
 part in it. **OC-10** stays open until the owner settles it.
 
-### Reconciliation details — Approved
+### Reconciliation details — Provisional (D-13 to D-15)
 
-Decided for the first reconciliation under AGENTS.md §1.1 (decision log
-D-13 to D-15) and implemented by `compose` on a project composed before.
-They decide the consumer side of OC-10, which the merge-engine decision
-left to the consumer lifecycle; the entry stays open.
+Decided for the first reconciliation under AGENTS.md §1.1 (decision log D-13
+to D-15) and implemented by `compose` on a project composed before. They
+decide the consumer side of OC-10, which the merge-engine decision left to the
+consumer lifecycle; the entry stays open.
 
 **Per path, three-way, without Git.** Every path of the reconciliation
 base and of the incoming composition is decided on its own from three
@@ -571,7 +572,7 @@ each as a mode and a content identity.
     [merge engine](amendments-and-composition.md#the-merge-engine--approved),
     the changes that collide are conflicts, and the composition's own changes
     are edited into the project's text, whose layout and comments stay.
-  - A UTF-8 text file is merged by line (decision log D-21; ADR 0022): the
+  - A UTF-8 text file is merged by line (**Provisional (D-21)**; ADR 0022): the
     lines each side changed against the base are compared, changes in
     different places are both kept, an identical change is one change, and
     changes that overlap or touch, including insertions by both sides at one
@@ -586,7 +587,7 @@ each as a mode and a content identity.
 
 **Conflicts.** A conflict between text the consumer and the composition
 both changed is left in the file for the consumer to resolve (see
-[pending-resolution details](#pending-resolution-details--approved)). A
+[pending-resolution details](#pending-resolution-details--provisional-d-18)). A
 composition with any other conflict is refused before anything is written,
 naming every conflicting path and why; the project, its lock, and its base
 stay as they were (standing default D2). A conflict between units'
@@ -686,12 +687,12 @@ Open:
   place, what the incoming composition and the next reconciliation base are.
   **OC-47.**
 
-### Pending-resolution details — Approved
+### Pending-resolution details — Provisional (D-18)
 
 Decided for the pending-resolution state under AGENTS.md §1.1 (decision log
-D-18) and accepted by the owner with the merge of the pull request that
-implements it. They decide the presentation and the mechanism of OC-37 and
-the grammar of OC-7 for `compose`; both entries stay open.
+D-18) and merged with the pull request that implements it; the owner has not
+approved it explicitly. They decide the presentation and the mechanism of
+OC-37 and the grammar of OC-7 for `compose`; both entries stay open.
 
 **Commands.** `assemblr compose --continue` and `assemblr compose --abort`,
 mutually exclusive, run at the project's top level.
@@ -827,9 +828,9 @@ Open:
 - The pending-resolution state for conflicts that are not between text,
   and for removal of the objects a given-up composition leaves in the store.
   **OC-37.** The journal and the recovery of an interrupted composition are
-  described in [composition details](#composition-details--approved),
-  [reconciliation details](#reconciliation-details--approved), and
-  [pending-resolution details](#pending-resolution-details--approved).
+  described in [composition details](#composition-details--provisional-d-10-to-d-12),
+  [reconciliation details](#reconciliation-details--provisional-d-13-to-d-15), and
+  [pending-resolution details](#pending-resolution-details--provisional-d-18).
 - Portability of a lockfile between machines: what happens when the source a
   lock records for a unit differs from the source registered for that identity
   on another machine, and what a lock records for a unit obtained through a

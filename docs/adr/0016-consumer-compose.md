@@ -14,7 +14,7 @@ base is stored in the project as tracked content-addressed state that a
 checkout cannot alter, ignored content must not reach that tracked state,
 and a base that does not verify is an explicit failure. The product rules
 are in
-[`consumer-projects.md`](../domain/consumer-projects.md#composition-details--approved).
+[`consumer-projects.md`](../domain/consumer-projects.md#composition-details--provisional-d-10-to-d-12).
 This ADR records how they are implemented and what the mechanisms are.
 
 ## Decision

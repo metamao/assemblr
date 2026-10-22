@@ -528,7 +528,7 @@ regenerate a catalog's metadata index.
   A unit registered from another reference becomes discoverable when that
   source is synchronized. `unit publish` never registers a previously
   unknown unit, and it never pushes commits or tags to a remote (see
-  [authoring-workflow.md](authoring-workflow.md#publication-details--approved)).
+  [authoring-workflow.md](authoring-workflow.md#publication-details--provisional-d-3-d-4)).
 - If publication succeeds but the index update fails, Assemblr reports that
   partial outcome explicitly. `registry sync` recovers.
 - `search` and `info` operate on indexed metadata. They never fetch remote
@@ -675,7 +675,7 @@ assemblr registry sync
   tag is reported with its reason on stderr, and the result names the indexed
   versions and, separately, the tags excluded and not indexed.
 
-For a registered unit, the top-level `info` command (decision log D-19):
+For a registered unit, the top-level `info` command (**Provisional (D-19)**):
 
 ```text
 assemblr info <identity>
