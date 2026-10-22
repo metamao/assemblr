@@ -4,6 +4,7 @@
 //! The result goes to stdout. Diagnostics, and changes to the lockfile, go to
 //! stderr.
 
+use super::advice::{Audience, composition_advice, distinct};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -768,9 +769,10 @@ fn hint(failure: &BuildFailure, root: &Path) -> String {
     };
     let mut hint =
         "the build was rejected; build/ and assemblr-lock.json were not changed".to_owned();
-    if let Some(advice) = problems.iter().find_map(|problem| advice(problem, root)) {
+    let advice = distinct(problems.iter().filter_map(|problem| advice(problem, root)));
+    if !advice.is_empty() {
         hint.push_str("; ");
-        hint.push_str(&advice);
+        hint.push_str(&advice.join("; "));
     }
     hint
 }
@@ -827,6 +829,7 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
                                                  parameter of the provider"
                 .to_owned(),
         },
+        BuildProblem::Composition(error) => composition_advice(error, Audience::Author)?,
         BuildProblem::Resolution(ResolutionError::Unavailable { .. }) => {
             "run `assemblr registry sync` to index newly published versions".to_owned()
         }

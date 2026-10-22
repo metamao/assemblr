@@ -1,5 +1,6 @@
 //! Argument parsing and dispatch.
 
+mod advice;
 mod project;
 mod registry;
 mod unit;

@@ -565,6 +565,106 @@ fn reserved_paths_cannot_be_delivered() {
     assert_eq!(tree(&project).len(), 1);
 }
 
+/// What follows `hint:` in a failed command's output.
+fn hint_of(err: &str) -> &str {
+    err.lines()
+        .find_map(|line| line.strip_prefix("hint: "))
+        .unwrap_or_else(|| panic!("no hint in {err}"))
+}
+
+#[test]
+fn a_base_mismatch_is_not_sent_to_options_but_to_the_versions_that_can_meet() {
+    let fixture = Fixture::new("hint-base");
+    let (node, _web) = registry(&fixture);
+    publish_node(&fixture, &node, "1.1.0", "node 1.1\n", "#!/bin/sh\n");
+    // An amender that accepts any 1.x but is based on 1.0.0.
+    let shell = fixture.repo("shell");
+    shell.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/shell",
+            "1.0.0",
+            &[("@acme/node", "^1")],
+            r#", "amendments": {"config/app.json.assemblr.tmpl": {"unit": "@acme/node", "base": "1.0.0"}}"#,
+        ),
+    );
+    shell.write(
+        "amendments/config/app.json.assemblr.tmpl",
+        "{\n  \"port\": {{ port }},\n  \"shell\": true\n}\n",
+    );
+    shell.write(
+        "assemblr-lock.json",
+        &format!(
+            "{{\n  \"format\": 1,\n  \"units\": {{\n    \"@acme/node\": {{\n      \"commit\": \
+             \"{}\",\n      \"tree\": \"{}\",\n      \"version\": \"1.0.0\"\n    }}\n  }}\n}}\n",
+            node.git(&["rev-parse", "v1.0.0"]),
+            node.git(&["rev-parse", "v1.0.0^{tree}"])
+        ),
+    );
+    shell.publish("1.0.0");
+    fixture.register(&shell);
+    let project = fixture.project("shop", &[("@acme/shell", "^1")], "");
+    let err = stderr(&fails(fixture.compose(&project)));
+    assert!(
+        err.contains("an amendment is applied only to its base version"),
+        "{err}"
+    );
+    let hint = hint_of(&err);
+    assert!(hint.contains("@acme/node@=1.0.0"), "{hint}");
+    assert!(hint.contains("based on 1.1.0"), "{hint}");
+    assert!(!hint.contains("options"), "{hint}");
+    assert_eq!(tree(&project).len(), 1);
+}
+
+#[test]
+fn problems_of_different_kinds_each_get_their_own_advice() {
+    let fixture = Fixture::new("hint-kinds");
+    registry(&fixture);
+    // A path collision between two units, and a bad option, reported together.
+    let other = fixture.repo("other");
+    other.write("manifest.jsonc", &manifest("@acme/other", "1.0.0", &[], ""));
+    other.write("src/README.md", "other\n");
+    other.publish("1.0.0");
+    fixture.register(&other);
+    let project = fixture.project(
+        "shop",
+        &[("@acme/node", "^1"), ("@acme/other", "^1")],
+        r#""@acme/node": {"prot": 1}"#,
+    );
+    let err = stderr(&fails(fixture.compose(&project)));
+    assert!(err.contains("README.md"), "{err}");
+    let hint = hint_of(&err);
+    assert!(hint.contains("remove one of the units"), "{hint}");
+    assert!(
+        hint.contains("spell the parameter as the unit declares it"),
+        "{hint}"
+    );
+}
+
+#[test]
+fn a_missing_required_value_still_points_at_options() {
+    let fixture = Fixture::new("hint-missing");
+    let need = fixture.repo("need");
+    need.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/need",
+            "1.0.0",
+            &[],
+            r#", "params": {"name": {"type": "string", "description": "The name."}}"#,
+        ),
+    );
+    need.write("src/name.txt.assemblr.tmpl", "{{ name }}\n");
+    need.publish("1.0.0");
+    fixture.register(&need);
+    let project = fixture.project("shop", &[("@acme/need", "^1")], "");
+    let err = stderr(&fails(fixture.compose(&project)));
+    assert!(
+        hint_of(&err).contains("supply the value in assemblr.jsonc `options`"),
+        "{err}"
+    );
+}
+
 /// Publishes `version` of the registered `node` with `readme` and `run` as
 /// its plain files, and indexes it.
 fn publish_node(fixture: &Fixture, node: &Repo, version: &str, readme: &str, run: &str) {
