@@ -42,3 +42,4 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0023](0023-cross-version-amendments.md) | Amendments across provider versions: deriving against the base, applying to the version resolved, and rebasing in `unit update` | Accepted |
 | [0024](0024-consumer-update.md) | `assemblr update`: resolving with a reduced lock, the lock as a record of the resolution, and one reconciliation | Accepted |
 | [0025](0025-parameter-mappings-and-examples.md) | Parameter mappings and examples: option values as a union, values decided from dependents to dependencies, and development values | Accepted |
+| [0027](0027-journal-format-compatibility.md) | Journal formats: a number for every change, and readers that refuse what they do not know | Accepted |

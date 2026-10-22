@@ -1271,6 +1271,11 @@ mod tests {
                 r#"{"format": 1, "lockfile": {"before": "", "after": ""}, "extra": 1}"#,
                 "unexpected `extra`",
             ),
+            (
+                r#"{"format": 1, "lockfile": {"before": "", "after": ""},
+                    "copies": {"a.md": {"before": "", "after": "", "mode": 1}}}"#,
+                "unexpected `mode`",
+            ),
         ] {
             fs::write(&path, text).unwrap();
             let error = Journal::read(&path).unwrap_err();

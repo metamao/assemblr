@@ -58,8 +58,26 @@ const BASES: &str = "bases";
 const JOURNAL: &str = "journal.json";
 /// Where the journal is written before it is put in place.
 const JOURNAL_NEW: &str = "journal.json.new";
-/// The version of the journal's format.
-const JOURNAL_FORMAT: u64 = 1;
+/// The version of the journal's format this version writes. Every change to
+/// the journal's members takes a new number, and a reader refuses a number
+/// or a member it does not know (ADR 0027).
+const JOURNAL_FORMAT: u64 = 2;
+/// The formats this version reads. Format 1 has the same members: its
+/// journals were written before the number was raised, by versions that
+/// ignored members they did not know, so a format-2 journal is one they
+/// refuse instead of misreading its `pending` record.
+const JOURNAL_FORMATS: [u64; 2] = [1, 2];
+/// The members of a journal, of a `files` entry, and of `pending`.
+const JOURNAL_MEMBERS: [&str; 5] = ["format", "base", "files", "directories", "pending"];
+const ENTRY_MEMBERS: [&str; 6] = [
+    "path",
+    "action",
+    "blob",
+    "executable",
+    "previous",
+    "previous_executable",
+];
+const PENDING_MEMBERS: [&str; 2] = ["lock", "files"];
 /// The largest listing or journal read, in bytes.
 const TEXT_LIMIT: u64 = 64 * 1024 * 1024;
 
@@ -338,7 +356,7 @@ impl Store {
         };
         Journal::parse(&bytes)
             .map(Some)
-            .map_err(|detail| StoreError::Corrupt { path, detail })
+            .map_err(|detail| StoreError::Journal { path, detail })
     }
 
     /// Records `journal`, durably, before the project's files are written.
@@ -476,7 +494,7 @@ impl Journal {
             .as_object()
             .ok_or_else(|| "the journal is not a JSON object".to_owned())?;
         match root.get("format").and_then(Value::as_u64) {
-            Some(JOURNAL_FORMAT) => {}
+            Some(format) if JOURNAL_FORMATS.contains(&format) => {}
             Some(other) => {
                 return Err(format!(
                     "it has format {other}, which this version of Assemblr does not read"
@@ -484,6 +502,7 @@ impl Journal {
             }
             None => return Err("it has no format number".to_owned()),
         }
+        known_members(&value, "it", &JOURNAL_MEMBERS)?;
         let base = root
             .get("base")
             .and_then(Value::as_str)
@@ -495,6 +514,7 @@ impl Journal {
             .ok_or_else(|| "it has no `files` list".to_owned())?
             .iter()
             .map(|entry| {
+                known_members(entry, "a `files` entry", &ENTRY_MEMBERS)?;
                 let path = entry
                     .get("path")
                     .and_then(Value::as_str)
@@ -548,6 +568,7 @@ impl Journal {
         let pending = match root.get("pending") {
             None => None,
             Some(pending) => {
+                known_members(pending, "its `pending`", &PENDING_MEMBERS)?;
                 let lock = pending
                     .get("lock")
                     .and_then(Value::as_str)
@@ -574,6 +595,21 @@ impl Journal {
             directories,
             pending,
         })
+    }
+}
+
+/// Refuses `value`, an object of the journal, when it has a member other
+/// than `members`: a member this version does not know may change what
+/// recovery must do, so ignoring it could revert what it should keep.
+fn known_members(value: &Value, what: &str, members: &[&str]) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{what} is not a JSON object"))?;
+    match object.keys().find(|key| !members.contains(&key.as_str())) {
+        Some(unknown) => Err(format!(
+            "{what} has the member `{unknown}`, which this version of Assemblr does not know"
+        )),
+        None => Ok(()),
     }
 }
 
@@ -629,6 +665,15 @@ pub enum StoreError {
         /// What is wrong.
         detail: String,
     },
+    /// The journal of a composition cannot be read: it is damaged, or
+    /// written by a version of Assemblr with a format or members this one
+    /// does not know. Nothing is done with it.
+    Journal {
+        /// The journal.
+        path: PathBuf,
+        /// What is wrong.
+        detail: String,
+    },
     /// A listing cannot be read.
     Listing {
         /// The listing.
@@ -651,6 +696,11 @@ impl fmt::Display for StoreError {
             Self::Corrupt { path, detail } => write!(
                 f,
                 "{} does not verify: {detail}; the stored reconciliation base cannot be trusted",
+                path.display()
+            ),
+            Self::Journal { path, detail } => write!(
+                f,
+                "{} cannot be read: {detail}; the composition it records is left as it is",
                 path.display()
             ),
             Self::Listing { path, error } => {

@@ -2712,3 +2712,46 @@ fn an_update_applies_amendments_across_versions_and_a_collision_refuses_it_whole
     assert_eq!(tree(&project), before);
     assert_eq!(locked(&project, "@acme/node"), "1.1.0");
 }
+
+#[test]
+fn a_journal_from_a_newer_version_is_refused_by_every_command_and_nothing_changes() {
+    let fixture = Fixture::new("journal-newer");
+    let project = text_conflict(&fixture);
+    fails(fixture.compose(&project));
+    // A later version recorded something this one does not know about the
+    // waiting composition.
+    let path = project.join(".assemblr/journal.json");
+    let mut journal: Value = serde_json::from_str(&read(&path)).unwrap();
+    assert_eq!(journal["format"], 2);
+    journal["resolved"] = Value::Array(vec![]);
+    fs::write(&path, serde_json::to_string_pretty(&journal).unwrap()).unwrap();
+    let waiting = tree(&project);
+
+    for args in [
+        &["compose"][..],
+        &["compose", "--continue"],
+        &["compose", "--abort"],
+        &["update"],
+        &["add", "@acme/node@^1.1"],
+    ] {
+        let err = stderr(&fails(fixture.assemblr(&project, args)));
+        assert!(
+            err.contains("has the member `resolved`, which this version of Assemblr does not know"),
+            "{args:?}: {err}"
+        );
+        assert!(
+            err.contains("may come from a newer version of Assemblr"),
+            "{args:?}: {err}"
+        );
+        assert_eq!(tree(&project), waiting, "{args:?}");
+    }
+
+    // A newer format number is refused the same way.
+    journal.as_object_mut().unwrap().remove("resolved");
+    journal["format"] = Value::from(3);
+    fs::write(&path, serde_json::to_string_pretty(&journal).unwrap()).unwrap();
+    let waiting = tree(&project);
+    let err = stderr(&fails(fixture.assemblr(&project, &["compose", "--abort"])));
+    assert!(err.contains("it has format 3"), "{err}");
+    assert_eq!(tree(&project), waiting);
+}
