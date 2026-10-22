@@ -1956,20 +1956,10 @@ fn abort_restores_the_project_and_the_declaration_byte_for_byte() {
         "{}",
         stdout(&output)
     );
-    // Every file of the project is as it was. The store only gained the
-    // aborted composition's base, which is content-addressed and harmless:
-    // nothing records it, and an interrupted composition leaves it too.
-    let outside_store = |files: Vec<(String, Vec<u8>)>| -> Vec<(String, Vec<u8>)> {
-        files
-            .into_iter()
-            .filter(|(path, _)| {
-                !path.starts_with(".assemblr/bases/") && !path.starts_with(".assemblr/objects/")
-            })
-            .collect()
-    };
-    let after = tree(&project);
-    assert_eq!(outside_store(after.clone()), outside_store(before.clone()));
-    assert!(before.iter().all(|file| after.contains(file)));
+    // Every file of the project is as it was, the store included: the
+    // aborted composition's base and the objects only it named are gone,
+    // and every object of the lock's base is still there.
+    assert_eq!(tree(&project), before);
     assert!(!project.join(".assemblr/journal.json").exists());
     let err = stderr(&fails(fixture.assemblr(&project, &["compose", "--abort"])));
     assert!(err.contains("no composition is waiting"), "{err}");
@@ -2242,6 +2232,93 @@ fn overlapping_edits_mark_only_the_lines_that_disagree() {
         NOTES.replace("Three.", "Three, mine.")
     );
     let _ = before;
+}
+
+#[test]
+fn continue_refuses_a_base_section_left_behind_but_not_a_heading_underline() {
+    let fixture = Fixture::new("text-leftover");
+    let guide = guide(&fixture, NOTES);
+    let project = fixture.project("shop", &[("@acme/guide", "^1")], "");
+    succeed_compose(&fixture, &project);
+    fs::write(
+        project.join("README.md"),
+        NOTES.replace("Three.", "Three, mine."),
+    )
+    .unwrap();
+    republish_guide(
+        &fixture,
+        &guide,
+        &project,
+        "1.1.0",
+        &NOTES.replace("Three.", "Three, theirs."),
+        "services:\n  web:\n    image: app\n",
+    );
+    fails(fixture.compose(&project));
+    let marked = read(&project.join("README.md"));
+
+    // Only the opening and closing lines are removed: the base section and
+    // the separator are left, and the continuation is refused.
+    let partial: String = marked
+        .split_inclusive('\n')
+        .filter(|line| !line.starts_with("<<<<<<< ") && !line.starts_with(">>>>>>> "))
+        .collect();
+    assert!(partial.contains("||||||| base"), "{partial}");
+    fs::write(project.join("README.md"), &partial).unwrap();
+    let waiting = tree(&project);
+    let err = stderr(&fails(
+        fixture.assemblr(&project, &["compose", "--continue"]),
+    ));
+    assert!(
+        err.contains("README.md: it still holds conflict markers"),
+        "{err}"
+    );
+    assert!(err.contains("||||||| base"), "{err}");
+    assert_eq!(tree(&project), waiting);
+
+    // A resolution whose text underlines a heading with `=` is accepted.
+    let resolved = NOTES.replace("Three.", "Three\n=======\n\nOurs.");
+    fs::write(project.join("README.md"), &resolved).unwrap();
+    succeeds(fixture.assemblr(&project, &["compose", "--continue"]));
+    assert_eq!(read(&project.join("README.md")), resolved);
+    assert_eq!(
+        lockfile(&project)["units"]["@acme/guide"]["version"],
+        "1.1.0"
+    );
+}
+
+#[test]
+fn abort_after_update_leaves_a_committed_project_clean_for_git() {
+    let fixture = Fixture::new("abort-clean");
+    let guide = guide(&fixture, NOTES);
+    let project = fixture.project("shop", &[("@acme/guide", "^1")], "");
+    git(&project, &["init", "-q"]);
+    succeed_compose(&fixture, &project);
+    fs::write(
+        project.join("README.md"),
+        NOTES.replace("Three.", "Three, mine."),
+    )
+    .unwrap();
+    git(&project, &["add", "-A"]);
+    git(&project, &["commit", "-q", "-m", "composed"]);
+    // A release that changes the same line and another file.
+    guide.write("manifest.jsonc", &manifest("@acme/guide", "1.1.0", &[], ""));
+    guide.write("src/README.md", &NOTES.replace("Three.", "Three, theirs."));
+    guide.write("src/compose.yaml", "services:\n  web:\n    image: app:2\n");
+    guide.publish("1.1.0");
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+
+    fails(fixture.assemblr(&project, &["update"]));
+    assert!(!git(&project, &["status", "--porcelain"]).is_empty());
+    succeeds(fixture.assemblr(&project, &["compose", "--abort"]));
+    assert_eq!(
+        git(
+            &project,
+            &["status", "--porcelain", "--untracked-files=all"]
+        ),
+        ""
+    );
+    // The project still composes from its base, which was kept whole.
+    succeeds(fixture.compose(&project));
 }
 
 fn succeed_compose(fixture: &Fixture, project: &Path) {
