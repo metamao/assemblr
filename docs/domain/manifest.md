@@ -177,7 +177,7 @@ Open:
 
 - The schema's file name and location, whether it is tracked in Git, and when
   it is regenerated (for example, after an Assemblr upgrade). **OC-17.**
-  Decided provisionally (decision log D-2): `manifest.schema.json` next to
+  **Provisional (D-2)**: `manifest.schema.json` next to
   the manifest, tracked, written by `unit init` and refreshed by running it
   again; no command compares it (see
   [authoring-workflow.md](authoring-workflow.md#initialization-details--approved)).

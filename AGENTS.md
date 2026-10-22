@@ -62,7 +62,7 @@ Classify a decision by its consequences, not by how unsure you feel:
    approved direction where one exists, and that a later PR could revise
    without breaking published units or persisted state. Decide it, implement
    it, record it in the decision log (§1.2), and cite the entry in the PR
-   and in the domain document's implementation notes. The related open
+   and in the domain document, labeled **Provisional (D-n)**. The related open
    contract stays open: a provisional decision is implemented behavior, not
    an approved contract, until the owner settles it.
 3. **Deferred.** A question the task does not need answered. Record it in the

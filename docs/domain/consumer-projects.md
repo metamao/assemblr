@@ -35,7 +35,7 @@ assemblr init my-prod-app
 Open:
 
 - The initial contents and full schema of `assemblr.jsonc`. **OC-36.** The
-  initial contents are decided provisionally (decision log D-9); see
+  initial contents: **Provisional (D-9)**; see
   [initialization details](#initialization-details--approved).
 
 ### Initialization details — Approved
@@ -285,8 +285,8 @@ Open:
 - Exact grammar, including how `add` accepts parameter values. **OC-7.** The
   grammar of `init`, `compose`, `add`, and `remove`, the requirement `add`
   records, how `remove` treats a unit that is not an explicit selection, and
-  what happens to a removed unit's `options` entry are decided provisionally
-  (see [composition details](#composition-details--approved) and
+  what happens to a removed unit's `options` entry are **Provisional (D-9,
+  D-17)** (see [composition details](#composition-details--approved) and
   [add and remove details](#add-and-remove-details--approved)).
 - Operations beyond updating locked versions within the declared requirements:
   changing requirements in bulk, updating past them, a dry run, and automatic
@@ -537,7 +537,7 @@ Composition reconciles three inputs:
   same reconciliation, which applies to every contributed file alike.
 - Repeating `compose` without relevant changes does not rewrite the project.
 
-The reconciliation strategy is decided provisionally in
+The reconciliation strategy is **Provisional (D-13 to D-15)**, described in
 [reconciliation details](#reconciliation-details--approved); Git takes no
 part in it. **OC-10** stays open until the owner settles it.
 

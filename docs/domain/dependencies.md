@@ -71,7 +71,7 @@ Open:
   lockfile is `assemblr-lock.json` (see
   [unit lock state](authoring-workflow.md#unit-lock-state--approved)),
   written by `unit build` and `unit update`; whether `unit publish` writes
-  it is decided provisionally as "no" (**OC-46**).
+  it is **Provisional (D-4)**: no (**OC-46**).
 
 ## Pre-releases and build metadata — Approved
 

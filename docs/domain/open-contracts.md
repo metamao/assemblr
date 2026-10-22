@@ -78,32 +78,32 @@ How the status of a statement affects implementation:
 
 - **Question:** Ordering policy for insertions at the same anchor. Approved so
   far: when the order may be significant, a conflict is preferred to an
-  arbitrary order. The exact policy needs further validation. Decided
-  provisionally for the JSON merge (decision log D-6): members several
-  amenders add at one place are placed in a fixed order by amender identity
-  rather than reported as a conflict, on the premise that JSON object member
-  order carries no meaning. The premise has a counterexample: Node reads the
-  conditions of a `package.json` `exports` in order, so the invented order
-  between two units' insertions can decide which condition applies. **Known
-  limitation, entry stays open:** the merge does not guarantee the meaning of
-  member order where a JSON consumer gives it one, when several units amend
-  one object. The owner decided to keep the generic behavior for now, with no
-  technology-specific rules in the engine, no new manifest metadata, and no
-  broad conflict for independent contributions, until real projects give
-  evidence. The line merge of text files follows the same stance (decision log
-  D-20): insertions several amenders make at one position are all kept in
-  amender-identity order and reported, because two units appending sections to
-  one guidance file is the common case. Across provider versions, insertions
-  the provider's release and an older amendment make at one position are both
-  kept with the provider's first, in composition and in `unit update` (owner
-  decision after the second decision-log review, #70; see [across provider
+  arbitrary order. The exact policy needs further validation. **Provisional
+  (D-6)** for the JSON merge: members several amenders add at one place are
+  placed in a fixed order by amender identity rather than reported as a
+  conflict, on the premise that JSON object member order carries no meaning.
+  The premise has a counterexample: Node reads the conditions of a
+  `package.json` `exports` in order, so the invented order between two units'
+  insertions can decide which condition applies. **Known limitation, entry
+  stays open:** the merge does not guarantee the meaning of member order where
+  a JSON consumer gives it one, when several units amend one object. The owner
+  decided to keep the generic behavior for now, with no technology-specific
+  rules in the engine, no new manifest metadata, and no broad conflict for
+  independent contributions, until real projects give evidence. The line merge
+  of text files follows the same stance (decision log D-20): insertions
+  several amenders make at one position are all kept in amender-identity order
+  and reported, because two units appending sections to one guidance file is
+  the common case. Across provider versions, insertions the provider's release
+  and an older amendment make at one position are both kept with the
+  provider's first, in composition and in `unit update` (owner decision after
+  the second decision-log review, #70; see [across provider
   versions](amendments-and-composition.md#across-provider-versions--approved)).
   **Known limitation for text, entry stays open:** a clean line merge does not
   guarantee semantic compatibility in formats where the order or repetition of
   lines decides the outcome, such as `.env`, `CODEOWNERS`, and `.gitignore`;
   the order of the amenders' identities can decide which line takes effect
   (see [text
-  files](amendments-and-composition.md#text-files--approved-direction-details-provisional)).
+  files](amendments-and-composition.md#text-files--approved-direction-details-provisional-d-20)).
   No such format is refused for it (decision log D-27). A copy's reorder is
   reported as a warning to its author and the merge keeps the provider's
   order; the warnings and tests describe the behavior and do not resolve the
@@ -134,7 +134,7 @@ How the status of a statement affects implementation:
   requirement, an existing tag that already points at the validated content,
   annotated vs lightweight tags (recommended (provisional): consider annotated
   tags), and whether a new version must be greater than earlier published
-  versions. Decided provisionally (decision log D-3) as the [publication
+  versions. **Provisional (D-3)**, as the [publication
   details](authoring-workflow.md#publication-details--approved): committing
   everything must change nothing, with untracked unignored files refused by
   name; a tag of the version at `HEAD` means already published and exits zero;
@@ -152,7 +152,7 @@ How the status of a statement affects implementation:
   resolved, is resolved in the pending-resolution state like a conflict with
   consumer modifications, or is a composition error; and, if it is resolved in
   place, what the incoming composition and the next reconciliation base are.
-  Decided provisionally for the first `compose` (decision log D-10): a
+  **Provisional (D-10)** for the first `compose`: a
   conflict between units' contributions is a composition error, and the
   project is not modified; unchanged by reconciliation (decision log D-13).
 - **Origin:** Readiness
@@ -183,11 +183,11 @@ How the status of a statement affects implementation:
   Compatibility equivalents do not collide. Approved for `unit build`: how a
   working tree's symbolic links, special files, and executable bits are read
   (see [build details](authoring-workflow.md#build-details--approved)).
-  Decided provisionally for the first `compose` (decision log D-10): files are
+  **Provisional (D-10)** for the first `compose`: files are
   written byte for byte with the executable bit as composed, never through a
   symbolic link; `assemblr.jsonc`, `assemblr-lock.json`, and `.assemblr/` are
-  reserved paths a unit cannot deliver. Decided provisionally for
-  reconciliation (decision log D-15): a project file that differs from its
+  reserved paths a unit cannot deliver. **Provisional (D-15)** for
+  reconciliation: a project file that differs from its
   base or the incoming file only by CRLF line endings counts as that content
   and keeps its line endings; the executable bit is reconciled like content,
   and where the file system has none the project's mode is read as the base's.
@@ -217,10 +217,10 @@ How the status of a statement affects implementation:
 
 - **Approved (normative):** List identity rules may be needed where identity
   cannot be inferred safely. Identity is never guessed.
-- **Open detail:** Manifest schema for list identity hints. Decided
-  provisionally for the JSON merge (decision log D-8): lists are compared
-  whole, so no identity is inferred and changes inside one list are never
-  merged independently; identical whole-list changes are one change.
+- **Open detail:** Manifest schema for list identity hints. **Provisional
+  (D-8)** for the JSON merge: lists are compared whole, so no identity is
+  inferred and changes inside one list are never merged independently;
+  identical whole-list changes are one change.
 - **Origin:** Owner
 - **Context:** [merge
   semantics](amendments-and-composition.md#structured-and-unknown-formats)
@@ -302,33 +302,32 @@ How the status of a statement affects implementation:
   `unit publish` take no arguments and run at the repository's top level;
   `unit check` runs every validation a build runs plus the publication checks
   and writes nothing, and `unit publish` tags the committed tree at `HEAD` and
-  updates the index for the registered source (decided provisionally, decision
-  log D-3 and D-4; see [check
-  details](authoring-workflow.md#check-details--approved) and [publication
-  details](authoring-workflow.md#publication-details--approved)). `unit init
-  <identity> [<directory>] [--description <text>]` establishes the repository
-  (initialized, adopted at its top level, nested inside a repository that is
-  not a unit's, refused inside a unit's), writes the manifest, the schema, and
-  `.gitignore`, never overwrites a manifest, and never commits (decided
-  provisionally, decision log D-5; see [initialization
+  updates the index for the registered source (**Provisional (D-3, D-4)**; see
+  [check details](authoring-workflow.md#check-details--approved) and
+  [publication details](authoring-workflow.md#publication-details--approved)).
+  `unit init <identity> [<directory>] [--description <text>]` establishes the
+  repository (initialized, adopted at its top level, nested inside a
+  repository that is not a unit's, refused inside a unit's), writes the
+  manifest, the schema, and `.gitignore`, never overwrites a manifest, and
+  never commits (**Provisional (D-5)**; see [initialization
   details](authoring-workflow.md#initialization-details--approved)). `assemblr
   init [<directory>]` writes an empty declaration and nothing else, and
   `assemblr compose` composes the declaration into a project composed for the
-  first time (decided provisionally, decision log D-9; see [initialization
+  first time (**Provisional (D-9)**; see [initialization
   details](consumer-projects.md#initialization-details--approved) and
   [composition details](consumer-projects.md#composition-details--approved)).
   `assemblr add <identity>[@<requirement>]` and `assemblr remove <identity>`
   edit the declaration and compose it: `add` records a caret requirement on
   the resolved version when none is given and keeps the requirement of a unit
   that is selected already, `remove` takes the selection and its `options`
-  entry and refuses a unit that is not an explicit selection (decided
-  provisionally, decision log D-17; see [add and remove
+  entry and refuses a unit that is not an explicit selection (**Provisional
+  (D-17)**; see [add and remove
   details](consumer-projects.md#add-and-remove-details--approved)). `assemblr
   update [<identity>...]` is decided by the owner (#63, decision log D-23; see
   [update](consumer-projects.md#update--approved)). `assemblr info
   <identity>[@<version>] [--json]` describes a registered unit's newest stable
-  or named version from the index and its repository, offline (decided
-  provisionally, decision log D-19; see the [implemented
+  or named version from the index and its repository, offline (**Provisional
+  (D-19)**; see the [implemented
   grammar](registries-and-discovery.md#implemented-grammar--approved)).
 - **Open detail:** Exact grammar and semantics of every other command, flag,
   and argument, including: how `registry info` relates to the top-level
@@ -417,7 +416,7 @@ How the status of a statement affects implementation:
   inside; other formats refused with several amenders, except UTF-8 text,
   which is combined by line (owner direction after the reference scenario;
   decision log D-20; see [text
-  files](amendments-and-composition.md#text-files--approved-direction-details-provisional)),
+  files](amendments-and-composition.md#text-files--approved-direction-details-provisional-d-20)),
   while YAML, TOML, XML, INI, and files that are not text stay refused;
   cross-version application (OC-52) and update reconciliation (OC-53) deferred
   then, and decided on #59 (decision log D-22); deterministic results per
@@ -425,12 +424,12 @@ How the status of a statement affects implementation:
   releases (see [the merge
   engine](amendments-and-composition.md#the-merge-engine--approved)).
 - **Open detail:** Further format adapters (TOML, YAML), and whether Git takes
-  part in unit composition. The consumer side is decided provisionally
-  (decision log D-13): per-path three-way reconciliation against the last
-  materialized composition, without Git; the value merge for a JSON or JSONC
-  file both sides changed, onto the project's text, and a line-level merge for
-  a UTF-8 text file (decision log D-21); every other disagreement refused or
-  left to the pending-resolution state (see [reconciliation
+  part in unit composition. The consumer side is **Provisional (D-13)**:
+  per-path three-way reconciliation against the last materialized composition,
+  without Git; the value merge for a JSON or JSONC file both sides changed,
+  onto the project's text, and a line-level merge for a UTF-8 text file
+  (decision log D-21); every other disagreement refused or left to the
+  pending-resolution state (see [reconciliation
   details](consumer-projects.md#reconciliation-details--approved)).
 - **Origin:** Owner
 - **Context:** [merge
@@ -445,7 +444,7 @@ How the status of a statement affects implementation:
   dependencies into a reusable composition is a contribution, whatever their
   number (owner direction, #32).
 - **Open detail:** The precise effective-contribution (no-op) algorithm.
-  Decided provisionally (decision log D-1): a unit is effective when it
+  **Provisional (D-1)**: a unit is effective when it
   delivers a `src/` file or declares a dependency; an amendment copy identical
   to the provider's file at its base is redundant and reported; an option
   equal to the locked version's default is not reported (see [check
@@ -482,7 +481,7 @@ How the status of a statement affects implementation:
   JSON Schema referenced through `$schema`. Assemblr's own validation is
   authoritative.
 - **Open detail:** The schema's file name and location, whether it is tracked
-  in Git, and when it is regenerated. Decided provisionally (decision log D-2)
+  in Git, and when it is regenerated. **Provisional (D-2)**
   and implemented by `unit init`: `manifest.schema.json` at the repository's
   top level, tracked, created when missing and refreshed by running `unit
   init` again; `unit check` and `unit publish` never compare it, since
@@ -624,9 +623,9 @@ How the status of a statement affects implementation:
   approved (see [manifest
   serialization](manifest.md#serialization-of-dependencies-options-params-and-amendments--approved));
   `assemblr.jsonc` has no `params`; schema file names and locations; how the
-  project-aware schema is generated and refreshed. Decided provisionally
-  (decision log D-9): `init` writes `dependencies` and `options` as empty
-  maps, and the reader accepts `$schema`; no schema file is written yet.
+  project-aware schema is generated and refreshed. **Provisional (D-9)**:
+  `init` writes `dependencies` and `options` as empty maps, and the reader
+  accepts `$schema`; no schema file is written yet.
 - **Origin:** Owner
 - **Context:** [project
   configuration](consumer-projects.md#project-configuration--approved),
@@ -646,28 +645,28 @@ How the status of a statement affects implementation:
   layout) and how the three versions are exposed; how resolution is marked
   complete; which operations are allowed while resolution is pending; the
   snapshot, journal, and restore mechanisms; and recovery after an interrupted
-  application. Decided provisionally for the first `compose` (decision log
-  D-12): a journal in `.assemblr/` records the files being created, replaced,
-  and removed, with their previous content kept under `.assemblr/previous/`,
-  and the next `compose` completes an interrupted composition whose lock is in
-  place and reverts any other to the previous content (decision log D-12 and
-  D-14). A journal whose format number or members this version does not know
-  is refused and left as it is (#73, ADR 0027). The journal also records the
-  declaration that `add` and `remove` rewrite, with its previous text, and a
-  revert restores it with the files (decision log D-17). Decided provisionally
-  for text conflicts (decision log D-18): `compose --continue` and `--abort`;
-  each conflicted file stays at its path holding the project's, the base's,
-  and the composition's content between diff3-style markers; the journal keeps
-  the lock and the marked files and waits; only `--continue` and `--abort` run
-  while it waits; `--continue` needs no line starting `<<<<<<< current`,
-  `|||||||base`, or `>>>>>>> incoming` left and writes the lock; `--abort`
-  restores the project, the declaration included, and removes the aborted base
-  and the objects only it names from the store (#72). A conflict of any other
-  kind, mode, deleted-versus-changed, removed-but-edited, non-text, or
-  unbased, still refuses the composition whole. A text file both sides changed
-  is merged by line, and a conflict is marked only around the lines that
-  disagree (decision log D-21); a structured file's conflict keeps whole-file
-  markers, and marking only the colliding values of a JSON file is deferred.
+  application. **Provisional (D-12)** for the first `compose`: a journal in
+  `.assemblr/` records the files being created, replaced, and removed, with
+  their previous content kept under `.assemblr/previous/`, and the next
+  `compose` completes an interrupted composition whose lock is in place and
+  reverts any other to the previous content (decision log D-12 and D-14). A
+  journal whose format number or members this version does not know is refused
+  and left as it is (#73, ADR 0027). The journal also records the declaration
+  that `add` and `remove` rewrite, with its previous text, and a revert
+  restores it with the files (decision log D-17). **Provisional (D-18)** for
+  text conflicts: `compose --continue` and `--abort`; each conflicted file
+  stays at its path holding the project's, the base's, and the composition's
+  content between diff3-style markers; the journal keeps the lock and the
+  marked files and waits; only `--continue` and `--abort` run while it waits;
+  `--continue` needs no line starting `<<<<<<< current`, `|||||||base`, or
+  `>>>>>>> incoming` left and writes the lock; `--abort` restores the project,
+  the declaration included, and removes the aborted base and the objects only
+  it names from the store (#72). A conflict of any other kind, mode,
+  deleted-versus-changed, removed-but-edited, non-text, or unbased, still
+  refuses the composition whole. A text file both sides changed is merged by
+  line, and a conflict is marked only around the lines that disagree (decision
+  log D-21); a structured file's conflict keeps whole-file markers, and
+  marking only the colliding values of a JSON file is deferred.
 - **Origin:** Owner
 - **Context:** [conflict
   resolution](consumer-projects.md#conflict-resolution--approved),
@@ -772,10 +771,10 @@ How the status of a statement affects implementation:
 - **Open detail:** How a composition treats a path that already holds content
   Assemblr did not materialize, so that no reconciliation base exists for it:
   for example, whether it is a conflict resolved in the pending-resolution
-  state or an error reported before anything is applied. Decided provisionally
-  for the first `compose` (decision log D-10): such a path is refused before
-  anything is applied, naming every path; the same holds for a new file of a
-  reconciled composition (decision log D-13).
+  state or an error reported before anything is applied. **Provisional
+  (D-10)** for the first `compose`: such a path is refused before anything is
+  applied, naming every path; the same holds for a new file of a reconciled
+  composition (decision log D-13).
 - **Origin:** Consumer
 - **Context:** [file
   contributions](consumer-projects.md#file-contributions--approved)
@@ -825,10 +824,10 @@ How the status of a statement affects implementation:
   files' contents in the Git directory so that an interrupted update is
   completed, never half applied (see [update
   details](authoring-workflow.md#update-details--approved)).
-- **Open detail:** Whether `unit publish` writes it. Decided provisionally
-  (decision log D-4): it does not; it requires the lockfile to be committed
-  and to record the current resolution, so the writers are `unit build` and
-  `unit update`. The entry stays open until the owner closes it.
+- **Open detail:** Whether `unit publish` writes it. **Provisional (D-4)**: it
+  does not; it requires the lockfile to be committed and to record the current
+  resolution, so the writers are `unit build` and `unit update`. The entry
+  stays open until the owner closes it.
 - **Origin:** Owner
 - **Context:** [unit lock
   state](authoring-workflow.md#unit-lock-state--approved), [base

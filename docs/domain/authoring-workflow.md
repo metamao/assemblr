@@ -66,13 +66,12 @@ Assemblr's own validation remains authoritative over the schema.
 
 Open:
 
-- The schema's name, location, and tracking. **OC-17.** Decided
-  provisionally (decision log D-2); see
-  [initialization details](#initialization-details--approved).
+- The schema's name, location, and tracking. **OC-17.** **Provisional (D-2)**;
+  see [initialization details](#initialization-details--approved).
 - How `init` establishes the Git repository: for example, whether it
   initializes a new repository or adopts an existing one, how it treats a
   target inside another repository, and whether it creates an initial commit.
-  Part of **OC-7.** Decided provisionally (decision log D-5); see
+  Part of **OC-7.** **Provisional (D-5)**; see
   [initialization details](#initialization-details--approved).
 
 ### Initialization details — Approved
@@ -216,9 +215,9 @@ composes.
 
 Open:
 
-- The exact no-op / effective-contribution algorithm. **OC-11.** Decided
-  provisionally for the first `unit check` (decision log D-1); see
-  [check details](#check-details--approved).
+- The exact no-op / effective-contribution algorithm. **OC-11.** **Provisional
+  (D-1)** for the first `unit check`; see [check
+  details](#check-details--approved).
 
 ### Check details — Approved
 
@@ -239,19 +238,19 @@ requires one that records the current resolution: a missing lockfile, and a
 resolution that would add, change, or retire an entry, are reported with the
 hint to run `unit build`, which writes it. `unit check` never creates it.
 
-**Effective contribution** (OC-11, provisional). A unit is effective when it
-delivers at least one `src/` file or declares at least one dependency.
+**Effective contribution** (OC-11, **Provisional (D-1)**). A unit is effective
+when it delivers at least one `src/` file or declares at least one dependency.
 Aggregation is a contribution: a unit whose purpose is to compose other units
 into one reusable dependency contributes that composition, whether it
 aggregates one unit or many. Since amendments and options presuppose a
 dependency, a unit is ineffective exactly when it has no file and no
 dependency, and that is reported. An amendment whose copy is the provider's
-file byte for byte at the declared base is a **redundant** contribution and
-is reported by path: it changes nothing and claims the file for no reason.
-An option equal to the parameter's default at the locked version is not
-reported: consumers resolve the dependency within the declared range, where
-the default may differ, so the explicit value pins it. The check gates
-`unit check` and `unit publish`, never a build (OC-28).
+file byte for byte at the declared base is a **redundant** contribution and is
+reported by path: it changes nothing and claims the file for no reason. An
+option equal to the parameter's default at the locked version is not reported:
+consumers resolve the dependency within the declared range, where the default
+may differ, so the explicit value pins it. The check gates `unit check` and
+`unit publish`, never a build (OC-28).
 
 **What a merge would not carry.** For each of the unit's own copies of a
 JSON or JSONC file, `unit check` and `unit build` report, as warnings that
@@ -524,8 +523,8 @@ the lockfile's writers are `unit build` and `unit update`.
 
 Open:
 
-- Whether `unit publish` writes the lockfile. **OC-46.** Decided
-  provisionally: it does not (decision log D-4). The entry stays open until
+- Whether `unit publish` writes the lockfile. **OC-46.**
+  **Provisional (D-4)**: it does not. The entry stays open until
   the owner closes it.
 
 ## Update — Approved
@@ -778,6 +777,6 @@ Open:
 - Edge cases, including untracked files, an existing tag that already points
   at the validated commit, annotated vs lightweight tags (annotated tags are
   recommended for consideration), and whether a new version must be greater
-  than earlier published versions. **OC-26.** Decided provisionally as the
-  publication details above (decision log D-3); the entry stays open until
+  than earlier published versions. **OC-26.** **Provisional (D-3)**: the
+  publication details above; the entry stays open until
   the owner closes it.
