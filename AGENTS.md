@@ -260,8 +260,10 @@ cargo test --all-targets --all-features
 cargo build --all-targets
 ```
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs these on Linux
-and Windows with `--locked`, and checks the MSRV.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs these with
+`--locked`: on Linux for pull requests, and on Linux and Windows plus the MSRV
+after a merge to `main`. Changes to documentation alone skip it. Start CI by
+hand on a branch when a change needs Windows or the MSRV before the merge.
 
 - Domain logic gets fast unit tests next to the code. CLI behavior gets
   integration tests in `tests/` that run the real binary.
@@ -616,7 +618,8 @@ be working at the same time.
   that blocks the next increment gets an `[Owner decision] Decide OC-<n>: …`
   issue.
 - **Checks:** [`ci.yml`](.github/workflows/ci.yml) runs format, lint, build,
-  and test on Linux and Windows, and checks the MSRV.
+  and test on Linux for pull requests, and adds Windows and the MSRV on `main`
+  or when started by hand. A PR's green checks therefore cover Linux only.
 - **Automated review:** [`claude-review.yml`](.github/workflows/claude-review.yml)
   reviews non-draft PRs when they are opened, pushed, or marked ready, and a
   new push cancels the previous run. It posts as `claude`: inline findings

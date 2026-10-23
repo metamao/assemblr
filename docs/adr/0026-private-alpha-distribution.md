@@ -38,8 +38,10 @@ or self-update is required (#68, D-25).
    already exists and verifies that the draft stores that commit. Nothing is
    released on merges. The owner
    publishes the draft, and publishing creates the tag at that commit; it is
-   never moved. Pull requests that touch the packaging run the same jobs
-   without the release step.
+   never moved. Started by hand on another branch, for example a pull
+   request that touches the packaging, it runs the same jobs without the
+   release step. Pull requests do not start it automatically, to save
+   Actions minutes.
 5. **Install, upgrade, and removal are documented commands**, not scripts: an
    upgrade replaces the binary. User state (the registry in the platform's
    local data directory, and every consumer project) is never part of the
