@@ -64,6 +64,24 @@ pub(super) fn remote_reference(text: &str) -> Result<SourceReference, ReferenceE
     Ok(SourceReference::new(text))
 }
 
+/// The reference a catalog's `declared` entry stands for: a remote reference
+/// as given, or a local path, which is resolved against the catalog's root
+/// `catalog` when it is relative, never against the working directory.
+pub(crate) fn catalog_reference(
+    declared: &str,
+    catalog: &Path,
+) -> Result<SourceReference, ReferenceError> {
+    if is_remote(declared) {
+        return remote_reference(declared);
+    }
+    let path = Path::new(declared);
+    if path.is_relative() {
+        local_reference(&catalog.join(path))
+    } else {
+        local_reference(path)
+    }
+}
+
 /// Whether a stored reference names a remote repository.
 pub(crate) fn is_remote_reference(reference: &SourceReference) -> bool {
     is_remote(reference.as_str())

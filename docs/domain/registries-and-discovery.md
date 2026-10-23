@@ -396,7 +396,9 @@ Open:
 
 - The index's file name, serialization format, storage location, and hash
   representation; whether a catalog without a published index can be
-  registered; and how refresh reports partial failures. **OC-40.**
+  registered; and how refresh reports partial failures. **OC-40.** The
+  implemented answers are provisional (D-36), see the [implemented
+  grammar](#implemented-grammar--approved).
 
 ## Synchronization — Approved
 
@@ -689,6 +691,43 @@ assemblr registry sync
 - Diagnostics keep excluded tags apart from indexed versions: each excluded
   tag is reported with its reason on stderr, and the result names the indexed
   versions and, separately, the tags excluded and not indexed.
+
+For catalogs, the maintainer's commands (**Provisional (D-36)**, see
+[ADR 0030](../adr/0030-catalog-index.md)):
+
+```text
+assemblr registry create <catalog> [<directory>]
+assemblr catalog refresh
+```
+
+- `registry create` makes a Git repository in `<directory>`, by default the
+  catalog's name in the current directory, which must be new or empty, and
+  writes a `registry.jsonc` with the catalog identity and no units. It
+  commits nothing.
+- `registry.jsonc` holds `name`, `units`, and optionally `$schema`. Any other
+  field, a duplicate key, or a reference that is not a string is an invalid
+  catalog manifest.
+- `catalog refresh` runs at the catalog's root and reads `registry.jsonc` from
+  the working tree, so uncommitted edits count. For each declared unit it
+  resolves the reference (a relative path against the catalog's root),
+  fetches a remote one as `registry add` does, and validates the published
+  versions as registration does, including that the repository declares the
+  identity the catalog gives it. It then writes `registry-index.json` at the
+  catalog's root, replacing the old one only if the content changed, and
+  commits nothing.
+- The index is JSON with sorted keys, two-space indentation, and a trailing
+  newline: `format` (1), `name`, and `units`, from identity to `source` (the
+  reference as declared) and `versions`, from version to `commit`, `tree`
+  (lowercase hexadecimal Git object ids), and `manifest` (the version's
+  `manifest.jsonc` as plain JSON, comments removed). The same sources and
+  history give the same bytes.
+- An invalid version is excluded from the index and reported on stderr, and
+  the refresh continues. A source-level failure of any declared unit (an
+  invalid reference, an unreachable or unreadable repository, an identity
+  other than the declared one, a source conflict) is reported for every
+  failing unit, rejects the refresh, and leaves `registry-index.json`
+  unchanged.
+- Registering or synchronizing a catalog is not implemented yet.
 
 For a registered unit, the top-level `info` command (**Provisional (D-19)**):
 

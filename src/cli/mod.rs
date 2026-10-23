@@ -1,6 +1,7 @@
 //! Argument parsing and dispatch.
 
 mod advice;
+mod catalog;
 mod diagnostic;
 mod info;
 mod project;
@@ -98,6 +99,9 @@ enum Command {
     /// Manage the local registry of unit repositories
     #[command(subcommand)]
     Registry(registry::RegistryCommand),
+    /// Maintain a catalog of unit repositories
+    #[command(subcommand)]
+    Catalog(catalog::CatalogCommand),
     /// Create, build, and publish units
     #[command(subcommand)]
     Unit(unit::UnitCommand),
@@ -113,6 +117,7 @@ pub(crate) fn run() -> ExitCode {
         Command::Update(args) => project::update(&args),
         Command::Info(args) => info::run(&args),
         Command::Search(args) => search::run(&args),
+        Command::Catalog(command) => catalog::run(command),
         Command::Registry(command) => registry::run(command),
         Command::Unit(command) => unit::run(command),
     }

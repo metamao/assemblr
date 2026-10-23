@@ -336,6 +336,9 @@ How the status of a statement affects implementation:
   `assemblr search <term>... [--json]` lists the registered units whose
   identity or newest stable description contains every term, offline
   (**Provisional (D-32)**, under OC-29).
+  `registry create <catalog> [<directory>]` creates a catalog's repository
+  and `registry.jsonc`, and `catalog refresh` regenerates its index
+  (**Provisional (D-36)**).
 - **Open detail:** Exact grammar and semantics of every other command, flag,
   and argument, including: how `registry info` relates to the top-level
   `info`, and whether unit inspection is spelled `info` or `unit info`; what
@@ -586,7 +589,9 @@ How the status of a statement affects implementation:
   and `units`. How conflicting catalog identities are handled. Which revision
   is read for a local catalog, and how uncommitted local catalog changes are
   treated. How identical references are recognized when relative references
-  come from different catalogs.
+  come from different catalogs. Implemented provisionally for catalog
+  refresh (D-36): only `name`, `units`, and `$schema` are accepted, and
+  refresh reads the working tree.
 - **Origin:** Registry
 - **Context:** [catalogs](registries-and-discovery.md#catalogs--approved),
   [synchronization](registries-and-discovery.md#synchronization--approved)
@@ -735,7 +740,11 @@ How the status of a statement affects implementation:
   central service, webhook, or back-reference.
 - **Open detail:** The index's file name, serialization, storage location, and
   hash representation; whether a catalog without a published index can be
-  registered; how refresh reports partial failures.
+  registered; how refresh reports partial failures. Implemented
+  provisionally (D-36, [ADR 0030](../adr/0030-catalog-index.md)):
+  `registry-index.json` at the catalog's root, JSON with sorted keys, Git
+  commit and tree ids, and an invalid version excluded with a warning while
+  any source-level failure rejects the whole refresh.
 - **Origin:** Owner
 - **Context:** [catalog metadata
   index](registries-and-discovery.md#catalog-metadata-index--approved)
