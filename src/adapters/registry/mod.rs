@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 pub(crate) use self::observe as observe_tags;
 pub use info::{Found, InfoFailure, Search, UnitInfo};
+pub(crate) use reference::catalog_reference;
 use reference::is_remote_reference;
 pub use reference::{ReferenceError, local_reference, source_reference};
 use sha2::{Digest, Sha256};
@@ -120,7 +121,7 @@ impl Registry {
 
     /// Fetches the remote `source` into its copy. A local source is read in
     /// place and needs nothing.
-    fn fetch_source(&self, source: &SourceReference) -> Result<(), FetchError> {
+    pub(crate) fn fetch_source(&self, source: &SourceReference) -> Result<(), FetchError> {
         if is_remote_reference(source) {
             fetch(source.as_str(), &self.copy_of(source))
         } else {

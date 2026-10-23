@@ -1,4 +1,4 @@
-//! Unit identities of the form `@owner/unit-name`.
+//! Unit and catalog identities of the form `@owner/name`.
 
 use std::fmt;
 use std::str::FromStr;
@@ -61,6 +61,30 @@ impl FromStr for UnitIdentity {
 impl fmt::Display for UnitIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "@{}/{}", self.owner, self.name)
+    }
+}
+
+/// The identity of a catalog: `@owner/name`, with the syntax of a
+/// [`UnitIdentity`] but in a namespace of its own, so a catalog and a unit
+/// may share a name without being related.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CatalogIdentity(UnitIdentity);
+
+impl CatalogIdentity {
+    /// Parses a catalog identity by the rules of a unit identity.
+    pub fn parse(input: &str) -> Result<Self, IdentityError> {
+        UnitIdentity::parse(input).map(Self)
+    }
+
+    /// The catalog name, without the owner.
+    pub fn name(&self) -> &str {
+        self.0.name()
+    }
+}
+
+impl fmt::Display for CatalogIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 

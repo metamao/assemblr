@@ -30,7 +30,7 @@ pub use composition::{
 };
 pub use contribution::{ContributionError, contribution_problems};
 pub use discovery::{EmptyQuery, SearchQuery};
-pub use identity::{IdentityError, IdentityErrorReason, Segment, UnitIdentity};
+pub use identity::{CatalogIdentity, IdentityError, IdentityErrorReason, Segment, UnitIdentity};
 pub use lock::{
     AmendmentBaseError, BaseIntegrityError, LockError, LockedUnit, PublishedAmendmentError,
     UnitLock, amendment_bases, published_amendments, relock, verify_bases,

@@ -6,6 +6,7 @@
 //! `docs/adr/0001-architecture.md`).
 
 mod build;
+mod catalog;
 mod git;
 mod init;
 mod jsonc;
@@ -25,6 +26,11 @@ pub use build::{
     PublishFailure, PublishProblem, PublishState, Published, PublishedProblem, Recovered,
     RecoveryError, TemplateError, UpdateFailure, UpdateProblem, UpdateState, UpdateWriteError,
     Updated, WriteError, amend_unit, build_unit, check_unit, publish_unit, update_unit,
+};
+pub use catalog::{
+    CATALOG_INDEX, CATALOG_MANIFEST, CatalogInitFailure, CatalogManifest, CatalogManifestError,
+    RefreshFailure, RefreshProblem, Refreshed, init_catalog, read_catalog_manifest,
+    refresh_catalog,
 };
 pub use git::{
     Discovered, FetchError, FetchErrorKind, GitError, GitErrorKind, GitRepository,
