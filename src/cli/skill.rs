@@ -65,6 +65,12 @@ fn install(args: &InstallArgs) -> ExitCode {
                     "move the file away, or run `assemblr skill install claude --force` to \
                      replace it",
                 ),
+                SkillFailure::Link(_) => Diagnosis::note("nothing was changed").advise(
+                    "Assemblr does not write through links; run `assemblr skill install claude \
+                     --force` to replace the link with the skill's file",
+                ),
+                SkillFailure::Directory(_) => Diagnosis::note("nothing was changed")
+                    .advise("move the directory away, then install the skill again"),
                 SkillFailure::NoLocation | SkillFailure::RelativeLocation(_) => {
                     Diagnosis::note("nothing was changed").advise(
                         "set CLAUDE_CONFIG_DIR to the absolute path of Claude Code's \

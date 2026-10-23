@@ -958,7 +958,8 @@ agent's user-level skill, which says when Assemblr helps and to run
   again updates a skill that Assemblr wrote. A file that Assemblr did not
   write is kept unless the user asks to replace it.
 - The skill names no command but `assemblr guide`, so it stays true when
-  Assemblr changes.
+  Assemblr changes. Assemblr recognizes a skill it wrote by a closing comment
+  that names no command either, and every later version still recognizes it.
 
 ## Recommended mechanisms — Recommended (provisional)
 

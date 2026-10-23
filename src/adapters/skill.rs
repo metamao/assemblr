@@ -14,8 +14,9 @@ use std::path::{Path, PathBuf};
 const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 
 /// The last line of every skill Assemblr writes, by which it recognizes one
-/// it may update.
-const MARKER: &str = "<!-- Written by `assemblr skill install claude`, which updates it. -->";
+/// it may update. It names no command, so it never needs to change; a later
+/// version that changes it must still recognize this one.
+const MARKER: &str = "<!-- assemblr-skill -->";
 
 /// The Claude Code skill. Its description lists the tasks that call for
 /// Assemblr, so that Claude Code loads it for them; its body names no
@@ -34,7 +35,7 @@ const CLAUDE_SKILL: &str = concat!(
      configuration), updating a project that has `assemblr.jsonc`, or making something reusable \
      across projects, run `assemblr guide` and follow it.\n",
     "\n",
-    "<!-- Written by `assemblr skill install claude`, which updates it. -->\n",
+    "<!-- assemblr-skill -->\n",
 );
 
 /// The largest existing skill file read, in bytes.
@@ -66,9 +67,13 @@ pub enum SkillFailure {
     NoLocation,
     /// `CLAUDE_CONFIG_DIR` is a relative path.
     RelativeLocation(PathBuf),
-    /// The skill's file exists and Assemblr did not write it, or it is a
-    /// symbolic link, which Assemblr never writes.
+    /// The skill's file exists and Assemblr did not write it.
     NotOurs(PathBuf),
+    /// The skill's path is a symbolic link, which Assemblr never writes
+    /// through.
+    Link(PathBuf),
+    /// The skill's path is a directory, which even `--force` keeps.
+    Directory(PathBuf),
     Io {
         path: PathBuf,
         error: io::Error,
@@ -92,6 +97,8 @@ impl fmt::Display for SkillFailure {
                 "{} already exists, and Assemblr did not write it",
                 path.display()
             ),
+            Self::Link(path) => write!(f, "{} is a symbolic link", path.display()),
+            Self::Directory(path) => write!(f, "{} is a directory", path.display()),
             Self::Io { path, error } => write!(f, "could not write {}: {error}", path.display()),
         }
     }
@@ -140,8 +147,14 @@ pub fn install_claude_skill(path: &Path, force: bool) -> Result<SkillInstalled, 
                 return Err(SkillFailure::NotOurs(path.to_owned()));
             }
         }
-        // A link or another kind of file, but never a directory.
-        Ok(metadata) if force && !metadata.is_dir() => SkillOutcome::Updated,
+        Ok(metadata) if metadata.is_dir() => {
+            return Err(SkillFailure::Directory(path.to_owned()));
+        }
+        // A link, or another kind of file, which `--force` replaces.
+        Ok(_) if force => SkillOutcome::Updated,
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(SkillFailure::Link(path.to_owned()));
+        }
         Ok(_) => return Err(SkillFailure::NotOurs(path.to_owned())),
     };
     if outcome != SkillOutcome::UpToDate {
@@ -177,7 +190,7 @@ mod tests {
             .collect();
         assert_eq!(
             commands,
-            ["assemblr guide", "assemblr skill install claude"],
+            ["assemblr guide"],
             "the skill must stay true across versions"
         );
     }
