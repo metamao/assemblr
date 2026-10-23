@@ -994,7 +994,10 @@ fn dependents_first<'a>(members: &BTreeMap<&'a UnitIdentity, Member<'a>>) -> Vec
 
 /// Why a parameter cannot be mapped to a dependency's parameter, if it
 /// cannot: only known incompatibilities, never a coercion.
-fn mapping_problem(source: &ParameterDefinition, target: &ParameterDefinition) -> Option<String> {
+pub(crate) fn mapping_problem(
+    source: &ParameterDefinition,
+    target: &ParameterDefinition,
+) -> Option<String> {
     match (source.parameter_type(), target.parameter_type()) {
         (ParameterType::Integer, ParameterType::Integer)
         | (ParameterType::Boolean, ParameterType::Boolean)

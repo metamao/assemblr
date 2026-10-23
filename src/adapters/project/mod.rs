@@ -17,7 +17,7 @@
 //! interrupted composition is completed or reverted by the next one, and
 //! a composition that would change nothing changes nothing.
 
-mod declaration;
+pub(crate) mod declaration;
 mod ignore;
 mod lines;
 mod pending;
@@ -332,11 +332,13 @@ fn compose_with(
         recovered: None,
     };
     let declaration_path = root.join(DECLARATION);
-    if fs::symlink_metadata(&declaration_path).is_err() {
-        return Err(rejected(ComposeProblem::NoDeclaration(declaration_path)));
-    }
+    // A unit's directory is told apart first: the author is in the wrong
+    // flow, not in the wrong directory.
     if root.join(MANIFEST).exists() {
         return Err(rejected(ComposeProblem::UnitRepository(root.to_owned())));
+    }
+    if fs::symlink_metadata(&declaration_path).is_err() {
+        return Err(rejected(ComposeProblem::NoDeclaration(declaration_path)));
     }
     let guard = lock_declaration(root).map_err(rejected)?;
     // `add` and `remove` write the declaration, so a read-only one is

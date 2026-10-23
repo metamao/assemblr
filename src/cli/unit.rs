@@ -11,11 +11,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use assemblr::adapters::{
-    AmendFailure, AmendProblem, AmendState, BuildFailure, BuildProblem, Built, CheckFailure,
-    CheckProblem, FileOutcome, GitOutcome, IndexOutcome, InitFailure, Initialized, LockfileOutcome,
-    ManifestFileError, PublishFailure, PublishProblem, PublishState, Published, RecoveryError,
-    Registry, TagProblem, UpdateFailure, UpdateProblem, UpdateState, Updated, amend_unit,
-    build_unit, check_unit, init_unit, publish_unit, update_unit,
+    AddFailure, AddProblem, AddedParameter, AmendFailure, AmendProblem, AmendState, BuildFailure,
+    BuildProblem, Built, CheckFailure, CheckProblem, DeclarationChange, FileOutcome, GitOutcome,
+    IndexOutcome, InitFailure, Initialized, LockfileOutcome, ManifestFileError, PublishFailure,
+    PublishProblem, PublishState, Published, RecoveryError, Registry, TagProblem, UpdateFailure,
+    UpdateProblem, UpdateState, Updated, add_dependency, amend_unit, build_unit, check_unit,
+    init_unit, publish_unit, update_unit,
 };
 use assemblr::domain::{
     ContributionError, Excluded, IntegrityChange, LockChange, LockError, RegistryError,
@@ -24,6 +25,7 @@ use assemblr::domain::{
 use clap::{Args, Subcommand};
 
 use super::diagnostic::{Diagnosis, count, fail, fail_with};
+use super::project::{UnitArgument, option_argument, unit_argument};
 
 #[derive(Debug, Subcommand)]
 pub(super) enum UnitCommand {
@@ -39,6 +41,16 @@ pub(super) enum UnitCommand {
         assemblr unit init @acme/web\n  \
         assemblr unit init @acme/web . --description \"Web server setup\"")]
     Init(InitArgs),
+    /// Add a dependency to the unit and build it
+    ///
+    /// Declares the unit in `manifest.jsonc` and builds as `unit build`
+    /// does, so `unit amend` works right after. A required parameter of
+    /// the dependency is mapped to a parameter of this unit with the same
+    /// name, declared for it when there is none, unless `--option` sets it.
+    #[command(after_long_help = "Examples:\n  \
+        assemblr unit add @acme/base\n  \
+        assemblr unit add @acme/base@^1.2.0 --option appName=shop")]
+    Add(AddArgs),
     /// Build the unit and its dependencies into build/
     ///
     /// Run it in the unit's directory. The first build creates
@@ -86,6 +98,19 @@ pub(super) struct InitArgs {
 }
 
 #[derive(Debug, Args)]
+pub(super) struct AddArgs {
+    /// The unit, like `@acme/base` or `@acme/base@^1.2`
+    #[arg(value_name = "UNIT", value_parser = unit_argument)]
+    unit: UnitArgument,
+    /// Set a parameter of the dependency to a literal; repeat for several
+    ///
+    /// The value is read by the parameter's type, as `assemblr add` reads
+    /// it. A required parameter without one is mapped instead.
+    #[arg(long = "option", value_name = "NAME=VALUE", value_parser = option_argument)]
+    options: Vec<(String, String)>,
+}
+
+#[derive(Debug, Args)]
 pub(super) struct UpdateArgs {
     /// The dependencies to update, like `@acme/base`, direct or not
     /// [default: every dependency]
@@ -106,6 +131,7 @@ pub(super) struct AmendArgs {
 pub(super) fn run(command: UnitCommand) -> ExitCode {
     match command {
         UnitCommand::Init(args) => init(&args),
+        UnitCommand::Add(args) => add(&args),
         UnitCommand::Build => build(),
         UnitCommand::Check => check(),
         UnitCommand::Publish => publish(),
@@ -519,6 +545,178 @@ fn update_diagnosis(failure: &UpdateFailure, root: &Path) -> Diagnosis {
     Diagnosis::note("nothing was changed").advise_if(advice)
 }
 
+fn add(args: &AddArgs) -> ExitCode {
+    let identity = args.unit.identity();
+    let mut options: Vec<(&str, &str)> = Vec::new();
+    for (name, value) in &args.options {
+        if options.iter().any(|(given, _)| given == name) {
+            return fail(
+                &format!("--option {name} is given more than once"),
+                Some("give each option once"),
+            );
+        }
+        options.push((name, value));
+    }
+    let (root, registry) = match locate() {
+        Ok(located) => located,
+        Err(code) => return code,
+    };
+    match add_dependency(&root, &registry, identity, args.unit.version(), &options) {
+        Ok(added) => {
+            let declaration = match added.change() {
+                DeclarationChange::Added { requirement } => {
+                    format!("Added {identity} ({requirement}) to manifest.jsonc")
+                }
+                DeclarationChange::Replaced { from, to } => format!(
+                    "Changed the requirement of {identity} from {from} to {to} in manifest.jsonc"
+                ),
+                DeclarationChange::Kept { requirement } => {
+                    format!("{identity} is already a dependency ({requirement})")
+                }
+                DeclarationChange::Removed { .. } => {
+                    unreachable!("`unit add` never removes a declaration")
+                }
+            };
+            let parameters = describe_parameters(added.parameters());
+            if parameters.is_empty() {
+                println!("{declaration}.");
+            } else {
+                println!("{declaration}; {}.", parameters.join("; "));
+            }
+            report_built(added.built());
+            ExitCode::SUCCESS
+        }
+        Err(failure) => fail_with(&failure.to_string(), &add_diagnosis(&failure, &root)),
+    }
+}
+
+/// How the dependency's parameters were satisfied, one phrase per kind.
+fn describe_parameters(parameters: &[AddedParameter]) -> Vec<String> {
+    let names = |pick: fn(&AddedParameter) -> Option<&assemblr::domain::ParameterName>| {
+        let names: Vec<String> = parameters
+            .iter()
+            .filter_map(pick)
+            .map(|name| format!("`{name}`"))
+            .collect();
+        names
+    };
+    let mut phrases = Vec::new();
+    let literal = names(|parameter| match parameter {
+        AddedParameter::Literal(name) => Some(name),
+        _ => None,
+    });
+    if !literal.is_empty() {
+        phrases.push(format!("set {}", literal.join(", ")));
+    }
+    let declared = names(|parameter| match parameter {
+        AddedParameter::Declared(name) => Some(name),
+        _ => None,
+    });
+    if !declared.is_empty() {
+        phrases.push(format!(
+            "declared {} in params and mapped {} to {}",
+            declared.join(", "),
+            if declared.len() == 1 { "it" } else { "them" },
+            if declared.len() == 1 {
+                "the dependency's parameter"
+            } else {
+                "the dependency's parameters"
+            }
+        ));
+    }
+    let existing = names(|parameter| match parameter {
+        AddedParameter::MappedToExisting(name) => Some(name),
+        _ => None,
+    });
+    if !existing.is_empty() {
+        phrases.push(format!(
+            "mapped {} from the unit's own {}",
+            existing.join(", "),
+            if existing.len() == 1 {
+                "parameter"
+            } else {
+                "parameters"
+            }
+        ));
+    }
+    phrases
+}
+
+/// What a failed `unit add` left, and what the author can do.
+fn add_diagnosis(failure: &AddFailure, root: &Path) -> Diagnosis {
+    let problems = match failure {
+        AddFailure::Write { .. } => {
+            return Diagnosis::note("nothing was changed")
+                .advise("fix the problem and run the command again");
+        }
+        AddFailure::Build(failure) => {
+            // The manifest was replaced before the build was published.
+            let advice = match failure.as_ref() {
+                BuildFailure::Rejected(problems) => {
+                    distinct(problems.iter().filter_map(|problem| advice(problem, root)))
+                }
+                BuildFailure::Publish(_) => Vec::new(),
+            };
+            let note = match failure.as_ref() {
+                BuildFailure::Publish(error)
+                    if matches!(
+                        error.state(),
+                        PublishState::BuildRemoved | PublishState::LockfileWithoutBuild
+                    ) =>
+                {
+                    "manifest.jsonc holds the dependency; there is no build/ now"
+                }
+                _ => {
+                    "manifest.jsonc holds the dependency; build/ and assemblr-lock.json were \
+                      not changed"
+                }
+            };
+            let diagnosis = Diagnosis::note(note);
+            return if advice.is_empty() {
+                diagnosis.advise("fix the problem and run `assemblr unit build`")
+            } else {
+                diagnosis.advise(advice.join("; "))
+            };
+        }
+        AddFailure::Rejected(problems) => problems,
+    };
+    let advice = distinct(problems.iter().filter_map(|problem| {
+        match problem {
+            AddProblem::Build(BuildProblem::Manifest(ManifestFileError::Missing { .. })) => {
+                Some(format!(
+                    "{} is not a unit repository's top level; run `assemblr unit add` in the \
+                 directory that holds `manifest.jsonc`",
+                    root.display()
+                ))
+            }
+            AddProblem::Build(problem) => advice(problem, root),
+            AddProblem::InvalidRequirement(_) => Some(
+                "write a SemVer requirement after the unit, like @owner/name@^1.2.0, \
+             @owner/name@~1.2, or @owner/name@=1.2.3"
+                    .to_owned(),
+            ),
+            AddProblem::ParameterClash { parameter, .. } => Some(format!(
+                "set the dependency's parameter to a literal with `--option {parameter}=<value>`, \
+             or rename the unit's own parameter"
+            )),
+            AddProblem::NoExample { parameter, .. } => Some(format!(
+                "set it with `--option {parameter}=<value>`, or declare `{parameter}` with an \
+             `example` in the unit's `params` and run the command again, which maps it"
+            )),
+            AddProblem::CannotEdit(_) => {
+                Some("edit manifest.jsonc by hand and run `assemblr unit build`".to_owned())
+            }
+            _ => None,
+        }
+    }));
+    let diagnosis = Diagnosis::note("nothing was changed");
+    if advice.is_empty() {
+        diagnosis
+    } else {
+        diagnosis.advise(advice.join("; "))
+    }
+}
+
 fn build() -> ExitCode {
     let (root, registry) = match locate() {
         Ok(located) => located,
@@ -526,26 +724,32 @@ fn build() -> ExitCode {
     };
     match build_unit(&root, &registry) {
         Ok(built) => {
-            report_lockfile(&built);
-            warn_notes(built.notes());
-            if let Some((path, error)) = built.leftover() {
-                eprintln!(
-                    "warning: could not delete the previous build at {}: {error}; the next \
-                     build deletes it",
-                    path.display()
-                );
-            }
-            println!(
-                "Built {} {} into build/: {}, with {}.",
-                built.unit(),
-                built.version(),
-                count(built.files(), "file", "files"),
-                count(built.dependencies(), "dependency", "dependencies")
-            );
+            report_built(&built);
             ExitCode::SUCCESS
         }
         Err(failure) => fail_with(&failure.to_string(), &diagnosis(&failure, &root)),
     }
+}
+
+/// Reports a build: the lockfile and warnings on stderr, the result on
+/// stdout.
+fn report_built(built: &Built) {
+    report_lockfile(built);
+    warn_notes(built.notes());
+    if let Some((path, error)) = built.leftover() {
+        eprintln!(
+            "warning: could not delete the previous build at {}: {error}; the next build \
+             deletes it",
+            path.display()
+        );
+    }
+    println!(
+        "Built {} {} into build/: {}, with {}.",
+        built.unit(),
+        built.version(),
+        count(built.files(), "file", "files"),
+        count(built.dependencies(), "dependency", "dependencies")
+    );
 }
 
 fn check() -> ExitCode {

@@ -100,8 +100,8 @@ it with `assemblr compose --abort`.
 
 ```sh
 assemblr unit init @acme/web         # create web/ with a manifest and a Git repository
-cd web                               # add files under src/, dependencies in manifest.jsonc
-assemblr unit build                  # build it and its dependencies into build/
+cd web                               # add files under src/
+assemblr unit add @acme/base         # declare a dependency and build into build/
 assemblr unit amend package.json     # copy a dependency's file to change it
 assemblr unit check                  # check it before publishing
 git add -A && git commit -m "First version"

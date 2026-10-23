@@ -110,7 +110,7 @@ fn unit_only(argument: &str) -> Result<UnitIdentity, String> {
 
 /// Parses `name=value` for `--option`; the value is read later, by the
 /// parameter's type.
-fn option_argument(argument: &str) -> Result<(String, String), String> {
+pub(super) fn option_argument(argument: &str) -> Result<(String, String), String> {
     match argument.split_once('=') {
         Some((name, value)) if !name.is_empty() => Ok((name.to_owned(), value.to_owned())),
         _ => Err(format!(
@@ -622,6 +622,11 @@ fn diagnosis(failure: &ComposeFailure, root: &Path) -> Diagnosis {
     };
     let advice = distinct(problems.iter().filter_map(|problem| {
         match problem {
+        ComposeProblem::UnitRepository(_) => Some(
+            "unit commands run here, and a dependency is added with `assemblr unit add <UNIT>`; \
+             a project is created in another directory with `assemblr init`"
+                .to_owned(),
+        ),
         ComposeProblem::NoDeclaration(_) => Some(match enclosing_project(root) {
             Some(project) => format!(
                 "the project is in {}; run the command there",

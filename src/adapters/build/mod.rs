@@ -16,6 +16,7 @@
 //! written. Only a build without problems is published, together with its
 //! lockfile (see [`output`]).
 
+mod add;
 mod amend;
 mod check;
 mod exclusive;
@@ -29,6 +30,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+pub use add::{AddFailure, AddProblem, AddedParameter, DependencyAdded, add_dependency};
 pub use amend::{AmendFailure, AmendProblem, AmendState, Amended, Match, WriteError, amend_unit};
 pub use check::{CheckFailure, CheckProblem, Checked, check_unit};
 use exclusive::BuildLock;
@@ -60,6 +62,38 @@ const MANIFEST: &str = "manifest.jsonc";
 /// Builds the unit whose repository's top level is `root`, resolving its
 /// dependencies from `registry`.
 pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailure> {
+    let mut opened = open(root, registry)?;
+    let manifest = opened.manifest.clone();
+    let validated = validate_opened(&mut opened, &manifest)?;
+    publish_validated(root, &opened, &manifest, validated)
+}
+
+/// A unit read from its working tree for a build, under the lock that
+/// serializes builds of the unit (see [`open`]).
+struct Opened {
+    guard: BuildLock,
+    /// The text of the working tree's `manifest.jsonc`.
+    text: String,
+    manifest: Manifest,
+    /// The `src/` files, or `None` when they could not be read, which
+    /// `problems` reports.
+    src: Option<FileTree>,
+    /// The amendment copies, or `None` as for `src`.
+    amendments: Option<FileTree>,
+    /// The lockfile, when there is one.
+    previous: Option<UnitLock>,
+    index: crate::domain::RegistryIndex,
+    /// The problems found so far, which reject the build once everything
+    /// else is validated.
+    problems: Vec<BuildProblem>,
+}
+
+/// Reads everything a build of the unit at `root` starts from, and takes
+/// the build lock, which the result holds. A unit whose manifest, lockfile,
+/// or registry index cannot be read is rejected here, with every problem
+/// found; other problems are kept for the validation to report together
+/// with its own.
+fn open(root: &Path, registry: &Registry) -> Result<Opened, BuildFailure> {
     let manifest_path = root.join(MANIFEST);
     if let Err(error) = fs::symlink_metadata(&manifest_path) {
         if error.kind() == io::ErrorKind::NotFound {
@@ -101,13 +135,19 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
         ]));
     }
 
-    let manifest = match read_working_manifest(root) {
-        Ok(manifest) => Some(manifest),
-        Err(error) => {
-            problems.push(BuildProblem::Manifest(error));
-            None
-        }
-    };
+    let text = read_working_manifest_text(root)
+        .map_err(|error| problems.push(BuildProblem::Manifest(error)))
+        .ok();
+    let manifest = text.as_deref().and_then(|text| {
+        read_manifest(text)
+            .map_err(|error| {
+                problems.push(BuildProblem::Manifest(ManifestFileError::Invalid {
+                    path: manifest_path.clone(),
+                    error,
+                }));
+            })
+            .ok()
+    });
     let src = match repository.read_working_src() {
         Ok(src) => Some(src),
         Err(ReadSrcError::Git(error)) => {
@@ -147,25 +187,58 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
         .ok();
 
     // Dependencies, as far as the unit's own inputs allow.
-    let (Some(manifest), Some(previous), Some(index)) = (&manifest, previous, index) else {
+    let (Some(text), Some(manifest), Some(previous), Some(index)) =
+        (text, manifest, previous, index)
+    else {
         return Err(BuildFailure::Rejected(problems));
     };
-    let previous_lock = previous.clone().unwrap_or_default();
+    Ok(Opened {
+        guard,
+        text,
+        manifest,
+        src,
+        amendments,
+        previous,
+        index,
+        problems,
+    })
+}
+
+/// Validates `manifest`, the working tree's or an edited one, with the
+/// files and the lock `opened` read, as a build does. Every problem, those
+/// found while opening included, rejects the build.
+fn validate_opened(opened: &mut Opened, manifest: &Manifest) -> Result<Validated, BuildFailure> {
+    let mut problems = Vec::new();
+    let previous_lock = opened.previous.clone().unwrap_or_default();
     let inputs = Inputs {
         manifest,
-        src: src.as_ref(),
-        amendments: amendments.as_ref(),
+        src: opened.src.as_ref(),
+        amendments: opened.amendments.as_ref(),
         previous: &previous_lock,
     };
     // A build composes an ineffective unit as readily as any other: the
     // effective-contribution check gates publication (OC-11).
-    let validated = validate(&inputs, &index, &mut problems).result;
-    let Some(validated) = validated.filter(|_| problems.is_empty()) else {
-        return Err(BuildFailure::Rejected(problems));
-    };
-    let lock = validated.lock;
+    let validated = validate(&inputs, &opened.index, &mut problems).result;
+    let validated = validated.filter(|_| problems.is_empty() && opened.problems.is_empty());
+    match validated {
+        Some(validated) => Ok(validated),
+        None => {
+            let mut all = std::mem::take(&mut opened.problems);
+            all.append(&mut problems);
+            Err(BuildFailure::Rejected(all))
+        }
+    }
+}
 
-    let lockfile = match &previous {
+/// Writes `validated`, the build of `manifest`, as `build/` and the lockfile.
+fn publish_validated(
+    root: &Path,
+    opened: &Opened,
+    manifest: &Manifest,
+    validated: Validated,
+) -> Result<Built, BuildFailure> {
+    let lock = validated.lock;
+    let lockfile = match &opened.previous {
         None => LockfileOutcome::Created,
         Some(previous) if *previous == lock => LockfileOutcome::Unchanged,
         Some(_) => LockfileOutcome::Updated,
@@ -177,7 +250,7 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
         .collect();
     let new_lock = (lockfile != LockfileOutcome::Unchanged).then_some(&lock);
     let published =
-        output::publish(root, &files, new_lock, &guard).map_err(BuildFailure::Publish)?;
+        output::publish(root, &files, new_lock, &opened.guard).map_err(BuildFailure::Publish)?;
     Ok(Built {
         unit: manifest.name().clone(),
         version: manifest.version().clone(),

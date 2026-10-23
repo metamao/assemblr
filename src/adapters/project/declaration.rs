@@ -29,7 +29,7 @@ pub enum DeclarationChange {
 
 /// Why the declaration was not edited.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum EditFailure {
+pub(crate) enum EditFailure {
     /// The unit is not an explicit selection.
     NotSelected,
     /// The text could not be edited safely.
@@ -37,7 +37,7 @@ pub(super) enum EditFailure {
 }
 
 /// The requirement `text` selects `identity` with, if it does.
-pub(super) fn selected_requirement(text: &str, identity: &UnitIdentity) -> Option<String> {
+pub(crate) fn selected_requirement(text: &str, identity: &UnitIdentity) -> Option<String> {
     let root = parse_value(text).ok()?;
     let key = identity.to_string();
     match root.member(DEPENDENCIES) {
@@ -55,6 +55,18 @@ pub(super) fn add(
     text: &str,
     identity: &UnitIdentity,
     requirement: &str,
+) -> Result<(String, DeclarationChange), EditFailure> {
+    add_after(text, identity, requirement, &[])
+}
+
+/// [`add`], with a missing `dependencies` object inserted after the first
+/// of `preferred` that the text holds, or after the last member when it
+/// holds none of them, as a unit's manifest keeps it near `description`.
+pub(crate) fn add_after(
+    text: &str,
+    identity: &UnitIdentity,
+    requirement: &str,
+    preferred: &[&str],
 ) -> Result<(String, DeclarationChange), EditFailure> {
     let root = parse_value(text).map_err(|error| EditFailure::Cannot(error.to_string()))?;
     let Value::Object(members) = &root else {
@@ -109,7 +121,11 @@ pub(super) fn add(
                 parent: Vec::new(),
                 key: DEPENDENCIES.to_owned(),
                 value: Value::Object(vec![(key.clone(), value.clone())]),
-                after: members.last().map(|(name, _)| name.clone()),
+                after: preferred
+                    .iter()
+                    .find(|key| members.iter().any(|(name, _)| name == *key))
+                    .map(|key| (*key).to_owned())
+                    .or_else(|| members.last().map(|(name, _)| name.clone())),
             },
             DeclarationChange::Added {
                 requirement: requirement.to_owned(),
@@ -173,7 +189,7 @@ pub(super) fn remove(
 /// JSON value the text reads as, and a string when it is not JSON, so that
 /// `port=8080` is a number and the composition reports a value that does
 /// not fit.
-pub(super) fn option_value(raw: &str, parameter: Option<&ParameterType>) -> Value {
+pub(crate) fn option_value(raw: &str, parameter: Option<&ParameterType>) -> Value {
     let json = parse_value(raw).ok();
     match (parameter.map(ParameterType::value_kind), json) {
         (Some(ValueKind::String), Some(Value::String(text))) => Value::String(text),
@@ -185,7 +201,7 @@ pub(super) fn option_value(raw: &str, parameter: Option<&ParameterType>) -> Valu
 /// `text` with each of `options`, a parameter name and its value, set in
 /// the `options` entry of `identity`. Entries and members that are missing
 /// are created after the last one there.
-pub(super) fn set_options(
+pub(crate) fn set_options(
     text: &str,
     identity: &UnitIdentity,
     options: &[(String, Value)],

@@ -444,7 +444,7 @@ fn write_copy(path: &Path, contents: &[u8], missing: &[PathBuf]) -> io::Result<(
 }
 
 /// Replaces `manifest.jsonc` with `contents` through the new file `staged`.
-fn write_manifest(root: &Path, staged: &Path, contents: &[u8]) -> io::Result<()> {
+pub(super) fn write_manifest(root: &Path, staged: &Path, contents: &[u8]) -> io::Result<()> {
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
