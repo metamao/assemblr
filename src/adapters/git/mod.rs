@@ -304,6 +304,19 @@ impl GitRepository {
             .map_err(InvalidVersion::InvalidManifest))
     }
 
+    /// Whether the repository has every object in `ids`.
+    pub(crate) fn has_commits(&self, ids: &[&ObjectId]) -> Result<bool, GitError> {
+        let mut objects = self.objects()?;
+        for id in ids {
+            if objects.header(id.as_str())?.is_none() {
+                objects.finish()?;
+                return Ok(false);
+            }
+        }
+        objects.finish()?;
+        Ok(true)
+    }
+
     /// Reads the file `name` at the root of `commit`'s tree, if there is
     /// one, with at most `limit` bytes: `Ok(None)` when the root has no
     /// entry of that name, and an error when the entry is not a regular
@@ -1080,6 +1093,15 @@ impl GitError {
         }
     }
 
+    /// A remote repository's copy could not be brought up to date with
+    /// what the registry index records. Holds the reason.
+    pub(crate) fn unretrievable(repository: PathBuf, reason: String) -> Self {
+        Self {
+            repository,
+            kind: GitErrorKind::Unretrievable(reason),
+        }
+    }
+
     /// The path of the repository being read.
     pub fn repository(&self) -> &Path {
         &self.repository
@@ -1102,6 +1124,12 @@ impl fmt::Display for GitError {
             ),
             GitErrorKind::NotARepository(reason) => {
                 write!(f, "{repository} is not a Git repository: {reason}")
+            }
+            GitErrorKind::Unretrievable(reason) => {
+                write!(
+                    f,
+                    "the content of {repository} could not be retrieved: {reason}"
+                )
             }
             GitErrorKind::Failed {
                 command,
@@ -1143,6 +1171,9 @@ pub enum GitErrorKind {
     Unavailable(io::Error),
     /// The path is not a Git repository. Holds the reason.
     NotARepository(String),
+    /// A remote repository's content could not be retrieved into
+    /// Assemblr's copy of it. Holds the reason.
+    Unretrievable(String),
     /// A Git command failed.
     Failed {
         /// The command.

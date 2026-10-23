@@ -38,11 +38,18 @@ impl Fixture {
     }
 
     /// The catalog `@acme/web` declaring `units`, refreshed and committed:
-    /// what a maintainer pushes.
+    /// what a maintainer pushes. The copies the refresh fetched are removed,
+    /// so a consumer starts with none, as on another machine.
     fn published_catalog(&self, units: &str) -> PathBuf {
         let catalog = self.catalog(units);
         commit_refresh(self, &catalog);
+        let _ = fs::remove_dir_all(self.data.join("sources"));
         catalog
+    }
+
+    /// How many remote repositories Assemblr holds copies of.
+    fn copies(&self) -> usize {
+        fs::read_dir(self.data.join("sources")).map_or(0, |entries| entries.count())
     }
 
     fn list(&self) -> Value {
@@ -321,8 +328,9 @@ fn a_remote_catalog_registers_its_units_for_discovery_and_composition() {
     assert_eq!(node_entry["direct"], false);
     assert_eq!(node_entry["catalogs"][0], "@acme/web");
 
-    // Discovery and composition read Assemblr's copies, offline.
-    fs::remove_dir_all(&node).unwrap();
+    // Registration read the catalog alone: no unit was fetched, and
+    // discovery reads the catalog's metadata.
+    assert_eq!(fixture.copies(), 1);
     let found = stdout(&succeeds(
         fixture.assemblr(&fixture.dir, &["search", "web"]),
     ));
@@ -330,9 +338,20 @@ fn a_remote_catalog_registers_its_units_for_discovery_and_composition() {
         found.contains("@acme/node 1.1.0: @acme/node for the web."),
         "{found}"
     );
+    let info = stdout(&succeeds(
+        fixture.assemblr(&fixture.dir, &["info", "@acme/node"]),
+    ));
+    assert!(info.contains("@acme/node 1.1.0"), "{info}");
+    assert_eq!(fixture.copies(), 1);
+
+    // Composition retrieves the unit it needs, and only that one.
     let project = fixture.dir.join("app");
     succeeds(fixture.assemblr(&fixture.dir, &["init", "app"]));
     succeeds(fixture.assemblr(&project, &["add", "@acme/node"]));
+    assert_eq!(fixture.copies(), 2);
+    // Later builds read the copy, offline.
+    fs::remove_dir_all(&node).unwrap();
+    succeeds(fixture.assemblr(&project, &["compose"]));
     assert_eq!(
         fs::read_to_string(project.join("file.txt")).unwrap(),
         "1.1.0\n"
@@ -429,14 +448,21 @@ fn a_catalog_whose_index_does_not_describe_its_units_is_rejected() {
         stderr(&rejected)
     );
 
-    // A listed version whose tag moved.
+    // A listed manifest that is not one of the unit it is listed for.
     git(&catalog, &["reset", "-q", "--hard", "HEAD~1"]);
-    fs::write(node.join("src/file.txt"), "moved\n").unwrap();
-    git(&node, &["commit", "-q", "-am", "moved"]);
-    git(&node, &["tag", "-f", "v1.0.0"]);
+    let mut listed = index(&catalog);
+    listed["units"]["@acme/node"]["versions"]["1.0.0"]["manifest"]["name"] =
+        serde_json::json!("@acme/other");
+    fs::write(
+        catalog.join("registry-index.json"),
+        serde_json::to_string_pretty(&listed).unwrap(),
+    )
+    .unwrap();
+    git(&catalog, &["commit", "-q", "-am", "Tamper"]);
     let rejected = fails(fixture.assemblr(&fixture.dir, &["registry", "add", &url(&catalog)]));
     assert!(
-        stderr(&rejected).contains("the catalog's index lists @acme/node 1.0.0, but its tag"),
+        stderr(&rejected)
+            .contains("the manifest it lists for @acme/node 1.0.0 declares @acme/other"),
         "{}",
         stderr(&rejected)
     );
@@ -562,4 +588,31 @@ fn publishing_a_catalog_managed_unit_points_to_the_catalog() {
     );
     let versions = &fixture.list()["units"][0]["versions"];
     assert_eq!(versions.as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_moved_tag_is_found_when_the_content_is_retrieved() {
+    let fixture = Fixture::new("moved");
+    let node = fixture.unit("node", "@acme/node", &["1.0.0"]);
+    let catalog = fixture.published_catalog(&format!(r#""@acme/node": "{}""#, url(&node)));
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "add", &url(&catalog)]));
+
+    // The tagged commit is rewritten after the catalog indexed it, so the
+    // recorded commit no longer exists.
+    fs::write(node.join("src/file.txt"), "moved\n").unwrap();
+    git(&node, &["commit", "-q", "--amend", "-am", "moved"]);
+    git(&node, &["tag", "-f", "v1.0.0"]);
+    git(&node, &["reflog", "expire", "--expire=now", "--all"]);
+    git(&node, &["gc", "-q", "--prune=now"]);
+
+    let project = fixture.dir.join("app");
+    succeeds(fixture.assemblr(&fixture.dir, &["init", "app"]));
+    let rejected = fails(fixture.assemblr(&project, &["add", "@acme/node"]));
+    assert!(!project.join("file.txt").exists());
+    assert!(
+        stderr(&rejected).contains("could not be retrieved")
+            && stderr(&rejected).contains("git ls-remote"),
+        "{}",
+        stderr(&rejected)
+    );
 }

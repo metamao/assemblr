@@ -21,13 +21,14 @@ use super::git::{
     GitError, GitRepository, HeadManifestError, MANIFEST_LIMIT, ReadFileError, init_repository,
 };
 use super::jsonc::{self, Json, SyntaxError};
+use super::manifest::read_manifest;
 use super::registry::{
     Problem, ReferenceError, Registry, TagProblem, catalog_reference, declared_reference,
     observe_tags,
 };
 use crate::domain::{
-    CatalogIdentity, Excluded, IdentityError, ObjectId, Provenance, RegisteredCatalog,
-    RegistryIndex, SourceReference, StaleListing, UnitIdentity, Version, declared_identity,
+    CatalogIdentity, Excluded, IdentityError, Manifest, ObjectId, Provenance, RegisteredCatalog,
+    RegistryIndex, SourceReference, UnitIdentity, Version, declared_identity,
 };
 
 /// The catalog's declaration, at its top level.
@@ -631,11 +632,11 @@ impl PublishedCatalog {
 #[derive(Debug, Clone)]
 pub(crate) struct ListedUnit {
     source: SourceReference,
-    versions: ListedVersions,
+    versions: BTreeMap<Version, (Provenance, Manifest)>,
 }
 
 /// The versions a catalog index lists for a unit, each with its provenance
-/// and manifest.
+/// and manifest, as read.
 type ListedVersions = BTreeMap<Version, (Provenance, Value)>;
 
 impl ListedUnit {
@@ -651,27 +652,9 @@ impl ListedUnit {
             .collect()
     }
 
-    /// Checks that the manifest listed for `version` is the one published
-    /// at `provenance` in `repository`.
-    pub(crate) fn check_manifest(
-        &self,
-        identity: &UnitIdentity,
-        version: &Version,
-        repository: &GitRepository,
-    ) -> Result<(), CatalogProblem> {
-        let Some((provenance, listed)) = self.versions.get(version) else {
-            return Ok(());
-        };
-        let published =
-            published_manifest(repository, provenance).map_err(CatalogProblem::Unreadable)?;
-        if &published == listed {
-            Ok(())
-        } else {
-            Err(CatalogProblem::ManifestDiffers {
-                unit: identity.clone(),
-                version: version.clone(),
-            })
-        }
+    /// The manifest the index lists for `version`.
+    pub(crate) fn manifest(&self, version: &Version) -> Option<&Manifest> {
+        self.versions.get(version).map(|(_, manifest)| manifest)
     }
 }
 
@@ -681,7 +664,9 @@ impl ListedUnit {
 /// Both `registry.jsonc` and `registry-index.json` are read from the
 /// commit, never from a working tree. The index must be the one
 /// `catalog refresh` writes for that declaration: the same catalog, the
-/// same units, and the same references.
+/// same units, and the same references, and every listed manifest a valid
+/// one of the unit and version it is listed for. The units' repositories
+/// are not read.
 pub(crate) fn read_published_catalog(
     repository: &GitRepository,
     source: &SourceReference,
@@ -690,6 +675,15 @@ pub(crate) fn read_published_catalog(
         .head_commit()
         .map_err(CatalogProblem::Unreadable)?
         .ok_or(CatalogProblem::NoCommit)?;
+    read_catalog_at(repository, source, commit)
+}
+
+/// Reads the catalog at `commit`, as [`read_published_catalog`] does.
+pub(crate) fn read_catalog_at(
+    repository: &GitRepository,
+    source: &SourceReference,
+    commit: ObjectId,
+) -> Result<PublishedCatalog, CatalogProblem> {
     let read = |name: &str, limit| -> Result<Option<String>, CatalogProblem> {
         let unreadable = |detail: String| {
             CatalogProblem::Unreadable(GitError::not_a_repository(
@@ -736,11 +730,28 @@ pub(crate) fn read_published_catalog(
                 unit: identity.clone(),
                 error,
             })?;
+        let mut checked = BTreeMap::new();
+        for (version, (provenance, listed)) in versions {
+            let invalid = |detail: String| {
+                CatalogProblem::InvalidIndex(format!(
+                    "the manifest it lists for {identity} {version} {detail}"
+                ))
+            };
+            let manifest = read_manifest(&listed.to_string())
+                .map_err(|error| invalid(format!("is invalid: {error}")))?;
+            if manifest.name() != identity {
+                return Err(invalid(format!("declares {}", manifest.name())));
+            }
+            if manifest.version() != version {
+                return Err(invalid(format!("declares version {}", manifest.version())));
+            }
+            checked.insert(version.clone(), (provenance.clone(), manifest));
+        }
         units.insert(
             identity.clone(),
             ListedUnit {
                 source: reference,
-                versions: versions.clone(),
+                versions: checked,
             },
         );
     }
@@ -851,36 +862,13 @@ pub enum CatalogProblem {
         /// Why.
         error: ReferenceError,
     },
-    /// A declared repository is another unit.
-    IdentityMismatch {
-        /// The identity the catalog declares.
-        unit: UnitIdentity,
-        /// The identity the repository declares.
-        found: UnitIdentity,
-        /// The repository.
-        source: SourceReference,
-    },
-    /// The index lists a version the unit's repository does not publish as
-    /// listed.
-    Listing(Box<StaleListing>),
-    /// The index lists another manifest for a version than the one the
-    /// unit's repository publishes.
-    ManifestDiffers {
-        /// The unit.
-        unit: UnitIdentity,
-        /// The version.
-        version: Version,
-    },
 }
 
 impl CatalogProblem {
     /// Whether running `catalog refresh` in the catalog, and committing and
     /// pushing the result, is what fixes it.
     pub fn needs_refresh(&self) -> bool {
-        matches!(
-            self,
-            Self::NoIndex | Self::StaleIndex(_) | Self::Listing(_) | Self::ManifestDiffers { .. }
-        )
+        matches!(self, Self::NoIndex | Self::StaleIndex(_))
     }
 }
 
@@ -902,20 +890,6 @@ impl fmt::Display for CatalogProblem {
                 "its {CATALOG_INDEX} does not match its {CATALOG_MANIFEST}: {detail}"
             ),
             Self::Reference { unit, error } => write!(f, "{unit}: {error}"),
-            Self::IdentityMismatch {
-                unit,
-                found,
-                source,
-            } => write!(
-                f,
-                "{unit}: the catalog declares {source} for it, but that repository is {found}"
-            ),
-            Self::Listing(stale) => stale.fmt(f),
-            Self::ManifestDiffers { unit, version } => write!(
-                f,
-                "the catalog's index lists another manifest for {unit} {version} than the \
-                 one its repository publishes"
-            ),
         }
     }
 }

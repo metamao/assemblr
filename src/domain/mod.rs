@@ -55,9 +55,9 @@ pub use reconcile::{
     reconcile,
 };
 pub use registry::{
-    Change, Excluded, IntegrityChange, InvalidIndex, ListingProblem, ObservedTag, ObservedVersion,
+    Change, Excluded, IntegrityChange, InvalidIndex, ObservedTag, ObservedVersion,
     RegisteredCatalog, RegisteredUnit, RegistryError, RegistryIndex, Removed, RemovedCatalog,
-    SourceReference, StaleListing, Unremovable, declared_identity, listed_tags,
+    SourceReference, Unremovable, catalog_tags, declared_identity,
 };
 pub use resolution::{
     AvailableVersions, Dependencies, Lock, LockChange, Requirement, Requirer, Resolution,

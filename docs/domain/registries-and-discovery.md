@@ -506,10 +506,7 @@ Assemblr distinguishes three levels of information:
 - Discovery and inspection work primarily from metadata.
 - Complete unit content is retrieved and cached when actual composition
   requires it. It is not downloaded indiscriminately when a catalog is
-  registered. **Proposed amendment for Alpha, needs the owner's approval
-  (#95):** registering or synchronizing a catalog fetches every unit it
-  declares, so that its index can be verified against the units' tags and
-  every later read is offline (see the implemented grammar).
+  registered.
 - Metadata is reused incrementally. Queries do not require repeatedly cloning
   complete repositories.
 
@@ -696,7 +693,7 @@ assemblr registry sync
 
   Units and catalogs are ordered by identity, and versions in SemVer order.
   `direct` says whether the unit is registered by itself, and `catalogs`
-  lists the registered catalogs that declare it (**Provisional (D-37)**).
+  lists the registered catalogs that declare it (**Provisional (D-39)**).
   `source` is the stored [reference](#local-repository-references--approved). `commit` is the
   version's provenance and `tree` its content identity, as lowercase
   hexadecimal Git object ids. The order of keys within an object is not
@@ -743,7 +740,7 @@ assemblr catalog refresh
   failing unit, rejects the refresh, and leaves `registry-index.json`
   unchanged.
 - `registry add` takes a catalog's path or reference as well
-  (**Provisional (D-37)**, see [ADR 0031](../adr/0031-catalog-registration.md)).
+  (**Provisional (D-39)**, see [ADR 0031](../adr/0031-catalog-registration.md)).
   A repository whose `HEAD` has a `registry.jsonc` and no `manifest.jsonc`
   is a catalog; one with both is refused. Its `registry.jsonc` and
   `registry-index.json` are read as committed at `HEAD`, never from a
@@ -751,13 +748,22 @@ assemblr catalog refresh
   catalog with no committed index is refused, with a hint to run `catalog
   refresh`. A relative reference resolves against a local catalog's
   directory; a remote catalog can declare only remote references.
-- Every declared unit is fetched and read as `registry add` reads a unit,
-  and must declare the identity the catalog gives it. Each version the
-  catalog's index lists must be a valid tag of the unit with the listed
-  commit, tree, and manifest. A unit only catalogs declare is indexed with
-  the versions their indexes list, not every tag it has; a unit also
-  registered directly, by the same reference, is indexed with every tag.
-  Any problem in any unit rejects the registration.
+- Registering or synchronizing a catalog reads only the catalog, never its
+  units' repositories. Each manifest its index lists must be valid and
+  declare the listed unit and version. A unit only catalogs declare is
+  indexed with the versions their indexes list, with the listed commit and
+  tree; a unit also registered directly is indexed from its own tags, and a
+  catalog that lists another commit for one of its versions is rejected. Any
+  problem rejects the whole registration or synchronization.
+- `search` and `info` describe a unit only catalogs declare from the
+  manifest its catalog lists, until its content has been retrieved.
+- A remote unit's content is retrieved into its copy the first time an
+  operation reads a version the copy does not hold: `add`, `compose`, and
+  `update` in a project, and `unit build`, `unit check`, `unit update`, and
+  `unit amend` for a dependency. This retrieves exactly the
+  commit the index records, which must still exist and hold the indexed
+  tree and manifest, so it never changes what is indexed or resolved
+  (**Provisional (D-39)**, under OC-42).
 - `registry sync` reads directly registered units, then each catalog again
   as committed at its `HEAD`: units it now declares are registered, units it
   no longer declares leave the registry unless they are registered directly

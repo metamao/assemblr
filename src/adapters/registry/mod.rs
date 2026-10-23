@@ -36,9 +36,10 @@ use super::git::{
 };
 use super::lockfile::{PublishedLockfileError, read_published};
 use crate::domain::{
-    CatalogIdentity, Change, Excluded, ObservedTag, ObservedVersion, PublishedAmendmentError,
-    RegisteredUnit, RegistryError, RegistryIndex, RemovedCatalog, SourceReference, UnitIdentity,
-    Unremovable, Version, declared_identity, listed_tags, published_amendments,
+    CatalogIdentity, Change, Excluded, ObjectId, ObservedTag, ObservedVersion,
+    PublishedAmendmentError, RegisteredUnit, RegistryError, RegistryIndex, RemovedCatalog,
+    SourceReference, UnitIdentity, Unremovable, Version, catalog_tags, declared_identity,
+    published_amendments,
 };
 
 /// The environment variable that places the registry under another
@@ -95,11 +96,20 @@ impl Registry {
         GitRepository::open(&copy)
     }
 
-    /// Opens the repository registered from `source` in the user's registry,
-    /// as [`open_source`](Self::open_source) does. Callers that hold only an
-    /// index use this: there is one registry per user, so it is the one the
-    /// index came from.
-    pub(crate) fn open_registered(source: &SourceReference) -> Result<GitRepository, GitError> {
+    /// Opens the repository registered from `source` in the user's registry
+    /// to read the content of `commits`, which the index records for it.
+    /// Callers that hold only an index use this: there is one registry per
+    /// user, so it is the one the index came from.
+    ///
+    /// A remote source whose copy is missing or lacks one of `commits` is
+    /// fetched first: that is how the content of a unit only catalogs
+    /// manage is retrieved, when a build or a composition first needs it.
+    /// The index is never changed, and the caller checks that each commit
+    /// still has the tree the index records.
+    pub(crate) fn open_registered(
+        source: &SourceReference,
+        commits: &[&ObjectId],
+    ) -> Result<GitRepository, GitError> {
         if !is_remote_reference(source) {
             return GitRepository::open(Path::new(source.as_str()));
         }
@@ -109,7 +119,26 @@ impl Registry {
                 format!("the registry that holds its copy cannot be found: {error}"),
             )
         })?;
-        registry.open_source(source)
+        if registry.copy_of(source).is_dir() {
+            let repository = registry.open_source(source)?;
+            if repository.has_commits(commits)? {
+                return Ok(repository);
+            }
+        }
+        registry.fetch_source(source).map_err(|error| {
+            GitError::unretrievable(PathBuf::from(source.as_str()), error.to_string())
+        })?;
+        let repository = registry.open_source(source)?;
+        if repository.has_commits(commits)? {
+            Ok(repository)
+        } else {
+            Err(GitError::unretrievable(
+                PathBuf::from(source.as_str()),
+                "it no longer has a commit that was indexed, so a published version was \
+                 rewritten"
+                    .to_owned(),
+            ))
+        }
     }
 
     /// Where the copy of the remote `source` is kept: a directory named by
@@ -212,11 +241,10 @@ impl Registry {
     /// Registers the catalog in `repository`, from `source`.
     ///
     /// The catalog's `registry.jsonc` and `registry-index.json` are read as
-    /// committed at `HEAD`, and must agree. Every unit it declares is
-    /// fetched and read as `add` reads a unit, and the versions the index
-    /// lists must be valid tags of the unit with the commit, tree, and
-    /// manifest listed. A unit only the catalog declares is indexed with
-    /// those versions. Any problem in any unit rejects the registration.
+    /// committed at `HEAD`, and must agree. A unit only the catalog declares
+    /// is indexed with the versions its index lists, from that metadata
+    /// alone: its repository is fetched when a build or a composition first
+    /// needs its content. Any problem rejects the registration.
     ///
     /// [`add_catalog`]: Self::add
     fn add_catalog(
@@ -227,16 +255,13 @@ impl Registry {
     ) -> Result<Added, RegistryFailure> {
         let published = read_published_catalog(repository, &source)
             .map_err(|problem| RegistryFailure::catalog(&source, problem))?;
-        let observed = self
-            .observe_catalog(current, &source, &published, &mut Fetched::default())
-            .map_err(RegistryFailure::Rejected)?;
         // Decided once before the lock, as `add` does, and again under it.
         let apply = |index: &RegistryIndex| {
             index
                 .apply_catalog(
                     published.identity().clone(),
                     published.registered(source.clone()),
-                    observed.clone(),
+                    Self::observe_catalog(index, &published),
                 )
                 .map_err(RegistryFailure::invalid)
         };
@@ -270,112 +295,28 @@ impl Registry {
         })
     }
 
-    /// Reads every unit `published` declares, as the catalog registered
-    /// from `catalog` would add or synchronize it into `index`: fetched once
-    /// per operation, its identity checked, and its tags limited to what the
-    /// catalog's index lists unless it is registered directly.
+    /// The versions `published` lists for each unit it declares, as the
+    /// observations [`RegistryIndex::apply_catalog`] takes. The units'
+    /// repositories are not read: their content is retrieved, and checked
+    /// against these versions, when a build or a composition first needs it.
     fn observe_catalog(
-        &self,
         index: &RegistryIndex,
-        catalog: &SourceReference,
         published: &PublishedCatalog,
-        fetched: &mut Fetched,
-    ) -> Result<BTreeMap<UnitIdentity, Vec<ObservedTag<TagProblem>>>, Vec<Problem>> {
-        let mut problems = Vec::new();
-        let mut observed = BTreeMap::new();
-        let in_catalog = |problem| Problem::Catalog {
-            catalog: catalog.clone(),
-            problem,
-        };
-        for (identity, listed) in published.units() {
-            let source = listed.source();
-            if !self.fetch_once(source, fetched, &mut problems) {
-                continue;
-            }
-            let indexed = index
-                .units()
-                .get(identity)
-                .filter(|unit| unit.source() == source);
-            let repository = match self.open_source(source) {
-                Ok(repository) => repository,
-                Err(error) => {
-                    problems.push(Problem::Unreadable {
-                        source: source.clone(),
-                        error,
-                    });
-                    continue;
-                }
-            };
-            let tags = match observe(&repository, indexed) {
-                Ok(tags) => tags,
-                Err(error) => {
-                    problems.push(Problem::Unreadable {
-                        source: source.clone(),
-                        error,
-                    });
-                    continue;
-                }
-            };
-            let found = match declared_identity(source, &tags) {
-                Ok(Some(found)) => found,
-                Ok(None) => match repository.head_manifest() {
-                    Ok(manifest) => manifest.name().clone(),
-                    Err(HeadManifestError::Git(error)) => {
-                        problems.push(Problem::Unreadable {
-                            source: source.clone(),
-                            error,
-                        });
-                        continue;
-                    }
-                    Err(error) => {
-                        problems.push(Problem::NoIdentity {
-                            source: source.clone(),
-                            error,
-                        });
-                        continue;
-                    }
-                },
-                Err(errors) => {
-                    problems.extend(errors.into_iter().map(Problem::Invalid));
-                    continue;
-                }
-            };
-            if &found != identity {
-                problems.push(in_catalog(CatalogProblem::IdentityMismatch {
-                    unit: identity.clone(),
-                    found,
-                    source: source.clone(),
-                }));
-                continue;
-            }
-            let direct = indexed.is_some_and(RegisteredUnit::is_direct);
-            let tags = match listed_tags(identity, &listed.provenances(), indexed, !direct, tags) {
-                Ok(tags) => tags,
-                Err(stale) => {
-                    problems.extend(
-                        stale
-                            .into_iter()
-                            .map(|stale| in_catalog(CatalogProblem::Listing(Box::new(stale)))),
-                    );
-                    continue;
-                }
-            };
-            // A version indexed already was checked when it was indexed.
-            for version in listed.provenances().keys() {
-                if indexed.is_some_and(|unit| unit.versions().contains_key(version)) {
-                    continue;
-                }
-                if let Err(problem) = listed.check_manifest(identity, version, &repository) {
-                    problems.push(in_catalog(problem));
-                }
-            }
-            observed.insert(identity.clone(), tags);
-        }
-        if problems.is_empty() {
-            Ok(observed)
-        } else {
-            Err(problems)
-        }
+    ) -> BTreeMap<UnitIdentity, Vec<ObservedTag<TagProblem>>> {
+        published
+            .units()
+            .iter()
+            .map(|(identity, listed)| {
+                let indexed = index
+                    .units()
+                    .get(identity)
+                    .filter(|unit| unit.source() == listed.source());
+                (
+                    identity.clone(),
+                    catalog_tags(identity, &listed.provenances(), indexed),
+                )
+            })
+            .collect()
     }
 
     /// Fetches `source` unless this operation fetched it already, and
@@ -498,7 +439,8 @@ impl Registry {
     /// as committed at its `HEAD`, as [`add`](Self::add) reads one: units it
     /// now declares are registered, units it no longer declares leave the
     /// registry unless something else keeps them, and the versions its index
-    /// lists are indexed. A source that cannot be fetched or read, or any
+    /// lists are indexed. The repositories of units only catalogs manage are
+    /// not fetched. A source that cannot be fetched or read, or any
     /// conflict in any unit or catalog, rejects the whole synchronization,
     /// and every problem is reported.
     pub fn sync(&self) -> Result<Synced, RegistryFailure> {
@@ -556,14 +498,7 @@ impl Registry {
                     continue;
                 }
             };
-            let observed = match self.observe_catalog(&next.index, source, &published, &mut fetched)
-            {
-                Ok(observed) => observed,
-                Err(mut found) => {
-                    problems.append(&mut found);
-                    continue;
-                }
-            };
+            let observed = Self::observe_catalog(&next.index, &published);
             match next.index.apply_catalog(
                 published.identity().clone(),
                 published.registered(source.clone()),

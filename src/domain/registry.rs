@@ -435,12 +435,14 @@ impl RegistryIndex {
     }
 
     /// Registers the catalog `identity`, or synchronizes it if it is
-    /// registered, as `catalog` declares it now, with the version tags read
-    /// from each unit it declares.
+    /// registered, as `catalog` declares it now, with the versions its index
+    /// lists for each unit it declares, as [`catalog_tags`] gives them.
     ///
     /// A declared unit that is not registered yet is registered as managed
-    /// by the catalog. One that is registered from the same repository is
-    /// synchronized with its tags. One registered from another repository
+    /// by the catalog. A managed one is synchronized with the listed
+    /// versions. One registered directly keeps the versions read from its
+    /// own tags, and a listed version indexed at another commit is an
+    /// integrity conflict. One registered from another repository
     /// is a source conflict. A unit the catalog no longer declares leaves
     /// the registry unless it is registered directly or another catalog
     /// declares it. The catalog's source cannot change identity, and the
@@ -487,6 +489,29 @@ impl RegistryIndex {
                         registered: registered.source.clone(),
                         given: source.clone(),
                     });
+                    continue;
+                }
+                // A unit registered directly is indexed from its own tags.
+                // What the catalog lists must agree with what is indexed.
+                Some(registered) if registered.direct => {
+                    for tag in &tags {
+                        let (Ok(found), Some(recorded)) =
+                            (&tag.outcome, registered.versions.get(&tag.version))
+                        else {
+                            continue;
+                        };
+                        if &found.provenance != recorded {
+                            errors.push(RegistryError::Integrity {
+                                identity: unit.clone(),
+                                source: source.clone(),
+                                version: tag.version.clone(),
+                                change: IntegrityChange::TagMoved {
+                                    recorded: recorded.clone(),
+                                    found: found.provenance.clone(),
+                                },
+                            });
+                        }
+                    }
                     continue;
                 }
                 Some(_) => index.sync(BTreeMap::from([(unit.clone(), tags)])),
@@ -603,126 +628,37 @@ impl RegistryIndex {
     }
 }
 
-/// The tags of the catalog-managed unit `identity` that its registration
-/// reads, from all of `tags`: the versions the catalog's index lists, and
-/// those already indexed, so that an indexed version stays checked. A unit
-/// registered directly reads every tag, and `filter` is false for it.
-///
-/// Every listed version must be a valid tag of the unit with the provenance
-/// listed; otherwise the catalog's index does not describe the unit's
-/// repository, and every such version is reported.
-pub fn listed_tags<R>(
+/// The versions a catalog's index lists for `identity`, as tags observed
+/// from the catalog rather than from the unit's repository, which is not
+/// read. Versions already indexed and no longer listed keep their recorded
+/// provenance: a catalog that has not been refreshed since never removes a
+/// version, while one that lists a version at another commit is an
+/// integrity conflict.
+pub fn catalog_tags<R>(
     identity: &UnitIdentity,
     listed: &BTreeMap<Version, Provenance>,
     indexed: Option<&RegisteredUnit>,
-    filter: bool,
-    tags: Vec<ObservedTag<R>>,
-) -> Result<Vec<ObservedTag<R>>, Vec<StaleListing>> {
-    let mut stale = Vec::new();
-    for (version, provenance) in listed {
-        let problem = match tags.iter().find(|tag| &tag.version == version) {
-            None => ListingProblem::NoTag,
-            Some(tag) => match &tag.outcome {
-                Err(_) => ListingProblem::Invalid,
-                Ok(found) if &found.identity != identity => {
-                    ListingProblem::OtherIdentity(found.identity.clone())
-                }
-                Ok(found) if &found.provenance != provenance => ListingProblem::Moved {
-                    listed: provenance.clone(),
-                    found: found.provenance.clone(),
-                },
-                Ok(_) => continue,
-            },
-        };
-        stale.push(StaleListing {
-            identity: identity.clone(),
-            version: version.clone(),
-            problem,
-        });
+) -> Vec<ObservedTag<R>> {
+    let tag = |version: &Version, provenance: &Provenance| {
+        ObservedTag::new(
+            format!("v{version}"),
+            version.clone(),
+            Ok(ObservedVersion::new(identity.clone(), provenance.clone())),
+        )
+    };
+    let mut tags: Vec<ObservedTag<R>> = listed
+        .iter()
+        .map(|(version, provenance)| tag(version, provenance))
+        .collect();
+    if let Some(unit) = indexed {
+        tags.extend(
+            unit.versions
+                .iter()
+                .filter(|(version, _)| !listed.contains_key(*version))
+                .map(|(version, provenance)| tag(version, provenance)),
+        );
     }
-    if !stale.is_empty() {
-        return Err(stale);
-    }
-    if !filter {
-        return Ok(tags);
-    }
-    Ok(tags
-        .into_iter()
-        .filter(|tag| {
-            listed.contains_key(&tag.version)
-                || indexed.is_some_and(|unit| unit.versions.contains_key(&tag.version))
-        })
-        .collect())
-}
-
-/// A version a catalog's index lists that the unit's repository does not
-/// publish as listed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StaleListing {
-    identity: UnitIdentity,
-    version: Version,
-    problem: ListingProblem,
-}
-
-impl StaleListing {
-    /// The unit.
-    pub fn identity(&self) -> &UnitIdentity {
-        &self.identity
-    }
-
-    /// The listed version.
-    pub fn version(&self) -> &Version {
-        &self.version
-    }
-
-    /// How the repository differs.
-    pub fn problem(&self) -> &ListingProblem {
-        &self.problem
-    }
-}
-
-impl fmt::Display for StaleListing {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self {
-            identity,
-            version,
-            problem,
-        } = self;
-        write!(f, "the catalog's index lists {identity} {version}, but ")?;
-        match problem {
-            ListingProblem::NoTag => write!(f, "its repository has no tag v{version}"),
-            ListingProblem::Invalid => write!(f, "its tag v{version} is not a valid version"),
-            ListingProblem::OtherIdentity(found) => {
-                write!(f, "its tag v{version} declares {found}")
-            }
-            ListingProblem::Moved { listed, found } => write!(
-                f,
-                "its tag v{version} is commit {} (tree {}), not commit {} (tree {})",
-                found.commit(),
-                found.tree(),
-                listed.commit(),
-                listed.tree()
-            ),
-        }
-    }
-}
-
-/// How a unit's repository differs from a version its catalog lists.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ListingProblem {
-    /// No tag publishes the version.
-    NoTag,
-    /// The tag is not a valid version.
-    Invalid,
-    /// The tag's manifest declares another identity.
-    OtherIdentity(UnitIdentity),
-    /// The tag is another commit or tree than the one listed.
-    Moved {
-        /// What the catalog lists.
-        listed: Provenance,
-        /// What the tag is.
-        found: Provenance,
-    },
+    tags
 }
 
 /// A removed direct registration.
@@ -1250,9 +1186,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        Change, IntegrityChange, ListingProblem, ObservedTag, ObservedVersion, RegisteredCatalog,
-        RegisteredUnit, RegistryError, RegistryIndex, SourceReference, Unremovable,
-        declared_identity, listed_tags,
+        Change, IntegrityChange, ObservedTag, ObservedVersion, RegisteredCatalog, RegisteredUnit,
+        RegistryError, RegistryIndex, SourceReference, Unremovable, catalog_tags,
+        declared_identity,
     };
     use crate::domain::{CatalogIdentity, ObjectId, Provenance, UnitIdentity, Version};
 
@@ -1796,44 +1732,63 @@ mod tests {
     }
 
     #[test]
-    fn listed_tags_keep_listed_and_indexed_versions_and_check_the_listing() {
+    fn catalog_tags_keep_indexed_versions_the_catalog_no_longer_lists() {
         let node = id("@acme/node");
-        let tags = || {
-            vec![
-                valid("@acme/node", "1.0.0", 'a'),
-                valid("@acme/node", "1.1.0", 'b'),
-                valid("@acme/node", "2.0.0", 'c'),
-            ]
-        };
         let listed = BTreeMap::from([(version("1.1.0"), provenance('b'))]);
         let indexed = RegisteredUnit::managed(
             source("/units/node"),
             BTreeMap::from([(version("1.0.0"), provenance('a'))]),
         );
 
-        let kept = listed_tags(&node, &listed, Some(&indexed), true, tags()).unwrap();
-        let versions: Vec<_> = kept.iter().map(|tag| tag.version().to_string()).collect();
-        assert_eq!(versions, ["1.0.0", "1.1.0"]);
-        // A unit registered directly keeps every tag.
-        assert_eq!(
-            listed_tags(&node, &listed, None, false, tags())
-                .unwrap()
-                .len(),
-            3
-        );
+        let tags: Vec<ObservedTag<&str>> = catalog_tags(&node, &listed, Some(&indexed));
+        let versions: Vec<_> = tags.iter().map(|tag| tag.version().to_string()).collect();
+        assert_eq!(versions, ["1.1.0", "1.0.0"]);
 
-        let moved = BTreeMap::from([
-            (version("1.1.0"), provenance('f')),
-            (version("3.0.0"), provenance('d')),
-        ]);
-        let stale = listed_tags(&node, &moved, None, true, tags()).unwrap_err();
-        assert_eq!(stale.len(), 2);
-        assert!(matches!(stale[0].problem(), ListingProblem::Moved { .. }));
-        assert_eq!(stale[1].problem(), &ListingProblem::NoTag);
-        assert!(
-            stale[1].to_string().contains("no tag v3.0.0"),
-            "{}",
-            stale[1]
+        // A listed version at another commit than the indexed one conflicts.
+        let start = RegistryIndex::new()
+            .apply_catalog(
+                web(),
+                catalog('c', &[("@acme/node", "/units/node")]),
+                BTreeMap::from([(id("@acme/node"), vec![valid("@acme/node", "1.0.0", 'a')])]),
+            )
+            .unwrap();
+        let moved = BTreeMap::from([(version("1.0.0"), provenance('f'))]);
+        let errors = start
+            .index()
+            .apply_catalog(
+                web(),
+                catalog('d', &[("@acme/node", "/units/node")]),
+                BTreeMap::from([(
+                    id("@acme/node"),
+                    catalog_tags::<&str>(&node, &moved, start.index().units().get(&node)),
+                )]),
+            )
+            .unwrap_err();
+        assert!(matches!(errors[0], RegistryError::Integrity { .. }));
+    }
+
+    #[test]
+    fn a_catalog_cannot_move_a_version_of_a_unit_registered_directly() {
+        let start = index(&[("@acme/node", "/units/node", &[("1.0.0", 'a')])]);
+        let errors = start
+            .apply_catalog(
+                web(),
+                catalog('c', &[("@acme/node", "/units/node")]),
+                BTreeMap::from([(id("@acme/node"), vec![valid("@acme/node", "1.0.0", 'f')])]),
+            )
+            .unwrap_err();
+        assert!(matches!(errors[0], RegistryError::Integrity { .. }));
+        // Versions it lists that are not indexed change nothing.
+        let change = start
+            .apply_catalog(
+                web(),
+                catalog('c', &[("@acme/node", "/units/node")]),
+                BTreeMap::from([(id("@acme/node"), vec![valid("@acme/node", "2.0.0", 'b')])]),
+            )
+            .unwrap();
+        assert_eq!(
+            change.index().units()[&id("@acme/node")].versions().len(),
+            1
         );
     }
 
