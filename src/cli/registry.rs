@@ -1,5 +1,5 @@
 //! `assemblr registry`: registering, listing, removing, and synchronizing
-//! local unit repositories.
+//! unit repositories, local or remote.
 //!
 //! Data goes to stdout and diagnostics to stderr. `list --json` derives from
 //! the same index as the human listing, in the schema documented in
@@ -17,15 +17,18 @@ use super::diagnostic::{Diagnosis, count, fail, fail_with};
 
 #[derive(Debug, Subcommand)]
 pub(super) enum RegistryCommand {
-    /// Register a unit's local Git repository
+    /// Register a unit's Git repository, local or remote
     ///
     /// Indexes the versions the repository has published, so that projects
-    /// and other units can use them.
-    #[command(
-        after_long_help = "Examples:\n  assemblr registry add ../web\n  assemblr registry add ~/units/web"
-    )]
+    /// and other units can use them. A remote repository is fetched with
+    /// your Git and SSH settings, and fetched again only by `registry sync`.
+    #[command(after_long_help = "Examples:\n  \
+        assemblr registry add ../web\n  \
+        assemblr registry add https://github.com/acme/web.git\n  \
+        assemblr registry add git@github.com:acme/web.git")]
     Add {
-        /// The path of the unit's Git repository
+        /// The repository: a local path, or an `https://` or SSH URL
+        #[arg(value_name = "REPOSITORY")]
         path: PathBuf,
     },
     /// List the registered units and their versions
@@ -46,6 +49,8 @@ pub(super) enum RegistryCommand {
         identity: UnitIdentity,
     },
     /// Index newly published versions of every registered unit
+    ///
+    /// Fetches every remote repository first.
     Sync,
 }
 
@@ -216,6 +221,10 @@ fn rejection_hint(operation: &str, problems: &[Problem]) -> Option<String> {
                 "published versions never change: restore the tag where it was".to_owned()
             }
         }),
+        Problem::Unfetchable { source, .. } => Some(format!(
+            "check the address, and that `git ls-remote {source}` works with your Git \
+             credentials"
+        )),
         Problem::Unreadable { .. } if operation == "synchronization" => Some(
             "if a registered repository was moved or deleted, \
              `assemblr registry remove <identity>` removes its registration"

@@ -24,7 +24,7 @@ use crate::domain::ObjectId;
 
 /// The environment variables that name a repository, its object store, or
 /// its reference namespace, and would point a write somewhere else.
-const LOCATION_VARIABLES: [&str; 8] = [
+pub(super) const LOCATION_VARIABLES: [&str; 8] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_COMMON_DIR",

@@ -631,18 +631,33 @@ Catalog maintenance adds one conceptual operation outside this table,
 
 ### Implemented grammar — Approved
 
-For local unit repositories:
+For unit repositories:
 
 ```text
-assemblr registry add <path>
+assemblr registry add <path or URL>
 assemblr registry list
 assemblr registry list --json
 assemblr registry remove <identity>
 assemblr registry sync
 ```
 
-- `add` takes the path of a local repository. Remote references are not
-  supported by this grammar yet: one fails explicitly and changes nothing.
+- `add` takes the path of a local repository, or the reference of a remote
+  one (**Provisional (D-35)**): an `https://`, `ssh://`, or `file://` URL, or
+  the scp-like `user@host:path`. A remote reference is stored exactly as
+  given. Other transports, such as `http://`, `git://`, and Git's
+  `<transport>::` helpers, and an `https://` URL that carries credentials,
+  fail explicitly before anything is fetched. `name:path` that also names a
+  local path is refused as ambiguous; `./name:path` registers the local one.
+- A remote repository is fetched with the user's own Git and SSH
+  configuration, which supplies any credentials, into a copy that Assemblr
+  keeps (**Provisional (D-35)**, see
+  [ADR 0029](../adr/0029-remote-sources.md)). `add` fetches it, and `sync`
+  fetches every remote source again before reading it; nothing else fetches.
+  `info`, `search`, builds, and compositions read the copy, offline. A
+  remote that cannot be fetched is a source-level failure: the registration
+  or synchronization is rejected and the index is unchanged. A tag that
+  moved or disappeared on the remote is an integrity conflict, like a local
+  one.
 - `remove` takes the unit identity, which is unique in the registry, so a
   source can be removed even when its repository no longer exists.
 - Data goes to stdout and diagnostics to stderr. A failed operation exits

@@ -329,6 +329,10 @@ How the status of a statement affects implementation:
   or named version from the index and its repository, offline (**Provisional
   (D-19)**; see the [implemented
   grammar](registries-and-discovery.md#implemented-grammar--approved)).
+  `registry add` also takes a remote reference (`https://`, `ssh://`,
+  `file://`, or `user@host:path`), stored as given, and `add` and `sync`
+  fetch remote sources into copies that every other operation reads offline
+  (**Provisional (D-35)**).
   `assemblr search <term>... [--json]` lists the registered units whose
   identity or newest stable description contains every term, offline
   (**Provisional (D-32)**, under OC-29).
@@ -759,7 +763,10 @@ How the status of a statement affects implementation:
 - **Open detail:** Which operations retrieve content on demand, and how that
   relates to the rule that `search`, `info`, `unit check`, `unit build`, and
   `unit update` never fetch implicitly; Git partial-fetch and caching
-  mechanisms.
+  mechanisms. **Provisional (D-35)** for remote unit
+  repositories: `registry add` and `registry sync` fetch every published tag
+  and `HEAD` into a full bare copy, with no partial fetch, and every other
+  operation reads the copy and never fetches.
 - **Origin:** Consumer
 - **Context:** [metadata and
   content](registries-and-discovery.md#metadata-and-content--approved)

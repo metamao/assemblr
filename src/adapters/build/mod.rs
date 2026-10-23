@@ -966,7 +966,7 @@ impl Dependencies {
                 unit: identity.clone(),
                 error,
             };
-            let repository = match GitRepository::open(Path::new(unit.source().as_str())) {
+            let repository = match Registry::open_registered(unit.source()) {
                 Ok(repository) => repository,
                 Err(error) => {
                     problems.push(unreadable(error));
