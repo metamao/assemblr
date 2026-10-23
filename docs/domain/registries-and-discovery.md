@@ -705,6 +705,33 @@ assemblr info <identity> --json
   unreadable repository, and a version that no longer matches the index each
   fail with exit status 1 and a hint.
 
+For registered units, the top-level `search` command (**Provisional
+(D-32)**):
+
+```text
+assemblr search <term>...
+assemblr search <term>... --json
+```
+
+- `search` reads the local index and the units' repositories, offline, as
+  `info` does. A unit matches when every whitespace-separated term occurs,
+  ignoring case, in its identity or in the description of its newest stable
+  version (the version `info` describes without a version). `search
+  cloudflare worker` and `search "cloudflare worker"` are the same query. A
+  query with no term fails with exit status 1.
+- Each match is one line, in identity order: `<identity> <version>:
+  <description>`. A unit with no published version is matched on its identity
+  alone and shown as `(no published version)`.
+- A unit whose version cannot be described, for example because its
+  repository was moved, is matched on its identity alone, and a warning on
+  stderr says so, since a match on its description may be missing. The other
+  units are still searched, and the command succeeds.
+- No match prints nothing on stdout, a note on stderr, and succeeds.
+- `--json` prints one object from the same data: `units`, in identity order,
+  each with `identity`, `source`, `version`, and `description`; the last two
+  are `null` when the unit could not be described. The order of keys is not
+  significant, and fields may be added.
+
 Open:
 
 - Exact grammar, arguments, and flags beyond the implemented grammar above,
@@ -760,7 +787,8 @@ Open:
 
 - The exact matching rules for `search`: which metadata fields are matched,
   how, and how results are ordered. Ordering must be deterministic.
-  **OC-29.**
+  **OC-29.** **Provisional (D-32)**: see the [implemented
+  grammar](#implemented-grammar--approved).
 
 ## Recommended mechanisms — Recommended (provisional)
 

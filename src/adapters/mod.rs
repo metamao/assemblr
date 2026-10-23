@@ -47,8 +47,8 @@ pub use project::{
     continue_compose, init_project, remove_unit, update_units,
 };
 pub use registry::{
-    Added, Indexed, InfoFailure, Problem, ReferenceError, Registry, RegistryFailure, StorageError,
-    Synced, TagProblem, UnitInfo, local_reference,
+    Added, Found, Indexed, InfoFailure, Problem, ReferenceError, Registry, RegistryFailure, Search,
+    StorageError, Synced, TagProblem, UnitInfo, local_reference,
 };
 pub use render::{
     Context as RenderContext, RenderError, RenderErrorKind, parameters_referenced, render,

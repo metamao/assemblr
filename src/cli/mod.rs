@@ -4,6 +4,7 @@ mod advice;
 mod info;
 mod project;
 mod registry;
+mod search;
 mod unit;
 
 use std::process::ExitCode;
@@ -41,6 +42,9 @@ enum Command {
     /// Show what the local registry knows about a unit: its versions,
     /// description, dependencies, parameters, options, and amendments.
     Info(info::InfoArgs),
+    /// Find registered units whose identity or description contains every
+    /// term.
+    Search(search::SearchArgs),
     /// Manage the local registry of unit repositories.
     #[command(subcommand)]
     Registry(registry::RegistryCommand),
@@ -58,6 +62,7 @@ pub(crate) fn run() -> ExitCode {
         Command::Remove(args) => project::remove(&args),
         Command::Update(args) => project::update(&args),
         Command::Info(args) => info::run(&args),
+        Command::Search(args) => search::run(&args),
         Command::Registry(command) => registry::run(command),
         Command::Unit(command) => unit::run(command),
     }

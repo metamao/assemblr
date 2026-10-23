@@ -9,7 +9,9 @@ use std::fmt;
 use std::path::Path;
 
 use super::{GitError, GitRepository, InvalidVersion, Registry, StorageError};
-use crate::domain::{Manifest, Provenance, SourceReference, UnitIdentity, Version};
+use crate::domain::{
+    Manifest, Provenance, RegisteredUnit, SearchQuery, SourceReference, UnitIdentity, Version,
+};
 
 /// A registered unit and one of its published versions.
 #[derive(Debug, Clone)]
@@ -132,6 +134,59 @@ impl fmt::Display for InfoFailure {
 
 impl std::error::Error for InfoFailure {}
 
+/// The units a search matched, and the units it could not describe.
+#[derive(Debug)]
+pub struct Search {
+    found: Vec<Found>,
+    undescribed: Vec<InfoFailure>,
+}
+
+impl Search {
+    /// The matched units, in identity order.
+    pub fn found(&self) -> &[Found] {
+        &self.found
+    }
+
+    /// Why units with a published version could not be described, in
+    /// identity order. They were matched on their identity alone, so a
+    /// match on their description may be missing.
+    pub fn undescribed(&self) -> &[InfoFailure] {
+        &self.undescribed
+    }
+}
+
+/// A unit a search matched.
+#[derive(Debug, Clone)]
+pub struct Found {
+    identity: UnitIdentity,
+    source: SourceReference,
+    has_versions: bool,
+    info: Option<UnitInfo>,
+}
+
+impl Found {
+    /// The unit's identity.
+    pub fn identity(&self) -> &UnitIdentity {
+        &self.identity
+    }
+
+    /// Where the unit is registered from.
+    pub fn source(&self) -> &SourceReference {
+        &self.source
+    }
+
+    /// Whether the unit has a published version.
+    pub fn has_versions(&self) -> bool {
+        self.has_versions
+    }
+
+    /// The unit's newest stable version, unless it has no published version
+    /// or could not be described.
+    pub fn info(&self) -> Option<&UnitInfo> {
+        self.info.as_ref()
+    }
+}
+
 impl Registry {
     /// Describes `identity` at `version`, or at its newest stable version
     /// (its newest one when every version is a pre-release). The manifest is
@@ -146,69 +201,109 @@ impl Registry {
             .units()
             .get(identity)
             .ok_or_else(|| InfoFailure::NotRegistered(identity.clone()))?;
-        let versions: Vec<Version> = unit.versions().keys().cloned().collect();
-        let chosen = match version {
-            Some(version) => versions
-                .iter()
-                .find(|known| *known == version)
-                .ok_or_else(|| InfoFailure::UnknownVersion {
-                    identity: identity.clone(),
-                    version: version.clone(),
-                    available: versions.clone(),
-                })?,
-            None => versions
-                .iter()
-                .rev()
-                .find(|known| !known.is_prerelease())
-                .or(versions.last())
-                .ok_or_else(|| InfoFailure::NoVersions {
+        describe(identity, unit, version)
+    }
+
+    /// The registered units that `query` matches, in identity order, each
+    /// with its newest stable version described as [`info`](Self::info)
+    /// describes it. A unit that cannot be described is matched on its
+    /// identity alone, and its failure is kept beside it.
+    pub fn search(&self, query: &SearchQuery) -> Result<Search, StorageError> {
+        let index = self.index()?;
+        let mut found = Vec::new();
+        let mut undescribed = Vec::new();
+        for (identity, unit) in index.units() {
+            let described = describe(identity, unit, None);
+            let description = described
+                .as_ref()
+                .ok()
+                .map(|info| info.manifest().description().as_str());
+            if query.matches(identity, description) {
+                found.push(Found {
                     identity: identity.clone(),
                     source: unit.source().clone(),
-                })?,
-        };
-        let provenance = unit.versions()[chosen].clone();
-        let source_error = |error| InfoFailure::Source {
-            identity: identity.clone(),
-            error: Box::new(error),
-        };
-        let repository =
-            GitRepository::open(Path::new(unit.source().as_str())).map_err(source_error)?;
-        let outcome = repository
-            .read_published(&[provenance.commit()])
-            .map_err(source_error)?
-            .pop();
-        let published = match outcome {
-            Some(Ok(published)) => published,
-            Some(Err(error)) => {
-                return Err(InfoFailure::Invalid {
-                    identity: identity.clone(),
-                    version: chosen.clone(),
-                    error: Box::new(error),
+                    has_versions: !unit.versions().is_empty(),
+                    info: described.as_ref().ok().cloned(),
                 });
             }
-            None => {
-                return Err(InfoFailure::NotIndexed {
-                    identity: identity.clone(),
-                    version: chosen.clone(),
-                });
+            match described {
+                Ok(_) | Err(InfoFailure::NoVersions { .. }) => {}
+                Err(failure) => undescribed.push(failure),
             }
-        };
-        let manifest = published.manifest();
-        if manifest.name() != identity
-            || manifest.version() != chosen
-            || *published.provenance() != provenance
-        {
+        }
+        Ok(Search { found, undescribed })
+    }
+}
+
+/// Describes the registered `unit` at `version`, or at its newest stable
+/// version.
+fn describe(
+    identity: &UnitIdentity,
+    unit: &RegisteredUnit,
+    version: Option<&Version>,
+) -> Result<UnitInfo, InfoFailure> {
+    let versions: Vec<Version> = unit.versions().keys().cloned().collect();
+    let chosen = match version {
+        Some(version) => versions
+            .iter()
+            .find(|known| *known == version)
+            .ok_or_else(|| InfoFailure::UnknownVersion {
+                identity: identity.clone(),
+                version: version.clone(),
+                available: versions.clone(),
+            })?,
+        None => versions
+            .iter()
+            .rev()
+            .find(|known| !known.is_prerelease())
+            .or(versions.last())
+            .ok_or_else(|| InfoFailure::NoVersions {
+                identity: identity.clone(),
+                source: unit.source().clone(),
+            })?,
+    };
+    let provenance = unit.versions()[chosen].clone();
+    let source_error = |error| InfoFailure::Source {
+        identity: identity.clone(),
+        error: Box::new(error),
+    };
+    let repository =
+        GitRepository::open(Path::new(unit.source().as_str())).map_err(source_error)?;
+    let outcome = repository
+        .read_published(&[provenance.commit()])
+        .map_err(source_error)?
+        .pop();
+    let published = match outcome {
+        Some(Ok(published)) => published,
+        Some(Err(error)) => {
+            return Err(InfoFailure::Invalid {
+                identity: identity.clone(),
+                version: chosen.clone(),
+                error: Box::new(error),
+            });
+        }
+        None => {
             return Err(InfoFailure::NotIndexed {
                 identity: identity.clone(),
                 version: chosen.clone(),
             });
         }
-        Ok(UnitInfo {
+    };
+    let manifest = published.manifest();
+    if manifest.name() != identity
+        || manifest.version() != chosen
+        || *published.provenance() != provenance
+    {
+        return Err(InfoFailure::NotIndexed {
             identity: identity.clone(),
-            source: unit.source().clone(),
-            versions,
-            provenance,
-            manifest: manifest.clone(),
-        })
+            version: chosen.clone(),
+        });
     }
+    Ok(UnitInfo {
+        identity: identity.clone(),
+        source: unit.source().clone(),
+        versions,
+        provenance,
+        manifest: manifest.clone(),
+    })
 }

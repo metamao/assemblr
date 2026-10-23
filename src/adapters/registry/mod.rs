@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub(crate) use self::observe as observe_tags;
-pub use info::{InfoFailure, UnitInfo};
+pub use info::{Found, InfoFailure, Search, UnitInfo};
 pub use reference::{ReferenceError, local_reference};
 pub use store::StorageError;
 use store::Store;
