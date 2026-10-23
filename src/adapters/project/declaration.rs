@@ -37,7 +37,7 @@ pub(crate) enum EditFailure {
 }
 
 /// The requirement `text` selects `identity` with, if it does.
-pub(super) fn selected_requirement(text: &str, identity: &UnitIdentity) -> Option<String> {
+pub(crate) fn selected_requirement(text: &str, identity: &UnitIdentity) -> Option<String> {
     let root = parse_value(text).ok()?;
     let key = identity.to_string();
     match root.member(DEPENDENCIES) {
@@ -55,6 +55,18 @@ pub(super) fn add(
     text: &str,
     identity: &UnitIdentity,
     requirement: &str,
+) -> Result<(String, DeclarationChange), EditFailure> {
+    add_after(text, identity, requirement, &[])
+}
+
+/// [`add`], with a missing `dependencies` object inserted after the first
+/// of `preferred` that the text holds, or after the last member when it
+/// holds none of them, as a unit's manifest keeps it near `description`.
+pub(crate) fn add_after(
+    text: &str,
+    identity: &UnitIdentity,
+    requirement: &str,
+    preferred: &[&str],
 ) -> Result<(String, DeclarationChange), EditFailure> {
     let root = parse_value(text).map_err(|error| EditFailure::Cannot(error.to_string()))?;
     let Value::Object(members) = &root else {
@@ -109,7 +121,11 @@ pub(super) fn add(
                 parent: Vec::new(),
                 key: DEPENDENCIES.to_owned(),
                 value: Value::Object(vec![(key.clone(), value.clone())]),
-                after: members.last().map(|(name, _)| name.clone()),
+                after: preferred
+                    .iter()
+                    .find(|key| members.iter().any(|(name, _)| name == *key))
+                    .map(|key| (*key).to_owned())
+                    .or_else(|| members.last().map(|(name, _)| name.clone())),
             },
             DeclarationChange::Added {
                 requirement: requirement.to_owned(),

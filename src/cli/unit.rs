@@ -12,7 +12,7 @@ use std::process::ExitCode;
 
 use assemblr::adapters::{
     AddFailure, AddProblem, AddedParameter, AmendFailure, AmendProblem, AmendState, BuildFailure,
-    BuildProblem, Built, CheckFailure, CheckProblem, DependencyChange, FileOutcome, GitOutcome,
+    BuildProblem, Built, CheckFailure, CheckProblem, DeclarationChange, FileOutcome, GitOutcome,
     IndexOutcome, InitFailure, Initialized, LockfileOutcome, ManifestFileError, PublishFailure,
     PublishProblem, PublishState, Published, RecoveryError, Registry, TagProblem, UpdateFailure,
     UpdateProblem, UpdateState, Updated, add_dependency, amend_unit, build_unit, check_unit,
@@ -564,14 +564,17 @@ fn add(args: &AddArgs) -> ExitCode {
     match add_dependency(&root, &registry, identity, args.unit.version(), &options) {
         Ok(added) => {
             let declaration = match added.change() {
-                DependencyChange::Added { requirement } => {
+                DeclarationChange::Added { requirement } => {
                     format!("Added {identity} ({requirement}) to manifest.jsonc")
                 }
-                DependencyChange::Replaced { from, to } => format!(
+                DeclarationChange::Replaced { from, to } => format!(
                     "Changed the requirement of {identity} from {from} to {to} in manifest.jsonc"
                 ),
-                DependencyChange::Kept { requirement } => {
+                DeclarationChange::Kept { requirement } => {
                     format!("{identity} is already a dependency ({requirement})")
+                }
+                DeclarationChange::Removed { .. } => {
+                    unreachable!("`unit add` never removes a declaration")
                 }
             };
             let parameters = describe_parameters(added.parameters());
@@ -647,8 +650,33 @@ fn add_diagnosis(failure: &AddFailure, root: &Path) -> Diagnosis {
                 .advise("fix the problem and run the command again");
         }
         AddFailure::Build(failure) => {
-            return diagnosis(failure, root)
-                .advise("manifest.jsonc holds the dependency; `assemblr unit build` builds it");
+            // The manifest was replaced before the build was published.
+            let advice = match failure.as_ref() {
+                BuildFailure::Rejected(problems) => {
+                    distinct(problems.iter().filter_map(|problem| advice(problem, root)))
+                }
+                BuildFailure::Publish(_) => Vec::new(),
+            };
+            let note = match failure.as_ref() {
+                BuildFailure::Publish(error)
+                    if matches!(
+                        error.state(),
+                        PublishState::BuildRemoved | PublishState::LockfileWithoutBuild
+                    ) =>
+                {
+                    "manifest.jsonc holds the dependency; there is no build/ now"
+                }
+                _ => {
+                    "manifest.jsonc holds the dependency; build/ and assemblr-lock.json were \
+                      not changed"
+                }
+            };
+            let diagnosis = Diagnosis::note(note);
+            return if advice.is_empty() {
+                diagnosis.advise("fix the problem and run `assemblr unit build`")
+            } else {
+                diagnosis.advise(advice.join("; "))
+            };
         }
         AddFailure::Rejected(problems) => problems,
     };

@@ -30,9 +30,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-pub use add::{
-    AddFailure, AddProblem, AddedParameter, DependencyAdded, DependencyChange, add_dependency,
-};
+pub use add::{AddFailure, AddProblem, AddedParameter, DependencyAdded, add_dependency};
 pub use amend::{AmendFailure, AmendProblem, AmendState, Amended, Match, WriteError, amend_unit};
 pub use check::{CheckFailure, CheckProblem, Checked, check_unit};
 use exclusive::BuildLock;

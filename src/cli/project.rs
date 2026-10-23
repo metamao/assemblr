@@ -623,8 +623,8 @@ fn diagnosis(failure: &ComposeFailure, root: &Path) -> Diagnosis {
     let advice = distinct(problems.iter().filter_map(|problem| {
         match problem {
         ComposeProblem::UnitRepository(_) => Some(
-            "a unit's dependencies are added with `assemblr unit add <UNIT>`; a project is \
-             created in another directory with `assemblr init`"
+            "unit commands run here, and a dependency is added with `assemblr unit add <UNIT>`; \
+             a project is created in another directory with `assemblr init`"
                 .to_owned(),
         ),
         ComposeProblem::NoDeclaration(_) => Some(match enclosing_project(root) {

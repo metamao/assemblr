@@ -22,11 +22,11 @@ mod schema;
 pub use build::{
     AddFailure, AddProblem, AddedParameter, AmendFailure, AmendProblem, AmendState, Amended,
     BuildFailure, BuildLockError, BuildProblem, Built, Carried, CheckFailure, CheckProblem,
-    Checked, CrossVersionReason, DependencyAdded, DependencyChange, FileState, IndexOutcome,
-    LockfileOutcome, ManifestFileError, Match, OutputProblem, PublishError, PublishFailure,
-    PublishProblem, PublishState, Published, PublishedProblem, Recovered, RecoveryError,
-    TemplateError, UpdateFailure, UpdateProblem, UpdateState, UpdateWriteError, Updated,
-    WriteError, add_dependency, amend_unit, build_unit, check_unit, publish_unit, update_unit,
+    Checked, CrossVersionReason, DependencyAdded, FileState, IndexOutcome, LockfileOutcome,
+    ManifestFileError, Match, OutputProblem, PublishError, PublishFailure, PublishProblem,
+    PublishState, Published, PublishedProblem, Recovered, RecoveryError, TemplateError,
+    UpdateFailure, UpdateProblem, UpdateState, UpdateWriteError, Updated, WriteError,
+    add_dependency, amend_unit, build_unit, check_unit, publish_unit, update_unit,
 };
 pub use catalog::{
     CATALOG_INDEX, CATALOG_MANIFEST, CatalogInitFailure, CatalogManifest, CatalogManifestError,

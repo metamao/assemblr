@@ -468,3 +468,28 @@ fn a_unit_cannot_add_itself_and_an_unknown_unit_leaves_the_manifest_alone() {
     assert_eq!(app.read("manifest.jsonc"), before);
     assert!(!app.exists("assemblr-lock.json"));
 }
+
+#[test]
+fn a_requirement_spelled_differently_is_kept_as_written() {
+    let fixture = Fixture::new("a_requirement_spelled_differently_is_kept_as_written");
+    fixture.base();
+    let app = fixture.app();
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[("@acme/base", ">=1.0.0,<2.0.0")],
+            "",
+        ),
+    );
+    succeeds(fixture.assemblr(&app.path, &["unit", "build"]));
+    let before = app.read("manifest.jsonc");
+    let output = succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
+    assert!(
+        stdout(&output).contains("already a dependency (>=1.0.0,<2.0.0)"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(app.read("manifest.jsonc"), before);
+}

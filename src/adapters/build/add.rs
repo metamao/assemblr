@@ -23,14 +23,15 @@ use super::{
 };
 use crate::adapters::jsonc_edit::{apply, parse_value};
 use crate::adapters::manifest::read_manifest;
-use crate::adapters::project::declaration::{EditFailure, option_value, set_options};
+use crate::adapters::project::declaration::{
+    DeclarationChange, EditFailure, add_after, option_value, selected_requirement, set_options,
+};
 use crate::adapters::registry::Registry;
 use crate::domain::{
     Edit, Manifest, OptionValue, ParameterDefinition, ParameterName, ParameterType, ParameterValue,
     UnitIdentity, Value, Version, VersionRequirement, mapping_problem,
 };
 
-const DEPENDENCIES: &str = "dependencies";
 const OPTIONS: &str = "options";
 const PARAMS: &str = "params";
 
@@ -88,7 +89,7 @@ pub fn add_dependency(
 struct Planned {
     text: String,
     manifest: Manifest,
-    change: DependencyChange,
+    change: DeclarationChange,
     parameters: Vec<AddedParameter>,
 }
 
@@ -108,7 +109,11 @@ fn plan(
     let text = opened.text.as_str();
     let manifest = &opened.manifest;
     let previous = opened.previous.clone().unwrap_or_default();
-    let declared = manifest.dependencies().get(identity);
+    let preferred = ["description", "version", "name"];
+    // The requirement as the manifest spells it, so that the edit compares
+    // text with text and never rewrites an equal requirement.
+    let declared = selected_requirement(text, identity);
+    let mut probed = None;
     let requirement = match requirement {
         // `unit add <unit>@1.2.3` records `^1.2.3`, as the consumer's `add`
         // does: the file always spells its operator.
@@ -119,12 +124,12 @@ fn plan(
             requirement.to_owned()
         }
         None => match declared {
-            Some(declared) => declared.to_string(),
+            Some(declared) => declared,
             None => {
                 // The version a resolution picks when any version is allowed,
                 // under the lock, so that a transitive dependency keeps its
                 // locked version.
-                let probe = declare(text, identity, "*").map_err(cannot)?;
+                let (probe, _) = add_after(text, identity, "*", &preferred).map_err(cannot)?;
                 let probe = read_manifest(&probe).map_err(|error| {
                     rejected(AddProblem::CannotEdit(format!(
                         "the edited manifest is not valid: {error}"
@@ -140,31 +145,21 @@ fn plan(
                 ) else {
                     return Err(AddFailure::rejected(BuildFailure::Rejected(found)));
                 };
-                match resolved.lock.units().get(identity) {
-                    Some(locked) => format!("^{}", locked.version()),
-                    None => {
-                        return Err(rejected(AddProblem::CannotEdit(format!(
-                            "the resolution did not select {identity}, so there is no version \
-                             to record"
-                        ))));
-                    }
-                }
+                let Some(locked) = resolved.lock.units().get(identity) else {
+                    return Err(rejected(AddProblem::CannotEdit(format!(
+                        "the resolution did not select {identity}, so there is no version to \
+                         record"
+                    ))));
+                };
+                let requirement = format!("^{}", locked.version());
+                // A caret on the version picked resolves to it again under
+                // the same lock.
+                probed = Some(resolved);
+                requirement
             }
         },
     };
-    let change = match declared {
-        Some(declared) if declared.to_string() == requirement => DependencyChange::Kept {
-            requirement: requirement.clone(),
-        },
-        Some(declared) => DependencyChange::Replaced {
-            from: declared.to_string(),
-            to: requirement.clone(),
-        },
-        None => DependencyChange::Added {
-            requirement: requirement.clone(),
-        },
-    };
-    let text = declare(text, identity, &requirement).map_err(cannot)?;
+    let (text, change) = add_after(text, identity, &requirement, &preferred).map_err(cannot)?;
     let edited = read_manifest(&text).map_err(|error| {
         rejected(AddProblem::CannotEdit(format!(
             "the edited manifest is not valid: {error}"
@@ -173,15 +168,21 @@ fn plan(
 
     // The added unit's parameters, at the version the edited manifest
     // resolves it to.
-    let mut found = Vec::new();
-    let Some(resolved) = resolve_graph(
-        Some(edited.name()),
-        edited.dependencies(),
-        &previous,
-        &opened.index,
-        &mut found,
-    ) else {
-        return Err(AddFailure::rejected(BuildFailure::Rejected(found)));
+    let resolved = match probed {
+        Some(resolved) => resolved,
+        None => {
+            let mut found = Vec::new();
+            let Some(resolved) = resolve_graph(
+                Some(edited.name()),
+                edited.dependencies(),
+                &previous,
+                &opened.index,
+                &mut found,
+            ) else {
+                return Err(AddFailure::rejected(BuildFailure::Rejected(found)));
+            };
+            resolved
+        }
     };
     let Some(locked) = resolved.lock.units().get(identity) else {
         return Err(rejected(AddProblem::CannotEdit(format!(
@@ -196,10 +197,11 @@ fn plan(
         .map_or(&empty, Manifest::params);
     let own = edited.options().get(identity).cloned().unwrap_or_default();
 
-    let mut literals: Vec<(String, Value)> = Vec::new();
+    // What the dependency's `options` entry gains, literals first: each as
+    // the manifest holds it, and as the text is edited to hold it.
+    let mut set: Vec<(ParameterName, OptionValue)> = Vec::new();
     let mut parameters = Vec::new();
     let mut declared_params: Vec<(ParameterName, ParameterDefinition)> = Vec::new();
-    let mut mappings: Vec<(String, Value)> = Vec::new();
     for (name, raw) in options {
         let parameter = ParameterName::parse(name)
             .map_err(|error| rejected(AddProblem::InvalidOption(error.to_string())))?;
@@ -209,7 +211,24 @@ fn plan(
                 .get(&parameter)
                 .map(ParameterDefinition::parameter_type),
         );
-        literals.push(((*name).to_owned(), value));
+        let literal = match value {
+            Value::String(text) => ParameterValue::String(text),
+            Value::Bool(flag) => ParameterValue::Boolean(flag),
+            Value::Number(number) => match number.parse() {
+                Ok(number) => ParameterValue::Integer(number),
+                Err(_) => {
+                    return Err(rejected(AddProblem::InvalidOption(format!(
+                        "the value of `{parameter}` is not a string, an integer, or a boolean"
+                    ))));
+                }
+            },
+            _ => {
+                return Err(rejected(AddProblem::InvalidOption(format!(
+                    "the value of `{parameter}` is not a string, an integer, or a boolean"
+                ))));
+            }
+        };
+        set.push((parameter.clone(), OptionValue::Literal(literal)));
         parameters.push(AddedParameter::Literal(parameter));
     }
     for (name, definition) in params {
@@ -234,22 +253,19 @@ fn plan(
             None => {
                 // The unit's build uses the example as the development
                 // value; without one, the mapped parameter cannot be built.
-                if definition.example().is_none() {
+                let Some(example) = definition.example() else {
                     return Err(rejected(AddProblem::NoExample {
                         dependency: identity.clone(),
                         version: version.clone(),
                         parameter: name.clone(),
                     }));
-                }
+                };
                 let own = ParameterDefinition::new(
                     definition.parameter_type().clone(),
                     definition.description().clone(),
                     None,
                 )
-                .and_then(|own| match definition.example() {
-                    Some(example) => own.with_example(example.clone()),
-                    None => Ok(own),
-                })
+                .and_then(|own| own.with_example(example.clone()))
                 .map_err(|error| {
                     rejected(AddProblem::CannotEdit(format!(
                         "the parameter `{name}` of {identity} {version} cannot be declared: {error}"
@@ -259,17 +275,13 @@ fn plan(
                 parameters.push(AddedParameter::Declared(name.clone()));
             }
         }
-        mappings.push((
-            name.as_str().to_owned(),
-            Value::Object(vec![(
-                "from".to_owned(),
-                Value::String(name.as_str().to_owned()),
-            )]),
-        ));
+        set.push((name.clone(), OptionValue::From(name.clone())));
     }
+    let values: Vec<(String, Value)> = set
+        .iter()
+        .map(|(name, value)| (name.as_str().to_owned(), option_text(value)))
+        .collect();
     let text = declare_params(&text, &declared_params).map_err(cannot)?;
-    let mut values = literals;
-    values.extend(mappings);
     let text = set_options(&text, identity, &values).map_err(cannot)?;
 
     // What the text must describe: the manifest plus the declarations,
@@ -277,41 +289,11 @@ fn plan(
     let mut params = manifest.params().clone();
     params.extend(declared_params);
     let mut unit_options = manifest.options().clone();
-    let mut entry = unit_options.get(identity).cloned().unwrap_or_default();
-    for (name, value) in &values {
-        let Ok(name) = ParameterName::parse(name) else {
-            continue;
-        };
-        let value = match value {
-            Value::Object(members) => match members.first() {
-                Some((_, Value::String(source))) => {
-                    ParameterName::parse(source).map(OptionValue::From).ok()
-                }
-                _ => None,
-            },
-            Value::String(text) => Some(OptionValue::Literal(ParameterValue::String(text.clone()))),
-            Value::Bool(flag) => Some(OptionValue::Literal(ParameterValue::Boolean(*flag))),
-            Value::Number(number) => number
-                .parse()
-                .ok()
-                .map(|number| OptionValue::Literal(ParameterValue::Integer(number))),
-            _ => None,
-        };
-        match value {
-            Some(value) => {
-                entry.insert(name, value);
-            }
-            // A literal the manifest cannot hold, such as a decimal, is
-            // reported by the manifest reader below.
-            None => {
-                return Err(rejected(AddProblem::InvalidOption(format!(
-                    "the value of `{name}` is not a string, an integer, or a boolean"
-                ))));
-            }
-        }
-    }
-    if !entry.is_empty() {
-        unit_options.insert(identity.clone(), entry);
+    if !set.is_empty() {
+        unit_options
+            .entry(identity.clone())
+            .or_default()
+            .extend(set);
     }
     let mut dependencies = manifest.dependencies().clone();
     let parsed = VersionRequirement::parse(&requirement)
@@ -353,48 +335,6 @@ fn plan(
     })
 }
 
-/// `text` with `identity` declared at `requirement` in `dependencies`:
-/// added after the last dependency, or its requirement replaced when it is
-/// declared already. A manifest without `dependencies` gets the object
-/// after `description`.
-fn declare(text: &str, identity: &UnitIdentity, requirement: &str) -> Result<String, EditFailure> {
-    let root = parse_value(text).map_err(|error| EditFailure::Cannot(error.to_string()))?;
-    let Value::Object(members) = &root else {
-        return Err(EditFailure::Cannot("it is not a JSON object".to_owned()));
-    };
-    let key = identity.to_string();
-    let value = Value::String(requirement.to_owned());
-    let edit = match root.member(DEPENDENCIES) {
-        Some(Value::Object(declared)) => match declared.iter().find(|(name, _)| *name == key) {
-            Some((_, Value::String(current))) if current == requirement => {
-                return Ok(text.to_owned());
-            }
-            Some(_) => Edit::Set {
-                path: vec![DEPENDENCIES.to_owned(), key],
-                value,
-            },
-            None => Edit::Insert {
-                parent: vec![DEPENDENCIES.to_owned()],
-                key,
-                value,
-                after: declared.last().map(|(name, _)| name.clone()),
-            },
-        },
-        Some(_) => {
-            return Err(EditFailure::Cannot(
-                "`dependencies` is not an object".to_owned(),
-            ));
-        }
-        None => Edit::Insert {
-            parent: Vec::new(),
-            key: DEPENDENCIES.to_owned(),
-            value: Value::Object(vec![(key, value)]),
-            after: anchor(members, &["description", "version", "name"]),
-        },
-    };
-    apply(text, &[edit]).map_err(|error| EditFailure::Cannot(error.to_string()))
-}
-
 /// `text` with each of `declared` added to `params`, after the last one. A
 /// manifest without `params` gets the object after `options`, or after
 /// `dependencies`.
@@ -421,7 +361,7 @@ fn declare_params(
                 parent: Vec::new(),
                 key: PARAMS.to_owned(),
                 value: Value::Object(vec![(name.as_str().to_owned(), value)]),
-                after: anchor(members, &[OPTIONS, DEPENDENCIES, "description"]),
+                after: anchor(members, &[OPTIONS, "dependencies", "description"]),
             },
         };
         text = apply(&text, &[edit]).map_err(|error| EditFailure::Cannot(error.to_string()))?;
@@ -472,6 +412,18 @@ fn definition_value(definition: &ParameterDefinition) -> Value {
     Value::Object(members)
 }
 
+/// An option value as the manifest writes it: the literal, or the mapping
+/// object `{ "from": "<name>" }`.
+fn option_text(value: &OptionValue) -> Value {
+    match value {
+        OptionValue::Literal(literal) => parameter_value(literal),
+        OptionValue::From(source) => Value::Object(vec![(
+            "from".to_owned(),
+            Value::String(source.as_str().to_owned()),
+        )]),
+    }
+}
+
 fn parameter_value(value: &ParameterValue) -> Value {
     match value {
         ParameterValue::String(text) => Value::String(text.clone()),
@@ -484,7 +436,7 @@ fn parameter_value(value: &ParameterValue) -> Value {
 #[derive(Debug)]
 pub struct DependencyAdded {
     built: Built,
-    change: DependencyChange,
+    change: DeclarationChange,
     parameters: Vec<AddedParameter>,
 }
 
@@ -495,7 +447,7 @@ impl DependencyAdded {
     }
 
     /// What happened to the dependency's declaration.
-    pub fn change(&self) -> &DependencyChange {
+    pub fn change(&self) -> &DeclarationChange {
         &self.change
     }
 
@@ -504,17 +456,6 @@ impl DependencyAdded {
     pub fn parameters(&self) -> &[AddedParameter] {
         &self.parameters
     }
-}
-
-/// What `unit add` did to the dependency's declaration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DependencyChange {
-    /// The unit was declared with this requirement.
-    Added { requirement: String },
-    /// The unit was declared already; its requirement was replaced.
-    Replaced { from: String, to: String },
-    /// The unit was declared already with this requirement, which stays.
-    Kept { requirement: String },
 }
 
 /// How `unit add` satisfied one parameter of the added unit.
