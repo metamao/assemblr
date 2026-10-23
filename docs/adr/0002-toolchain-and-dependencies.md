@@ -76,7 +76,11 @@ add to the test build:
 ### CI
 
 GitHub Actions on Linux and Windows run format, clippy, build, and test checks,
-plus an MSRV job on Linux. macOS is not in CI yet. Add it when there is a
+plus an MSRV job on Linux. To stay within the Actions minutes of a private
+repository (Windows minutes count double), pull requests run the Linux checks
+only; Windows and the MSRV run on pushes to `main` and when the workflow is
+started by hand, and changes to documentation alone (`docs/**`, `*.md`) skip
+CI. macOS is not in CI yet. Add it when there is a
 platform-specific concern or a user need.
 
 The workflow has run successfully on GitHub-hosted Linux and Windows runners,

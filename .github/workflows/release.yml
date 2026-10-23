@@ -1,8 +1,9 @@
 # Private alpha releases (docs/adr/0026). A release is prepared only by
 # starting this workflow by hand: it validates, builds and packages the
 # binaries, and creates a *draft* prerelease. The owner publishes the draft,
-# which creates the tag at the validated commit. Pull requests that touch the
-# packaging run the same validation, build, and packaging, without creating a release.
+# which creates the tag at the validated commit. To save Actions minutes, pull
+# requests do not run it: start it by hand on the PR branch to check packaging
+# changes; outside main it stops before creating a release.
 
 name: Release
 
@@ -13,12 +14,6 @@ on:
         description: "Release tag; must be v<version in Cargo.toml>, e.g. v0.1.0-alpha.1"
         required: true
         type: string
-  pull_request:
-    paths:
-      - .github/workflows/release.yml
-      - build.rs
-      - Cargo.toml
-      - Cargo.lock
 
 permissions:
   contents: read
