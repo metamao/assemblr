@@ -88,19 +88,38 @@ impl std::error::Error for VersionError {}
 /// A SemVer requirement on a dependency's version, such as `^2.1.0` or
 /// `>=1.2, <1.5`.
 ///
-/// A bare version such as `1.2.3` means `^1.2.3`, as in Cargo.
+/// Every comparator names its operator: a bare version such as `1.2.3` is
+/// refused, because Cargo reads it as `^1.2.3` and npm, pip, and Poetry as
+/// an exact version, so either reading would surprise some authors.
+/// Wildcards such as `*` and `1.*` are explicit and accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VersionRequirement(semver::VersionReq);
 
 impl VersionRequirement {
-    /// Parses a requirement using Cargo's requirement syntax.
+    /// Parses a requirement using Cargo's requirement syntax, with an
+    /// operator on every comparator.
     pub fn parse(input: &str) -> Result<Self, RequirementError> {
-        semver::VersionReq::parse(input)
-            .map(Self)
-            .map_err(|error| RequirementError {
+        let requirement = semver::VersionReq::parse(input).map_err(|error| RequirementError {
+            input: input.to_owned(),
+            reason: Reason::Syntax(error.to_string()),
+        })?;
+        // The crate gives a bare version the caret operator, so a caret
+        // comparator must be spelled with `^`. Comparators follow the
+        // comma-separated segments one to one; `*` alone has none.
+        let bare =
+            requirement.comparators.len() == input.split(',').count()
+                && requirement.comparators.iter().zip(input.split(',')).any(
+                    |(comparator, text)| {
+                        comparator.op == semver::Op::Caret && !text.trim_start().starts_with('^')
+                    },
+                );
+        if bare {
+            return Err(RequirementError {
                 input: input.to_owned(),
-                reason: error.to_string(),
-            })
+                reason: Reason::NoOperator,
+            });
+        }
+        Ok(Self(requirement))
     }
 
     /// Whether `version` satisfies this requirement.
@@ -132,7 +151,13 @@ impl fmt::Display for VersionRequirement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequirementError {
     input: String,
-    reason: String,
+    reason: Reason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Reason {
+    Syntax(String),
+    NoOperator,
 }
 
 impl RequirementError {
@@ -144,11 +169,21 @@ impl RequirementError {
 
 impl fmt::Display for RequirementError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "invalid version requirement {:?}: {}; expected a SemVer requirement such as \"^1.2.0\"",
-            self.input, self.reason
-        )
+        match &self.reason {
+            Reason::Syntax(reason) => write!(
+                f,
+                "invalid version requirement {:?}: {reason}; expected a SemVer requirement such as \"^1.2.0\"",
+                self.input
+            ),
+            Reason::NoOperator => {
+                let version = self.input.trim();
+                write!(
+                    f,
+                    "version requirement {:?} has no operator; write \"^{version}\" to accept compatible versions or \"={version}\" for this version only",
+                    self.input
+                )
+            }
+        }
     }
 }
 
@@ -238,8 +273,8 @@ mod tests {
     fn requirements_use_cargo_syntax() {
         for (input, canonical) in [
             ("^2.1.0", "^2.1.0"),
-            ("1.2.3", "^1.2.3"),
             ("~1", "~1"),
+            ("1.*", "1.*"),
             ("=1.0.0", "=1.0.0"),
             (">=1.2, <1.5", ">=1.2, <1.5"),
             ("*", "*"),
@@ -264,6 +299,20 @@ mod tests {
         assert!(!matches("^1.1.0-beta", "1.2.0-beta.1"));
         assert!(matches("=1.1.0-beta.1", "1.1.0-beta.1"));
         assert!(matches("^1.0.0", "1.0.0+build.5"));
+    }
+
+    #[test]
+    fn requirements_without_an_operator_are_rejected() {
+        for input in ["1.2.3", "1", " 1.2", ">=1.0, 1.4.0"] {
+            let error = VersionRequirement::parse(input).unwrap_err();
+            assert_eq!(error.input(), input);
+            assert!(error.to_string().contains("has no operator"), "{error}");
+        }
+        let error = VersionRequirement::parse("1.2.3").unwrap_err().to_string();
+        assert!(
+            error.contains("\"^1.2.3\"") && error.contains("\"=1.2.3\""),
+            "{error}"
+        );
     }
 
     #[test]

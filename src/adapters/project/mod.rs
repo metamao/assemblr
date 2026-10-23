@@ -44,8 +44,8 @@ use super::registry::Registry;
 use crate::domain::{
     Action, BaseIdentity, BlobId, Conflict, Contributor, Current, Disagreement, LockChange,
     MergeFormat, Mergeability, Project, ReconciliationState, RegistryIndex, RelativePath, Root,
-    Snapshot, SnapshotFile, UnitFile, UnitIdentity, UnitLock, VersionRequirement, compose, is_text,
-    reconcile, update_lock,
+    Snapshot, SnapshotFile, UnitFile, UnitIdentity, UnitLock, Version, VersionRequirement, compose,
+    is_text, reconcile, update_lock,
 };
 
 /// The project's declaration, at its top level.
@@ -228,8 +228,9 @@ pub fn update_units(
 /// `requirement` the unit is recorded with a caret requirement on the
 /// version the resolution picks; a unit already selected keeps its own.
 /// Each of `options`, a parameter name and the text of its value, is set
-/// in the unit's `options` entry: the text is the JSON value it reads as,
-/// such as `8080` or `true`, and a string when it is not JSON. A
+/// in the unit's `options` entry, read by the parameter's type: the text
+/// itself for a string parameter, and otherwise the JSON value it reads
+/// as, such as `8080` or `true`, or a string when it is not JSON. A
 /// composition that is refused leaves the declaration as it was.
 pub fn add_unit(
     root: &Path,
@@ -1693,6 +1694,11 @@ fn plan_declaration(
             options,
         } => {
             let requirement = match requirement {
+                // `add <unit>@1.2.3` records `^1.2.3`, as `npm install`
+                // does: the file always spells its operator.
+                Some(requirement) if Version::parse(requirement).is_ok() => {
+                    format!("^{requirement}")
+                }
                 Some(requirement) => {
                     VersionRequirement::parse(requirement).map_err(|error| {
                         vec![ComposeProblem::InvalidRequirement(error.to_string())]
@@ -1713,8 +1719,22 @@ fn plan_declaration(
                     }
                 },
             )?;
+            let types = if options.is_empty() {
+                BTreeMap::new()
+            } else {
+                parameter_types(&edited, identity, previous_lock, index)
+            };
+            let values: Vec<(String, crate::domain::Value)> = options
+                .iter()
+                .map(|(name, raw)| {
+                    (
+                        name.clone(),
+                        declaration::option_value(raw, types.get(name.as_str())),
+                    )
+                })
+                .collect();
             let edited =
-                declaration::set_options(&edited, identity, options).map_err(|failure| {
+                declaration::set_options(&edited, identity, &values).map_err(|failure| {
                     match failure {
                         declaration::EditFailure::Cannot(detail) => cannot(detail),
                         declaration::EditFailure::NotSelected => {
@@ -1741,6 +1761,50 @@ fn plan_declaration(
         text: edited,
         change,
     })
+}
+
+/// The type of each parameter `identity` declares at the version the
+/// declaration `text` resolves it to, so that `--option` values are read
+/// by type. Empty when the declaration does not resolve: the composition
+/// reports why.
+fn parameter_types(
+    text: &str,
+    identity: &UnitIdentity,
+    previous_lock: &UnitLock,
+    index: &RegistryIndex,
+) -> BTreeMap<String, crate::domain::ParameterType> {
+    let Ok(project) = read_project(text) else {
+        return BTreeMap::new();
+    };
+    let mut ignored = Vec::new();
+    let Some(resolved) = resolve_graph(
+        None,
+        project.dependencies(),
+        previous_lock,
+        index,
+        &mut ignored,
+    ) else {
+        return BTreeMap::new();
+    };
+    let Some(locked) = resolved.lock.units().get(identity) else {
+        return BTreeMap::new();
+    };
+    resolved
+        .dependencies
+        .manifest(identity, locked.version())
+        .map(|manifest| {
+            manifest
+                .params()
+                .iter()
+                .map(|(name, definition)| {
+                    (
+                        name.as_str().to_owned(),
+                        definition.parameter_type().clone(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The requirement an `add` without one records: a caret requirement on

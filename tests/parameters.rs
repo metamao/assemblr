@@ -299,6 +299,31 @@ fn a_consumer_sets_the_name_once_and_every_level_gets_it() {
 }
 
 #[test]
+fn add_reads_an_option_value_by_the_parameters_type() {
+    let fixture = Fixture::new("typed-option");
+    base_units(&fixture);
+    let shop = project(
+        &fixture,
+        "shop",
+        "{\n  \"dependencies\": {},\n  \"options\": {}\n}\n",
+    );
+
+    // Text that reads as JSON stays a string for a string parameter.
+    succeed(&fixture.assemblr(&shop, &["add", "@acme/app", "--option", "appName=true"]));
+    assert_eq!(
+        json(&shop.join("assemblr.jsonc"))["options"]["@acme/app"]["appName"],
+        "true"
+    );
+    assert_eq!(json(&shop.join("package.json"))["name"], "true");
+    succeed(&fixture.assemblr(&shop, &["add", "@acme/app", "--option", "appName=8080"]));
+    assert_eq!(json(&shop.join("package.json"))["name"], "8080");
+
+    // A quoted JSON string still gives its content.
+    succeed(&fixture.assemblr(&shop, &["add", "@acme/app", "--option", "appName=\"acme\""]));
+    assert_eq!(json(&shop.join("package.json"))["name"], "acme");
+}
+
+#[test]
 fn the_example_is_never_a_consumer_value() {
     let fixture = Fixture::new("example-not-used");
     base_units(&fixture);

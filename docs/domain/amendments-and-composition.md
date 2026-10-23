@@ -127,8 +127,10 @@ Amendments are created with `unit amend` and reconciled with `unit update`
 Open:
 
 - Behavior when a base's historical Git objects are unavailable. **OC-9.**
-- Whether conflicts between units' contributions in a consumer composition are
-  resolved like conflicts with consumer modifications. **OC-47.**
+
+A conflict between units' contributions in a consumer composition is a
+composition error, not a pending-resolution state (**OC-47**, resolved; see
+[composition details](consumer-projects.md#composition-details--provisional-d-10-to-d-12)).
 
 ## Template contexts — Approved
 

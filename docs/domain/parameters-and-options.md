@@ -45,7 +45,8 @@ type and allowed values.
 The name `own` is **reserved** for the amending author's template context
 (see
 [amendments-and-composition.md](amendments-and-composition.md#template-contexts--approved)).
-It is not a valid parameter name. The syntax of other names is **OC-50**.
+It is not a valid parameter name. Other names follow the [approved
+rule](manifest.md#parameter-definitions-and-manifest-text--approved) (**OC-50**, resolved).
 
 Requiredness follows from the default alone:
 

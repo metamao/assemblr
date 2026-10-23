@@ -530,7 +530,7 @@ regenerate a catalog's metadata index.
   A unit registered from another reference becomes discoverable when that
   source is synchronized. `unit publish` never registers a previously
   unknown unit, and it never pushes commits or tags to a remote (see
-  [authoring-workflow.md](authoring-workflow.md#publication-details--provisional-d-3-d-4)).
+  [authoring-workflow.md](authoring-workflow.md#publication-details--approved-d-3-d-4)).
 - If publication succeeds but the index update fails, Assemblr reports that
   partial outcome explicitly. `registry sync` recovers.
 - `search` and `info` operate on indexed metadata. They never fetch remote
@@ -867,7 +867,7 @@ engineering side.
   state are unchanged. Expensive checks need a specific correctness or
   integrity reason.
 - **Git.** Use Git's existing object and tag infrastructure rather than a
-  parallel versioning mechanism. Consider annotated release tags (**OC-26**).
+  parallel versioning mechanism. Release tags are annotated (**OC-26**, resolved).
   Authentication to private repositories is delegated to the user's existing
   Git and SSH configuration. Assemblr has no credential manager in Alpha.
 - **Snapshots and caches.** Snapshots are immutable and content-addressed, with

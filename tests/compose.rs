@@ -1537,6 +1537,31 @@ fn add_promotes_a_transitive_unit_and_replaces_a_requirement_only_when_given_one
         stdout(&output)
     );
     assert!(declaration(&project).contains("\"@acme/node\": \"~1.0\""));
+
+    // A bare version is recorded with its caret, so the file never holds a
+    // requirement without an operator.
+    let output = succeeds(add(&fixture, &project, "@acme/node@1.0.0"));
+    assert!(
+        stdout(&output).contains("from ~1.0 to ^1.0.0"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(declaration(&project).contains("\"@acme/node\": \"^1.0.0\""));
+}
+
+#[test]
+fn a_declared_requirement_without_an_operator_is_refused() {
+    let fixture = Fixture::new("bare-requirement");
+    registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/web", "1.0.0")], "");
+    let before = tree(&project);
+    let err = stderr(&fails(fixture.compose(&project)));
+    assert!(err.contains("has no operator"), "{err}");
+    assert!(
+        err.contains("\"^1.0.0\"") && err.contains("\"=1.0.0\""),
+        "{err}"
+    );
+    assert_eq!(tree(&project), before);
 }
 
 #[test]

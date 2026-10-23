@@ -8,7 +8,7 @@
 The second PR of the authoring-completeness increment (#32) adds `unit
 init`, which closes the authoring loop at its start. The product rules are
 in
-[`authoring-workflow.md`](../domain/authoring-workflow.md#initialization-details--provisional-d-2-d-5)
+[`authoring-workflow.md`](../domain/authoring-workflow.md#initialization-details--provisional-d-5-d-33)
 and the decisions behind them in the autonomous decision log (D-2, D-5).
 This ADR records how they are implemented: how the directory's place in Git
 is found and a repository created, given that Assemblr otherwise runs Git in

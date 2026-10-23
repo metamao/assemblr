@@ -66,18 +66,17 @@ Assemblr's own validation remains authoritative over the schema.
 
 Open:
 
-- The schema's name, location, and tracking. **OC-17.** **Provisional (D-2)**;
-  see [initialization details](#initialization-details--provisional-d-2-d-5).
 - How `init` establishes the Git repository: for example, whether it
   initializes a new repository or adopts an existing one, how it treats a
   target inside another repository, and whether it creates an initial commit.
-  Part of **OC-7.** **Provisional (D-5)**; see
-  [initialization details](#initialization-details--provisional-d-2-d-5).
+  Part of **OC-7.** **Provisional (D-5, D-33)**; see
+  [initialization details](#initialization-details--provisional-d-5-d-33).
 
-### Initialization details — Provisional (D-2, D-5)
+### Initialization details — Provisional (D-5, D-33)
 
 Decided for the first `unit init` under AGENTS.md §1.1 (decision log D-2 and
-D-5) and merged with PR #37. The owner has not approved it explicitly.
+D-5) and merged with PR #37. The owner approved the schema (D-2, OC-17) in
+the [owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799); the rest is not approved explicitly.
 
 **Command.** `assemblr unit init <identity> [<directory>]
 [--description <text>]`. The directory is created, parents included, when it
@@ -220,16 +219,13 @@ not a superficial "`src/` must contain files" rule. A unit with no `src/`
 files can still contribute through amendments, options, or the units it
 composes.
 
-Open:
+The effective-contribution algorithm is approved as the [check
+details](#check-details--approved-d-1-d-3) describe (OC-11, resolved).
 
-- The exact no-op / effective-contribution algorithm. **OC-11.** **Provisional
-  (D-1)** for the first `unit check`; see [check
-  details](#check-details--provisional-d-1-d-3).
-
-### Check details — Provisional (D-1, D-3)
+### Check details — Approved (D-1, D-3)
 
 Decided for the first `unit check` under AGENTS.md §1.1 (decision log D-1 and
-D-3) and merged with PR #36. The owner has not approved it explicitly.
+D-3), merged with PR #36, and approved by the owner in the [owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
 
 **Command.** `assemblr unit check`, with no arguments, run at the
 repository's top level as `unit build` is. It reads the unit as a build does,
@@ -245,7 +241,7 @@ requires one that records the current resolution: a missing lockfile, and a
 resolution that would add, change, or retire an entry, are reported with the
 hint to run `unit build`, which writes it. `unit check` never creates it.
 
-**Effective contribution** (OC-11, **Provisional (D-1)**). A unit is effective
+**Effective contribution** (OC-11, resolved; D-1). A unit is effective
 when it delivers at least one `src/` file or declares at least one dependency.
 Aggregation is a contribution: a unit whose purpose is to compose other units
 into one reusable dependency contributes that composition, whether it
@@ -525,14 +521,10 @@ The lockfile and amendments:
 `unit amend` reads the lockfile and never writes it (see
 [amend details](#amend-details--approved)). `unit publish` never writes it
 either: it requires the lockfile to be committed and to record the current
-resolution (see [publication details](#publication-details--provisional-d-3-d-4)), so
+resolution (see [publication details](#publication-details--approved-d-3-d-4)), so
 the lockfile's writers are `unit build` and `unit update`.
 
-Open:
-
-- Whether `unit publish` writes the lockfile. **OC-46.**
-  **Provisional (D-4)**: it does not. The entry stays open until
-  the owner closes it.
+`unit publish` never writing the lockfile is approved (D-4, OC-46 resolved).
 
 ## Update — Approved
 
@@ -557,11 +549,12 @@ amendments from their historical base to the newer dependency version.
   result.
 - A newly discovered Git tag, for example after a registry synchronization,
   never updates a dependency automatically.
+- When the declared range allows several versions, the [resolution
+  policy](dependencies.md#resolution-policy--approved) chooses (**OC-16**,
+  resolved).
 
 Open:
 
-- Which version is chosen when the declared range allows several. This
-  follows the resolution policy, which is not yet decided. **OC-16.**
 - The command surface for changing a range. **OC-7**, **OC-27.**
 
 ### Update details — Approved
@@ -584,7 +577,7 @@ goes to stdout; diagnostics go to stderr.
 with the [unit lock state](#unit-lock-state--approved) minus the updated
 units, so that the other locked versions keep precedence and change only
 when the updated units' requirements force it (see
-[dependencies.md](dependencies.md#recommended-provisional)). What changed is
+[dependencies.md](dependencies.md#resolution-policy--approved)). What changed is
 reported against the complete previous lock state, and every kept version,
 named or not, must still be published with the content it was locked to;
 otherwise the update fails, as a build does. A run that changes nothing
@@ -714,10 +707,11 @@ Publishing locally is distinct from **pushing** to a remote Git server.
 `unit publish` establishes the published version locally and **never pushes**
 commits or tags as a side effect. Pushing is an explicit, separate operation.
 
-### Publication details — Provisional (D-3, D-4)
+### Publication details — Approved (D-3, D-4)
 
 Decided for the first `unit publish` under AGENTS.md §1.1 (decision log D-3
-and D-4) and merged with PR #36. The owner has not approved it explicitly.
+and D-4), merged with PR #36, and approved by the owner in the [owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799) (OC-26 and
+OC-46 resolved).
 
 **Command.** `assemblr unit publish`, with no arguments, run at the
 repository's top level as `unit build` is. The version is the one the
@@ -777,13 +771,8 @@ the partial outcome, exits non-zero, and says that the tag stands and that
 **Ordering.** Everything is decided before the tag is created. After it,
 only the index update can fail. Nothing is pushed or fetched.
 
-Open:
-
-- Whether Alpha provides a push operation, and its command or flag.
-  **OC-13.**
-- Edge cases, including untracked files, an existing tag that already points
-  at the validated commit, annotated vs lightweight tags (annotated tags are
-  recommended for consideration), and whether a new version must be greater
-  than earlier published versions. **OC-26.** **Provisional (D-3)**: the
-  publication details above; the entry stays open until
-  the owner closes it.
+**Pushing.** Alpha provides no push operation (owner decision, OC-13
+resolved). Other machines see a version once the commit and its tag reach
+the remote that they register, so after a new publication the result
+suggests `git push --follow-tags`, which pushes the commit and its annotated
+tag but no other local tag.

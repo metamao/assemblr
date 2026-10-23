@@ -8,7 +8,7 @@
 //! refusal, never a different declaration.
 
 use crate::adapters::jsonc_edit::{apply, parse_value};
-use crate::domain::{Edit, UnitIdentity, Value};
+use crate::domain::{Edit, ParameterType, UnitIdentity, Value, ValueKind};
 
 const DEPENDENCIES: &str = "dependencies";
 const OPTIONS: &str = "options";
@@ -166,23 +166,36 @@ pub(super) fn remove(
     Ok((edited, DeclarationChange::Removed { options }))
 }
 
-/// `text` with each of `options`, a parameter name and the text of its
-/// value, set in the `options` entry of `identity`. The text is the JSON
-/// value it reads as, and a string when it is not JSON, so that
-/// `appName=shop` needs no quotes and `port=8080` stays a number. Entries
-/// and members that are missing are created after the last one there.
+/// The value that `--option <name>=<raw>` sets, read by the parameter's
+/// type when it is known. A string parameter takes the text as it is, so
+/// `name=true` is the string "true"; a quoted JSON string still gives its
+/// content. Any other parameter, or one the unit does not declare, takes the
+/// JSON value the text reads as, and a string when it is not JSON, so that
+/// `port=8080` is a number and the composition reports a value that does
+/// not fit.
+pub(super) fn option_value(raw: &str, parameter: Option<&ParameterType>) -> Value {
+    let json = parse_value(raw).ok();
+    match (parameter.map(ParameterType::value_kind), json) {
+        (Some(ValueKind::String), Some(Value::String(text))) => Value::String(text),
+        (Some(ValueKind::String), _) | (_, None) => Value::String(raw.to_owned()),
+        (_, Some(value)) => value,
+    }
+}
+
+/// `text` with each of `options`, a parameter name and its value, set in
+/// the `options` entry of `identity`. Entries and members that are missing
+/// are created after the last one there.
 pub(super) fn set_options(
     text: &str,
     identity: &UnitIdentity,
-    options: &[(String, String)],
+    options: &[(String, Value)],
 ) -> Result<String, EditFailure> {
     if options.is_empty() {
         return Ok(text.to_owned());
     }
     let mut text = text.to_owned();
     let key = identity.to_string();
-    for (name, raw) in options {
-        let value = parse_value(raw).unwrap_or_else(|_| Value::String(raw.clone()));
+    for (name, value) in options {
         let root = parse_value(&text).map_err(|error| EditFailure::Cannot(error.to_string()))?;
         let Value::Object(members) = &root else {
             return Err(EditFailure::Cannot("it is not a JSON object".to_owned()));
@@ -227,7 +240,7 @@ pub(super) fn set_options(
             Some(_) => return Err(EditFailure::Cannot("`options` is not an object".to_owned())),
         };
         let mut expected = root.clone();
-        set_option(&mut expected, &key, name, value);
+        set_option(&mut expected, &key, name, value.clone());
         text = apply_checked(&text, &[edit], &expected)?;
     }
     Ok(text)

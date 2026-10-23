@@ -61,17 +61,14 @@ a winner by source precedence, declaration order, or installation order.
 Transitive dependencies follow the same resolution and source-conflict rules
 as direct ones.
 
-Open:
-
-- Which version is chosen for a newly incorporated unit when several satisfy
-  every requirement. Whatever policy is chosen, it must be deterministic.
-  **OC-16.**
-- The SemVer range dialect. **OC-15.**
-- The consumer lockfile's format and location (**OC-8**). The unit
-  lockfile is `assemblr-lock.json` (see
-  [unit lock state](authoring-workflow.md#unit-lock-state--approved)),
-  written by `unit build` and `unit update`; whether `unit publish` writes
-  it is **Provisional (D-4)**: no (**OC-46**).
+The version chosen for a newly incorporated unit and the requirement
+dialect are approved below ([resolution policy](#resolution-policy--approved)):
+**OC-15** and **OC-16** are resolved. The unit lockfile is
+`assemblr-lock.json` (see
+[unit lock state](authoring-workflow.md#unit-lock-state--approved)), written
+by `unit build` and `unit update` and never by `unit publish` (**OC-46**,
+resolved). The consumer lockfile is described in
+[consumer-projects.md](consumer-projects.md#lock-and-reconciliation-state--approved).
 
 ## Pre-releases and build metadata — Approved
 
@@ -114,21 +111,21 @@ follows the policy of **minimal necessary updates**:
 Explicit update operations are distinct from these minimal changes (see
 [Explicit updates](#explicit-updates--approved)).
 
-### Recommended (provisional)
+### Resolution policy — Approved
 
-Until the resolver contract is finalized (**OC-15**, **OC-16**), the owner has
-accepted these defaults for Alpha:
+Accepted by the owner as defaults for Alpha and approved in the
+[owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799) (**OC-15**, **OC-16**):
 
 - When existing locked resolutions satisfy every requirement, they are
   preserved.
 - A new resolution considers the **full transitive constraint set**.
 - Among the versions that satisfy it, the **highest compatible stable
   published version** is preferred.
-- Cargo-like SemVer requirement semantics are the starting point for the range
-  dialect.
+- Requirements follow Cargo's SemVer requirement semantics, with an operator
+  on every comparator: a bare version such as `1.2.3` is refused (see
+  [versioning](units.md#versioning--approved)).
 
-The owner has also accepted these details for Alpha. The related entry stays
-open until the owner settles it: **OC-16**.
+The details:
 
 - A **locked version is kept** when it satisfies every requirement and the
   dependencies of the locked versions can still be resolved. Otherwise it is
@@ -149,8 +146,7 @@ open until the owner settles it: **OC-16**.
   would force another's down, the unit decided first keeps the higher
   version. A unit is decided before the units its published versions depend
   on, and otherwise in identity order. Declaration order and the order in
-  which the registry lists versions never affect the result. This rule may
-  change while OC-16 is open.
+  which the registry lists versions never affect the result.
 - **Diagnostics** distinguish an identity that no registered source provides,
   a range that no locally available version satisfies (listing the available
   versions), an identity whose published versions are ambiguous, and a locked

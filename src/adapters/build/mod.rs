@@ -926,6 +926,11 @@ pub(crate) struct Dependencies {
 }
 
 impl Dependencies {
+    /// The manifest of `identity` at `version`, when that version was read.
+    pub(crate) fn manifest(&self, identity: &UnitIdentity, version: &Version) -> Option<&Manifest> {
+        self.manifests.get(&(identity.clone(), version.clone()))
+    }
+
     /// Reads every published version of every identity the unit can reach
     /// through some version's dependencies, starting from its own, at the
     /// commits `index` records. Identities without a registered source are

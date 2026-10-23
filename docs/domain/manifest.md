@@ -96,16 +96,14 @@ fixed (**OC-45**), so that definition is elided:
 
 Open:
 
-- The property names and type spellings inside a parameter definition.
-  **OC-45.** A provisional default is described below.
 - How an option value mapped from the unit's own parameter is written.
   **OC-39.**
 - List identity hints (**OC-4**).
 
-## Parameter definitions and manifest text — Recommended (provisional)
+## Parameter definitions and manifest text — Approved
 
-The owner has accepted these defaults for Alpha. The related entries stay open
-until the owner settles them: **OC-45**, **OC-50**, and **OC-51**.
+Accepted by the owner as defaults for Alpha and approved in the
+[owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799): **OC-45**, **OC-50**, and **OC-51** are resolved.
 
 A parameter definition has these properties:
 
@@ -132,12 +130,12 @@ A parameter definition has these properties:
 }
 ```
 
-Other provisional rules:
+Other rules:
 
 - **Parameter names** start with an ASCII letter and continue with ASCII
   letters, digits, or underscores, such as `appName` or `node_compat`. Names
   are usable in the template syntax (OC-5), and the rule can be widened
-  compatibly. **OC-50.** Approved, not provisional: `own` is reserved
+  compatibly. **OC-50.** `own` is reserved
   for the amending author's context and is not a valid parameter name (see
   [parameters-and-options.md](parameters-and-options.md#declaration--approved)).
 - **JSONC.** Comments (`//` and `/* */`) and trailing commas after a value are
@@ -173,11 +171,7 @@ Assemblr.
 - The schema works **offline**. Editing a unit must not require network access
   to fetch the schema.
 
-Open:
-
-- The schema's file name and location, whether it is tracked in Git, and when
-  it is regenerated (for example, after an Assemblr upgrade). **OC-17.**
-  **Provisional (D-2)**: `manifest.schema.json` next to
-  the manifest, tracked, written by `unit init` and refreshed by running it
-  again; no command compares it (see
-  [authoring-workflow.md](authoring-workflow.md#initialization-details--provisional-d-2-d-5)).
+The schema is `manifest.schema.json` next to the manifest, tracked, written
+by `unit init` and refreshed by running it again; no command compares it
+(**OC-17**, resolved; D-2, see
+  [authoring-workflow.md](authoring-workflow.md#initialization-details--provisional-d-5-d-33)).
