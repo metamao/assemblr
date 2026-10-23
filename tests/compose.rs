@@ -432,17 +432,19 @@ fn a_rejected_composition_leaves_the_project_unmodified() {
     assert_eq!(tree(&project).len(), 1);
     assert!(!project.join(".assemblr").exists());
 
-    // Existing content at a delivered path, or on the way to one.
+    // Something that cannot hold conflict markers on the way to a
+    // delivered path: the whole composition is refused, and a file of the
+    // project's own at another delivered path is not touched either.
     declare(&project, &[("@acme/web", "^1")], "");
     fs::write(project.join("README.md"), "mine").unwrap();
     fs::write(project.join("config"), "a file where a directory goes").unwrap();
     let err = stderr(&fails(fixture.compose(&project)));
     assert!(
-        err.contains("already hold content Assemblr did not materialize:\nerror:   README.md\nerror:   config"),
+        err.contains("cannot mark as a conflict:\nerror:   config\n"),
         "{err}"
     );
     assert!(
-        err.contains("composing over existing files is not supported yet"),
+        err.contains("cannot hold conflict markers; move it away"),
         "{err}"
     );
     assert_eq!(read(&project.join("README.md")), "mine");
@@ -1039,7 +1041,8 @@ fn an_interrupted_composition_is_reverted_by_the_next_one() {
 
     // The next compose reverts first: the files still holding what was
     // written go, the edited one stays, the journal goes. The edited file
-    // then blocks the fresh composition, as any existing content does.
+    // is then the project's own, which the fresh composition leaves marked
+    // against its own content, as any existing content is.
     let output = fails(fixture.compose(&project));
     assert!(
         stderr(&output).contains(
@@ -1050,20 +1053,24 @@ fn an_interrupted_composition_is_reverted_by_the_next_one() {
         stderr(&output)
     );
     assert!(
-        stderr(&output)
-            .contains("already hold content Assemblr did not materialize:\nerror:   bin/run"),
+        stdout(&output).contains("  conflict bin/run"),
         "{}",
-        stderr(&output)
+        stdout(&output)
     );
-    assert!(!project.join("config/app.json").exists());
-    assert!(!project.join(".assemblr").join("journal.json").exists());
-    assert_eq!(read(&project.join("bin/run")), "edited meanwhile");
+    let run = read(&project.join("bin/run"));
+    assert!(
+        run.contains("<<<<<<< current (your file)\nedited meanwhile\n"),
+        "{run}"
+    );
+    assert!(
+        run.contains("||||||| base (none: Assemblr did not write this file)\n=======\n"),
+        "{run}"
+    );
 
-    // With the edit out of the way, the project composes again to the
-    // same state as before the interruption.
-    fs::remove_file(project.join("bin/run")).unwrap();
-    fs::remove_dir(project.join("bin")).unwrap();
-    succeeds(fixture.compose(&project));
+    // Taking the composition's side, the project reaches the same state as
+    // before the interruption.
+    fs::write(project.join("bin/run"), "#!/bin/sh\necho run\n").unwrap();
+    succeeds(fixture.assemblr(&project, &["compose", "--continue"]));
     assert_eq!(tree(&project), complete);
 
     // An interruption after the lock was written: the composition is
@@ -1659,12 +1666,18 @@ fn a_refused_add_leaves_the_declaration_and_the_project_as_they_were() {
     assert!(stderr(&output).contains("nothing follows the last `@`"));
     assert_eq!(tree(&project), before);
 
-    // A composition that the project's own content refuses: the file the
-    // unit would create is there already, edited.
+    // The project's own content where the unit would create a file: a
+    // conflict, which `--abort` undoes, the declaration included.
     fs::write(project.join("web.txt"), "mine\n").unwrap();
     let before = tree(&project);
-    let err = stderr(&fails(add(&fixture, &project, "@acme/web")));
-    assert!(err.contains("web.txt"), "{err}");
+    let output = fails(add(&fixture, &project, "@acme/web"));
+    assert!(
+        stdout(&output).contains("  conflict web.txt"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(read(&project.join("web.txt")).contains("<<<<<<< current"));
+    succeeds(fixture.assemblr(&project, &["compose", "--abort"]));
     assert_eq!(tree(&project), before);
     assert!(!declaration(&project).contains("@acme/web"));
 }
@@ -1843,6 +1856,79 @@ fn text_conflict(fixture: &Fixture) -> PathBuf {
     );
     declare(&project, &[("@acme/node", "^1.1")], "");
     project
+}
+
+/// A file of the project's own where the composition creates one, which
+/// Assemblr did not write: both, whole, between markers, resolved like any
+/// conflict (owner decision on OC-44).
+#[test]
+fn a_file_assemblr_did_not_write_is_a_conflict_the_consumer_resolves() {
+    let fixture = Fixture::new("existing-conflict");
+    let (node, _) = registry(&fixture);
+    let project = initialized(&fixture, "shop");
+    fs::write(project.join("README.md"), "# Shop\n").unwrap();
+    fs::create_dir(project.join("config")).unwrap();
+    fs::write(project.join("config/app.json"), "{\n  \"port\": 3000\n}\n").unwrap();
+
+    let output = fails(add(&fixture, &project, "@acme/node"));
+    let out = stdout(&output);
+    assert!(out.contains("  conflict README.md"), "{out}");
+    assert!(out.contains("  created bin/run"), "{out}");
+    assert!(
+        !out.contains("config/app.json"),
+        "already composed content is kept: {out}"
+    );
+    assert!(
+        stderr(&output).contains("config/app.json already held the composed content"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        read(&project.join("README.md")),
+        "<<<<<<< current (your file)\n# Shop\n\
+         ||||||| base (none: Assemblr did not write this file)\n\
+         =======\nnode\n\
+         >>>>>>> incoming (the declared composition)\n"
+    );
+    assert!(!project.join("assemblr-lock.json").exists());
+
+    // The consumer keeps both; the next composition reconciles the file
+    // against the unit's content like any other.
+    fs::write(project.join("README.md"), "# Shop\nnode\n").unwrap();
+    succeeds(fixture.assemblr(&project, &["compose", "--continue"]));
+    assert!(project.join("assemblr-lock.json").exists());
+    publish_node(
+        &fixture,
+        &node,
+        "1.1.0",
+        "node\n",
+        "#!/bin/sh\necho run v2\n",
+    );
+    declare(&project, &[("@acme/node", "^1.1")], "");
+    let output = succeeds(fixture.compose(&project));
+    assert!(
+        stdout(&output).contains("  modified bin/run"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(read(&project.join("README.md")), "# Shop\nnode\n");
+}
+
+#[test]
+fn a_binary_file_assemblr_did_not_write_is_refused() {
+    let fixture = Fixture::new("existing-binary");
+    registry(&fixture);
+    let project = initialized(&fixture, "shop");
+    fs::write(project.join("README.md"), b"\0binary").unwrap();
+    let before = tree(&project);
+
+    let err = stderr(&fails(add(&fixture, &project, "@acme/node")));
+
+    assert!(
+        err.contains("cannot mark as a conflict:\nerror:   README.md"),
+        "{err}"
+    );
+    assert_eq!(tree(&project), before);
 }
 
 #[test]

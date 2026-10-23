@@ -66,7 +66,12 @@ pub(super) fn marked_change(
         FileConflictKind::Lines { .. } => {
             mark_lines(&base_bytes, &held.bytes, incoming.contents())?
         }
-        _ => mark(&base_bytes, &held.bytes, incoming.contents())?,
+        _ => mark(
+            &base_bytes,
+            "the last composition",
+            &held.bytes,
+            incoming.contents(),
+        )?,
     };
     // The composition's change to the executable bit wins when it made
     // one; otherwise the project's mode stands, as in reconciliation.
@@ -83,10 +88,34 @@ pub(super) fn marked_change(
     })
 }
 
-/// The three versions of a file between conflict markers, or `None` when
-/// any of them is not UTF-8 text. Each version is kept as it is, and the
-/// marker lines end as the project's file does.
-fn mark(base: &[u8], current: &[u8], incoming: &[u8]) -> Option<Vec<u8>> {
+/// The change that leaves the project's own file at a path the
+/// composition creates, `held`, marked against the composition's file: both
+/// whole, with an empty base, since Assemblr wrote nothing there (owner
+/// decision on OC-44). `None` when either is not UTF-8 text.
+pub(super) fn marked_existing(
+    held: &[u8],
+    held_executable: bool,
+    incoming: &UnitFile,
+) -> Option<Change> {
+    let bytes = mark(
+        b"",
+        "none: Assemblr did not write this file",
+        held,
+        incoming.contents(),
+    )?;
+    Some(Change::Modify {
+        file: UnitFile::new(bytes, incoming.is_executable()),
+        previous: held.to_vec(),
+        previous_executable: held_executable,
+        merged: false,
+    })
+}
+
+/// The three versions of a file between conflict markers, the base's
+/// labeled `base_label`, or `None` when any of them is not UTF-8 text. Each
+/// version is kept as it is, and the marker lines end as the project's file
+/// does.
+fn mark(base: &[u8], base_label: &str, current: &[u8], incoming: &[u8]) -> Option<Vec<u8>> {
     let text = |bytes: &[u8]| !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok();
     if !(text(base) && text(current) && text(incoming)) {
         return None;
@@ -106,7 +135,7 @@ fn mark(base: &[u8], current: &[u8], incoming: &[u8]) -> Option<Vec<u8>> {
         }
     };
     section(&format!("{CURRENT_MARK} (your file)"), current);
-    section(&format!("{BASE_MARK} (the last composition)"), base);
+    section(&format!("{BASE_MARK} ({base_label})"), base);
     section(SEPARATOR, incoming);
     out.extend_from_slice(format!("{INCOMING_MARK} (the declared composition){eol}").as_bytes());
     Some(out)
@@ -429,7 +458,7 @@ mod tests {
 
     #[test]
     fn the_three_versions_are_kept_between_markers() {
-        let marked = mark(b"base\n", b"mine\n", b"theirs").unwrap();
+        let marked = mark(b"base\n", "the last composition", b"mine\n", b"theirs").unwrap();
         assert_eq!(
             String::from_utf8(marked).unwrap(),
             "<<<<<<< current (your file)\nmine\n\
@@ -441,7 +470,7 @@ mod tests {
 
     #[test]
     fn markers_end_lines_as_the_project_s_file_does() {
-        let marked = mark(b"a", b"b\r\nc\r\n", b"d").unwrap();
+        let marked = mark(b"a", "the last composition", b"b\r\nc\r\n", b"d").unwrap();
         let text = String::from_utf8(marked).unwrap();
         assert!(text.starts_with("<<<<<<< current (your file)\r\nb\r\nc\r\n"));
         assert!(text.ends_with(">>>>>>> incoming (the declared composition)\r\n"));
@@ -449,13 +478,13 @@ mod tests {
 
     #[test]
     fn binary_or_non_utf8_content_is_not_marked() {
-        assert!(mark(b"a", b"b\0", b"c").is_none());
-        assert!(mark(b"a", b"b", &[0xff, 0xfe]).is_none());
+        assert!(mark(b"a", "the last composition", b"b\0", b"c").is_none());
+        assert!(mark(b"a", "the last composition", b"b", &[0xff, 0xfe]).is_none());
     }
 
     #[test]
     fn a_leftover_marker_line_is_found_and_a_heading_underline_is_not() {
-        let marked = mark(b"a\n", b"b\n", b"c\n").unwrap();
+        let marked = mark(b"a\n", "the last composition", b"b\n", b"c\n").unwrap();
         assert!(has_markers(&marked));
         assert!(!has_markers(b"Title\n=======\ntext\n"));
         assert!(has_markers(b"x\r\n<<<<<<< current (your file)\r\n"));

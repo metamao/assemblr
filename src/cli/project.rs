@@ -664,8 +664,8 @@ fn diagnosis(failure: &ComposeFailure, root: &Path) -> Diagnosis {
                 .to_owned(),
         }),
         ComposeProblem::Existing(_) => Some(
-            "move the existing files away, or compose into an empty project; composing over \
-             existing files is not supported yet"
+            "a binary file, a directory, or a link cannot hold conflict markers; move it away \
+             and compose again"
                 .to_owned(),
         ),
         ComposeProblem::LocallyIgnored(_) => Some(
