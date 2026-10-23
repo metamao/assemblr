@@ -222,7 +222,7 @@ pub fn amend_unit(
         });
     }
     // Several amendments of a file are combined when it is JSON or JSONC,
-    // or UTF-8 text that is not in a structured format.
+    // or UTF-8 text that is not XML.
     let delivered = delivered_path(&found.path).ok().flatten();
     let combinable = match MergeFormat::of_path(delivered.as_ref().unwrap_or(&found.path)) {
         MergeFormat::Json => true,
@@ -808,8 +808,8 @@ impl fmt::Display for AmendProblem {
                 f,
                 "src/{path} of {provider} is already amended by {amender} {version}, a locked \
                  dependency, based on {provider} {base}; several amendments of one file are \
-                 combined for JSON, JSONC, and UTF-8 text files, but not for YAML, TOML, XML, or \
-                 INI files or a file that is not text, so it cannot be amended here"
+                 combined for JSON, JSONC, and UTF-8 text files, but not for XML files or a file \
+                 that is not text, so it cannot be amended here"
             ),
             Self::CopyExists { path } => write!(
                 f,

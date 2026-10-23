@@ -1,6 +1,6 @@
 # 0023: Amendments across provider versions: deriving against the base, applying to the version resolved, and rebasing in `unit update`
 
-- **Status:** Accepted, point 4 amended by #70
+- **Status:** Accepted, point 4 amended by #70, point 5 by #92
 - **Date:** 2026-10-22
 
 ## Context
@@ -53,8 +53,8 @@ amender. This ADR records how that is built.
    the composition. `unit update` rebases the same way (point 7), so the
    copy it writes composes to the same file. Conflict reports still name the
    two sides in the order of their identities.
-5. **Formats without a merge, and non-text.** YAML, TOML, XML, INI, and any
-   file or copy that is not UTF-8 text is applied across versions only when
+5. **Formats without a merge, and non-text.** XML, and any file or copy that
+   is not UTF-8 text (YAML, TOML, and INI too until #92 made them text) is applied across versions only when
    the provider's file is the same bytes at both versions (point 2).
    Otherwise the composition fails with `CrossVersion` (no merge).
 6. **Rendering (OC-52).** The base and the copy are rendered with one context:

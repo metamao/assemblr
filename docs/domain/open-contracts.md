@@ -381,14 +381,16 @@ How the status of a statement affects implementation:
   which is combined by line (owner direction after the reference scenario;
   **Provisional (D-20)**; see [text
   files](amendments-and-composition.md#text-files--approved-direction-details-provisional-d-20)),
-  while YAML, TOML, XML, INI, and files that are not text stay refused;
+  YAML, TOML, and INI included (owner decision on #92, replacing their
+  refusal), while XML and files that are not text stay refused
+  (**Provisional (D-37)**);
   cross-version application (OC-52) and update reconciliation (OC-53) deferred
   then, and decided on #59 (decision log D-22); deterministic results per
   engine version, semantic rather than byte-identical stability across
   releases (see [the merge
   engine](amendments-and-composition.md#the-merge-engine--approved)).
-- **Open detail:** Further format adapters (TOML, YAML), and whether Git takes
-  part in unit composition. The consumer side is **Provisional (D-13)**:
+- **Open detail:** Further format adapters (TOML, YAML, which are merged by
+  line until one exists), and whether Git takes part in unit composition. The consumer side is **Provisional (D-13)**:
   per-path three-way reconciliation against the last materialized composition,
   without Git; the value merge for a JSON or JSONC file both sides changed,
   onto the project's text, and a line-level merge for a UTF-8 text file

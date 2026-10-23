@@ -601,7 +601,9 @@ each as a mode and a content identity.
     composition's.
   - YAML, TOML, XML, and INI files, binary files, and files whose base is not
     stored are conflicts, as before: a line merge could not tell a key twice
-    from data.
+    from data. Unit composition merges YAML, TOML, and INI by line (owner
+    decision on #92), but a consumer's own edits to them stay a conflict
+    (**Provisional (D-37)**).
 - The executable bit is reconciled like content.
 - A managed path that is not a regular file is a conflict.
 

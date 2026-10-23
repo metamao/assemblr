@@ -485,8 +485,8 @@ pub enum CompositionError {
     },
     /// Several members amend the same file of the same provider, and the
     /// file is not one whose amendments can be combined (JSON, JSONC, and
-    /// UTF-8 text are; YAML, TOML, XML, and INI are not, and neither is a
-    /// file or copy that is not text). No amender takes precedence, so none
+    /// UTF-8 text, including YAML, TOML, and INI, are; XML is not, and
+    /// neither is a file or copy that is not text). No amender takes precedence, so none
     /// is applied.
     SeveralAmenders {
         /// The amended path.
@@ -686,8 +686,8 @@ impl fmt::Display for CompositionError {
                 write_list(f, amenders.iter().map(amender_name))?;
                 f.write_str(
                     "; several amendments of one file are combined for JSON, JSONC, and UTF-8 \
-                     text files, but not for YAML, TOML, XML, or INI files or a file that is not \
-                     text, and no amender takes precedence, so the file is not amended",
+                     text files, but not for XML files or a file that is not text, and no \
+                     amender takes precedence, so the file is not amended",
                 )
             }
             Self::AmendmentBase {
@@ -3012,7 +3012,7 @@ mod tests {
         let message = errors[0].to_string();
         for part in [
             "src/bin/run of @metamao/node 1.0.0 is amended by this unit, @metamao/amender 1.0.0",
-            "combined for JSON, JSONC, and UTF-8 text files, but not for YAML, TOML, XML, or INI",
+            "combined for JSON, JSONC, and UTF-8 text files, but not for XML files",
             "no amender takes precedence",
         ] {
             assert!(message.contains(part), "{message}");

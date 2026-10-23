@@ -478,6 +478,16 @@ fn a_consumer_composes_the_same_guidance_file_and_a_conflict_refuses_the_composi
 /// amenders `db` and `api`, each adding its own port line after the last
 /// line, and an unbuilt `@acme/app` depending on both.
 fn port_scenario(fixture: &Fixture, file: &str, base: &str, line: fn(&str) -> String) -> Repo {
+    amenders_scenario(fixture, file, base, |port| format!("{base}{}", line(port)))
+}
+
+/// As [`port_scenario`], with each amender's copy `copy(port)` whole.
+fn amenders_scenario(
+    fixture: &Fixture,
+    file: &str,
+    base: &str,
+    copy: impl Fn(&str) -> String,
+) -> Repo {
     let worker = fixture.repo("worker");
     worker.write(
         "manifest.jsonc",
@@ -497,10 +507,7 @@ fn port_scenario(fixture: &Fixture, file: &str, base: &str, line: fn(&str) -> St
                 &amending(&[file], "@acme/worker", "1.0.0"),
             ),
         );
-        unit.write(
-            &format!("amendments/{file}"),
-            &format!("{base}{}", line(port)),
-        );
+        unit.write(&format!("amendments/{file}"), &copy(port));
         unit.write(
             "assemblr-lock.json",
             &unit.lockfile_for(&worker, "@acme/worker", "1.0.0"),
@@ -545,22 +552,64 @@ fn insertions_at_one_position_are_kept_in_identity_order_and_reported() {
 }
 
 #[test]
-fn structured_formats_without_an_adapter_stay_refused() {
-    // Two port lines added to a YAML file would be a key twice: a line
-    // merge cannot tell, so none of the amendments applies.
+fn yaml_toml_and_ini_files_are_merged_by_line_like_text() {
+    // Two units each add a service to one `compose.yaml`: merged by line.
     let fixture = Fixture::new("yaml");
     let app = port_scenario(
         &fixture,
         "compose.yaml",
         "services:\n  web:\n    image: app\n",
-        |port| format!("    ports: [\"{port}\"]\n"),
+        |port| format!("  svc{port}:\n    ports: [\"{port}\"]\n"),
     );
+    succeeds(fixture.build(&app));
+    assert_eq!(
+        app.read("build/compose.yaml"),
+        "services:\n  web:\n    image: app\n  svc8080:\n    ports: [\"8080\"]\n  svc5432:\n    \
+         ports: [\"5432\"]\n"
+    );
+
+    // The limit: a clean line merge does not check what the lines mean, so
+    // two units that each add the same key leave it twice.
+    let fixture = Fixture::new("toml");
+    let app = port_scenario(&fixture, "config.toml", "[server]\n", |port| {
+        format!("port = {port}\n")
+    });
+    succeeds(fixture.build(&app));
+    assert_eq!(
+        app.read("build/config.toml"),
+        "[server]\nport = 8080\nport = 5432\n"
+    );
+
+    // Changes to the same line still conflict.
+    let fixture = Fixture::new("ini");
+    let app = port_scenario(&fixture, "app.ini", "[server]\nport = 80\n", |port| {
+        format!("timeout = {port}\n")
+    });
+    succeeds(fixture.build(&app));
+    let fixture = Fixture::new("ini-conflict");
+    let app = amenders_scenario(&fixture, "app.ini", "[server]\nport = 80\n", |port| {
+        format!("[server]\nport = {port}\n")
+    });
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(
+        err.contains("change the same lines of the provider's file differently"),
+        "{err}"
+    );
+    assert!(!app.path.join("build").exists());
+}
+
+#[test]
+fn xml_files_stay_refused_with_several_amenders() {
+    let fixture = Fixture::new("xml");
+    let app = port_scenario(&fixture, "pom.xml", "<project>\n</project>\n", |port| {
+        format!("<port>{port}</port>\n")
+    });
     let err = stderr(&fails(fixture.build(&app)));
     assert!(
         err.contains(
-            "src/compose.yaml of @acme/worker 1.0.0 is amended by @acme/api 1.0.0, @acme/db \
-             1.0.0; several amendments of one file are combined for JSON, JSONC, and UTF-8 text \
-             files, but not for YAML, TOML, XML, or INI files"
+            "src/pom.xml of @acme/worker 1.0.0 is amended by @acme/api 1.0.0, @acme/db 1.0.0; \
+             several amendments of one file are combined for JSON, JSONC, and UTF-8 text files, \
+             but not for XML files"
         ),
         "{err}"
     );
@@ -569,39 +618,54 @@ fn structured_formats_without_an_adapter_stay_refused() {
 }
 
 #[test]
-fn unit_amend_creates_a_copy_of_a_text_file_but_not_of_a_structured_one_another_unit_amends() {
-    let fixture = Fixture::new("amend-refusal");
-    let _ = port_scenario(
-        &fixture,
-        "compose.yaml",
-        "services:\n  web:\n    image: app\n",
-        |port| format!("    ports: [\"{port}\"]\n"),
-    );
-    let solo = fixture.repo("solo");
-    solo.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/solo",
-            "0.1.0",
-            &[("@acme/db", "^1"), ("@acme/worker", "=1.0.0")],
-            "",
+fn unit_amend_creates_a_copy_of_a_yaml_file_but_not_of_an_xml_one_another_unit_amends() {
+    for (name, file, base) in [
+        (
+            "amend-yaml",
+            "compose.yaml",
+            "services:\n  web:\n    image: app\n",
         ),
-    );
-    solo.write("src/solo.txt", "solo");
-    succeeds(fixture.build(&solo));
-    let err = stderr(&fails(
-        fixture.assemblr(&solo.path, &["unit", "amend", "compose.yaml"]),
-    ));
-    assert!(
-        err.contains(
-            "src/compose.yaml of @acme/worker is already amended by @acme/db 1.0.0, a locked \
-             dependency, based on @acme/worker 1.0.0; several amendments of one file are \
-             combined for JSON, JSONC, and UTF-8 text files, but not for YAML, TOML, XML, or INI \
-             files or a file that is not text, so it cannot be amended here"
-        ),
-        "{err}"
-    );
-    assert!(!solo.path.join("amendments").exists());
+        ("amend-xml", "pom.xml", "<project>\n</project>\n"),
+    ] {
+        let fixture = Fixture::new(name);
+        let _ = port_scenario(&fixture, file, base, |port| format!("# {port}\n"));
+        let solo = fixture.repo("solo");
+        solo.write(
+            "manifest.jsonc",
+            &manifest(
+                "@acme/solo",
+                "0.1.0",
+                &[("@acme/db", "^1"), ("@acme/worker", "=1.0.0")],
+                "",
+            ),
+        );
+        solo.write("src/solo.txt", "solo");
+        succeeds(fixture.build(&solo));
+        let output = fixture.assemblr(&solo.path, &["unit", "amend", file]);
+        if file.ends_with(".yaml") {
+            let output = succeeds(output);
+            assert!(
+                stdout(&output).contains(
+                    "The file is also amended by @acme/db 1.0.0; the build combines the copies"
+                ),
+                "{}",
+                stdout(&output)
+            );
+            assert_eq!(solo.read(&format!("amendments/{file}")), base);
+        } else {
+            let err = stderr(&fails(output));
+            assert!(
+                err.contains(&format!(
+                    "src/{file} of @acme/worker is already amended by @acme/db 1.0.0, a locked \
+                     dependency, based on @acme/worker 1.0.0; several amendments of one file are \
+                     combined for JSON, JSONC, and UTF-8 text files, but not for XML files or a \
+                     file that is not text, so it cannot be amended here"
+                )),
+                "{err}"
+            );
+            assert!(!solo.path.join("amendments").exists());
+        }
+    }
 }
 
 #[test]

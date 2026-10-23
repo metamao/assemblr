@@ -1,6 +1,6 @@
 # 0021: The line-level merge of text: the domain engine, which files it covers, and what it reports
 
-- **Status:** Accepted
+- **Status:** Accepted, point 5 amended by #92
 - **Date:** 2026-10-21
 
 ## Context
@@ -46,9 +46,13 @@ weaker provenance. The product decisions are in the autonomous decision log
    only difference, and it is a parameter of the engine, not two engines.
 5. **Which files.** The format is the delivered path's extension (ADR 0015
    point 6 recognizes it the same way): `.json` and `.jsonc` keep the value
-   merge; `.yaml`, `.yml`, `.toml`, `.xml`, `.ini`, and JSON in another case
-   are structured formats whose lines a merge cannot tell apart from data,
-   such as a key twice, so they stay refused; every other path is text. A
+   merge; `.xml` and JSON in another case are structured formats whose lines
+   a merge cannot tell apart from data, so they stay refused; every other path
+   is text. (Amended by #92: `.yaml`, `.yml`, `.toml`, and `.ini` were refused
+   too, for the risk of a key twice; the owner decided to merge them by line
+   and document that limit, since Compose and CI files are YAML that several
+   units are likely to touch. A consumer's reconciliation keeps refusing
+   them, D-37.) A
    file or a copy that is not UTF-8 without a NUL is refused too. The
    composer checks this on the contents it has, so the refusal is a
    composition error before any rendering, and `unit amend` applies the same
