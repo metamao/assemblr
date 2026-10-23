@@ -14,8 +14,9 @@
 //! checks, and a summary go to `target/agent-bench/<run id>/`.
 //!
 //! A condition is what the agent knows about Assemblr beforehand: `none`,
-//! `hint` (the prompt says that Assemblr is installed), or `pointer` (the
-//! default: the user-level `CLAUDE.md` says to run `assemblr guide`).
+//! `hint` (the prompt says that Assemblr is installed), `pointer` (the
+//! user-level `CLAUDE.md` says to run `assemblr guide`), or `skill` (the
+//! default: `assemblr skill install claude` installed the skill).
 //!
 //! It costs money and needs Claude Code on `PATH`, so it never runs in CI.
 //! Claude Code gets no access to the caller's home, so it authenticates with
@@ -38,7 +39,7 @@ use machine::{AUTHENTICATION, Root, enclosing_repository};
 use scenarios::{Report, SCENARIOS, Scenario};
 use transcript::Metrics;
 
-const USAGE: &str = "usage: cargo agent-bench [--condition <none|hint|pointer>]... [--runs <n>] \
+const USAGE: &str = "usage: cargo agent-bench [--condition <none|hint|pointer|skill>]... [--runs <n>] \
                      [--jobs <n>] [--model <model>] [--budget <usd>] [--keep] [<scenario>...]\n       \
                      cargo agent-bench --list";
 
@@ -83,6 +84,7 @@ enum Condition {
     None,
     Hint,
     Pointer,
+    Skill,
 }
 
 impl Condition {
@@ -91,8 +93,9 @@ impl Condition {
             "none" => Ok(Self::None),
             "hint" => Ok(Self::Hint),
             "pointer" => Ok(Self::Pointer),
+            "skill" => Ok(Self::Skill),
             _ => Err(format!(
-                "unknown condition {name:?}: use none, hint, or pointer"
+                "unknown condition {name:?}: use none, hint, pointer, or skill"
             )),
         }
     }
@@ -102,6 +105,7 @@ impl Condition {
             Self::None => "none",
             Self::Hint => "hint",
             Self::Pointer => "pointer",
+            Self::Skill => "skill",
         }
     }
 }
@@ -179,7 +183,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
         new
     });
     if options.conditions.is_empty() {
-        options.conditions.push(Condition::Pointer);
+        options.conditions.push(Condition::Skill);
     }
     if options.scenarios.is_empty() {
         options.scenarios = SCENARIOS.iter().collect();
@@ -379,6 +383,11 @@ fn attempt(
         fs::create_dir_all(&dir)
             .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
         fs::write(dir.join("CLAUDE.md"), POINTER).map_err(|error| error.to_string())?;
+    }
+    if job.condition == Condition::Skill {
+        agent
+            .assemblr(&agent.work(), &["skill", "install", "claude"])
+            .map_err(|error| format!("setup failed: {error}"))?;
     }
     let mut prompt = job
         .scenario

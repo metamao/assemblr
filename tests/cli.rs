@@ -119,5 +119,7 @@ fn guide_prints_the_agent_guide_and_help_points_to_it() {
         assert!(guide.contains(section), "{guide}");
     }
     assert!(stderr(&output).is_empty());
-    assert!(stdout(&assemblr(&["--help"])).contains("`assemblr guide`"));
+    let help = stdout(&assemblr(&["--help"]));
+    assert!(help.contains("assemblr guide "), "{help}");
+    assert!(help.contains("assemblr skill install claude "), "{help}");
 }

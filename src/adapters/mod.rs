@@ -19,6 +19,7 @@ mod project;
 mod registry;
 mod render;
 mod schema;
+mod skill;
 
 pub use build::{
     AddFailure, AddProblem, AddedParameter, AmendFailure, AmendProblem, AmendState, Amended,
@@ -65,3 +66,6 @@ pub use render::{
     Context as RenderContext, RenderError, RenderErrorKind, parameters_referenced, render,
 };
 pub use schema::{MANIFEST_SCHEMA, MANIFEST_SCHEMA_REFERENCE, manifest_schema};
+pub use skill::{
+    SkillFailure, SkillInstalled, SkillOutcome, claude_skill_path, install_claude_skill,
+};

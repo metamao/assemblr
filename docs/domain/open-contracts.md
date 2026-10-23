@@ -236,7 +236,8 @@ How the status of a statement affects implementation:
   told not to and never push), discovery (`search`, `info`, with a
   machine-readable form), the agent guide (`guide`, whose name stays stable in
   every version; see [agent
-  guide](registries-and-discovery.md#agent-guide--approved)), and the
+  guide](registries-and-discovery.md#agent-guide--approved)), the agent's
+  skill (`skill install <agent>`, for `claude` only), and the
   consumer operations (`init`, `add`, `remove`, `compose`, and continuing or
   aborting a pending composition) and their intent. `unit init` establishes the unit's Git repository.
   `catalog add` takes a unit's repository reference and reads its identity
