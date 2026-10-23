@@ -33,8 +33,8 @@ use crate::adapters::registry::{
     observe_tags as observe,
 };
 use crate::domain::{
-    Excluded, ObjectId, ObservedTag, ObservedVersion, Provenance, RegistryError, SourceReference,
-    UnitIdentity, Version,
+    CatalogIdentity, Excluded, ObjectId, ObservedTag, ObservedVersion, Provenance, RegistryError,
+    SourceReference, UnitIdentity, Version,
 };
 
 /// Publishes the version the committed manifest of the unit whose
@@ -277,6 +277,10 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
             Ok(published)
         }
         Ok(Indexed::NotRegistered) => Ok(published),
+        Ok(Indexed::Managed { catalogs }) => {
+            published.index = IndexOutcome::Managed { catalogs };
+            Ok(published)
+        }
         Err(error) => Err(PublishFailure::IndexNotUpdated {
             published: Box::new(published),
             error,
@@ -366,6 +370,12 @@ pub enum IndexOutcome {
     },
     /// The registry does not register the unit.
     NotRegistered,
+    /// Only catalogs manage the unit, so the version becomes discoverable
+    /// when one of them lists it and is synchronized.
+    Managed {
+        /// The catalogs that declare the unit.
+        catalogs: Vec<CatalogIdentity>,
+    },
 }
 
 /// Why a publication failed.

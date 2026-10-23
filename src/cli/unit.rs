@@ -672,6 +672,16 @@ fn report_published(published: &Published) {
                 published.unit()
             );
         }
+        IndexOutcome::Managed { catalogs } => {
+            let catalogs: Vec<String> = catalogs.iter().map(ToString::to_string).collect();
+            println!(
+                "The local registry has {} through {}, whose index lists its versions, so the \
+                 version becomes discoverable once `assemblr catalog refresh` adds it there, \
+                 the catalog is pushed, and `assemblr registry sync` reads it.",
+                published.unit(),
+                catalogs.join(", ")
+            );
+        }
         IndexOutcome::NotRegistered => {
             println!(
                 "The local registry does not register {}, so the version is not discoverable \

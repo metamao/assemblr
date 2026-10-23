@@ -82,6 +82,24 @@ pub(crate) fn catalog_reference(
     }
 }
 
+/// The repository the registered catalog `catalog` declares as `declared`:
+/// relative to the catalog's directory when the catalog is local, and a
+/// remote reference when it is remote.
+pub(crate) fn declared_reference(
+    declared: &str,
+    catalog: &SourceReference,
+) -> Result<SourceReference, ReferenceError> {
+    if is_remote_reference(catalog) {
+        if is_remote(declared) {
+            remote_reference(declared)
+        } else {
+            Err(ReferenceError::LocalInRemote(declared.to_owned()))
+        }
+    } else {
+        catalog_reference(declared, Path::new(catalog.as_str()))
+    }
+}
+
 /// Whether a stored reference names a remote repository.
 pub(crate) fn is_remote_reference(reference: &SourceReference) -> bool {
     is_remote(reference.as_str())
@@ -165,6 +183,9 @@ pub enum ReferenceError {
     Transport(String),
     /// The remote reference carries user information, such as a token.
     Credentials(String),
+    /// A remote catalog declares a local path, which has no meaning on
+    /// another machine.
+    LocalInRemote(String),
     /// The working directory could not be read to make the path absolute.
     WorkingDirectory(io::Error),
     /// The absolute path is not UTF-8.
@@ -195,6 +216,11 @@ impl fmt::Display for ReferenceError {
                 f,
                 "{reference} contains credentials, which would be stored in the registry; \
                  remove them and let Git's credential helper or SSH supply them"
+            ),
+            Self::LocalInRemote(reference) => write!(
+                f,
+                "{reference} is a local path, which a remote catalog cannot declare; use an \
+                 `https://` or SSH URL"
             ),
             Self::WorkingDirectory(error) => {
                 write!(f, "could not read the working directory: {error}")

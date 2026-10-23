@@ -21,12 +21,14 @@ use super::git::{
     GitError, GitRepository, HeadManifestError, MANIFEST_LIMIT, ReadFileError, init_repository,
 };
 use super::jsonc::{self, Json, SyntaxError};
+use super::manifest::read_manifest;
 use super::registry::{
-    Problem, ReferenceError, Registry, TagProblem, catalog_reference, observe_tags,
+    Problem, ReferenceError, Registry, TagProblem, catalog_reference, declared_reference,
+    observe_tags,
 };
 use crate::domain::{
-    CatalogIdentity, Excluded, IdentityError, Provenance, RegistryIndex, SourceReference,
-    UnitIdentity, Version, declared_identity,
+    CatalogIdentity, Excluded, IdentityError, Manifest, ObjectId, Provenance, RegisteredCatalog,
+    RegistryIndex, SourceReference, UnitIdentity, Version, declared_identity,
 };
 
 /// The catalog's declaration, at its top level.
@@ -562,6 +564,337 @@ impl fmt::Display for RefreshProblem {
         }
     }
 }
+
+/// The largest catalog index read from a catalog's history, in bytes.
+const INDEX_SIZE_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// Whether the repository's `HEAD` is a catalog: its top level has a
+/// `registry.jsonc` and no `manifest.jsonc`. A repository with no commit is
+/// not one. One with both files is refused, since it is not clear which it
+/// is.
+pub(crate) fn is_catalog(repository: &GitRepository) -> Result<bool, CatalogProblem> {
+    let Some(head) = repository
+        .head_commit()
+        .map_err(CatalogProblem::Unreadable)?
+    else {
+        return Ok(false);
+    };
+    let has = |name: &str| match repository.read_top_level_file(&head, name, 0) {
+        Ok(None) => Ok(false),
+        Ok(Some(_)) | Err(ReadFileError::TooLarge { .. } | ReadFileError::NotAFile { .. }) => {
+            Ok(true)
+        }
+        Err(ReadFileError::Git(error)) => Err(CatalogProblem::Unreadable(error)),
+        Err(error) => Err(CatalogProblem::Unreadable(GitError::not_a_repository(
+            repository.path().to_owned(),
+            error.to_string(),
+        ))),
+    };
+    match (has(CATALOG_MANIFEST)?, has("manifest.jsonc")?) {
+        (true, true) => Err(CatalogProblem::Ambiguous),
+        (catalog, _) => Ok(catalog),
+    }
+}
+
+/// A catalog as committed at `HEAD`: its declaration and its generated
+/// index, checked against each other.
+#[derive(Debug, Clone)]
+pub(crate) struct PublishedCatalog {
+    identity: CatalogIdentity,
+    commit: ObjectId,
+    units: BTreeMap<UnitIdentity, ListedUnit>,
+}
+
+impl PublishedCatalog {
+    pub(crate) fn identity(&self) -> &CatalogIdentity {
+        &self.identity
+    }
+
+    pub(crate) fn units(&self) -> &BTreeMap<UnitIdentity, ListedUnit> {
+        &self.units
+    }
+
+    /// The catalog as the registry records it, registered from `source`.
+    pub(crate) fn registered(&self, source: SourceReference) -> RegisteredCatalog {
+        RegisteredCatalog::new(
+            source,
+            self.commit.clone(),
+            self.units
+                .iter()
+                .map(|(identity, unit)| (identity.clone(), unit.source.clone()))
+                .collect(),
+        )
+    }
+}
+
+/// A unit a published catalog declares: its repository, resolved, and the
+/// versions the index lists, each with its provenance and manifest.
+#[derive(Debug, Clone)]
+pub(crate) struct ListedUnit {
+    source: SourceReference,
+    versions: BTreeMap<Version, (Provenance, Manifest)>,
+}
+
+/// The versions a catalog index lists for a unit, each with its provenance
+/// and manifest, as read.
+type ListedVersions = BTreeMap<Version, (Provenance, Value)>;
+
+impl ListedUnit {
+    pub(crate) fn source(&self) -> &SourceReference {
+        &self.source
+    }
+
+    /// The listed versions and their provenance.
+    pub(crate) fn provenances(&self) -> BTreeMap<Version, Provenance> {
+        self.versions
+            .iter()
+            .map(|(version, (provenance, _))| (version.clone(), provenance.clone()))
+            .collect()
+    }
+
+    /// The manifest the index lists for `version`.
+    pub(crate) fn manifest(&self, version: &Version) -> Option<&Manifest> {
+        self.versions.get(version).map(|(_, manifest)| manifest)
+    }
+}
+
+/// Reads the catalog committed at `HEAD` of `repository`, which is
+/// registered, or being registered, from `source`.
+///
+/// Both `registry.jsonc` and `registry-index.json` are read from the
+/// commit, never from a working tree. The index must be the one
+/// `catalog refresh` writes for that declaration: the same catalog, the
+/// same units, and the same references, and every listed manifest a valid
+/// one of the unit and version it is listed for. The units' repositories
+/// are not read.
+pub(crate) fn read_published_catalog(
+    repository: &GitRepository,
+    source: &SourceReference,
+) -> Result<PublishedCatalog, CatalogProblem> {
+    let commit = repository
+        .head_commit()
+        .map_err(CatalogProblem::Unreadable)?
+        .ok_or(CatalogProblem::NoCommit)?;
+    read_catalog_at(repository, source, commit)
+}
+
+/// Reads the catalog at `commit`, as [`read_published_catalog`] does.
+pub(crate) fn read_catalog_at(
+    repository: &GitRepository,
+    source: &SourceReference,
+    commit: ObjectId,
+) -> Result<PublishedCatalog, CatalogProblem> {
+    let read = |name: &str, limit| -> Result<Option<String>, CatalogProblem> {
+        let unreadable = |detail: String| {
+            CatalogProblem::Unreadable(GitError::not_a_repository(
+                repository.path().to_owned(),
+                format!("its {name} cannot be read: {detail}"),
+            ))
+        };
+        match repository.read_top_level_file(&commit, name, limit) {
+            Ok(Some(bytes)) => String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|error| unreadable(error.to_string())),
+            Ok(None) => Ok(None),
+            Err(ReadFileError::Git(error)) => Err(CatalogProblem::Unreadable(error)),
+            Err(error) => Err(unreadable(error.to_string())),
+        }
+    };
+    let declaration =
+        read(CATALOG_MANIFEST, MANIFEST_SIZE_LIMIT)?.ok_or(CatalogProblem::NoCommit)?;
+    let manifest = read_catalog_manifest(&declaration).map_err(CatalogProblem::Declaration)?;
+    let index = read(CATALOG_INDEX, INDEX_SIZE_LIMIT)?.ok_or(CatalogProblem::NoIndex)?;
+    let index: Value = serde_json::from_str(&index)
+        .map_err(|error| CatalogProblem::InvalidIndex(error.to_string()))?;
+    let listed = parse_index(&index).map_err(CatalogProblem::InvalidIndex)?;
+    let stale = |detail: String| CatalogProblem::StaleIndex(detail);
+    if listed.name != manifest.name().to_string() {
+        return Err(stale(format!(
+            "it is the index of {}, not of {}",
+            listed.name,
+            manifest.name()
+        )));
+    }
+    let mut units = BTreeMap::new();
+    for (identity, declared) in manifest.units() {
+        let Some((indexed, versions)) = listed.units.get(identity) else {
+            return Err(stale(format!("it does not list {identity}")));
+        };
+        if indexed != declared {
+            return Err(stale(format!(
+                "it lists {identity} from {indexed}, but registry.jsonc declares {declared}"
+            )));
+        }
+        let reference =
+            declared_reference(declared, source).map_err(|error| CatalogProblem::Reference {
+                unit: identity.clone(),
+                error,
+            })?;
+        let mut checked = BTreeMap::new();
+        for (version, (provenance, listed)) in versions {
+            let invalid = |detail: String| {
+                CatalogProblem::InvalidIndex(format!(
+                    "the manifest it lists for {identity} {version} {detail}"
+                ))
+            };
+            let manifest = read_manifest(&listed.to_string())
+                .map_err(|error| invalid(format!("is invalid: {error}")))?;
+            if manifest.name() != identity {
+                return Err(invalid(format!("declares {}", manifest.name())));
+            }
+            if manifest.version() != version {
+                return Err(invalid(format!("declares version {}", manifest.version())));
+            }
+            checked.insert(version.clone(), (provenance.clone(), manifest));
+        }
+        units.insert(
+            identity.clone(),
+            ListedUnit {
+                source: reference,
+                versions: checked,
+            },
+        );
+    }
+    if let Some(extra) = listed
+        .units
+        .keys()
+        .find(|identity| !manifest.units().contains_key(*identity))
+    {
+        return Err(stale(format!(
+            "it lists {extra}, which registry.jsonc does not declare"
+        )));
+    }
+    Ok(PublishedCatalog {
+        identity: manifest.name().clone(),
+        commit,
+        units,
+    })
+}
+
+/// A catalog index as read, before it is checked against the declaration.
+struct ListedIndex {
+    name: String,
+    units: BTreeMap<UnitIdentity, (String, ListedVersions)>,
+}
+
+/// Reads a catalog index, or describes what is wrong with it.
+fn parse_index(value: &Value) -> Result<ListedIndex, String> {
+    let object = |value: &'_ Value, context: &str| -> Result<Map<String, Value>, String> {
+        value
+            .as_object()
+            .cloned()
+            .ok_or_else(|| format!("{context} is not a JSON object"))
+    };
+    let root = object(value, "the index")?;
+    match root.get("format").and_then(Value::as_u64) {
+        Some(INDEX_FORMAT) => {}
+        Some(other) => {
+            return Err(format!(
+                "it has format {other}, which this version of Assemblr does not read"
+            ));
+        }
+        None => return Err("it has no format number".to_owned()),
+    }
+    let name = root
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or("it has no `name`")?
+        .to_owned();
+    let mut units = BTreeMap::new();
+    for (key, unit) in object(root.get("units").ok_or("it has no `units`")?, "`units`")? {
+        let identity = UnitIdentity::parse(&key).map_err(|error| error.to_string())?;
+        let context = format!("{identity}");
+        let unit = object(&unit, &context)?;
+        let source = unit
+            .get("source")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{context} has no `source`"))?
+            .to_owned();
+        let mut versions = BTreeMap::new();
+        let listed = unit
+            .get("versions")
+            .ok_or_else(|| format!("{context} has no `versions`"))?;
+        for (key, entry) in object(listed, &context)? {
+            let version = Version::parse(&key).map_err(|error| error.to_string())?;
+            let context = format!("{identity} {version}");
+            let entry = object(&entry, &context)?;
+            let id = |name: &str| {
+                entry
+                    .get(name)
+                    .and_then(Value::as_str)
+                    .and_then(ObjectId::parse)
+                    .ok_or_else(|| format!("{context} has an invalid `{name}`"))
+            };
+            let provenance = Provenance::new(id("commit")?, id("tree")?);
+            let manifest = entry
+                .get("manifest")
+                .filter(|manifest| manifest.is_object())
+                .ok_or_else(|| format!("{context} has no `manifest` object"))?
+                .clone();
+            versions.insert(version, (provenance, manifest));
+        }
+        units.insert(identity, (source, versions));
+    }
+    Ok(ListedIndex { name, units })
+}
+
+/// Why a catalog cannot be registered or synchronized.
+#[derive(Debug)]
+pub enum CatalogProblem {
+    /// The repository could not be read.
+    Unreadable(GitError),
+    /// The repository has both a `registry.jsonc` and a `manifest.jsonc`.
+    Ambiguous,
+    /// `HEAD` has no commit with a `registry.jsonc`.
+    NoCommit,
+    /// The committed `registry.jsonc` is invalid.
+    Declaration(CatalogManifestError),
+    /// No `registry-index.json` is committed.
+    NoIndex,
+    /// The committed index cannot be read as one.
+    InvalidIndex(String),
+    /// The committed index is not the one for the committed declaration.
+    StaleIndex(String),
+    /// A declared reference cannot be a repository reference.
+    Reference {
+        /// The unit.
+        unit: UnitIdentity,
+        /// Why.
+        error: ReferenceError,
+    },
+}
+
+impl CatalogProblem {
+    /// Whether running `catalog refresh` in the catalog, and committing and
+    /// pushing the result, is what fixes it.
+    pub fn needs_refresh(&self) -> bool {
+        matches!(self, Self::NoIndex | Self::StaleIndex(_))
+    }
+}
+
+impl fmt::Display for CatalogProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unreadable(error) => error.fmt(f),
+            Self::Ambiguous => write!(
+                f,
+                "it has both a {CATALOG_MANIFEST} and a manifest.jsonc, so it is not clear \
+                 whether it is a catalog or a unit"
+            ),
+            Self::NoCommit => write!(f, "it has no committed {CATALOG_MANIFEST}"),
+            Self::Declaration(error) => write!(f, "its {CATALOG_MANIFEST} is invalid: {error}"),
+            Self::NoIndex => write!(f, "it has no committed {CATALOG_INDEX}"),
+            Self::InvalidIndex(detail) => write!(f, "its {CATALOG_INDEX} is invalid: {detail}"),
+            Self::StaleIndex(detail) => write!(
+                f,
+                "its {CATALOG_INDEX} does not match its {CATALOG_MANIFEST}: {detail}"
+            ),
+            Self::Reference { unit, error } => write!(f, "{unit}: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for CatalogProblem {}
 
 #[cfg(test)]
 mod tests {

@@ -338,7 +338,9 @@ How the status of a statement affects implementation:
   (**Provisional (D-32)**, under OC-29).
   `registry create <catalog> [<directory>]` creates a catalog's repository
   and `registry.jsonc`, and `catalog refresh` regenerates its index
-  (**Provisional (D-36)**).
+  (**Provisional (D-36)**). `registry add` registers a catalog as well,
+  `registry sync` synchronizes catalogs, and `registry remove --catalog
+  <identity>` removes one (**Provisional (D-39)**).
 - **Open detail:** Exact grammar and semantics of every other command, flag,
   and argument, including: how `registry info` relates to the top-level
   `info`, and whether unit inspection is spelled `info` or `unit info`; what
@@ -593,7 +595,10 @@ How the status of a statement affects implementation:
   treated. How identical references are recognized when relative references
   come from different catalogs. Implemented provisionally for catalog
   refresh (D-36): only `name`, `units`, and `$schema` are accepted, and
-  refresh reads the working tree.
+  refresh reads the working tree. Implemented provisionally for
+  registration (D-39): a local catalog is read as committed at `HEAD`, a
+  remote catalog may declare only remote references, and references are
+  compared after a local catalog's relative paths are resolved.
 - **Origin:** Registry
 - **Context:** [catalogs](registries-and-discovery.md#catalogs--approved),
   [synchronization](registries-and-discovery.md#synchronization--approved)
@@ -627,7 +632,9 @@ How the status of a statement affects implementation:
   metadata indexes. Whether synchronization can target individual sources. How
   the index update of `unit publish`, and a unit registered both individually
   and through a catalog, interact with versions the catalog's index does not
-  yet list.
+  yet list. Implemented provisionally (D-39): every catalog problem is
+  source-level; `unit publish` indexes nothing for a unit only catalogs
+  manage; a unit registered both ways is indexed with every valid tag.
 - **Origin:** Registry
 - **Context:** [registration](registries-and-discovery.md#registration--approved),
   [synchronization](registries-and-discovery.md#synchronization--approved)
@@ -743,7 +750,8 @@ How the status of a statement affects implementation:
 - **Open detail:** The index's file name, serialization, storage location, and
   hash representation; whether a catalog without a published index can be
   registered; how refresh reports partial failures. Implemented
-  provisionally (D-36, [ADR 0030](../adr/0030-catalog-index.md)):
+  provisionally (D-36, D-39, [ADR 0030](../adr/0030-catalog-index.md)): a
+  catalog with no committed index cannot be registered;
   `registry-index.json` at the catalog's root, JSON with sorted keys, Git
   commit and tree ids, and an invalid version excluded with a warning while
   any source-level failure rejects the whole refresh.
@@ -760,7 +768,11 @@ How the status of a statement affects implementation:
   Neither unverified trust nor full source downloads on every ordinary
   registry operation is acceptable.
 - **Open detail:** The verification and caching strategy that achieves these
-  guarantees efficiently.
+  guarantees efficiently. Implemented provisionally (D-39, [ADR
+  0031](../adr/0031-catalog-registration.md)): registration checks each
+  listed manifest's structure, identity, and version; the commit, tree, and
+  manifest are checked against the unit's repository when its content is
+  first retrieved, and every build checks them again.
 - **Origin:** Owner
 - **Context:** [metadata ingestion and
   trust](registries-and-discovery.md#metadata-ingestion-and-trust--approved)
@@ -777,7 +789,15 @@ How the status of a statement affects implementation:
   mechanisms. **Provisional (D-35)** for remote unit
   repositories: `registry add` and `registry sync` fetch every published tag
   and `HEAD` into a full bare copy, with no partial fetch, and every other
-  operation reads the copy and never fetches.
+  operation reads the copy and never fetches. **Decided by the owner
+  (2026-10-23, in session, #95)** for catalogs: registering or synchronizing
+  a catalog reads only its metadata, and a unit's content is fetched when
+  composition first needs it, so `add` and `compose` may fetch.
+  **Provisional (D-39)**: any operation that reads a version the copy lacks
+  fetches it, including `update` and the dependencies read by `unit build`,
+  `unit check`, `unit update`, and `unit amend`; fetching the content of an indexed commit is not read as
+  fetching remote changes, since it cannot change the index or a
+  resolution.
 - **Origin:** Consumer
 - **Context:** [metadata and
   content](registries-and-discovery.md#metadata-and-content--approved)

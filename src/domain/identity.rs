@@ -82,6 +82,13 @@ impl CatalogIdentity {
     }
 }
 
+impl From<UnitIdentity> for CatalogIdentity {
+    /// The catalog of the same name: the syntax is the same.
+    fn from(identity: UnitIdentity) -> Self {
+        Self(identity)
+    }
+}
+
 impl fmt::Display for CatalogIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
