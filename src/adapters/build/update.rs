@@ -396,23 +396,23 @@ fn update_with(
     // directories on the way are real directories, created here when they
     // do not exist and removed again if the update is not written.
     let mut created = Vec::new();
+    match amend::real_directories_of(root, updated.pending.iter().map(|pending| &pending.source)) {
+        Ok(missing) => created = missing,
+        Err(amend::DirectoryProblem::NotADirectory(path)) => {
+            problems.push(UpdateProblem::Build(BuildProblem::NotADirectory { path }));
+        }
+        Err(amend::DirectoryProblem::Unreadable(path, error)) => {
+            problems.push(UpdateProblem::Build(BuildProblem::Unreadable {
+                path,
+                error,
+            }));
+        }
+    }
     for pending in &updated.pending {
         let target = copy_target(root, &pending.source);
         if fs::symlink_metadata(&target).is_ok() {
             problems.push(UpdateProblem::StagingOccupied { path: target });
             continue;
-        }
-        match amend::real_directories(root, &pending.source) {
-            Ok(missing) => created.extend(missing),
-            Err(amend::DirectoryProblem::NotADirectory(path)) => {
-                problems.push(UpdateProblem::Build(BuildProblem::NotADirectory { path }));
-            }
-            Err(amend::DirectoryProblem::Unreadable(path, error)) => {
-                problems.push(UpdateProblem::Build(BuildProblem::Unreadable {
-                    path,
-                    error,
-                }));
-            }
         }
         copy_plans.push((
             pending.source.clone(),
@@ -584,7 +584,11 @@ fn reconcile(
             }
             continue;
         };
-        let format = MergeFormat::of_path(&delivered);
+        // A template's sources are rebased by line, whatever its format.
+        let format = match MergeFormat::of_path(&delivered) {
+            MergeFormat::Json if delivered != *path => MergeFormat::Text,
+            format => format,
+        };
         let texts = (
             std::str::from_utf8(&old_base),
             std::str::from_utf8(copy.contents()),

@@ -313,14 +313,18 @@ fn write_pending(
         if let Some(next) = declared.with_amendment(pending.source.clone(), declaration) {
             declared = next;
         }
-        match amend::real_directories(root, &pending.source) {
-            Ok(missing) => placements.push((pending, missing)),
-            Err(amend::DirectoryProblem::NotADirectory(path)) => {
-                problems.push(BuildProblem::NotADirectory { path });
-            }
-            Err(amend::DirectoryProblem::Unreadable(path, error)) => {
-                problems.push(BuildProblem::Unreadable { path, error });
-            }
+        placements.push(pending);
+    }
+    // The directories the copies need, each once: two copies can share a
+    // new one.
+    let mut missing = Vec::new();
+    match amend::real_directories_of(root, placements.iter().map(|pending| &pending.source)) {
+        Ok(directories) => missing = directories,
+        Err(amend::DirectoryProblem::NotADirectory(path)) => {
+            problems.push(BuildProblem::NotADirectory { path });
+        }
+        Err(amend::DirectoryProblem::Unreadable(path, error)) => {
+            problems.push(BuildProblem::Unreadable { path, error });
         }
     }
     if !problems.is_empty() {
@@ -336,14 +340,26 @@ fn write_pending(
             };
         }
     };
+    for directory in &missing {
+        if let Err(error) = fs::create_dir(directory) {
+            amend::remove_directories(&missing);
+            return BuildFailure::PendingWrite {
+                path: directory.clone(),
+                error,
+                written: Vec::new(),
+            };
+        }
+    }
     let mut written = Vec::new();
-    for (pending, missing) in &placements {
+    for pending in &placements {
         let copy_path = root
             .join(super::git::UnitDirectory::Amendments.as_str())
             .join(pending.source.as_str());
-        if let Err(error) = amend::write_copy(&copy_path, &pending.copy, missing) {
+        if let Err(error) = amend::write_copy(&copy_path, &pending.copy, &[]) {
             let _ = fs::remove_file(&copy_path);
-            amend::remove_directories(missing);
+            if written.is_empty() {
+                amend::remove_directories(&missing);
+            }
             return BuildFailure::PendingWrite {
                 path: copy_path,
                 error,

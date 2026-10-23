@@ -68,7 +68,8 @@ of the first amendments increment.
   resolves the conflict by replacing the marker in its copy. The marker
   shapes are **Provisional (D-41)**: for a JSON or JSONC file, the contested
   value becomes an object whose only member, `"<<<<<<< conflict"`, names each
-  side's value by its amender; for a text file, the contested lines are
+  side's value by its amender, `null` for a side that removes the value;
+  for a text file, the contested lines are
   written between `<<<<<<< <amender>`, `||||||| base`, `=======`, and
   `>>>>>>> <amender>` lines, as diff3 conflicts are shown, with each
   separator naming its side when more than two sides changed the lines.

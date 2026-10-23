@@ -187,12 +187,12 @@ fn json_set(
     }
     // One amender whose base is the composition below it: its copy takes
     // the file's place, byte for byte, as a single copy always did.
-    if let [index] = *maximal.iter().copied().collect::<Vec<_>>().as_slice()
-        && bases[&index] == common
-    {
-        let layer = &layers[index];
-        let value = read(Some(layer.amender), layer.copy)?;
-        return Ok((layer.copy.to_owned(), value, marked));
+    if let [index] = *maximal.iter().copied().collect::<Vec<_>>().as_slice() {
+        if bases[&index] == common {
+            let layer = &layers[index];
+            let value = read(Some(layer.amender), layer.copy)?;
+            return Ok((layer.copy.to_owned(), value, marked));
+        }
     }
     let mut sets: BTreeMap<UnitIdentity, Vec<Operation>> = BTreeMap::new();
     let mut copies: BTreeMap<&UnitIdentity, (Value, Value)> = BTreeMap::new();
@@ -265,8 +265,15 @@ fn json_set(
             .filter_map(|index| {
                 let layer = &layers[*index];
                 let (base, copy) = copies.get(layer.amender)?;
-                let held = copy.at(&path)?;
-                (base.at(&path) != Some(held)).then(|| (layer.amender.to_string(), held.clone()))
+                // A side that removed the value is `null`, so that the
+                // author sees every side of the contest.
+                let held = copy.at(&path);
+                (base.at(&path) != held).then(|| {
+                    (
+                        layer.amender.to_string(),
+                        held.cloned().unwrap_or(Value::Null),
+                    )
+                })
             })
             .collect();
         let marker = Value::Object(vec![(JSON_MARK.to_owned(), Value::Object(sides))]);
@@ -357,10 +364,21 @@ pub(crate) fn layer_text(
     let mut notes = Vec::new();
     let all: BTreeSet<usize> = (0..layers.len()).collect();
     let (text, marked) = text_set(provider_unit, provider, layers, &all, &mut notes)?;
+    // A conflict is unresolved while its marker block stands in the text.
+    // Two conflicts can have the same block, so each occurrence in the text
+    // accounts for one of them.
+    let mut remaining: BTreeMap<&str, usize> = BTreeMap::new();
     let unresolved = marked
-        .into_iter()
-        .filter(|(header, _)| text.lines().any(|line| line == header))
-        .map(|(_, conflict)| Unresolved::Lines(conflict))
+        .iter()
+        .filter(|(block, _)| {
+            let left = remaining
+                .entry(block.as_str())
+                .or_insert_with(|| text.matches(block.as_str()).count());
+            let stands = *left > 0;
+            *left = left.saturating_sub(1);
+            stands
+        })
+        .map(|(_, conflict)| Unresolved::Lines(conflict.clone()))
         .collect();
     notes.sort();
     notes.dedup();
@@ -370,7 +388,7 @@ pub(crate) fn layer_text(
     })
 }
 
-/// Each conflict marked so far, by the line that opens its marker.
+/// Each conflict marked so far, with the whole block of its marker.
 type MarkedLines = Vec<(String, TextConflictReport)>;
 
 fn text_set(
@@ -404,10 +422,10 @@ fn text_set(
         };
         bases.insert(*index, base);
     }
-    if let [index] = *maximal.iter().copied().collect::<Vec<_>>().as_slice()
-        && bases[&index] == common
-    {
-        return Ok((layers[index].copy.to_owned(), marked));
+    if let [index] = *maximal.iter().copied().collect::<Vec<_>>().as_slice() {
+        if bases[&index] == common {
+            return Ok((layers[index].copy.to_owned(), marked));
+        }
     }
     let mut moved: Vec<(UnitIdentity, String)> = Vec::new();
     for index in &maximal {
@@ -459,11 +477,11 @@ fn text_set(
     let (text, conflicts) = write_marked(&common, &merge, BASE_MARK, Ord::cmp, |side| {
         side.to_string()
     });
-    for (header, base_lines, sides) in conflicts {
+    for (block, base_lines, sides) in conflicts {
         let mut report_sides: Vec<(UnitIdentity, String)> = sides;
         report_sides.sort_by(|left, right| left.0.cmp(&right.0));
         marked.push((
-            header,
+            block,
             TextConflictReport {
                 base_lines,
                 sides: report_sides,
@@ -473,7 +491,7 @@ fn text_set(
     Ok((text, marked))
 }
 
-/// Each conflict a marked text holds: the line that opens its marker,
+/// Each conflict a marked text holds: the whole block of its marker,
 /// the base lines it covers, and what each side that changed them holds
 /// there, briefly, in the merge's order of the sides.
 type MarkedConflicts<C> = Vec<(String, std::ops::Range<usize>, Vec<(C, String)>)>;
@@ -509,6 +527,7 @@ fn write_marked<C: Clone + Ord>(
                     .map(|((side, lines), _)| (side, lines.as_slice()))
                     .collect();
                 changed.sort_by(|left, right| order(left.0, right.0));
+                let start = text.len();
                 let mut section = |header: String, lines: &[&str]| {
                     text.push_str(&header);
                     text.push_str(eol);
@@ -520,8 +539,7 @@ fn write_marked<C: Clone + Ord>(
                 let Some(((first, first_lines), rest)) = changed.split_first() else {
                     continue;
                 };
-                let header = format!("{OPEN_MARK}{}", label(first));
-                section(header.clone(), first_lines);
+                section(format!("{OPEN_MARK}{}", label(first)), first_lines);
                 section(base_mark.to_owned(), &conflict.base);
                 for (side, lines) in rest {
                     let separator = if rest.len() == 1 {
@@ -537,7 +555,7 @@ fn write_marked<C: Clone + Ord>(
                     .iter()
                     .map(|(side, lines)| ((*side).clone(), describe_change(&conflict.base, lines)))
                     .collect();
-                marked.push((header, conflict.base_lines.clone(), sides));
+                marked.push((text[start..].to_owned(), conflict.base_lines.clone(), sides));
             }
         }
     }
@@ -873,6 +891,91 @@ mod tests {
             layered.merged.text(),
             "# Agents\n\nRun verify (d1, r2).\n\n## Notes\n\n## D1\n"
         );
+    }
+
+    #[test]
+    fn a_side_that_removes_the_contested_value_is_null_in_the_marker() {
+        let (a, b) = (unit("@acme/a"), unit("@acme/b"));
+        let copy_a = BASE.replace("\"eslint\"", "\"eslint --fix\"");
+        let copy_b = "{\n  \"name\": \"demo\",\n  \"scripts\": {}\n}\n";
+        let siblings = [layer(&a, &copy_a, &[]), layer(&b, copy_b, &[])];
+        let layered = layer_json(BASE, &siblings).unwrap();
+        assert_eq!(layered.unresolved.len(), 1);
+        let value = parse_value(layered.merged.text()).unwrap();
+        assert_eq!(
+            value
+                .at(&["scripts".to_owned(), "lint".to_owned()])
+                .unwrap()
+                .to_string(),
+            "{\"<<<<<<< conflict\":{\"@acme/a\":\"eslint --fix\",\"@acme/b\":null}}"
+        );
+    }
+
+    #[test]
+    fn two_text_conflicts_with_the_same_sides_are_resolved_one_at_a_time() {
+        let (d1, r2, app) = (unit("@acme/d1"), unit("@acme/r2"), unit("@acme/app"));
+        let provider = unit("@acme/base");
+        let base = "# One
+
+Run one.
+
+# Two
+
+Run two.
+";
+        let copy_d1 = "# One
+
+Run one (d1).
+
+# Two
+
+Run two (d1).
+";
+        let copy_r2 = "# One
+
+Run one (r2).
+
+# Two
+
+Run two (r2).
+";
+        let siblings = [layer(&d1, copy_d1, &[]), layer(&r2, copy_r2, &[])];
+        let layered = layer_text(&provider, base, &siblings).unwrap();
+        assert_eq!(layered.unresolved.len(), 2);
+        let marked = layered.merged.text().to_owned();
+        let second = marked.find("# Two").unwrap();
+        // The unit above resolves the first conflict only: the second one,
+        // opened by the same marker line, is the one still reported.
+        let half = format!("# One\n\nRun one (both).\n\n{}", &marked[second..]);
+        let all = [
+            layer(&d1, copy_d1, &[]),
+            layer(&r2, copy_r2, &[]),
+            layer(&app, &half, &[&d1, &r2]),
+        ];
+        let layered = layer_text(&provider, base, &all).unwrap();
+        assert_eq!(layered.unresolved.len(), 1);
+        assert!(
+            layered.unresolved[0].to_string().contains("two"),
+            "{}",
+            layered.unresolved[0]
+        );
+        // Two identical conflicts: resolving one leaves one.
+        let base = "Run it.\n\n---\n\nRun it.\n";
+        let copy_d1 = "Run it (d1).\n\n---\n\nRun it (d1).\n";
+        let copy_r2 = "Run it (r2).\n\n---\n\nRun it (r2).\n";
+        let siblings = [layer(&d1, copy_d1, &[]), layer(&r2, copy_r2, &[])];
+        let layered = layer_text(&provider, base, &siblings).unwrap();
+        assert_eq!(layered.unresolved.len(), 2);
+        let marked = layered.merged.text().to_owned();
+        let separator = marked.find("---").unwrap();
+        let half = format!("Run it (both).\n\n{}", &marked[separator..]);
+        let all = [
+            layer(&d1, copy_d1, &[]),
+            layer(&r2, copy_r2, &[]),
+            layer(&app, &half, &[&d1, &r2]),
+        ];
+        let layered = layer_text(&provider, base, &all).unwrap();
+        assert_eq!(layered.unresolved.len(), 1);
     }
 
     #[test]

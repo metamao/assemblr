@@ -373,6 +373,113 @@ impl<'c, 'a> Worlds<'c, 'a> {
         }
     }
 
+    /// Whether the base of `amender` at `version`, a published version, is
+    /// the composition below it in the world `against` locks: its lockfile
+    /// locks the provider, the amenders of the file below it there, and
+    /// the amenders of the file in its own world, at the versions `against`
+    /// records. A lower unit that amended the file then and no longer does
+    /// is a difference like a changed one.
+    fn agrees_at<'u>(
+        &self,
+        amender: &UnitIdentity,
+        version: &Version,
+        against: &UnitLock,
+        file: FileRef<'_>,
+        below: impl IntoIterator<Item = &'u UnitIdentity>,
+    ) -> bool {
+        let Some(world) = self.lock_at(amender, version) else {
+            return false;
+        };
+        let Some(lower) = self.amenders_in(amender, version, &world, file) else {
+            return false;
+        };
+        let mut units: BTreeSet<UnitIdentity> = BTreeSet::new();
+        units.insert(file.provider.clone());
+        units.extend(below.into_iter().cloned());
+        units.extend(lower.iter().map(|(unit, _)| (*unit).clone()));
+        Self::agrees(Some(&world), against, &units)
+    }
+
+    /// The amenders of `file` in `world`, the published lockfile of
+    /// `amender` at `version`: the units it locks, among those the
+    /// amender's dependencies reach there, whose manifest at the locked
+    /// version amends the file. `None` when the amender's manifest is not
+    /// known.
+    fn amenders_in<'w>(
+        &self,
+        amender: &UnitIdentity,
+        version: &Version,
+        world: &'w UnitLock,
+        file: FileRef<'_>,
+    ) -> Option<Vec<(&'w UnitIdentity, &'w Version)>> {
+        let manifest = self.dependencies.manifest(amender, version)?;
+        let manifest_at = |unit: &UnitIdentity| {
+            world
+                .units()
+                .get(unit)
+                .and_then(|locked| self.dependencies.manifest(unit, locked.version()))
+        };
+        let reach = dependency_closure(std::iter::once(amender), |unit| {
+            if unit == amender {
+                Some(manifest.dependencies())
+            } else {
+                manifest_at(unit).map(|manifest| manifest.dependencies())
+            }
+        });
+        Some(
+            world
+                .units()
+                .iter()
+                .filter(|(unit, _)| reach.contains(*unit))
+                .filter(|(unit, locked)| {
+                    self.dependencies
+                        .manifest(unit, locked.version())
+                        .and_then(|manifest| manifest.amendments().get(file.source))
+                        .is_some_and(|declaration| declaration.unit() == file.provider)
+                })
+                .map(|(unit, locked)| (unit, locked.version()))
+                .collect(),
+        )
+    }
+
+    /// What a unit's own single copy of a JSON file loses if a unit above
+    /// merges it: members and values are carried, comments and order are
+    /// not. Said to the author now, while the copy stands whole.
+    fn unshared_notes(
+        &self,
+        file: FileRef<'_>,
+        sides: Sides,
+        amender: &Amender<'_>,
+        provider_text: &[u8],
+        copy: &[u8],
+    ) -> Vec<String> {
+        let mut notes = Vec::new();
+        if Some(amender.identity) != self.built
+            || sides != Sides::Rendered
+            || MergeFormat::of_path(file.delivered) != MergeFormat::Json
+        {
+            return notes;
+        }
+        let (Ok(base), Ok(copy)) = (
+            std::str::from_utf8(provider_text),
+            std::str::from_utf8(copy),
+        ) else {
+            return notes;
+        };
+        for note in unshared_notes(base, amender.identity, copy) {
+            let MergeNote::NotCarried { what, .. } = note else {
+                continue;
+            };
+            notes.push(format!(
+                "amendments/{} of {}: if another unit amends src/{} of {} too, {what} of this \
+                 copy is not carried; the merge carries members and values, not comments or \
+                 order",
+                file.source, amender.identity, file.source, file.provider
+            ));
+        }
+        notes
+    }
+
     /// Whether `world`, an amender's published lockfile, locks `units` at
     /// the versions `against` records. A unit `world` does not lock is a
     /// difference.
@@ -447,9 +554,13 @@ impl<'c, 'a> Worlds<'c, 'a> {
                 // construction of the lock state.
                 continue;
             };
-            let world = self.lock_at(amender.identity, version);
-            let units = std::iter::once(provider).chain(amender.below.iter().copied());
-            if Self::agrees(world.as_ref(), self.lock, units) {
+            if self.agrees_at(
+                amender.identity,
+                version,
+                self.lock,
+                file,
+                amender.below.iter().copied(),
+            ) {
                 continue;
             }
             let base = self.base_of(
@@ -523,41 +634,21 @@ impl<'c, 'a> Worlds<'c, 'a> {
         ) else {
             return None;
         };
-        // One amender whose base is the file itself: its copy takes the
-        // file's place, byte for byte, whatever the format.
-        if let ([amender], [copy]) = (amenders, copies.as_slice())
-            && !reconstructed.contains_key(amender.identity)
-        {
-            let mut notes = Vec::new();
-            // The unit's own copy takes the file's place whole, but a unit
-            // above it may merge it, which carries members and values only:
-            // say so to its author now.
-            if Some(amender.identity) == self.built
-                && sides == Sides::Rendered
-                && MergeFormat::of_path(path) == MergeFormat::Json
-                && let (Some(base), Some(copy)) = (
-                    std::str::from_utf8(&provider_text).ok(),
-                    std::str::from_utf8(copy).ok(),
-                )
-            {
-                for note in unshared_notes(base, amender.identity, copy) {
-                    let MergeNote::NotCarried { what, .. } = note else {
-                        continue;
-                    };
-                    notes.push(format!(
-                        "amendments/{} of {}: if another unit amends src/{} of {provider} too, \
-                         {what} of this copy is not carried; the merge carries members and \
-                         values, not comments or order",
-                        file.source, amender.identity, file.source
-                    ));
-                }
+        // One amender whose base is the file itself, or a base reconstructed
+        // at other versions that is the file all the same: its copy takes
+        // the file's place, byte for byte, whatever the format.
+        if let ([amender], [copy]) = (amenders, copies.as_slice()) {
+            let unchanged = reconstructed
+                .get(amender.identity)
+                .is_none_or(|base| *base == provider_text);
+            if unchanged {
+                return Some(Outcome {
+                    notes: self.unshared_notes(file, sides, amender, &provider_text, copy),
+                    bytes: copy.clone(),
+                    crossed: Vec::new(),
+                    unresolved: Vec::new(),
+                });
             }
-            return Some(Outcome {
-                bytes: copy.clone(),
-                notes,
-                crossed: Vec::new(),
-                unresolved: Vec::new(),
-            });
         }
         // Amenders in a chain, each above the one before, with each copy
         // taken on top of the composition below it: the top copy is the
@@ -568,13 +659,15 @@ impl<'c, 'a> Worlds<'c, 'a> {
             .windows(2)
             .all(|pair| pair[1].0.below.contains(pair[0].0.identity))
             && reconstructed.is_empty();
-        if chain && let Some((_, top)) = ordered.last() {
-            return Some(Outcome {
-                bytes: (*top).clone(),
-                notes: Vec::new(),
-                crossed: Vec::new(),
-                unresolved: Vec::new(),
-            });
+        if chain {
+            if let Some((_, top)) = ordered.last() {
+                return Some(Outcome {
+                    bytes: (*top).clone(),
+                    notes: Vec::new(),
+                    crossed: Vec::new(),
+                    unresolved: Vec::new(),
+                });
+            }
         }
         let merge = |failure: Option<MergeFailure>| BuildProblem::Merge {
             unit: provider.clone(),
@@ -597,7 +690,12 @@ impl<'c, 'a> Worlds<'c, 'a> {
                 .collect(),
             failure,
         };
-        let format = MergeFormat::of_path(path);
+        // A template's sources are layered by line, whatever its format: a
+        // placeholder in a value's place is not the format's syntax.
+        let format = match MergeFormat::of_path(path) {
+            MergeFormat::Json if sides == Sides::Sources && file.template => MergeFormat::Text,
+            format => format,
+        };
         let all_text = is_text(&provider_text)
             && copies.iter().all(|copy| is_text(copy))
             && reconstructed.values().all(|base| is_text(base));
@@ -724,47 +822,26 @@ impl<'c, 'a> Worlds<'c, 'a> {
         // A parameter a template names must mean the same at the resolved
         // version as at the base, or the contribution cannot be told from
         // the provider's own change.
-        if file.template
-            && resolved.is_some_and(|resolved| *resolved != declared)
-            && let Some(problem) = self.parameter_changed(
+        if file.template && resolved.is_some_and(|resolved| *resolved != declared) {
+            if let Some(problem) = self.parameter_changed(
                 provider,
                 &declared,
                 resolved,
                 provider_file.contents(),
                 copy,
-            )
-        {
-            sink.push(cross(problem));
-            return None;
+            ) {
+                sink.push(cross(problem));
+                return None;
+            }
         }
-        // The amenders of the file in the amender's world: the units its
-        // lockfile records whose manifest at that version amends the file,
-        // among those its dependencies reach there.
+        // The amenders of the file in the amender's world.
         let manifest_at = |unit: &UnitIdentity| {
             world
                 .units()
                 .get(unit)
                 .and_then(|locked| self.dependencies.manifest(unit, locked.version()))
         };
-        let reach = dependency_closure(std::iter::once(amender), |unit| {
-            if unit == amender {
-                Some(manifest.dependencies())
-            } else {
-                manifest_at(unit).map(|manifest| manifest.dependencies())
-            }
-        });
-        let candidates: Vec<(&UnitIdentity, &Version)> = world
-            .units()
-            .iter()
-            .filter(|(unit, _)| reach.contains(*unit))
-            .filter(|(unit, locked)| {
-                self.dependencies
-                    .manifest(unit, locked.version())
-                    .and_then(|manifest| manifest.amendments().get(source))
-                    .is_some_and(|declaration| declaration.unit() == provider)
-            })
-            .map(|(unit, locked)| (unit, locked.version()))
-            .collect();
+        let candidates = self.amenders_in(amender, version, &world, file)?;
         let mut lower: Vec<Amender<'_>> = Vec::new();
         let mut copies: Vec<FileTree> = Vec::new();
         for (unit, locked) in &candidates {
@@ -804,9 +881,13 @@ impl<'c, 'a> Worlds<'c, 'a> {
             let Some(version_below) = &amender_below.version else {
                 continue;
             };
-            let lock_below = self.lock_at(amender_below.identity, version_below);
-            let units = std::iter::once(provider).chain(amender_below.below.iter().copied());
-            if Self::agrees(lock_below.as_ref(), &world, units) {
+            if self.agrees_at(
+                amender_below.identity,
+                version_below,
+                &world,
+                file,
+                amender_below.below.iter().copied(),
+            ) {
                 continue;
             }
             let base = self.base_of(

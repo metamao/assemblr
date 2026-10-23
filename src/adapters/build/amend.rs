@@ -173,10 +173,10 @@ pub fn amend_unit(
         }));
     }
     let lock = &resolved.lock;
-    if let Some(unit) = unit
-        && !lock.units().contains_key(unit)
-    {
-        return Err(rejected(AmendProblem::NotADependency(unit.clone())));
+    if let Some(unit) = unit {
+        if !lock.units().contains_key(unit) {
+            return Err(rejected(AmendProblem::NotADependency(unit.clone())));
+        }
     }
     // Every unit in the graph is searched, at its locked version: a file's
     // provider need not be a direct dependency.
@@ -393,6 +393,23 @@ pub(super) fn real_directories(
                 missing.push(directory.clone());
             }
             Err(error) => return Err(DirectoryProblem::Unreadable(directory, error)),
+        }
+    }
+    Ok(missing)
+}
+
+/// The directories of the copies at `paths` that do not exist yet, each
+/// once, parents first, so that they are created once for all the copies.
+pub(super) fn real_directories_of<'p>(
+    root: &Path,
+    paths: impl IntoIterator<Item = &'p RelativePath>,
+) -> Result<Vec<PathBuf>, DirectoryProblem> {
+    let mut missing: Vec<PathBuf> = Vec::new();
+    for path in paths {
+        for directory in real_directories(root, path)? {
+            if !missing.contains(&directory) {
+                missing.push(directory);
+            }
         }
     }
     Ok(missing)

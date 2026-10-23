@@ -97,10 +97,18 @@ const PACKAGE: &str = "{\n  \"name\": \"base\",\n  \"scripts\": {\n    \"dev\": 
 
 /// `@acme/base` 1.0.0 with `package.json`, registered.
 fn base(fixture: &Fixture) -> Repo {
+    base_with(fixture, &[])
+}
+
+/// `@acme/base` 1.0.0 with `package.json` and `files`, registered.
+fn base_with(fixture: &Fixture, files: &[(&str, &str)]) -> Repo {
     let base = fixture.repo("base");
     base.write("manifest.jsonc", &manifest("@acme/base", "1.0.0", &[], ""));
     base.write("src/package.json", PACKAGE);
     base.write("src/README.md", "# Base\n");
+    for (path, contents) in files {
+        base.write(&format!("src/{path}"), contents);
+    }
     base.publish("1.0.0");
     fixture.register(&base);
     base
@@ -645,4 +653,323 @@ fn every_lockfile_entry_a_layered_base_depends_on_is_verified() {
         "{err}"
     );
     assert!(!app.exists("build"));
+}
+
+/// Publishes `repo` as `@acme/<name>` at `version` with `dependencies`,
+/// one source file, and `amendments` of files of `@acme/base` 1.0.0.
+fn publish_unit(
+    fixture: &Fixture,
+    repo: &Repo,
+    name: &str,
+    version: &str,
+    dependencies: &[(&str, &str)],
+    amendments: &[(&str, &str)],
+) {
+    let declared: Vec<String> = amendments
+        .iter()
+        .map(|(path, _)| format!(r#""{path}": {{"unit": "@acme/base", "base": "1.0.0"}}"#))
+        .collect();
+    let extra = if declared.is_empty() {
+        String::new()
+    } else {
+        format!(r#", "amendments": {{{}}}"#, declared.join(", "))
+    };
+    repo.write(
+        "manifest.jsonc",
+        &manifest(&format!("@acme/{name}"), version, dependencies, &extra),
+    );
+    repo.write(&format!("src/{name}.txt"), name);
+    let _ = fs::remove_dir_all(repo.path.join("amendments"));
+    for (path, copy) in amendments {
+        repo.write(&format!("amendments/{path}"), copy);
+    }
+    succeeds(fixture.build(repo));
+    repo.publish(version);
+    fixture.sync();
+}
+
+#[test]
+fn a_file_without_a_merge_is_still_amended_across_versions_when_it_is_unchanged() {
+    let fixture = Fixture::new("xml-across");
+    let base = base(&fixture);
+    base.write("manifest.jsonc", &manifest("@acme/base", "1.0.1", &[], ""));
+    base.write(
+        "src/pom.xml",
+        "<project>\n  <name>base</name>\n</project>\n",
+    );
+    base.publish("1.0.1");
+    fixture.sync();
+    let xml = fixture.repo("xml");
+    xml.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/xml",
+            "1.0.0",
+            &[("@acme/base", "^1")],
+            r#", "amendments": {"pom.xml": {"unit": "@acme/base", "base": "1.0.1"}}"#,
+        ),
+    );
+    xml.write("src/xml.txt", "xml");
+    xml.write(
+        "amendments/pom.xml",
+        "<project>\n  <name>xml</name>\n</project>\n",
+    );
+    succeeds(fixture.build(&xml));
+    xml.publish("1.0.0");
+    fixture.register(&xml);
+    // The provider moves without touching the file: the copy applies.
+    base.write("manifest.jsonc", &manifest("@acme/base", "1.1.0", &[], ""));
+    base.write("src/README.md", "# Base 1.1\n");
+    base.publish("1.1.0");
+    fixture.sync();
+    let app = app(&fixture, &[("@acme/xml", "^1"), ("@acme/base", "^1.1")]);
+    succeeds(fixture.build(&app));
+    assert!(app.read("assemblr-lock.json").contains("\"1.1.0\""));
+    assert_eq!(
+        app.read("build/pom.xml"),
+        "<project>\n  <name>xml</name>\n</project>\n"
+    );
+    // The provider changes the file: there is no merge to apply the copy.
+    base.write("manifest.jsonc", &manifest("@acme/base", "1.2.0", &[], ""));
+    base.write(
+        "src/pom.xml",
+        "<project>\n  <name>base 1.2</name>\n</project>\n",
+    );
+    base.publish("1.2.0");
+    fixture.sync();
+    succeeds(fixture.assemblr(&app.path, &["unit", "update"]));
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(
+        err.contains("applied across versions only to a file that is unchanged"),
+        "{err}"
+    );
+}
+
+#[test]
+fn pending_copies_that_share_a_new_directory_are_all_created() {
+    let fixture = Fixture::new("shared-directory");
+    base_with(
+        &fixture,
+        &[
+            ("config/a.json", "{\n  \"x\": 1\n}\n"),
+            ("config/b.json", "{\n  \"x\": 1\n}\n"),
+        ],
+    );
+    let api = fixture.repo("api");
+    publish_unit(
+        &fixture,
+        &api,
+        "api",
+        "1.0.0",
+        &[("@acme/base", "=1.0.0")],
+        &[
+            ("config/a.json", "{\n  \"x\": 2\n}\n"),
+            ("config/b.json", "{\n  \"x\": 2\n}\n"),
+        ],
+    );
+    fixture.register(&api);
+    let db = fixture.repo("db");
+    publish_unit(
+        &fixture,
+        &db,
+        "db",
+        "1.0.0",
+        &[("@acme/base", "=1.0.0")],
+        &[],
+    );
+    fixture.register(&db);
+
+    // `unit update` brings two conflicts into one directory that does not
+    // exist yet, and creates both copies.
+    let app = app(&fixture, &[("@acme/api", "^1"), ("@acme/db", "^1")]);
+    succeeds(fixture.build(&app));
+    assert!(!app.exists("amendments"));
+    publish_unit(
+        &fixture,
+        &db,
+        "db",
+        "1.1.0",
+        &[("@acme/base", "=1.0.0")],
+        &[
+            ("config/a.json", "{\n  \"x\": 3\n}\n"),
+            ("config/b.json", "{\n  \"x\": 3\n}\n"),
+        ],
+    );
+    let output = fails(fixture.assemblr(&app.path, &["unit", "update"]));
+    assert!(
+        stdout(&output).contains(
+            "Created, declared in manifest.jsonc: amendments/config/a.json, \
+             amendments/config/b.json."
+        ),
+        "{}\n{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    for path in ["amendments/config/a.json", "amendments/config/b.json"] {
+        assert!(app.read(path).contains("\"<<<<<<< conflict\""), "{path}");
+    }
+    assert!(app.read("assemblr-lock.json").contains("\"1.1.0\""));
+
+    // `unit add` of the sibling does the same from a build.
+    let other = fixture.repo("other");
+    other.write(
+        "manifest.jsonc",
+        &manifest("@acme/other", "0.1.0", &[("@acme/api", "^1")], ""),
+    );
+    other.write("src/other.txt", "other");
+    succeeds(fixture.build(&other));
+    let output = fails(fixture.assemblr(&other.path, &["unit", "add", "@acme/db"]));
+    let err = stderr(&output);
+    for path in ["amendments/config/a.json", "amendments/config/b.json"] {
+        assert!(err.contains(&format!("{path}: the amendments of")), "{err}");
+        assert!(other.read(path).contains("\"<<<<<<< conflict\""), "{path}");
+    }
+    let manifest = other.read("manifest.jsonc");
+    assert!(manifest.contains("\"config/a.json\""), "{manifest}");
+    assert!(manifest.contains("\"config/b.json\""), "{manifest}");
+    assert!(other.read("assemblr-lock.json").contains("@acme/db"));
+}
+
+#[test]
+fn a_lower_amendment_dropped_below_a_published_amender_leaves_its_copy() {
+    let fixture = Fixture::new("dropped-below");
+    base_with(&fixture, &[("README.md", "# Base\n\nIntro.\n\nEnd.\n")]);
+    let low = fixture.repo("low");
+    publish_unit(
+        &fixture,
+        &low,
+        "low",
+        "1.0.0",
+        &[("@acme/base", "=1.0.0")],
+        &[("README.md", "# Base\n\nIntro.\n\nEnd.\nlow\n")],
+    );
+    fixture.register(&low);
+    let mid = fixture.repo("mid");
+    mid.write(
+        "manifest.jsonc",
+        &manifest("@acme/mid", "1.0.0", &[("@acme/low", "^1")], ""),
+    );
+    mid.write("src/mid.txt", "mid");
+    succeeds(fixture.build(&mid));
+    succeeds(fixture.assemblr(&mid.path, &["unit", "amend", "README.md"]));
+    assert_eq!(
+        mid.read("amendments/README.md"),
+        "# Base\n\nIntro.\n\nEnd.\nlow\n"
+    );
+    mid.write(
+        "amendments/README.md",
+        "# Base\nmid\n\nIntro.\n\nEnd.\nlow\n",
+    );
+    succeeds(fixture.build(&mid));
+    mid.publish("1.0.0");
+    fixture.register(&mid);
+    // `low` 1.1.0 no longer amends the file. A dependent on it gets
+    // `mid`'s own contribution only: its copy is moved off the base it
+    // was taken on, not delivered as it is.
+    publish_unit(
+        &fixture,
+        &low,
+        "low",
+        "1.1.0",
+        &[("@acme/base", "=1.0.0")],
+        &[],
+    );
+    let app = app(&fixture, &[("@acme/mid", "^1"), ("@acme/low", "^1.1")]);
+    succeeds(fixture.build(&app));
+    assert!(app.read("assemblr-lock.json").contains("\"1.1.0\""));
+    assert_eq!(
+        app.read("build/README.md"),
+        "# Base\nmid\n\nIntro.\n\nEnd.\n"
+    );
+}
+
+#[test]
+fn a_json_template_is_amended_and_rebased_by_line() {
+    let fixture = Fixture::new("json-template");
+    let base = fixture.repo("base");
+    base.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/base",
+            "1.0.0",
+            &[],
+            r#", "params": {"port": {"type": "integer", "description": "The port.", "default": 8787}}"#,
+        ),
+    );
+    base.write(
+        "src/config.json.assemblr.tmpl",
+        "{\n  \"port\": {{ port }},\n  \"name\": \"base\"\n}\n",
+    );
+    base.publish("1.0.0");
+    fixture.register(&base);
+    let api = fixture.repo("api");
+    publish_unit(
+        &fixture,
+        &api,
+        "api",
+        "1.0.0",
+        &[("@acme/base", "=1.0.0")],
+        &[(
+            "config.json.assemblr.tmpl",
+            "{\n  \"api\": true,\n  \"port\": {{ port }},\n  \"name\": \"base\"\n}\n",
+        )],
+    );
+    fixture.register(&api);
+    let db = fixture.repo("db");
+    publish_unit(
+        &fixture,
+        &db,
+        "db",
+        "1.0.0",
+        &[("@acme/base", "=1.0.0")],
+        &[(
+            "config.json.assemblr.tmpl",
+            "{\n  \"port\": {{ port }},\n  \"name\": \"base\",\n  \"db\": true\n}\n",
+        )],
+    );
+    fixture.register(&db);
+    let app = app(&fixture, &[("@acme/api", "^1"), ("@acme/db", "^1")]);
+    succeeds(fixture.build(&app));
+    assert_eq!(
+        app.read("build/config.json"),
+        "{\n  \"api\": true,\n  \"port\": 8787,\n  \"name\": \"base\",\n  \"db\": true\n}\n"
+    );
+    // The copy is the sources layered by line, placeholders and all.
+    succeeds(fixture.assemblr(&app.path, &["unit", "amend", "config.json"]));
+    let copy =
+        "{\n  \"api\": true,\n  \"port\": {{ port }},\n  \"name\": \"base\",\n  \"db\": true\n}\n";
+    assert_eq!(app.read("amendments/config.json.assemblr.tmpl"), copy);
+    app.write(
+        "amendments/config.json.assemblr.tmpl",
+        &copy.replace("\"api\": true", "\"api\": false"),
+    );
+    succeeds(fixture.build(&app));
+    assert!(app.read("build/config.json").contains("\"api\": false"));
+    // A change below flows into the copy by line too.
+    publish_unit(
+        &fixture,
+        &db,
+        "db",
+        "1.1.0",
+        &[("@acme/base", "=1.0.0")],
+        &[(
+            "config.json.assemblr.tmpl",
+            "{\n  \"port\": {{ port }},\n  \"name\": \"base\",\n  \"db\": 2\n}\n",
+        )],
+    );
+    let output = succeeds(fixture.assemblr(&app.path, &["unit", "update"]));
+    assert!(
+        stdout(&output).contains("Rewritten to follow the changes below"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(
+        app.read("amendments/config.json.assemblr.tmpl"),
+        "{\n  \"api\": false,\n  \"port\": {{ port }},\n  \"name\": \"base\",\n  \"db\": 2\n}\n"
+    );
+    succeeds(fixture.build(&app));
+    assert_eq!(
+        app.read("build/config.json"),
+        "{\n  \"api\": false,\n  \"port\": 8787,\n  \"name\": \"base\",\n  \"db\": 2\n}\n"
+    );
 }
