@@ -146,7 +146,7 @@ fn add(root: &Path, registry: &Registry, reference: &str, commit: bool) -> ExitC
                 refreshed.catalog(),
                 version_list(versions)
             );
-            finish(root, commit, &format!("Add {unit} to the catalog"))
+            finish(root, commit, true, &format!("Add {unit} to the catalog"))
         }
         Ok(CatalogAdded::AlreadyDeclared { unit }) => {
             println!("The catalog declares {unit} from {reference} already; nothing changed.");
@@ -165,7 +165,12 @@ fn remove(root: &Path, registry: &Registry, unit: &UnitIdentity, commit: bool) -
                 refreshed.catalog()
             );
             println!("Its repository was not changed.");
-            finish(root, commit, &format!("Remove {unit} from the catalog"))
+            finish(
+                root,
+                commit,
+                true,
+                &format!("Remove {unit} from the catalog"),
+            )
         }
         Err(failure) => change_failed(&failure),
     }
@@ -190,7 +195,12 @@ fn refresh(root: &Path, registry: &Registry, commit: bool) -> ExitCode {
                     refreshed.catalog()
                 );
             }
-            finish(root, commit, "Refresh the catalog index")
+            finish(
+                root,
+                commit,
+                refreshed.changed(),
+                "Refresh the catalog index",
+            )
         }
         Err(failure) => refresh_failed(&failure),
     }
@@ -225,30 +235,46 @@ fn version_list(versions: &[assemblr::domain::Version]) -> String {
 }
 
 /// Commits the catalog's two files when `commit`, and says what to do next.
-fn finish(root: &Path, commit: bool, message: &str) -> ExitCode {
+/// When the command `wrote` nothing, the files may still hold edits made by
+/// hand, which are committed; outside a Git repository there is then
+/// nothing to do.
+fn finish(root: &Path, commit: bool, wrote: bool, message: &str) -> ExitCode {
+    let paths = format!("{CATALOG_MANIFEST} and {CATALOG_INDEX}");
     if !commit {
-        println!("Next: commit and push {CATALOG_MANIFEST} and {CATALOG_INDEX}.");
+        if wrote {
+            println!("Next: commit and push {paths}.");
+        }
         return ExitCode::SUCCESS;
     }
-    match commit_catalog(root, message) {
+    let repository = match GitRepository::open(root) {
+        Ok(repository) => repository,
+        Err(_) if !wrote => return ExitCode::SUCCESS,
+        Err(error) => return commit_failed(&error, &paths, wrote),
+    };
+    match repository.commit_paths(root, &[CATALOG_MANIFEST, CATALOG_INDEX], message) {
         Ok(true) => {
-            println!("Committed {CATALOG_MANIFEST} and {CATALOG_INDEX}.");
+            println!("Committed {paths}.");
             println!("Next: run `git push` so that other machines can sync it.");
             ExitCode::SUCCESS
         }
         Ok(false) => ExitCode::SUCCESS,
-        Err(error) => fail_with(
-            &format!("could not commit the catalog: {error}"),
-            &Diagnosis::note(format!(
-                "{CATALOG_MANIFEST} and {CATALOG_INDEX} were written but not committed"
-            ))
-            .advise("fix the problem, then commit them with Git"),
-        ),
+        Err(error) => commit_failed(&error, &paths, wrote),
     }
 }
 
-fn commit_catalog(root: &Path, message: &str) -> Result<bool, GitError> {
-    GitRepository::open(root)?.commit_paths(root, &[CATALOG_MANIFEST, CATALOG_INDEX], message)
+fn commit_failed(error: &GitError, paths: &str, wrote: bool) -> ExitCode {
+    let state = if wrote {
+        "were written but not committed"
+    } else {
+        "were not committed"
+    };
+    fail_with(
+        &format!("could not commit the catalog: {error}"),
+        &Diagnosis::note(format!("{paths} {state}")).advise(format!(
+            "commit them with `git commit -- {CATALOG_MANIFEST} {CATALOG_INDEX}`, or pass \
+             `--no-commit` next time"
+        )),
+    )
 }
 
 fn change_failed(failure: &CatalogChangeFailure) -> ExitCode {

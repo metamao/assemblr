@@ -272,6 +272,46 @@ fn an_invalid_tag_is_excluded_with_a_warning() {
 }
 
 #[test]
+fn an_up_to_date_refresh_has_nothing_to_commit_or_suggest() {
+    let fixture = Fixture::new("up_to_date");
+    let node = url(&fixture.unit("node", "@acme/node", &["1.0.0"]));
+    // A catalog outside any Git repository, refreshed once already.
+    let catalog = fixture.dir.join("plain");
+    fs::create_dir_all(&catalog).unwrap();
+    fs::write(
+        catalog.join("registry.jsonc"),
+        format!(r#"{{"name": "@acme/web", "units": {{"@acme/node": "{node}"}}}}"#),
+    )
+    .unwrap();
+    succeeds(fixture.assemblr(&catalog, &["catalog", "refresh", "--no-commit"]));
+
+    for args in [
+        &["catalog", "refresh"][..],
+        &["catalog", "refresh", "--no-commit"],
+    ] {
+        let out = stdout(&succeeds(fixture.assemblr(&catalog, args)));
+        assert!(out.contains("is up to date"), "{out}");
+        assert!(!out.contains("Next:"), "{out}");
+    }
+
+    // Writing a change outside a repository cannot be committed, and says so.
+    let api = fixture.unit("api", "@acme/api", &["1.0.0"]);
+    let rejected = stderr(&fails(
+        fixture.assemblr(&catalog, &["catalog", "add", &url(&api)]),
+    ));
+    assert!(
+        rejected.contains(
+            "note: registry.jsonc and registry-index.json were written but not committed"
+        ),
+        "{rejected}"
+    );
+    assert!(
+        rejected.contains("git commit -- registry.jsonc registry-index.json"),
+        "{rejected}"
+    );
+}
+
+#[test]
 fn refresh_outside_a_catalog_says_where_to_run_it() {
     let fixture = Fixture::new("outside");
     let rejected = fails(fixture.assemblr(&fixture.dir, &["catalog", "refresh"]));
