@@ -275,12 +275,8 @@ impl Listings {
                     .open_source(registered.source())
                     .map_err(|error| error.to_string())
                     .and_then(|repository| {
-                        read_catalog_at(
-                            &repository,
-                            registered.source(),
-                            registered.commit().clone(),
-                        )
-                        .map_err(|problem| problem.to_string())
+                        read_catalog_at(&repository, registered.commit().clone())
+                            .map_err(|problem| problem.to_string())
                     })
             });
             match published {

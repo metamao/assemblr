@@ -22,9 +22,9 @@ use std::sync::Arc;
 
 pub(crate) use self::observe as observe_tags;
 pub use info::{Found, InfoFailure, Search, UnitInfo};
+pub(crate) use reference::catalog_reference;
 use reference::is_remote_reference;
 pub use reference::{ReferenceError, local_reference, source_reference};
-pub(crate) use reference::{catalog_reference, declared_reference};
 use sha2::{Digest, Sha256};
 pub use store::StorageError;
 use store::Store;
@@ -253,7 +253,7 @@ impl Registry {
         repository: &GitRepository,
         current: &RegistryIndex,
     ) -> Result<Added, RegistryFailure> {
-        let published = read_published_catalog(repository, &source)
+        let published = read_published_catalog(repository)
             .map_err(|problem| RegistryFailure::catalog(&source, problem))?;
         // Decided once before the lock, as `add` does, and again under it.
         let apply = |index: &RegistryIndex| {
@@ -487,7 +487,7 @@ impl Registry {
             let published = self
                 .open_source(source)
                 .map_err(CatalogProblem::Unreadable)
-                .and_then(|repository| read_published_catalog(&repository, source));
+                .and_then(|repository| read_published_catalog(&repository));
             let published = match published {
                 Ok(published) => published,
                 Err(problem) => {

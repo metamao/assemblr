@@ -155,9 +155,9 @@ How the status of a statement affects implementation:
 
 - **Question:** **Lock portability across machines.** What happens when the
   source a consumer lock records for a unit differs from the source registered
-  for that identity on another machine, and what a lock records for a unit
-  obtained through a relative catalog reference. Unavailable sources and Git
-  objects are OC-9.
+  for that identity on another machine. A catalog declares no local paths,
+  so a unit obtained through a catalog has the same reference on every
+  machine. Unavailable sources and Git objects are OC-9.
 - **Origin:** Readiness
 - **Context:** [lock](consumer-projects.md#lock-and-reconciliation-state--approved),
   [source conflicts](registries-and-discovery.md#source-conflicts--approved)
@@ -230,14 +230,17 @@ How the status of a statement affects implementation:
 
 - **Approved (normative):** The authoring operations (`init`, `amend`,
   `check`, `build`, `update`, `publish`), the registry command
-  responsibilities (`registry create`, `add`, `remove`, `list`, `info`,
-  `sync`, `doctor`), catalog refresh, discovery (`search`, `info`, with a
+  responsibilities (`add`, `remove`, `list`, `info`, `sync`, `doctor`),
+  the catalog maintainer's commands (`catalog init`, `catalog add`, `catalog
+  remove`, `catalog refresh`, which commit the catalog's two files unless
+  told not to and never push), discovery (`search`, `info`, with a
   machine-readable form), the agent guide (`guide`, whose name stays stable in
   every version; see [agent
   guide](registries-and-discovery.md#agent-guide--approved)), and the
   consumer operations (`init`, `add`, `remove`, `compose`, and continuing or
-  aborting a pending composition) and their intent. `unit init` establishes the unit's Git repository. There are
-  no commands solely for adding or removing catalog entries. `add` accepts one
+  aborting a pending composition) and their intent. `unit init` establishes the unit's Git repository.
+  `catalog add` takes a unit's repository reference and reads its identity
+  from the unit. `add` accepts one
   unit per invocation and records a caret (`^`) requirement by default. The
   CLI is non-interactive by default. For local unit repositories, the registry
   grammar is `registry add <path>`, `registry list`, `registry list --json`
@@ -293,16 +296,17 @@ How the status of a statement affects implementation:
   `assemblr search <term>... [--json]` lists the registered units whose
   identity or newest stable description contains every term, offline
   (**Provisional (D-32)**, under OC-29).
-  `registry create <catalog> [<directory>]` creates a catalog's repository
+  `catalog init <catalog> [<directory>]` creates a catalog's repository
   and `registry.jsonc`, and `catalog refresh` regenerates its index
-  (**Provisional (D-36)**). `registry add` registers a catalog as well,
+  (**Provisional (D-36)**); `catalog add <reference>` and `catalog remove
+  <identity>` edit `registry.jsonc` and refresh, and the three commit unless
+  given `--no-commit` (**Provisional (D-45)**). `registry add` registers a catalog as well,
   `registry sync` synchronizes catalogs, and `registry remove --catalog
   <identity>` removes one (**Provisional (D-39)**).
 - **Open detail:** Exact grammar and semantics of every other command, flag,
   and argument, including: how `registry info` relates to the top-level
   `info`, and whether unit inspection is spelled `info` or `unit info`; what
-  `registry doctor` does beyond diagnosis; how catalog operations (`registry
-  create`, catalog refresh) are grouped; how `add` takes parameter values
+  `registry doctor` does beyond diagnosis; how `add` takes parameter values
   (`--option <name>=<value>`, **Provisional (D-34)**, its values read by the
   parameter's type by owner decision). The grammar of `unit init` (its
   default directory, **Provisional (D-33)**), `init`, `compose`, `add`, and
@@ -485,24 +489,22 @@ How the status of a statement affects implementation:
 - **Approved (normative):** A catalog is a Git repository whose
   `registry.jsonc` has a `name` (an `@owner/name` catalog identity, in a
   namespace separate from units) and a `units` map from expected unit
-  identities to plain-string Git references. HTTPS, SSH, and local references
-  are permitted. Relative references resolve against the catalog root. The
+  identities to plain-string Git references. HTTPS and SSH references and
+  `file://` URLs are permitted; local paths are not. The
   referenced manifest must declare the catalog's identity for it.
   `registry.jsonc` duplicates no versions, dependencies, parameters, or
   hashes, and indexing adds no fields to it. A catalog needs no SemVer or
-  release publication. Entries may be edited directly and are validated
-  through registration or synchronization. Remote catalogs synchronize from
+  release publication. Entries are added and removed with `catalog add` and
+  `catalog remove`, or edited directly and validated through refresh,
+  registration, or synchronization. Remote catalogs synchronize from
   the Git default branch, and the index records the exact catalog commit.
 - **Open detail:** Whether `registry.jsonc` may contain fields beyond `name`
   and `units`. How conflicting catalog identities are handled. Which revision
   is read for a local catalog, and how uncommitted local catalog changes are
-  treated. How identical references are recognized when relative references
-  come from different catalogs. Implemented provisionally for catalog
+  treated. Implemented provisionally for catalog
   refresh (D-36): only `name`, `units`, and `$schema` are accepted, and
   refresh reads the working tree. Implemented provisionally for
-  registration (D-39): a local catalog is read as committed at `HEAD`, a
-  remote catalog may declare only remote references, and references are
-  compared after a local catalog's relative paths are resolved.
+  registration (D-39): a local catalog is read as committed at `HEAD`.
 - **Origin:** Registry
 - **Context:** [catalogs](registries-and-discovery.md#catalogs--approved),
   [synchronization](registries-and-discovery.md#synchronization--approved)

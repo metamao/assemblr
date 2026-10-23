@@ -31,9 +31,10 @@ pub use build::{
     update_unit,
 };
 pub use catalog::{
-    CATALOG_INDEX, CATALOG_MANIFEST, CatalogInitFailure, CatalogManifest, CatalogManifestError,
-    CatalogProblem, RefreshFailure, RefreshProblem, Refreshed, init_catalog, read_catalog_manifest,
-    refresh_catalog,
+    CATALOG_INDEX, CATALOG_MANIFEST, CatalogAdded, CatalogChangeFailure, CatalogInitFailure,
+    CatalogManifest, CatalogManifestError, CatalogProblem, RefreshFailure, RefreshProblem,
+    Refreshed, add_to_catalog, init_catalog, read_catalog_manifest, refresh_catalog,
+    remove_from_catalog,
 };
 pub use git::{
     Discovered, FetchError, FetchErrorKind, GitError, GitErrorKind, GitRepository,

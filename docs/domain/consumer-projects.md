@@ -901,8 +901,7 @@ Open:
   [pending-resolution details](#pending-resolution-details--approved-d-18).
 - Portability of a lockfile between machines: what happens when the source a
   lock records for a unit differs from the source registered for that identity
-  on another machine, and what a lock records for a unit obtained through a
-  relative catalog reference. Unavailable sources are **OC-9**. **OC-49.**
+  on another machine. Unavailable sources are **OC-9**. **OC-49.**
 
 ## Editing assistance — Approved direction, details Open
 
