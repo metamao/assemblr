@@ -562,6 +562,13 @@ fn compose_with(
             .into_iter()
             .map(|problem| ComposeProblem::Build(Box::new(problem))),
     );
+    // A conflict between sibling amenders that no unit above both resolves
+    // is a composition error in a consumer project (OC-47).
+    if let Some(rendered) = &rendered {
+        problems.extend(rendered.unresolved.iter().cloned().map(|unresolved| {
+            ComposeProblem::Build(Box::new(BuildProblem::Unresolved(unresolved)))
+        }));
+    }
     let Some(rendered) = rendered.filter(|_| problems.is_empty()) else {
         return Err(rejected_all(problems));
     };

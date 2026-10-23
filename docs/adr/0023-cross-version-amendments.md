@@ -1,6 +1,6 @@
 # 0023: Amendments across provider versions: deriving against the base, applying to the version resolved, and rebasing in `unit update`
 
-- **Status:** Accepted, point 4 amended by #70, point 5 by #92
+- **Status:** Accepted, point 4 amended by #70, point 5 by #92, point 7 replaced by 0032
 - **Date:** 2026-10-22
 
 ## Context

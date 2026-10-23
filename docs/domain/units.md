@@ -227,8 +227,8 @@ provide. Authors edit ordinary copies of files. They do not hand-write
 low-level merge operations. Assemblr derives the changes. See
 [amendments-and-composition.md](amendments-and-composition.md).
 
-- An amendment targets a file that a **direct dependency** provides in its
-  `src/`.
+- An amendment targets a file that a unit **below** it, a direct or
+  transitive dependency, provides in its `src/`.
 - The copy lives at `amendments/<path>`, where `<path>` is the file's path in
   that dependency's `src/`, under the same path rules. The unit's own `src/`
   must not hold the same path.

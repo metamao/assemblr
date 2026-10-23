@@ -25,9 +25,11 @@ use std::fmt;
 
 use super::jsonc_edit::{EditError, ValueError, apply, comments_of, parse_value};
 use crate::domain::{
-    Conflict, Contributor, Derived, InsertTie, Lists, Operation, TextMerge, UnitIdentity, Value,
-    combine, derive, describe_change, describe_lines, merge_text, merge_values, plan,
+    Conflict, Contributor, Derived, Lists, Operation, TextMerge, UnitIdentity, Value, combine,
+    derive, describe_change, describe_lines, merge_values, plan,
 };
+#[cfg(test)]
+use crate::domain::{InsertTie, merge_text};
 
 /// Composes `copies`, each amender's rendered copy, onto `base`, the
 /// provider's rendered file. The amenders are ordered by identity, whatever
@@ -50,6 +52,7 @@ pub(crate) fn merge_json(
 /// planned against `provider`, the file at the resolved version, so that
 /// the provider's own changes between the two stay and a change that
 /// collides with an amender's is a conflict.
+#[cfg(test)]
 pub(crate) fn merge_json_from(
     provider: &str,
     copies: &[(&UnitIdentity, &str, &str)],
@@ -129,6 +132,7 @@ pub(crate) fn merge_text_files(
 /// contribution to the provider's file. Changes that overlap or touch
 /// conflict; insertions both make at one position are both kept, the
 /// provider's first (see [`RebaseSide`]).
+#[cfg(test)]
 pub(crate) fn merge_text_files_from(
     provider_unit: &UnitIdentity,
     provider: &str,
@@ -195,13 +199,13 @@ pub(crate) fn merge_text_files_from(
 /// the provider's release is the file the amender now amends, and nothing
 /// either side wrote is lost.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum RebaseSide {
+pub(super) enum RebaseSide {
     Provider(UnitIdentity),
     Amender(UnitIdentity),
 }
 
 impl RebaseSide {
-    fn unit(&self) -> &UnitIdentity {
+    pub(super) fn unit(&self) -> &UnitIdentity {
         match self {
             Self::Provider(unit) | Self::Amender(unit) => unit,
         }
@@ -211,7 +215,7 @@ impl RebaseSide {
 /// The conflicts of a text merge, for a message, naming only the sides that
 /// changed the lines, each by the unit `unit` gives for it, in the order of
 /// their identities.
-fn conflict_reports<C>(
+pub(super) fn conflict_reports<C>(
     merge: &TextMerge<'_, C>,
     unit: impl Fn(&C) -> &UnitIdentity,
 ) -> Vec<TextConflictReport> {
@@ -240,9 +244,9 @@ fn conflict_reports<C>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextConflictReport {
     /// The base lines the changes cover, as indexes into its lines.
-    base_lines: std::ops::Range<usize>,
+    pub(super) base_lines: std::ops::Range<usize>,
     /// What each amender holds there, briefly, ordered by identity.
-    sides: Vec<(UnitIdentity, String)>,
+    pub(super) sides: Vec<(UnitIdentity, String)>,
 }
 
 impl fmt::Display for TextConflictReport {
@@ -259,7 +263,7 @@ impl fmt::Display for TextConflictReport {
 /// What the value model cannot carry from `copy`, an amender's rendered
 /// copy of `base`: the order of members it changes and the comments it
 /// adds. They are reported, never dropped in silence.
-fn not_carried(
+pub(super) fn not_carried(
     amender: &UnitIdentity,
     base: &str,
     copy: &str,
@@ -312,7 +316,7 @@ pub(crate) fn unshared_notes(base: &str, amender: &UnitIdentity, copy: &str) -> 
 /// aside. They always do unless the derivation is wrong, and a wrong
 /// derivation must never end in a successful composition: the file would
 /// not hold what the copy asked for.
-fn round_trip(
+pub(super) fn round_trip(
     amender: &UnitIdentity,
     base: &Value,
     copy: &Value,
@@ -362,6 +366,10 @@ pub struct Merged {
 }
 
 impl Merged {
+    pub(super) fn new(text: String, notes: Vec<MergeNote>) -> Self {
+        Self { text, notes }
+    }
+
     /// The composed text.
     pub fn text(&self) -> &str {
         &self.text

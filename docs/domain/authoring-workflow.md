@@ -186,13 +186,16 @@ write after the manifest was replaced is redone by `unit build`.
 `unit amend` creates an amendment from a dependency's file. It:
 
 - locates the dependency's file **recursively by filename**, searching the
-  `src/` trees of the unit's **direct dependencies**, each at its version in
-  the [unit lock state](#unit-lock-state--approved);
+  `src/` trees of **every unit in the unit lock state**, direct or
+  transitive, each at its locked version (owner decision on #100);
 - **fails** if no file matches;
 - uses the file when **exactly one** matches;
 - **fails on ambiguity** and reports every matching path;
 - accepts an unambiguous **relative path** when a filename is not enough;
-- creates an **editable full-file copy** at `amendments/<path>`;
+- creates an **editable full-file copy** at `amendments/<path>`, holding the
+  file's **layered base**: the provider's file as the units below compose it,
+  which is the file as it stands in `build/` (see
+  [amendments-and-composition.md](amendments-and-composition.md#the-base));
 - records the copy's **exact base provenance** in the manifest: the
   dependency's identity and the locked version (see
   [amendments-and-composition.md](amendments-and-composition.md#layout-and-declaration));
@@ -209,10 +212,14 @@ with a `/` it is a path in that `src/`, matched exactly. Either form matches
 a template by its source name or by its delivered name, without
 `.assemblr.tmpl`: `config/package.json` and `package.json` both find
 `config/package.json.assemblr.tmpl`. The copy always keeps the source path,
-suffix included. `--unit` restricts the search to one direct dependency;
-without it, every direct dependency is searched. Several matches are
-reported, each by its path and provider, and never resolved by preference.
-The result goes to stdout; diagnostics go to stderr.
+suffix included. `--unit` restricts the search to one locked dependency,
+direct or transitive; without it, every locked unit is searched. Several
+matches are reported, each by its path and provider, and never resolved by
+preference. The result goes to stdout, naming the units below whose
+amendments the copy is composed from, when there are any; diagnostics go
+to stderr. A copy whose base holds a conflict marker between siblings is
+created as it is, and the result says so: the unit resolves the conflict in
+its copy.
 
 **The lockfile.** `unit amend` requires a unit lockfile that records the
 current resolution: it resolves the dependencies under the lockfile as a
@@ -221,18 +228,14 @@ change it, saying to run `unit build` first. It never writes the lockfile.
 It takes the same lock as a build, so a concurrent build sees the manifest
 either before or after the amendment.
 
-**What it refuses, changing nothing:** a `--unit` that is not a direct
+**What it refuses, changing nothing:** a `--unit` that is not a locked
 dependency; a path the unit's own `src/` holds, which would collide; a path
-the manifest already declares; a file of the same provider that a locked
-dependency, direct or transitive, already amends, naming that amender and
-its version, unless the file is JSON, JSONC, or UTF-8 text outside the
-structured formats the merge does not support (XML, and JSON in another case;
-YAML, TOML, and INI are text, owner decision on #92), whose amendments the build
-combines (see
-[amendments-and-composition.md](amendments-and-composition.md#the-merge-engine--approved)),
-in which case the copy is created and the result names the other amenders;
-and a file at `amendments/<path>` whose content differs from the provider's
-file, or that is not a regular file. While an update of the unit is interrupted,
+the manifest already declares; a file whose base cannot be composed, for the
+reasons a build reports; and a file at `amendments/<path>` whose content
+differs from the composed base, or that is not a regular file. A file that a
+unit below already amends is amended on top of its amendment, whatever the
+format; a file that siblings amend is amended on top of their combination,
+with their conflicts marked. While an update of the unit is interrupted,
 it refuses to run at all, until `unit update` completes it (see
 [update details](#update-details--approved)). A file of another provider
 with the same name is a different file, and delivered-path collisions are
@@ -250,7 +253,7 @@ command fails before writing and prints the member to add by hand. When the
 manifest cannot be written, the copy is removed again. An interruption
 between the two steps leaves a copy that is not declared: `unit build`
 reports it, and running the same `unit amend` again completes it, keeping
-the copy, as long as its content is still the provider's file.
+the copy, as long as its content is still the composed base.
 
 ## Check — Approved
 
@@ -262,10 +265,11 @@ the copy, as long as its content is still the provider's file.
   of every dependency are satisfied through the dependency chain (see
   [parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved));
 - dependency resolution;
-- amendment validity: each amendment targets a direct dependency that
-  provides the path, its declared base version is the locked version, the
-  lockfile identifies that version's content, and the historical base is
-  available;
+- amendment validity: each amendment targets a locked unit, direct or
+  transitive, that provides the path, its declared base version is the
+  locked version, the lockfile identifies the content of every version the
+  base is composed of, the historical base is available, and no copy holds a
+  conflict marker;
 - merge validity;
 - an **effective, non-redundant contribution**.
 
@@ -389,12 +393,13 @@ stdout. Diagnostics, and changes to the unit lockfile, go to stderr.
 - dependency resolution, under the [unit lock state](#unit-lock-state--approved);
 - `src/` path validity and path collisions, on delivered paths (see
   [units.md](units.md#src-unit-files));
-- amendment validity: each declared provider is a direct dependency that
-  provides the path in its `src/` at the locked version, the declared base is
-  the locked version, the copy exists, and no copy is undeclared (see
-  below); for the amendments that resolved dependencies publish, each base
-  is verified against the registry record and the provider resolves to it,
-  and no provider file has more than one amender;
+- amendment validity: each declared provider is a locked unit, direct or
+  transitive, that provides the path in its `src/` at the locked version, the
+  declared base is the locked version, the copy exists, holds no conflict
+  marker, and no copy is undeclared (see below); for the amendments that
+  resolved dependencies publish, each base is verified against the registry
+  record, and siblings that conflict in a file the unit does not amend put
+  the build in the pending state;
 - rendering of the templates of the unit and of its dependencies, amended
   copies included (see
   [parameters-and-options.md](parameters-and-options.md#rendering--approved)).
@@ -463,27 +468,45 @@ as `own`, the values that unit has in this build (see
 [amendments-and-composition.md](amendments-and-composition.md#template-contexts--approved)).
 Every amendment that cannot be applied is reported with the others: a
 declared base other than the locked version (see
-[unit lock state](#unit-lock-state--approved)), a path the provider does
-not have at that version, naming the provider's template or plain file when
-only the suffix differs, a declaration without a copy, and a copy without a
-declaration. For a published amender, its lockfile's identity of each base
-is compared with the registry record for the provider at that version, and a
-disagreement is an integrity conflict; a provider resolved to a version
-other than the base is not a problem for a published amender, whose copy is
-applied to the version resolved (see
+[unit lock state](#unit-lock-state--approved)), a provider that is not a
+locked unit, a path the provider does not have at that version, naming the
+provider's template or plain file when only the suffix differs, a
+declaration without a copy, and a copy without a declaration. For a
+published amender, its lockfile's identity of each version its base is
+composed of is compared with the registry record, and a disagreement is an
+integrity conflict; a provider or a unit below resolved to a version other
+than the amender locked is not a problem for a published amender, whose
+changes are moved onto the version resolved (see
 [amendments-and-composition.md](amendments-and-composition.md#across-provider-versions--approved)),
-and is for the unit's own amendment, whose base is its locked version. A JSON or JSONC file that several units amend is composed by
-the merge engine, and a conflict between the amendments rejects the build
-naming the path and every amender; what a copy carries beyond values is
-reported as a warning. A text file that several units amend is composed by
-line, with a conflict naming the lines and every amender; insertions several
-units make at one position are all kept in the order of the units'
-identities, and the build reports it. YAML, TOML, and INI files are text here
-(owner decision on #92). An XML file that several units amend, or a file or
-copy that is not UTF-8 text, is not amended
-by any of them, and the build is rejected (see
+and is for the unit's own amendment, whose base is its locked state. The
+amenders of one file are composed in layers (see
+[amendments-and-composition.md](amendments-and-composition.md#the-base)):
+a unit's copy on top of the composition of the units below it, whatever the
+format, and siblings side by side, by the merge engine for a JSON or JSONC
+file and by line for text; what a copy carries beyond values is reported as
+a warning, and insertions siblings make at one position are all kept in the
+order of the units' identities, and reported. YAML, TOML, and INI files are
+text here (owner decision on #92). An XML file that siblings amend, or a
+file or copy that is not UTF-8 text, is not amended by any of them, and the
+build is rejected (see
 [amendments-and-composition.md](amendments-and-composition.md#the-merge-engine--approved)).
 The unit's own `src/` file at an amended path is a path collision.
+
+**Pending state** (owner decision on #100: the unit flow behaves as the
+consumer's pending resolution does). When siblings conflict in a file the
+unit does not amend yet, the conflict is the unit's to resolve, and the build
+creates the amendment itself: the copy at `amendments/<path>`, holding the
+sources layered with each conflict between markers, the declaration in
+`manifest.jsonc`, and the lockfile, since the resolution is sound and the
+conflict is a matter of content (**Provisional (D-42)**). Nothing is written
+under `build/`. The build reports each file with its conflicts, says what was
+written, and exits non-zero, saying to edit the copy, remove every marker,
+and build again. While any copy under `amendments/` holds a marker, `unit
+build`, `unit check`, and `unit publish` refuse, naming the files, and change
+nothing; `unit amend` of another file still works. A conflict in a file the
+unit does amend is reported as a build error: its copy resolved what it saw,
+and the rest is a change below (see
+[update details](#update-details--approved)).
 
 **`build/`.**
 
@@ -641,38 +664,53 @@ named or not, must still be published with the content it was locked to;
 otherwise the update fails, as a build does. A run that changes nothing
 reports that and touches no file.
 
-**Amendments.** For each of the unit's own amendments whose provider moves
-from the declared base to the new version:
+**Amendments** (owner decision on #100, replacing the earlier statement
+that no marker-based resolution is offered for a unit's amendments). For
+each of the unit's own amendments, the update composes its **layered base**
+twice, on the source templates: before the update, at the lock state, and
+after it, at the new resolution (see
+[amendments-and-composition.md](amendments-and-composition.md#the-base)).
 
-- when the provider's source file at the amended path is the same bytes at
-  both versions, the amendment is **carried over**: the copy is untouched,
-  the declaration's `base` becomes the new version, and the lock records
-  that version, in one operation;
-- when the file differs and is text outside the structured formats without a
-  merge (XML, and JSON in another case; YAML, TOML, and INI are text, owner
-  decision on #92), the amendment is **rebased**: the changes the
-  copy makes against the file at the old base are merged by line into the file
-  at the new version, on the source templates and with neither side taking
-  precedence, so the copy keeps its template expressions. Insertions the
-  provider and the copy make at the same position are both kept, the
-  provider's first, as a composition applies them across versions (see
-  [across provider versions](amendments-and-composition.md#across-provider-versions--approved)),
-  so the rebased copy composes to the same file. The copy is
-  rewritten, the declaration's `base` becomes the new version, and the lock
-  records it, in one operation. Source templates are never parsed as
-  structured documents, since a template need not be one; a rebased JSON file
-  that is not a template must still parse as JSON, or the update fails;
+- when the two bases are the same bytes, the amendment is **carried over**:
+  the copy is untouched, and when the provider moves the declaration's `base`
+  becomes the new version and the lock records it, in one operation;
+- when they differ, because the provider moved or a unit below did, and the
+  file is JSON or JSONC, or UTF-8 text outside the structured formats without
+  a merge (XML; YAML, TOML, and INI are text, owner decision on #92), the
+  amendment is **rebased**: the base before, the copy, and the base after are
+  merged three ways, by value for a JSON or JSONC file that is not a template
+  and by line otherwise, with neither side taking precedence, so the copy
+  keeps its template expressions and its own layout. A change below that the
+  copy did not touch flows through. Insertions the base and the copy make at
+  the same position are both kept, the base's first, as a composition applies
+  them across versions (see
+  [across provider versions](amendments-and-composition.md#across-provider-versions--approved)).
+  What both the copy and the update change is **not applied silently**: it is
+  left in the copy between `<<<<<<< current (your copy)`, `||||||| base
+  (before the update)`, `=======`, and `>>>>>>> incoming (the base after the
+  update)` lines for text, and as the marker object the layered base uses for
+  a JSON value, naming each side as `current` and `incoming`, and each is
+  reported. The copy is rewritten, the declaration's `base` follows the lock,
+  and the lock records the new versions, in one operation. A conflict marker
+  between siblings that the base after the update holds, in lines the copy
+  did not change, flows into the copy the same way, and is reported. The
+  update then exits non-zero, saying that it was applied and that the author
+  edits the copy, removes every marker, and builds;
 - otherwise the update fails and changes nothing, naming the amendment, the
-  provider, the old base, the new version, and the cause: the copy and the
-  provider changed the same lines (each collision is reported with its lines,
-  what the provider does there, and what the amendment does), the file
-  differs and has no merge or is not text, or the new version no longer
-  provides the path. The author resolves it by removing the declaration and
-  the copy and amending the file again at the new version; no marker-based
-  resolution is offered for a unit's amendments.
+  provider, the old base, the new version, and the cause: the base changed
+  and the file has no merge or is not text, the copy cannot be moved onto
+  the new base, or the new version no longer provides the path. The author
+  resolves it by removing the declaration and the copy and amending the file
+  again at the new version.
 
 A declaration whose base is not the locked version was edited by hand, and
 fails the update too.
+
+**Sibling conflicts.** When the dependencies after the update conflict in a
+file the unit does not amend, the update creates the amendment as a build
+does in the [pending state](#build-details--approved): the marked copy, its
+declaration, and the lock, in the same operation as the update, and reports
+it the same way.
 
 **Published amendments.** An amendment published by a dependency, whose
 provider resolves to a version other than its base, does not block the
@@ -683,9 +721,10 @@ resolution may choose.
 
 **Writing and recovery.** Everything is decided before anything is written.
 An update replaces `assemblr-lock.json` and, when an amendment is carried
-over, `manifest.jsonc`, whose declarations are rewritten in place so that
-comments and formatting survive, as `unit amend` edits it, and the copies it
-rebased under `amendments/`. Before any file is touched, the update records
+over or created, `manifest.jsonc`, whose declarations are rewritten in place
+or added so that comments and formatting survive, as `unit amend` edits it,
+and the copies it rebased or created under `amendments/`. Before any file is
+touched, the update records
 every file's contents before and after it in `assemblr-update.json` in the
 repository's Git directory. It then replaces the copies, in path order, each
 through a temporary file beside it and a rename, then the manifest through the
@@ -701,7 +740,8 @@ content, changed since the update started, is never overwritten: the update
 stops, keeps the record, and says to restore the file to either recorded
 content or to delete the record to abandon the update. A record that
 Assemblr cannot read is reported and kept. Nothing under `src/` is ever
-written by an update, and under `amendments/` only the copies it rebased.
+written by an update, and under `amendments/` only the copies it rebased or
+created.
 
 ## Testing: native validation vs functional correctness — Approved
 

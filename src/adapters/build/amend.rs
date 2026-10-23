@@ -25,16 +25,16 @@ use std::path::{Path, PathBuf};
 
 use super::exclusive::BuildLock;
 use super::{
-    BuildLockError, BuildProblem, Dependencies, MANIFEST, ManifestFileError,
-    read_working_manifest_text,
+    BuildLockError, BuildProblem, MANIFEST, ManifestFileError, development_values, layer_sources,
+    read_working_manifest_text, resolve_graph, without_amendments,
 };
 use crate::adapters::git::{FILE_LIMIT, GitError, GitRepository, ReadSrcError, UnitDirectory};
 use crate::adapters::lockfile::{self, LockfileError};
 use crate::adapters::manifest::{EditError, declare_amendment, read_manifest};
 use crate::adapters::registry::{Registry, StorageError};
 use crate::domain::{
-    AmendmentDeclaration, LockChange, LockError, MergeFormat, RelativePath, RelativePathError,
-    ResolutionError, UnitIdentity, Version, delivered_path, is_text, relock, resolve,
+    AmendmentDeclaration, LockChange, LockError, RelativePath, RelativePathError, ResolutionError,
+    Root, UnitContent, UnitIdentity, Version, compose, delivered_path,
 };
 
 /// Where the edited manifest is written before it replaces `manifest.jsonc`.
@@ -131,11 +131,6 @@ pub fn amend_unit(
         .index()
         .map_err(|error| problems.push(AmendProblem::Registry(error)))
         .ok();
-    if let (Some(manifest), Some(unit)) = (&manifest, unit) {
-        if !manifest.dependencies().contains_key(unit) {
-            problems.push(AmendProblem::NotADirectDependency(unit.clone()));
-        }
-    }
     let (Some(wanted), Some(text), Some(manifest), Some(src), Some(previous), Some(index)) =
         (wanted, text, manifest, src, previous, index)
     else {
@@ -145,43 +140,57 @@ pub fn amend_unit(
         return Err(AmendFailure::Rejected(problems));
     }
 
-    // The dependencies, as the lockfile records them. A resolution that
-    // would change the lockfile is a build's work.
-    let dependencies = Dependencies::read(&index, &manifest).map_err(|found| {
-        AmendFailure::Rejected(found.into_iter().map(AmendProblem::Build).collect())
-    })?;
-    let resolution = resolve(
+    // The dependencies, as the lockfile records them, with every locked
+    // version's content. A resolution that would change the lockfile is a
+    // build's work.
+    let mut found_problems = Vec::new();
+    let resolved = resolve_graph(
         Some(manifest.name()),
         manifest.dependencies(),
-        &dependencies.available,
-        &previous.versions(),
-    )
-    .map_err(|errors| {
-        AmendFailure::Rejected(errors.into_iter().map(AmendProblem::Resolution).collect())
-    })?;
-    if !resolution.changes().is_empty() {
+        &previous,
+        &index,
+        &mut found_problems,
+    );
+    let Some(resolved) = resolved else {
+        return Err(AmendFailure::Rejected(
+            found_problems
+                .into_iter()
+                .map(AmendProblem::Build)
+                .collect(),
+        ));
+    };
+    if !found_problems.is_empty() {
+        return Err(AmendFailure::Rejected(
+            found_problems
+                .into_iter()
+                .map(AmendProblem::Build)
+                .collect(),
+        ));
+    }
+    if !resolved.resolution.changes().is_empty() {
         return Err(rejected(AmendProblem::LockfileStale {
-            changes: resolution.changes().clone(),
+            changes: resolved.resolution.changes().clone(),
         }));
     }
-    let lock = relock(&previous, &resolution, &index).map_err(|errors| {
-        AmendFailure::Rejected(errors.into_iter().map(AmendProblem::Lock).collect())
-    })?;
-    let searched: Vec<&UnitIdentity> = manifest
-        .dependencies()
+    let lock = &resolved.lock;
+    if let Some(unit) = unit {
+        if !lock.units().contains_key(unit) {
+            return Err(rejected(AmendProblem::NotADependency(unit.clone())));
+        }
+    }
+    // Every unit in the graph is searched, at its locked version: a file's
+    // provider need not be a direct dependency.
+    let searched: Vec<&UnitIdentity> = lock
+        .units()
         .keys()
         .filter(|identity| unit.is_none_or(|unit| unit == *identity))
         .collect();
-    let contents = dependencies
-        .read_content(&lock, searched.iter().copied())
-        .map_err(|found| {
-            AmendFailure::Rejected(found.into_iter().map(AmendProblem::Build).collect())
-        })?;
-
     let mut matches = Vec::new();
     for identity in &searched {
-        let (Some(content), Some(locked)) = (contents.get(*identity), lock.units().get(*identity))
-        else {
+        let (Some(content), Some(locked)) = (
+            resolved.contents.get(*identity),
+            lock.units().get(*identity),
+        ) else {
             continue;
         };
         for path in content.files.keys().filter(|path| wanted.matches(path)) {
@@ -207,11 +216,6 @@ pub fn amend_unit(
             }));
         }
     };
-    let base = contents
-        .get(&found.unit)
-        .and_then(|content| content.files.get(&found.path))
-        .map(|file| file.contents().to_vec())
-        .unwrap_or_default();
     let declaration = AmendmentDeclaration::new(found.unit.clone(), found.version.clone());
 
     if let Some(existing) = manifest.amendments().get(&found.path) {
@@ -221,48 +225,77 @@ pub fn amend_unit(
             base: existing.base().clone(),
         });
     }
-    // Several amendments of a file are combined when it is JSON or JSONC,
-    // or UTF-8 text that is not XML.
-    let delivered = delivered_path(&found.path).ok().flatten();
-    let combinable = match MergeFormat::of_path(delivered.as_ref().unwrap_or(&found.path)) {
-        MergeFormat::Json => true,
-        MergeFormat::Text => is_text(&base),
-        MergeFormat::Unsupported => false,
-    };
-    // A locked dependency, direct or transitive, that already amends the
-    // same file of the same provider.
-    let mut shared_with = Vec::new();
-    for (identity, locked) in lock.units() {
-        let key = (identity.clone(), locked.version().clone());
-        let Some(existing) = dependencies
-            .manifests
-            .get(&key)
-            .and_then(|manifest| manifest.amendments().get(&found.path))
-            .filter(|existing| *existing.unit() == found.unit)
-        else {
-            continue;
-        };
-        // Several amendments of one file are combined by the build (OC-10):
-        // the copy is created, and the author is told who else amends the
-        // file. A file in a format that cannot be combined would make the
-        // build refuse both amenders, so the copy is not created.
-        if combinable {
-            shared_with.push((identity.clone(), locked.version().clone()));
-            continue;
-        }
-        problems.push(AmendProblem::AmendedByDependency {
-            path: found.path.clone(),
-            provider: found.unit.clone(),
-            amender: identity.clone(),
-            version: locked.version().clone(),
-            base: existing.base().clone(),
-        });
-    }
+    // A file the unit provides itself collides with the provider's in the
+    // composition; that is reported as what it is, before composing.
     if src.contains_key(&found.path) {
         problems.push(AmendProblem::OwnSrc {
             path: found.path.clone(),
         });
     }
+    if !problems.is_empty() {
+        return Err(AmendFailure::Rejected(problems));
+    }
+    // The base: the file as the unit's dependencies compose it, which is
+    // the file as it stands in `build/` before this amendment. The sources
+    // are layered, so a template keeps its expressions. The unit's own
+    // amendments are no part of it, and are left out of the composition:
+    // one of them may be a copy an interrupted run left undeclared, or one
+    // with conflict markers the author has not resolved yet.
+    let (development, _) = development_values(&manifest);
+    let units = resolved.units();
+    let bare = without_amendments(&manifest);
+    let no_copies = crate::domain::FileTree::new();
+    let composition = compose(
+        resolved.resolution.graph(),
+        Root::Unit(UnitContent::new(&bare, &src, &no_copies)),
+        &units,
+        &development,
+    );
+    let composition = match composition {
+        Ok(composition) => composition,
+        Err(errors) => {
+            problems.extend(
+                errors
+                    .into_iter()
+                    .map(|error| AmendProblem::Build(BuildProblem::Composition(error))),
+            );
+            return Err(AmendFailure::Rejected(problems));
+        }
+    };
+    let delivered = delivered_path(&found.path)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| found.path.clone());
+    let mut found_problems = Vec::new();
+    let base = layer_sources(
+        &composition,
+        &delivered,
+        lock,
+        Some(manifest.name()),
+        &resolved.dependencies,
+        &mut found_problems,
+    );
+    problems.extend(found_problems.into_iter().map(AmendProblem::Build));
+    let Some(base) = base else {
+        return Err(AmendFailure::Rejected(problems));
+    };
+    // The locked units whose amendments the copy is composed from, with
+    // their versions.
+    let below: Vec<(UnitIdentity, Version)> = composition
+        .files()
+        .get(&delivered)
+        .map(|composed| {
+            composed
+                .amendments()
+                .iter()
+                .filter_map(|amendment| {
+                    let locked = lock.units().get(amendment.amender())?;
+                    Some((amendment.amender().clone(), locked.version().clone()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let markers = crate::adapters::layered::has_markers(&base);
     let copy_path = root
         .join(UnitDirectory::Amendments.as_str())
         .join(found.path.as_str());
@@ -333,14 +366,18 @@ pub fn amend_unit(
     Ok(Amended {
         found,
         kept_existing: keep,
-        shared_with,
+        below,
+        markers,
     })
 }
 
 /// Checks that `amendments/` and the directories of `path` under it are
 /// real directories where they exist, and returns the ones that do not
 /// exist yet, outermost first.
-fn real_directories(root: &Path, path: &RelativePath) -> Result<Vec<PathBuf>, DirectoryProblem> {
+pub(super) fn real_directories(
+    root: &Path,
+    path: &RelativePath,
+) -> Result<Vec<PathBuf>, DirectoryProblem> {
     let mut segments: Vec<&str> = path.segments().collect();
     segments.pop();
     let mut directory = root.join(UnitDirectory::Amendments.as_str());
@@ -361,15 +398,32 @@ fn real_directories(root: &Path, path: &RelativePath) -> Result<Vec<PathBuf>, Di
     Ok(missing)
 }
 
+/// The directories of the copies at `paths` that do not exist yet, each
+/// once, parents first, so that they are created once for all the copies.
+pub(super) fn real_directories_of<'p>(
+    root: &Path,
+    paths: impl IntoIterator<Item = &'p RelativePath>,
+) -> Result<Vec<PathBuf>, DirectoryProblem> {
+    let mut missing: Vec<PathBuf> = Vec::new();
+    for path in paths {
+        for directory in real_directories(root, path)? {
+            if !missing.contains(&directory) {
+                missing.push(directory);
+            }
+        }
+    }
+    Ok(missing)
+}
+
 /// Why a directory of the copy's path cannot be written into.
-enum DirectoryProblem {
+pub(super) enum DirectoryProblem {
     NotADirectory(PathBuf),
     Unreadable(PathBuf, io::Error),
 }
 
 /// Removes the directories `created`, innermost first, as far as they are
 /// empty. Best effort: a directory that cannot be removed is harmless.
-fn remove_directories(created: &[PathBuf]) {
+pub(super) fn remove_directories(created: &[PathBuf]) {
     for directory in created.iter().rev() {
         let _ = fs::remove_dir(directory);
     }
@@ -431,7 +485,7 @@ fn existing_copy(path: &Path, base: &[u8]) -> Result<bool, fn(RelativePath) -> A
 
 /// Creates the copy, new, in the directories `missing`, which it creates
 /// one at a time and never through a link, and flushes it.
-fn write_copy(path: &Path, contents: &[u8], missing: &[PathBuf]) -> io::Result<()> {
+pub(super) fn write_copy(path: &Path, contents: &[u8], missing: &[PathBuf]) -> io::Result<()> {
     for directory in missing {
         fs::create_dir(directory)?;
     }
@@ -492,7 +546,8 @@ impl fmt::Display for Match {
 pub struct Amended {
     found: Match,
     kept_existing: bool,
-    shared_with: Vec<(UnitIdentity, Version)>,
+    below: Vec<(UnitIdentity, Version)>,
+    markers: bool,
 }
 
 impl Amended {
@@ -508,10 +563,16 @@ impl Amended {
     }
 
     /// The locked dependencies, with their versions, whose published
-    /// amendments of the same file the build combines with this one, by
-    /// identity.
-    pub fn shared_with(&self) -> &[(UnitIdentity, Version)] {
-        &self.shared_with
+    /// amendments of the same file the copy is composed from, by identity.
+    pub fn below(&self) -> &[(UnitIdentity, Version)] {
+        &self.below
+    }
+
+    /// Whether the copy holds conflict markers: amendments below the unit
+    /// conflict, and the copy resolves the conflict once the markers are
+    /// replaced.
+    pub fn has_markers(&self) -> bool {
+        self.markers
     }
 }
 
@@ -620,8 +681,9 @@ pub enum AmendProblem {
     Resolution(ResolutionError),
     /// The resolution contradicts the lockfile.
     Lock(LockError),
-    /// `--unit` names an identity that is not a direct dependency.
-    NotADirectDependency(UnitIdentity),
+    /// `--unit` names an identity that is not a locked dependency, direct
+    /// or transitive.
+    NotADependency(UnitIdentity),
     /// The file argument is not a valid filename or path.
     InvalidFile {
         /// The argument.
@@ -629,7 +691,7 @@ pub enum AmendProblem {
         /// Why.
         error: RelativePathError,
     },
-    /// No direct dependency provides the file.
+    /// No dependency provides the file.
     NoMatch {
         /// The argument.
         file: String,
@@ -651,21 +713,6 @@ pub enum AmendProblem {
         /// The declared provider.
         unit: UnitIdentity,
         /// The declared base.
-        base: Version,
-    },
-    /// A locked dependency's published version already amends the same
-    /// file of the same provider, and the file is not one whose amendments
-    /// the build combines (JSON and JSONC are).
-    AmendedByDependency {
-        /// The path.
-        path: RelativePath,
-        /// The provider.
-        provider: UnitIdentity,
-        /// The dependency that amends it.
-        amender: UnitIdentity,
-        /// Its locked version.
-        version: Version,
-        /// The base its amendment declares.
         base: Version,
     },
     /// A file at `amendments/<path>` exists with other content than the
@@ -754,10 +801,10 @@ impl fmt::Display for AmendProblem {
             Self::Build(problem) => problem.fmt(f),
             Self::Resolution(error) => error.fmt(f),
             Self::Lock(error) => error.fmt(f),
-            Self::NotADirectDependency(unit) => write!(
+            Self::NotADependency(unit) => write!(
                 f,
-                "{unit} is not a direct dependency of the unit; an amendment targets a direct \
-                 dependency"
+                "{unit} is not a dependency of the unit, directly or through its dependencies, \
+                 so none of its files can be amended here"
             ),
             Self::InvalidFile { file, error } => {
                 write!(
@@ -798,23 +845,10 @@ impl fmt::Display for AmendProblem {
                 f,
                 "the manifest already declares an amendment of {path} from {unit} {base}"
             ),
-            Self::AmendedByDependency {
-                path,
-                provider,
-                amender,
-                version,
-                base,
-            } => write!(
-                f,
-                "src/{path} of {provider} is already amended by {amender} {version}, a locked \
-                 dependency, based on {provider} {base}; several amendments of one file are \
-                 combined for JSON, JSONC, and UTF-8 text files, but not for XML files or a file \
-                 that is not text, so it cannot be amended here"
-            ),
             Self::CopyExists { path } => write!(
                 f,
-                "amendments/{path} already exists with content other than the provider's file, \
-                 and an existing amendment is never overwritten"
+                "amendments/{path} already exists with content other than the file's composed \
+                 base, and an existing amendment is never overwritten"
             ),
             Self::CopyNotAFile { path } => {
                 write!(f, "amendments/{path} exists and is not a regular file")

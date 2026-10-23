@@ -383,41 +383,73 @@ impl std::error::Error for PublishedAmendmentError {}
 /// the index does not record is not reported: the provider then resolves
 /// to another version, which the composition reports. Errors are sorted by
 /// path.
-pub fn verify_bases(
+pub fn verify_bases<'m>(
     amender: &UnitIdentity,
     version: &Version,
     manifest: &Manifest,
     lock: &UnitLock,
     index: &RegistryIndex,
+    manifest_of: impl Fn(&UnitIdentity, &Version) -> Option<&'m Manifest>,
 ) -> Vec<BaseIntegrityError> {
+    let recorded = |unit: &UnitIdentity, version: &Version| {
+        index
+            .units()
+            .get(unit)
+            .and_then(|published| published.versions().get(version))
+            .cloned()
+    };
+    // The units below the amender, at the versions its lockfile locks: the
+    // amendments among them of a file it amends are part of its base.
+    let dependencies_of = |unit: &UnitIdentity| {
+        if unit == amender {
+            return Some(manifest.dependencies());
+        }
+        let locked = lock.units.get(unit)?;
+        manifest_of(unit, &locked.version).map(Manifest::dependencies)
+    };
+    let below = super::composition::dependency_closure(std::iter::once(amender), dependencies_of);
     let mut errors = Vec::new();
     for (path, declaration) in manifest.amendments() {
         let provider = declaration.unit();
         let base = declaration.base();
-        let Some(recorded) = index
-            .units()
-            .get(provider)
-            .and_then(|unit| unit.versions().get(base))
-        else {
-            continue;
-        };
-        let Some(locked) = lock
+        let mut entries: Vec<(&UnitIdentity, &LockedUnit)> = Vec::new();
+        if let Some(locked) = lock
             .units
             .get(provider)
             .filter(|locked| locked.version == *base)
-        else {
-            continue;
-        };
-        if locked.provenance != *recorded {
-            errors.push(BaseIntegrityError {
-                amender: amender.clone(),
-                version: version.clone(),
-                path: path.clone(),
-                provider: provider.clone(),
-                base: base.clone(),
-                published: locked.provenance.clone(),
-                recorded: recorded.clone(),
+        {
+            entries.push((provider, locked));
+        }
+        for unit in &below {
+            let Some(locked) = lock.units.get(unit).filter(|_| unit != provider) else {
+                continue;
+            };
+            let amends = manifest_of(unit, &locked.version).is_some_and(|published| {
+                published
+                    .amendments()
+                    .get(path)
+                    .is_some_and(|declared| declared.unit() == provider)
             });
+            if amends {
+                entries.push((unit, locked));
+            }
+        }
+        for (unit, locked) in entries {
+            let Some(recorded) = recorded(unit, &locked.version) else {
+                continue;
+            };
+            if locked.provenance != recorded {
+                errors.push(BaseIntegrityError {
+                    amender: amender.clone(),
+                    version: version.clone(),
+                    path: path.clone(),
+                    provider: provider.clone(),
+                    base: base.clone(),
+                    entry: (unit.clone(), locked.version.clone()),
+                    published: locked.provenance.clone(),
+                    recorded,
+                });
+            }
         }
     }
     errors
@@ -432,6 +464,9 @@ pub struct BaseIntegrityError {
     path: RelativePath,
     provider: UnitIdentity,
     base: Version,
+    /// The lockfile entry that disagrees: the provider at the base, or an
+    /// amender below whose amendment is part of the base.
+    entry: (UnitIdentity, Version),
     published: Provenance,
     recorded: Provenance,
 }
@@ -457,6 +492,13 @@ impl BaseIntegrityError {
         &self.provider
     }
 
+    /// The lockfile entry that disagrees with the registry: the provider
+    /// at the base, or an amender below it whose amendment is part of the
+    /// base.
+    pub fn entry(&self) -> (&UnitIdentity, &Version) {
+        (&self.entry.0, &self.entry.1)
+    }
+
     /// The declared base version.
     pub fn base(&self) -> &Version {
         &self.base
@@ -475,23 +517,35 @@ impl BaseIntegrityError {
 
 impl fmt::Display for BaseIntegrityError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (unit, version) = &self.entry;
         write!(
             f,
-            "integrity conflict: {} {} amends {} of {} {}, whose content its lockfile identifies \
-             as commit {} (tree {}), but the registry records commit {} (tree {}) for {} {}; a \
-             published version's content must not change, and an amendment's changes are derived \
-             only against its verified base",
-            self.amender,
-            self.version,
-            self.path,
-            self.provider,
-            self.base,
-            self.published.commit(),
-            self.published.tree(),
+            "integrity conflict: {} {} amends {} of {} {}, ",
+            self.amender, self.version, self.path, self.provider, self.base
+        )?;
+        if *unit != self.provider || *version != self.base {
+            write!(
+                f,
+                "a base that includes the amendment of {unit} {version}, whose content its \
+                 lockfile identifies as commit {} (tree {}), ",
+                self.published.commit(),
+                self.published.tree()
+            )?;
+        } else {
+            write!(
+                f,
+                "whose content its lockfile identifies as commit {} (tree {}), ",
+                self.published.commit(),
+                self.published.tree()
+            )?;
+        }
+        write!(
+            f,
+            "but the registry records commit {} (tree {}) for {unit} {version}; a published \
+             version's content must not change, and an amendment's changes are derived only \
+             against its verified base",
             self.recorded.commit(),
-            self.recorded.tree(),
-            self.provider,
-            self.base
+            self.recorded.tree()
         )
     }
 }
@@ -895,7 +949,8 @@ mod tests {
                 &version("0.1.0"),
                 &manifest,
                 &agreeing,
-                &index
+                &index,
+                |_, _| None,
             ),
             []
         );
@@ -907,6 +962,7 @@ mod tests {
             &manifest,
             &differing,
             &index,
+            |_, _| None,
         );
         let expected = |amended: &str| BaseIntegrityError {
             amender: identity("@acme/app"),
@@ -914,6 +970,7 @@ mod tests {
             path: path(amended),
             provider: identity("@acme/node"),
             base: version("1.0.0"),
+            entry: (identity("@acme/node"), version("1.0.0")),
             published: provenance('5', '6'),
             recorded: provenance('1', '2'),
         };
@@ -940,7 +997,8 @@ mod tests {
                 &version("0.1.0"),
                 &manifest,
                 &differing,
-                &other
+                &other,
+                |_, _| None,
             ),
             []
         );
@@ -951,7 +1009,8 @@ mod tests {
                 &version("0.1.0"),
                 &manifest,
                 &elsewhere,
-                &index
+                &index,
+                |_, _| None,
             ),
             []
         );

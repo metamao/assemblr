@@ -20,6 +20,9 @@ mod add;
 mod amend;
 mod check;
 mod exclusive;
+mod layering;
+pub use layering::UnresolvedFile;
+pub(crate) use layering::{layer_sources, render_files};
 mod output;
 mod publish;
 mod update;
@@ -46,14 +49,13 @@ use super::git::{GitError, GitRepository, InvalidVersion, MANIFEST_LIMIT, ReadSr
 use super::lockfile::{self, LockfileError, PublishedLockfileError};
 use super::manifest::{ReadManifestError, read_manifest};
 use super::registry::{Registry, StorageError};
-use super::render::{Context, RenderError, parameters_referenced, render};
+use super::render::RenderError;
 use crate::domain::{
     AmendmentBaseError, AvailableVersions, BaseIntegrityError, CompositionError, ContributionError,
-    FileTree, LockChange, LockError, Manifest, MergeFormat, ObjectId, ParameterName,
-    ParameterValues, PublishedAmendmentError, RelativePath, Requirer, ResolutionError, Root,
-    TEMPLATE_SUFFIX, UnitContent, UnitFile, UnitIdentity, UnitLock, ValueKind, Version,
-    amendment_bases, compose, contribution_problems, is_text, published_amendments, relock,
-    resolve, verify_bases,
+    FileTree, LockChange, LockError, Manifest, ObjectId, ParameterName, PublishedAmendmentError,
+    RelativePath, Requirer, ResolutionError, Root, TEMPLATE_SUFFIX, UnitContent, UnitFile,
+    UnitIdentity, UnitLock, ValueKind, Version, amendment_bases, compose, contribution_problems,
+    published_amendments, relock, resolve, verify_bases,
 };
 
 /// The unit's manifest, at the repository's top level.
@@ -65,7 +67,8 @@ pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailur
     let mut opened = open(root, registry)?;
     let manifest = opened.manifest.clone();
     let validated = validate_opened(&mut opened, &manifest)?;
-    publish_validated(root, &opened, &manifest, validated)
+    let text = opened.text.clone();
+    publish_validated(root, &opened, &text, &manifest, validated)
 }
 
 /// A unit read from its working tree for a build, under the lock that
@@ -234,9 +237,13 @@ fn validate_opened(opened: &mut Opened, manifest: &Manifest) -> Result<Validated
 fn publish_validated(
     root: &Path,
     opened: &Opened,
+    text: &str,
     manifest: &Manifest,
     validated: Validated,
 ) -> Result<Built, BuildFailure> {
+    if !validated.pending.is_empty() {
+        return Err(write_pending(root, opened, text, manifest, validated));
+    }
     let lock = validated.lock;
     let lockfile = match &opened.previous {
         None => LockfileOutcome::Created,
@@ -260,6 +267,138 @@ fn publish_validated(
         changes: validated.changes,
         notes: validated.notes,
         leftover: published.leftover,
+    })
+}
+
+/// Writes the pending state: each marked copy under `amendments/`, its
+/// declaration in the manifest, and the lockfile, since the resolution is
+/// sound and the conflict is a matter of content. `build/` is not touched.
+/// The copies are created first, new files only, then the manifest is
+/// replaced through its staging file, then the lockfile through its own.
+fn write_pending(
+    root: &Path,
+    opened: &Opened,
+    text: &str,
+    manifest: &Manifest,
+    validated: Validated,
+) -> BuildFailure {
+    let staged = root.join(amend::MANIFEST_NEW);
+    let lock_staging = root.join(output::LOCK_STAGING);
+    let mut problems = Vec::new();
+    for path in [&staged, &lock_staging] {
+        if fs::symlink_metadata(path).is_ok() {
+            problems.push(BuildProblem::StagingOccupied { path: path.clone() });
+        }
+    }
+    let mut edited = text.to_owned();
+    let mut declared = manifest.clone();
+    let mut placements = Vec::new();
+    for pending in &validated.pending {
+        let declaration = crate::domain::AmendmentDeclaration::new(
+            pending.provider.clone(),
+            pending.base.clone(),
+        );
+        match crate::adapters::manifest::declare_amendment(
+            &edited,
+            &declared,
+            &pending.source,
+            &declaration,
+        ) {
+            Ok(text) => edited = text,
+            Err(error) => {
+                problems.push(BuildProblem::ManifestEdit(error));
+                continue;
+            }
+        }
+        if let Some(next) = declared.with_amendment(pending.source.clone(), declaration) {
+            declared = next;
+        }
+        placements.push(pending);
+    }
+    // The directories the copies need, each once: two copies can share a
+    // new one.
+    let mut missing = Vec::new();
+    match amend::real_directories_of(root, placements.iter().map(|pending| &pending.source)) {
+        Ok(directories) => missing = directories,
+        Err(amend::DirectoryProblem::NotADirectory(path)) => {
+            problems.push(BuildProblem::NotADirectory { path });
+        }
+        Err(amend::DirectoryProblem::Unreadable(path, error)) => {
+            problems.push(BuildProblem::Unreadable { path, error });
+        }
+    }
+    if !problems.is_empty() {
+        return BuildFailure::Rejected(problems);
+    }
+    let lock_bytes = match lockfile::serialize(&validated.lock) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return BuildFailure::PendingWrite {
+                path: root.join(lockfile::LOCKFILE),
+                error,
+                written: Vec::new(),
+            };
+        }
+    };
+    for directory in &missing {
+        if let Err(error) = fs::create_dir(directory) {
+            amend::remove_directories(&missing);
+            return BuildFailure::PendingWrite {
+                path: directory.clone(),
+                error,
+                written: Vec::new(),
+            };
+        }
+    }
+    let mut written = Vec::new();
+    for pending in &placements {
+        let copy_path = root
+            .join(super::git::UnitDirectory::Amendments.as_str())
+            .join(pending.source.as_str());
+        if let Err(error) = amend::write_copy(&copy_path, &pending.copy, &[]) {
+            let _ = fs::remove_file(&copy_path);
+            if written.is_empty() {
+                amend::remove_directories(&missing);
+            }
+            return BuildFailure::PendingWrite {
+                path: copy_path,
+                error,
+                written,
+            };
+        }
+        written.push(pending.source.clone());
+    }
+    if let Err(error) = amend::write_manifest(root, &staged, edited.as_bytes()) {
+        let _ = fs::remove_file(&staged);
+        return BuildFailure::PendingWrite {
+            path: root.join(MANIFEST),
+            error,
+            written,
+        };
+    }
+    written.push(
+        RelativePath::parse(MANIFEST).unwrap_or_else(|_| validated.pending[0].source.clone()),
+    );
+    let lockfile_outcome = match &opened.previous {
+        None => LockfileOutcome::Created,
+        Some(previous) if *previous == validated.lock => LockfileOutcome::Unchanged,
+        Some(_) => LockfileOutcome::Updated,
+    };
+    if lockfile_outcome != LockfileOutcome::Unchanged {
+        let replaced = fs::write(&lock_staging, &lock_bytes)
+            .and_then(|()| fs::rename(&lock_staging, root.join(lockfile::LOCKFILE)));
+        if let Err(error) = replaced {
+            let _ = fs::remove_file(&lock_staging);
+            return BuildFailure::PendingWrite {
+                path: root.join(lockfile::LOCKFILE),
+                error,
+                written,
+            };
+        }
+    }
+    BuildFailure::Pending(Pending {
+        files: validated.pending,
+        lockfile: lockfile_outcome,
     })
 }
 
@@ -336,6 +475,154 @@ pub(super) struct Validated {
     /// What the composition reports without failing: parts of amendment
     /// copies the merge could not carry, each naming the file.
     pub(super) notes: Vec<String>,
+    /// Files the unit does not amend whose sibling amenders conflict:
+    /// the build creates the marked copies instead of `build/` (the
+    /// pending state, see `docs/domain/authoring-workflow.md`).
+    pub(super) pending: Vec<PendingFile>,
+}
+
+/// A copy the pending state creates: the composition of a file with the
+/// conflict between its sibling amenders marked, for the unit to resolve.
+#[derive(Debug, Clone)]
+pub struct PendingFile {
+    /// The path in the provider's `src/`, and the copy's under
+    /// `amendments/`.
+    source: RelativePath,
+    /// The provider.
+    provider: UnitIdentity,
+    /// Its locked version, the copy's base.
+    base: Version,
+    /// The amenders whose contributions conflict.
+    amenders: Vec<UnitIdentity>,
+    /// Each conflict, as the merge reports it.
+    conflicts: Vec<String>,
+    /// The marked copy.
+    copy: Vec<u8>,
+}
+
+impl PendingFile {
+    /// The copy's path under `amendments/`.
+    pub fn path(&self) -> &RelativePath {
+        &self.source
+    }
+
+    /// The provider of the amended file.
+    pub fn provider(&self) -> &UnitIdentity {
+        &self.provider
+    }
+
+    /// The provider's version the copy is based on.
+    pub fn base(&self) -> &Version {
+        &self.base
+    }
+
+    /// The amenders whose contributions conflict, by identity.
+    pub fn amenders(&self) -> &[UnitIdentity] {
+        &self.amenders
+    }
+
+    /// Each conflict, as the merge reports it.
+    pub fn conflicts(&self) -> &[String] {
+        &self.conflicts
+    }
+}
+
+/// The values a unit is built with: a required parameter is built with its
+/// example, for this unit only, and a consumer never sees them. The
+/// parameters without a default or an example are given too.
+pub(super) fn development_values(
+    manifest: &Manifest,
+) -> (
+    BTreeMap<UnitIdentity, crate::domain::OptionValues>,
+    Vec<ParameterName>,
+) {
+    let mut development = crate::domain::OptionValues::new();
+    let mut parameters: Vec<ParameterName> = Vec::new();
+    for (name, definition) in manifest.params() {
+        if definition.default().is_some() {
+            continue;
+        }
+        match definition.example() {
+            Some(example) => {
+                development.insert(name.clone(), example.clone());
+            }
+            None => parameters.push(name.clone()),
+        }
+    }
+    let development = if development.is_empty() {
+        BTreeMap::new()
+    } else {
+        BTreeMap::from([(manifest.name().clone(), development)])
+    };
+    (development, parameters)
+}
+
+/// The pending copy for each file of `unresolved` that `manifest`, the
+/// unit being built, does not amend: the sources layered, with the
+/// conflict marked, for the unit to resolve. The files it amends are given
+/// back: its copy resolved what it saw, and the rest is the caller's to
+/// report.
+pub(super) fn pending_files(
+    composition: &crate::domain::Composition<'_>,
+    unresolved: Vec<UnresolvedFile>,
+    lock: &UnitLock,
+    manifest: &Manifest,
+    dependencies: &Dependencies,
+    problems: &mut Vec<BuildProblem>,
+) -> (Vec<PendingFile>, Vec<UnresolvedFile>) {
+    let mut pending = Vec::new();
+    let mut kept = Vec::new();
+    for unresolved in unresolved {
+        let Some(locked) = lock.units().get(&unresolved.provider) else {
+            kept.push(unresolved);
+            continue;
+        };
+        if manifest.amendments().contains_key(&unresolved.source) {
+            kept.push(unresolved);
+            continue;
+        }
+        let copy = layer_sources(
+            composition,
+            &unresolved.delivered,
+            lock,
+            Some(manifest.name()),
+            dependencies,
+            problems,
+        );
+        let Some(copy) = copy else {
+            continue;
+        };
+        pending.push(PendingFile {
+            source: unresolved.source.clone(),
+            provider: unresolved.provider.clone(),
+            base: locked.version().clone(),
+            amenders: unresolved.amenders.clone(),
+            conflicts: unresolved
+                .conflicts
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            copy,
+        });
+    }
+    (pending, kept)
+}
+
+/// `manifest` without its amendments: the root of a composition that
+/// gives the bases of the unit's own amendments, which are no part of
+/// them, and that is not disturbed by a copy an interrupted run left
+/// undeclared or by one that still holds conflict markers.
+pub(super) fn without_amendments(manifest: &Manifest) -> Manifest {
+    Manifest::new(
+        manifest.name().clone(),
+        manifest.version().clone(),
+        manifest.description().clone(),
+        manifest.dependencies().clone(),
+        manifest.options().clone(),
+        manifest.params().clone(),
+        BTreeMap::new(),
+    )
+    .unwrap_or_else(|_| manifest.clone())
 }
 
 /// The resolved, verified dependencies of a root: a unit, or a consumer
@@ -438,9 +725,16 @@ pub(crate) fn resolve_graph(
         };
         if let Some(published) = &content.lock {
             problems.extend(
-                verify_bases(identity, locked.version(), manifest, published, index)
-                    .into_iter()
-                    .map(BuildProblem::BaseIntegrity),
+                verify_bases(
+                    identity,
+                    locked.version(),
+                    manifest,
+                    published,
+                    index,
+                    |unit, version| dependencies.manifests.get(&(unit.clone(), version.clone())),
+                )
+                .into_iter()
+                .map(|error| BuildProblem::BaseIntegrity(Box::new(error))),
             );
         }
     }
@@ -473,27 +767,7 @@ pub(super) fn validate(
         contribution: Vec::new(),
         result: None,
     };
-    // A required parameter is built with its example: development values
-    // are the author's, for this unit only, and a consumer never sees them.
-    let mut development = crate::domain::OptionValues::new();
-    let mut parameters: Vec<ParameterName> = Vec::new();
-    for (name, definition) in manifest.params() {
-        if definition.default().is_some() {
-            continue;
-        }
-        match definition.example() {
-            Some(example) => {
-                development.insert(name.clone(), example.clone());
-            }
-            None => parameters.push(name.clone()),
-        }
-    }
-    let development: BTreeMap<UnitIdentity, crate::domain::OptionValues> = if development.is_empty()
-    {
-        BTreeMap::new()
-    } else {
-        BTreeMap::from([(manifest.name().clone(), development)])
-    };
+    let (development, parameters) = development_values(manifest);
     if !parameters.is_empty() {
         problems.push(BuildProblem::DevelopmentValues {
             unit: manifest.name().clone(),
@@ -527,6 +801,17 @@ pub(super) fn validate(
     let (Some(src), Some(amendments)) = (src, amendments) else {
         return validation;
     };
+    // A copy that still holds a conflict marker is not a copy yet: the
+    // author resolves it first, and nothing is composed from it.
+    let marked: Vec<RelativePath> = amendments
+        .iter()
+        .filter(|(_, copy)| super::layered::has_markers(copy.contents()))
+        .map(|(path, _)| path.clone())
+        .collect();
+    if !marked.is_empty() {
+        problems.push(BuildProblem::Markers { paths: marked });
+        return validation;
+    }
     validation.contribution =
         contribution_problems(manifest, src, amendments, &resolved.providers());
     let units = resolved.units();
@@ -568,422 +853,30 @@ pub(super) fn validate(
     ) else {
         return validation;
     };
+    // A conflict between siblings in a file the unit does not amend is
+    // the unit's to resolve: the pending state gives it the marked copy
+    // of the sources. In a file it amends, its copy resolved what it saw
+    // and the rest is reported.
+    let (pending, kept) = pending_files(
+        &composition,
+        rendered.unresolved,
+        &resolved.lock,
+        manifest,
+        &resolved.dependencies,
+        problems,
+    );
+    problems.extend(kept.into_iter().map(BuildProblem::Unresolved));
+    if !problems.is_empty() {
+        return validation;
+    }
     validation.result = Some(Validated {
         lock: resolved.lock,
         changes: resolved.resolution.changes().clone(),
         files: rendered.files,
         notes: rendered.notes.into_iter().map(|(_, note)| note).collect(),
+        pending,
     });
     validation
-}
-
-/// The rendered files of a composition.
-pub(crate) struct Rendered {
-    pub(crate) files: Vec<(RelativePath, UnitFile)>,
-    /// What the composition reports without failing, each with the
-    /// delivered path it concerns.
-    pub(crate) notes: Vec<(RelativePath, String)>,
-    /// The amendments applied to another version of their provider than
-    /// the one they were taken from, each with its delivered path.
-    pub(crate) crossed: Vec<(RelativePath, String)>,
-}
-
-/// Renders every file of `composition`: templates with the parameter
-/// values of the unit that provides each one, plus the amending unit's
-/// values as `own` for a copy. One copy takes the provider's file's place;
-/// several are combined on the rendered content (see `super::merge`).
-/// Every problem is reported, by delivered path and then position, and the
-/// files are given only when there was none. `built` is the unit being
-/// built, whose amendments are not published versions.
-pub(crate) fn render_files(
-    composition: &crate::domain::Composition<'_>,
-    lock: &UnitLock,
-    built: Option<&UnitIdentity>,
-    dependencies: &Dependencies,
-    problems: &mut Vec<BuildProblem>,
-) -> Option<Rendered> {
-    let no_values = ParameterValues::new();
-    let values_of = |unit: &UnitIdentity| values_of(composition, &no_values, unit);
-    let mut files: Vec<(RelativePath, UnitFile)> = Vec::new();
-    let mut notes = Vec::new();
-    let mut crossed = Vec::new();
-    let mut failed = false;
-    // Problems are collected here, since the rendering closure below holds
-    // on to the sink while the rest of the loop reports into it too.
-    let sink: std::cell::RefCell<Vec<BuildProblem>> = std::cell::RefCell::new(Vec::new());
-    // The `src/` trees of the versions amendments were taken from, read
-    // when a composition resolves a provider to another version.
-    let history: std::cell::RefCell<BTreeMap<(UnitIdentity, Version), FileTree>> =
-        std::cell::RefCell::new(BTreeMap::new());
-    for (path, composed) in composition.files() {
-        let executable = composed.is_executable();
-        let provider = composed.unit();
-        let resolved_version = lock.units().get(provider).map(|locked| locked.version());
-        let published_version = |amender: &UnitIdentity| {
-            (Some(amender) != built)
-                .then(|| lock.units().get(amender))
-                .flatten()
-                .map(|locked| locked.version().clone())
-        };
-        // Renders one side: the provider's file, or an amender's copy.
-        // `quiet` renders without reporting: the base of a single copy is
-        // rendered only to compare, and a base that does not render is
-        // not that build's problem.
-        let quiet = std::cell::Cell::new(false);
-        let side = |bytes: &[u8], amender: Option<&UnitIdentity>| -> Option<Vec<u8>> {
-            if !composed.is_template() {
-                return Some(bytes.to_vec());
-            }
-            let template = |error| BuildProblem::Template {
-                unit: provider.clone(),
-                path: composed.source().clone(),
-                amended_by: amender.cloned(),
-                published: amender.and_then(published_version),
-                error,
-            };
-            let Ok(text) = std::str::from_utf8(bytes) else {
-                if !quiet.get() {
-                    sink.borrow_mut().push(template(TemplateError::NotUtf8));
-                }
-                return None;
-            };
-            let values = values_of(provider);
-            let context = match amender {
-                Some(amender) => Context::amended(values, values_of(amender)),
-                None => Context::new(values),
-            };
-            match render(text, &context) {
-                Ok(rendered) => Some(rendered.into_bytes()),
-                Err(errors) => {
-                    if !quiet.get() {
-                        sink.borrow_mut()
-                            .extend(errors.into_iter().map(TemplateError::Render).map(template));
-                    }
-                    None
-                }
-            }
-        };
-        // The amendments taken from another version of the provider than
-        // the one resolved, with the provider's file as it was there.
-        // Amendments whose file is the same bytes at both versions are
-        // applied as if taken from the resolved one.
-        let mut crossing: BTreeMap<&UnitIdentity, (Version, Vec<u8>)> = BTreeMap::new();
-        let mut unreadable = false;
-        for amendment in composed.amendments() {
-            let base = amendment.base();
-            let Some(resolved) = resolved_version.filter(|resolved| *resolved != base) else {
-                continue;
-            };
-            crossed.push((
-                path.clone(),
-                format!(
-                    "{path}: the amendment of {} was taken from {provider} {base} and is applied \
-                     to {provider} {resolved}",
-                    amendment.amender()
-                ),
-            ));
-            let cross = |reason| BuildProblem::CrossVersion {
-                unit: provider.clone(),
-                path: composed.source().clone(),
-                amender: amendment.amender().clone(),
-                published: published_version(amendment.amender()),
-                base: base.clone(),
-                resolved: resolved.clone(),
-                reason,
-            };
-            let key = (provider.clone(), base.clone());
-            if !history.borrow().contains_key(&key) {
-                match dependencies.read_src_at(provider, base) {
-                    Some(Ok(tree)) => {
-                        history.borrow_mut().insert(key.clone(), tree);
-                    }
-                    Some(Err(problem)) => {
-                        sink.borrow_mut().push(problem);
-                        unreadable = true;
-                        continue;
-                    }
-                    None => {
-                        sink.borrow_mut()
-                            .push(cross(CrossVersionReason::BaseUnavailable));
-                        unreadable = true;
-                        continue;
-                    }
-                }
-            }
-            let tree = history.borrow();
-            match tree
-                .get(&key)
-                .and_then(|tree| tree.get(composed.source()))
-                .map(|file| file.contents().to_vec())
-            {
-                Some(bytes) if bytes == composed.contents() => {}
-                Some(bytes) => {
-                    crossing.insert(amendment.amender(), (base.clone(), bytes));
-                }
-                None => {
-                    sink.borrow_mut()
-                        .push(cross(CrossVersionReason::BaseUnavailable));
-                    unreadable = true;
-                }
-            }
-        }
-        if unreadable {
-            failed = true;
-            continue;
-        }
-        let delivered = match composed.amendments() {
-            [] => side(composed.contents(), None),
-            [only] if crossing.is_empty() => {
-                let (amender, copy) = (only.amender(), only.copy());
-                let delivered = side(copy.contents(), Some(amender));
-                // The unit's own copy takes the file's place whole, but a
-                // second amender would make a merge of it, which carries
-                // members and values only: say so to its author now.
-                if Some(amender) == built && MergeFormat::of_path(path) == MergeFormat::Json {
-                    quiet.set(true);
-                    let base = side(composed.contents(), None);
-                    quiet.set(false);
-                    if let (Some(base), Some(copy)) = (
-                        base.as_deref().and_then(utf8),
-                        delivered.as_deref().and_then(utf8),
-                    ) {
-                        for note in super::merge::unshared_notes(base, amender, copy) {
-                            let super::merge::MergeNote::NotCarried { what, .. } = note else {
-                                continue;
-                            };
-                            notes.push((
-                                path.clone(),
-                                format!(
-                                    "amendments/{} of {amender}: if another unit amends src/{} \
-                                     of {provider} too, {what} of this copy is not carried; the \
-                                     merge carries members and values, not comments or order",
-                                    composed.source(),
-                                    composed.source()
-                                ),
-                            ));
-                        }
-                    }
-                }
-                delivered
-            }
-            amendments => {
-                let merge = || BuildProblem::Merge {
-                    unit: provider.clone(),
-                    // An amended file's provider is a locked dependency:
-                    // the root is never amended.
-                    version: resolved_version.cloned(),
-                    path: composed.source().clone(),
-                    // By identity, as the conflicts name them.
-                    amenders: amendments
-                        .iter()
-                        .map(|amendment| amendment.amender().clone())
-                        .collect::<std::collections::BTreeSet<_>>()
-                        .into_iter()
-                        .collect(),
-                    crossed: crossing
-                        .iter()
-                        .map(|(amender, (base, _))| ((*amender).clone(), base.clone()))
-                        .collect(),
-                    failure: None,
-                };
-                // A merge across versions is made on text, in a format
-                // with a merge; anything else is applied only to the file
-                // it was taken from.
-                let cross_problem = |amender: &UnitIdentity, reason| {
-                    let (base, _) = &crossing[amender];
-                    BuildProblem::CrossVersion {
-                        unit: provider.clone(),
-                        path: composed.source().clone(),
-                        amender: amender.clone(),
-                        published: published_version(amender),
-                        base: base.clone(),
-                        resolved: resolved_version.cloned().unwrap_or_else(|| base.clone()),
-                        reason,
-                    }
-                };
-                let mut refused = false;
-                for amender in crossing.keys() {
-                    let not_text = !is_text(composed.contents())
-                        || !is_text(&crossing[amender].1)
-                        || amendments
-                            .iter()
-                            .any(|amendment| !is_text(amendment.copy().contents()));
-                    if MergeFormat::of_path(path) == MergeFormat::Unsupported || not_text {
-                        sink.borrow_mut()
-                            .push(cross_problem(amender, CrossVersionReason::NoMerge));
-                        refused = true;
-                    }
-                }
-                // A parameter a template names must mean the same at the
-                // resolved version as at the base, or the contribution
-                // cannot be told from the provider's own change.
-                if !refused && composed.is_template() {
-                    for amendment in amendments {
-                        let Some((base_version, base_source)) = crossing.get(amendment.amender())
-                        else {
-                            continue;
-                        };
-                        let mut referenced = utf8(base_source)
-                            .map(parameters_referenced)
-                            .unwrap_or_default();
-                        referenced.extend(
-                            utf8(amendment.copy().contents())
-                                .map(parameters_referenced)
-                                .unwrap_or_default(),
-                        );
-                        let at = |version: &Version| {
-                            dependencies
-                                .manifests
-                                .get(&(provider.clone(), version.clone()))
-                                .map(|manifest| manifest.params())
-                        };
-                        let (Some(then), Some(now)) =
-                            (at(base_version), resolved_version.and_then(at))
-                        else {
-                            continue;
-                        };
-                        for name in referenced {
-                            let kind =
-                                |params: &BTreeMap<_, crate::domain::ParameterDefinition>| {
-                                    params
-                                        .get(&name)
-                                        .map(|definition| definition.parameter_type().value_kind())
-                                };
-                            if kind(now).is_none() || kind(then) != kind(now) {
-                                sink.borrow_mut().push(cross_problem(
-                                    amendment.amender(),
-                                    CrossVersionReason::Parameter {
-                                        name: name.clone(),
-                                        base: kind(then),
-                                        resolved: kind(now),
-                                    },
-                                ));
-                                refused = true;
-                            }
-                        }
-                    }
-                }
-                if refused {
-                    None
-                } else {
-                    let base = side(composed.contents(), None);
-                    let copies: Vec<Option<RenderedCopy<'_>>> = amendments
-                        .iter()
-                        .map(|amendment| {
-                            let copy =
-                                side(amendment.copy().contents(), Some(amendment.amender()))?;
-                            let amender_base = match (&base, crossing.get(amendment.amender())) {
-                                (_, Some((_, source))) => side(source, None)?,
-                                (Some(base), None) => base.clone(),
-                                (None, None) => return None,
-                            };
-                            Some((amendment.amender(), amender_base, copy))
-                        })
-                        .collect();
-                    match (base, copies.into_iter().collect::<Option<Vec<_>>>()) {
-                        (Some(base), Some(copies)) => {
-                            let sides: Option<(&str, Vec<CopyText<'_>>)> =
-                                utf8(&base).and_then(|provider_text| {
-                                    copies
-                                        .iter()
-                                        .map(|(amender, amender_base, copy)| {
-                                            Some((*amender, utf8(amender_base)?, utf8(copy)?))
-                                        })
-                                        .collect::<Option<Vec<_>>>()
-                                        .map(|copies| (provider_text, copies))
-                                });
-                            match sides {
-                                None => {
-                                    sink.borrow_mut().push(merge());
-                                    None
-                                }
-                                Some((provider_text, copies)) => {
-                                    match match MergeFormat::of_path(path) {
-                                        MergeFormat::Json => Some(super::merge::merge_json_from(
-                                            provider_text,
-                                            &copies,
-                                        )),
-                                        MergeFormat::Text => {
-                                            Some(super::merge::merge_text_files_from(
-                                                provider,
-                                                provider_text,
-                                                &copies,
-                                            ))
-                                        }
-                                        // The composition refuses these
-                                        // before it gets here.
-                                        MergeFormat::Unsupported => None,
-                                    } {
-                                        Some(Ok(merged)) => {
-                                            notes.extend(merged.notes().iter().map(|note| {
-                                                (
-                                                    path.clone(),
-                                                    format!(
-                                                        "src/{} of {provider}: {note}",
-                                                        composed.source()
-                                                    ),
-                                                )
-                                            }));
-                                            Some(merged.into_text().into_bytes())
-                                        }
-                                        Some(Err(failure)) => {
-                                            let mut problem = merge();
-                                            if let BuildProblem::Merge { failure: slot, .. } =
-                                                &mut problem
-                                            {
-                                                *slot = Some(failure);
-                                            }
-                                            sink.borrow_mut().push(problem);
-                                            None
-                                        }
-                                        None => {
-                                            sink.borrow_mut().push(merge());
-                                            None
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        _ => None,
-                    }
-                }
-            }
-        };
-        match delivered {
-            Some(bytes) => files.push((path.clone(), UnitFile::new(bytes, executable))),
-            None => failed = true,
-        }
-    }
-    problems.extend(sink.into_inner());
-    if failed {
-        return None;
-    }
-    Some(Rendered {
-        files,
-        notes,
-        crossed,
-    })
-}
-
-/// An amender, the provider's file as it was where the copy was taken from,
-/// and the copy, all rendered.
-type RenderedCopy<'a> = (&'a UnitIdentity, Vec<u8>, Vec<u8>);
-
-/// [`RenderedCopy`] as text.
-type CopyText<'a> = (&'a UnitIdentity, &'a str, &'a str);
-
-/// The effective values of `unit` in `composition`, or none.
-fn values_of<'c>(
-    composition: &'c crate::domain::Composition<'_>,
-    none: &'c ParameterValues,
-    unit: &UnitIdentity,
-) -> &'c ParameterValues {
-    composition.values().get(unit).unwrap_or(none)
-}
-
-/// `bytes` as text, if they are UTF-8.
-fn utf8(bytes: &[u8]) -> Option<&str> {
-    std::str::from_utf8(bytes).ok()
 }
 
 /// The published versions a resolution may choose from, read from the
@@ -1123,6 +1016,59 @@ impl Dependencies {
                 problem: PublishedProblem::Src(error),
             },
         }))
+    }
+
+    /// Reads the `amendments/` copies of `identity` at `version`, or
+    /// `None` when the index does not record that version.
+    fn read_amendments_at(
+        &self,
+        identity: &UnitIdentity,
+        version: &Version,
+    ) -> Option<Result<FileTree, BuildProblem>> {
+        let key = (identity.clone(), version.clone());
+        let (repository, commit) = (self.repositories.get(identity)?, self.commits.get(&key)?);
+        Some(
+            repository
+                .read_amendments(commit)
+                .map_err(|error| match error {
+                    ReadSrcError::Git(error) => BuildProblem::Source {
+                        unit: identity.clone(),
+                        error,
+                    },
+                    error => BuildProblem::Published {
+                        unit: identity.clone(),
+                        version: version.clone(),
+                        problem: PublishedProblem::Amendments(error),
+                    },
+                }),
+        )
+    }
+
+    /// Reads the lockfile of `identity` at `version`, or `None` when the
+    /// index does not record that version. A version without a lockfile
+    /// reads as `Ok(None)`.
+    fn read_lock_at(
+        &self,
+        identity: &UnitIdentity,
+        version: &Version,
+    ) -> Option<Result<Option<UnitLock>, BuildProblem>> {
+        let key = (identity.clone(), version.clone());
+        let (repository, commit) = (self.repositories.get(identity)?, self.commits.get(&key)?);
+        Some(
+            lockfile::read_published(repository, commit).map_err(|error| match error {
+                PublishedLockfileError::Read(super::git::ReadFileError::Git(error)) => {
+                    BuildProblem::Source {
+                        unit: identity.clone(),
+                        error,
+                    }
+                }
+                error => BuildProblem::Published {
+                    unit: identity.clone(),
+                    version: version.clone(),
+                    problem: PublishedProblem::Lockfile(error),
+                },
+            }),
+        )
     }
 
     /// Reads the content of the locked versions of `identities`: the
@@ -1297,6 +1243,41 @@ pub enum BuildFailure {
     Rejected(Vec<BuildProblem>),
     /// Writing the build failed. The error says what remains.
     Publish(PublishError),
+    /// The build met a conflict between sibling amenders in files the unit
+    /// does not amend, and created the marked copies for it to resolve:
+    /// the pending state. The manifest declares them and the lockfile is
+    /// written; `build/` is untouched.
+    Pending(Pending),
+    /// Writing the pending state failed. `written` lists the files that
+    /// were written before it did, by path under `amendments/`, with
+    /// `manifest.jsonc` last when it was replaced.
+    PendingWrite {
+        /// The file that could not be written.
+        path: PathBuf,
+        /// Why.
+        error: io::Error,
+        /// What was written.
+        written: Vec<RelativePath>,
+    },
+}
+
+/// The pending state a build created.
+#[derive(Debug)]
+pub struct Pending {
+    files: Vec<PendingFile>,
+    lockfile: LockfileOutcome,
+}
+
+impl Pending {
+    /// The copies created, in path order.
+    pub fn files(&self) -> &[PendingFile] {
+        &self.files
+    }
+
+    /// What happened to the lockfile.
+    pub fn lockfile(&self) -> LockfileOutcome {
+        self.lockfile
+    }
 }
 
 impl fmt::Display for BuildFailure {
@@ -1312,6 +1293,32 @@ impl fmt::Display for BuildFailure {
                 Ok(())
             }
             Self::Publish(error) => error.fmt(f),
+            Self::Pending(pending) => {
+                for (index, file) in pending.files.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str("\n")?;
+                    }
+                    let amenders: Vec<String> =
+                        file.amenders.iter().map(ToString::to_string).collect();
+                    write!(
+                        f,
+                        "amendments/{}: the amendments of {} of src/{} of {} {} conflict, and \
+                         the copy holds each conflict between markers:",
+                        file.source,
+                        amenders.join(" and "),
+                        file.source,
+                        file.provider,
+                        file.base
+                    )?;
+                    for conflict in &file.conflicts {
+                        write!(f, "\n  {conflict}")?;
+                    }
+                }
+                Ok(())
+            }
+            Self::PendingWrite { path, error, .. } => {
+                write!(f, "cannot write {}: {error}", path.display())
+            }
         }
     }
 }
@@ -1381,7 +1388,7 @@ pub enum BuildProblem {
     AmendmentBase(AmendmentBaseError),
     /// A published amender's lockfile identifies a base as other content
     /// than the registry records for that version.
-    BaseIntegrity(BaseIntegrityError),
+    BaseIntegrity(Box<BaseIntegrityError>),
     /// The unit and its dependencies cannot be composed.
     Composition(CompositionError),
     /// Several amendments of one provider file cannot be combined.
@@ -1399,6 +1406,34 @@ pub enum BuildProblem {
         crossed: Vec<(UnitIdentity, Version)>,
         /// Why, or `None` when a rendered side is not UTF-8 text.
         failure: Option<super::merge::MergeFailure>,
+    },
+    /// Copies under `amendments/` that still hold conflict markers.
+    Markers {
+        /// The copies' paths.
+        paths: Vec<RelativePath>,
+    },
+    /// A conflict between sibling amenders of a file that no unit above
+    /// both resolves.
+    Unresolved(UnresolvedFile),
+    /// A staging file the pending state writes through already exists.
+    StagingOccupied {
+        /// The staging file.
+        path: PathBuf,
+    },
+    /// The manifest cannot be edited safely to declare a pending copy.
+    ManifestEdit(super::manifest::EditError),
+    /// A directory on a pending copy's path under `amendments/` is not a
+    /// real directory.
+    NotADirectory {
+        /// The path.
+        path: PathBuf,
+    },
+    /// A directory on a pending copy's path cannot be read.
+    Unreadable {
+        /// The path.
+        path: PathBuf,
+        /// Why.
+        error: io::Error,
     },
     /// An amendment taken from another version of its provider than the one
     /// resolved cannot be applied to it.
@@ -1515,6 +1550,37 @@ impl fmt::Display for BuildProblem {
                     )?;
                 }
                 Ok(())
+            }
+            Self::Markers { paths } => {
+                let paths: Vec<String> = paths
+                    .iter()
+                    .map(|path| format!("amendments/{path}"))
+                    .collect();
+                write!(
+                    f,
+                    "{} still {} conflict markers; the build composes nothing until they are \
+                     resolved",
+                    paths.join(", "),
+                    if paths.len() == 1 { "holds" } else { "hold" }
+                )
+            }
+            Self::Unresolved(unresolved) => unresolved.fmt(f),
+            Self::StagingOccupied { path } => write!(
+                f,
+                "{} exists; it is reserved for the build's staging, so nothing was written",
+                path.display()
+            ),
+            Self::ManifestEdit(error) => write!(
+                f,
+                "the manifest cannot be edited safely to declare the copy: {error}"
+            ),
+            Self::NotADirectory { path } => write!(
+                f,
+                "{} is not a directory, and the copy would be written beneath it",
+                path.display()
+            ),
+            Self::Unreadable { path, error } => {
+                write!(f, "cannot read {}: {error}", path.display())
             }
             Self::CrossVersion {
                 unit,

@@ -145,6 +145,20 @@ pub(super) fn publication_checks(
                 changes: validated.changes.clone(),
             });
         }
+        // A conflict between siblings that a build would hand to the unit
+        // as a marked copy: nothing is composed until it is resolved.
+        problems.extend(
+            validated
+                .pending
+                .iter()
+                .map(|pending| CheckProblem::Pending {
+                    path: pending.path().clone(),
+                    provider: pending.provider().clone(),
+                    base: pending.base().clone(),
+                    amenders: pending.amenders().to_vec(),
+                    conflicts: pending.conflicts().to_vec(),
+                }),
+        );
     }
     problems.extend(
         validation
@@ -152,11 +166,14 @@ pub(super) fn publication_checks(
             .into_iter()
             .map(CheckProblem::Contribution),
     );
-    validation.result.map(|validated| Publishable {
-        notes: validated.notes,
-        dependencies: validated.lock.units().len(),
-        files: validated.files.len(),
-    })
+    validation
+        .result
+        .filter(|validated| validated.pending.is_empty())
+        .map(|validated| Publishable {
+            notes: validated.notes,
+            dependencies: validated.lock.units().len(),
+            files: validated.files.len(),
+        })
 }
 
 /// A unit that passed every check.
@@ -234,6 +251,20 @@ pub enum CheckProblem {
     },
     /// The unit's contribution does not qualify for publication.
     Contribution(ContributionError),
+    /// A conflict between sibling amenders of a file the unit does not
+    /// amend, which a build would hand to the unit as a marked copy.
+    Pending {
+        /// The file's path in the provider's `src/`.
+        path: crate::domain::RelativePath,
+        /// The provider.
+        provider: UnitIdentity,
+        /// Its locked version.
+        base: Version,
+        /// The amenders whose contributions conflict.
+        amenders: Vec<UnitIdentity>,
+        /// Each conflict, as the merge reports it.
+        conflicts: Vec<String>,
+    },
 }
 
 impl fmt::Display for CheckProblem {
@@ -263,6 +294,25 @@ impl fmt::Display for CheckProblem {
                 )
             }
             Self::Contribution(error) => error.fmt(f),
+            Self::Pending {
+                path,
+                provider,
+                base,
+                amenders,
+                conflicts,
+            } => {
+                let amenders: Vec<String> = amenders.iter().map(ToString::to_string).collect();
+                write!(
+                    f,
+                    "src/{path} of {provider} {base}: the amendments of {} conflict, and this \
+                     unit does not resolve them:",
+                    amenders.join(" and ")
+                )?;
+                for conflict in conflicts {
+                    write!(f, "\n  {conflict}")?;
+                }
+                Ok(())
+            }
         }
     }
 }

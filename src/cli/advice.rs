@@ -89,6 +89,16 @@ pub(super) fn composition_advice(error: &CompositionError, audience: Audience) -
             "`assemblr unit update` moves the locked version of {unit} and the base of the \
              amendment together; a build never changes either"
         ),
+        CompositionError::AmendmentUnreachable { amender, unit, .. } => match amender {
+            Requirer::Root => format!(
+                "declare a dependency that leads to {unit}, or remove the declaration and the \
+                 copy"
+            ),
+            Requirer::Unit(identity, _) => format!(
+                "select a version of {identity} whose dependencies lead to {unit}, or a version \
+                 that does not amend the file"
+            ),
+        },
         CompositionError::AmendmentNotProvided {
             amender,
             unit,

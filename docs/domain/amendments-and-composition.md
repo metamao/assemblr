@@ -44,29 +44,52 @@ Amendments are created with `unit amend` and reconciled with `unit update`
 
 ### The base
 
-- An amendment's base is a file in the **`src/`** of the unit that provides
-  it, at an exact published version of that unit. It is never the composed
-  output of that unit, so it never includes amendments made by other units.
-- Amendments that several units make to the same file are combined **side by
-  side** against that original (see
-  [merge semantics](#merge-semantics--approved)).
-- A unit therefore cannot independently override a value that another unit
-  **added or changed through an amendment**: that value is not in its base,
-  and setting it to a different value is a conflict. Identical contributions
-  from several amenders to one value are compatible and become one change
-  (decided by the owner, #33). A unit that wants such a value to be
-  configurable exposes it as a parameter of its own, which other units set
-  through `options`. Changing a value from another unit's `src/` is an
-  ordinary amendment.
-- Amendments that build on a dependency's composed output, including that
-  dependency's own amendments, are outside Alpha.
+Decided by the owner on #100 (2026-10-23), replacing the original-file base
+of the first amendments increment.
+
+- An amendment's base is **layered**: the provider's file in its **`src/`**,
+  at the exact version the amending unit is locked to, as the units **below**
+  the amender compose it. The units below an amender are its dependency
+  closure, direct and transitive, each at the amender's locked version; the
+  base is the provider's file with the amendments of every unit below that
+  amends it applied. It is the file as it appears in the amender's `build/`
+  before the amender's own copy, and `unit amend` hands out exactly that.
+- A unit can therefore change what a unit below it added or changed through
+  an amendment, as it changes anything else in its base. Its copy is taken
+  on top of the composition below, whatever the file's format: one amender
+  above another is a chain, not a merge.
+- Amenders that are not below one another are **siblings**. Their amendments
+  are combined **side by side**, with no precedence by name or order (see
+  [merge semantics](#merge-semantics--approved)). Identical contributions
+  from siblings to one value are compatible and become one change (decided
+  by the owner, #33).
+- Where siblings conflict, the base of a unit above both carries a
+  **conflict marker** at each contested value or run of lines, and that unit
+  resolves the conflict by replacing the marker in its copy. The marker
+  shapes are **Provisional (D-41)**: for a JSON or JSONC file, the contested
+  value becomes an object whose only member, `"<<<<<<< conflict"`, names each
+  side's value by its amender, `null` for a side that removes the value;
+  for a text file, the contested lines are
+  written between `<<<<<<< <amender>`, `||||||| base`, `=======`, and
+  `>>>>>>> <amender>` lines, as diff3 conflicts are shown, with each
+  separator naming its side when more than two sides changed the lines.
+  A conflict that no unit above both siblings resolves is reported by every
+  composer; what it means for the composition is decided by the flow (see
+  [composition, builds, and reconciliation](#composition-builds-and-reconciliation)).
+- Amendments are reconciled across versions with the same three inputs,
+  the base before, the copy, and the base after, whichever unit moved:
+  a change below that the copy did not touch flows through, and a change to
+  what the copy changed is a conflict (see
+  [across provider versions](#across-provider-versions--approved)).
 
 ### Target
 
-- An amendment targets a **direct dependency** of the amending unit: an
-  identity declared in its own `dependencies`, which provides the file's path
-  in its `src/`. Amending a file of a transitive dependency, or of any other
-  identity, is an error.
+- An amendment targets a unit **below** the amending unit: any unit in its
+  resolved dependency graph, direct or transitive, which provides the file's
+  path in its `src/` at its locked version. The provider need not be declared
+  in the amender's own `dependencies`; the declaration names it, with the
+  base version, so that the base can be identified and verified. Amending a
+  file of a unit that is not in the graph is an error.
 
 ### Layout and declaration
 
@@ -101,20 +124,30 @@ Amendments are created with `unit amend` and reconciled with `unit update`
 ### Base identity and verification
 
 - The exact content of a base is identified through the amending unit's unit
-  lockfile: its entry for the target unit records the base version together
-  with the commit and tree that version was published with (see
+  lockfile: its entry for the provider records the base version together
+  with the commit and tree that version was published with, and its entries
+  for the units below that amend the same file record the versions whose
+  amendments the base is composed of (see
   [authoring-workflow.md](authoring-workflow.md#unit-lock-state--approved)).
   The lockfile is tracked, so a published version of the amending unit carries
   it. A published version with amendments carries a lockfile consistent with
   its declarations.
 - Whoever composes an amendment, a dependent unit's build or a consumer
-  project, verifies the base: the amending unit's lockfile entry for the
-  declared version is compared with the composer's own registry record for
-  that unit and version. If they agree, the base is verified. If they differ,
-  that is an **integrity conflict**: the composition fails and changes
-  nothing (see
+  project, verifies the base: every lockfile entry the base depends on, the
+  provider's at the declared version and each amender below's, is compared
+  with the composer's own registry record for that unit and version. If they
+  agree, the base is verified. If any differs, that is an **integrity
+  conflict**: the composition fails and changes nothing (see
   [registries-and-discovery.md](registries-and-discovery.md#integrity-and-snapshots--approved)).
-  If the version or its content is unavailable, see **OC-9**.
+  If a version or its content is unavailable, see **OC-9**.
+- A published amender's base is the composition at **its** locked versions.
+  When a composition resolves the provider, or a unit below the amender that
+  amends the file, to another version than the amender locked, the
+  amender's base is reconstructed from the published content at the
+  amender's locked versions, so that its changes are derived against the
+  base its author saw, and applied to the composition's own base
+  (**Provisional (D-43)**; see
+  [across provider versions](#across-provider-versions--approved)).
 - **Verifying a base is distinct from comparing it with the resolved
   version.** A composition may resolve the target unit to a version other
   than the declared base; the unit lockfile does not determine what
@@ -411,29 +444,36 @@ scratch and needs no reconciliation history (see
 [authoring-workflow.md](authoring-workflow.md#build--approved)).
 
 **Implemented.** A unit's build applies the amendments of every unit in its
-composition: its own, whose providers resolve to the declared bases by
-construction of the
-[unit lock state](authoring-workflow.md#unit-lock-state--approved), and those
-that its resolved dependencies publish, direct or transitive. The
-direct-dependency restriction binds the amender to the provider, not the
-amender to the unit being built. A published amender's bases are verified
-against the composer's registry record before composition, as approved
-above. With the base and the resolved version equal, one amender's result is
-the rendered copy, and no change is derived. Otherwise, or when several
-amenders share a file, the changes are derived against each copy's base and
-combined on the rendered content: by [the merge engine](#the-merge-engine--approved)
-for a JSON or JSONC file, and by line for text, with the provider's file and
-each copy rendered with the provider's values, the copy with its amender's as
-`own`, and applied to the provider's file at the version resolved ([across
-provider versions](#across-provider-versions--approved)). The cases that
-cannot be applied fail explicitly, naming each amender, its version, the
-provider, the base, and the resolved version, and change nothing (standing
-default D2): a collision, a parameter that changed meaning, a path the
-provider no longer has, a provider file in a structured format without an
-adapter or that is not text that changed between the two versions, and such
-a file that several units amend. `unit update` carries a unit's own
-amendment to the provider's new version, rebasing the copy when the file
-changed, and refuses the update, changing nothing, on a collision (see
+composition: its own, whose bases are the composition at its
+[unit lock state](authoring-workflow.md#unit-lock-state--approved) by
+construction, and those that its resolved dependencies publish, direct or
+transitive. A published amender's bases are verified against the composer's
+registry record before composition, as approved above. The amenders of one
+file are layered: the composition of a set of amenders is the composition of
+those below the set's maximal amenders, with the maximal amenders' changes
+derived against their own bases and combined on it, by [the merge
+engine](#the-merge-engine--approved) for a JSON or JSONC file and by line for
+text, with the provider's file and each copy rendered with the provider's
+values, the copy with its amender's as `own`. One amender whose base is the
+composition below it takes the file's place with its rendered copy, whatever
+the format, and no change is derived. A conflict between siblings is marked
+in the composition, and resolved by a unit above both that replaces the
+marker; a marker no amender above resolves is a conflict of the composition
+as a whole. In a **consumer composition** it is a composition error that
+names the file, the siblings, and each contested value or line, and changes
+nothing (until #101). In a **unit's build**, a marked file the unit does not
+amend yet puts the build in the **pending state** (see
+[authoring-workflow.md](authoring-workflow.md#build-details--approved)): the
+unit gets the marked copy as its own amendment and resolves it. The other
+cases that cannot be applied fail explicitly, naming each amender, its
+version, the provider, the base, and the resolved version, and change
+nothing (standing default D2): a copy whose base cannot be reconstructed, a
+parameter that changed meaning, a path the provider no longer has, a
+provider file in a structured format without an adapter or that is not text
+that changed between the two versions, and such a file that siblings amend.
+`unit update` reconciles a unit's own amendments with their bases before and
+after the update, leaves what both changed between markers, and hands the
+unit the sibling conflicts its new dependencies bring (see
 [authoring-workflow.md](authoring-workflow.md#update-details--approved)).
 
 Consumer projects reconcile downstream modifications with three inputs: the
@@ -463,9 +503,20 @@ until each amender had published again:
   A collision, in a value or in lines of text, is a composition error naming
   the amender, the file, and the place, with no precedence and no overwrite.
   The project or unit is left unchanged.
-- **Flat model.** Each amender's contribution is derived against its own base.
-  Amenders taken from different versions of the provider stay independent:
-  applying one never establishes the base or the precedence of another.
+- **Layered model.** Each amender's contribution is derived against its own
+  base: the provider's file as the units below the amender compose it, at
+  the amender's locked versions. Siblings stay independent: applying one
+  never establishes the base or the precedence of another. An amender above
+  another composes its copy on top of the other's, and sees the other's
+  changes in its base.
+- **A moved world.** When the composition resolves the provider, or a unit
+  below the amender that amends the file, to a version other than the one
+  the amender locked, the amender's base is reconstructed at its locked
+  versions from the published content, recursively for the amenders below,
+  and its changes are moved onto the composition's own base for the file:
+  a change below that the amender's copy did not touch flows through, and a
+  change to lines or values the copy changed too is a collision
+  (**Provisional (D-43)**).
 - **Insertions at one place in text.** When the provider's release and an
   amendment taken from an earlier version both insert lines at the same
   position of a text file, and neither changes a line there, both insertions
@@ -488,9 +539,10 @@ until each amender had published again:
 - **The unit's own build** keeps its rule: the declared base is the version the
   unit is locked to (`unit amend`, `unit build`). Only dependents' builds and
   consumer compositions apply across versions.
-- **Verification.** Bases are verified exactly as before, against the registry's
-  record of the base version; the base file is read from that immutable
-  version. Results depend on the files at the two versions, the copy, and the
+- **Verification.** Every lockfile entry a base depends on is verified
+  against the registry's record, as approved above, and every base file and
+  copy is read from its immutable version. Results depend on the published
+  files and copies at the versions involved, the unit's own copies, and the
   composition's values only, so they are deterministic.
 - **Visibility.** A successful cross-version application is an ordinary
   successful operation: it adds no note to a composition. A merge that is
@@ -499,18 +551,22 @@ until each amender had published again:
   tools. `--verbose` on `compose`, `add`, `remove`, and `update` lists, as notes,
   each amendment applied to another version of its provider than its base,
   whether or not the composition writes the file (**Provisional (D-31)**).
-- **`unit update`.** For each of the unit's own amendments whose provider
-  moves, an unchanged file is carried over untouched; a file that changed is
-  **rebased** on the source templates: the changes the copy makes against the
-  old base are merged by line into the file at the new version, neither side
-  taking precedence, except that insertions both make at one position are both
-  kept with the provider's first, as in a composition, and the declared base,
-  the copy, and the lock change together. Source templates are merged as text, never as structured
-  documents, since a template need not be one before it is rendered; a
-  rebased JSON file that is not a template must still parse as JSON. On a
-  collision, and for a file with no merge or that is not text, the update
-  writes nothing and reports each collision with its lines, the provider's
-  change, and the amendment's.
+- **`unit update`.** For each of the unit's own amendments, the base before
+  the update and the base after it are composed on the source templates. An
+  unchanged base carries the copy over untouched, its declared base following
+  the lock. A base that changed, because the provider moved or a unit below
+  did, **rebases** the copy: the base before, the copy, and the base after are
+  merged three ways, by value for a JSON or JSONC file that is not a template
+  and by line otherwise, neither side taking precedence, except that
+  insertions both make at one position are both kept with the base's first,
+  as in a composition. What both the copy and the update change is left in
+  the copy between markers, `current` for the copy and `incoming` for the
+  base after the update, and reported; the declared base, the copy, and the
+  lock change together, and the author resolves the markers before the next
+  build. Source templates are merged as text, never as structured documents,
+  since a template need not be one before it is rendered. For a file with no
+  merge or that is not text whose base changed, the update writes nothing and
+  says so.
 
 ## Evidence (non-normative)
 

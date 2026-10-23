@@ -278,10 +278,15 @@ fn the_unit_s_own_amendment_joins_the_published_ones() {
     let app = app(&fixture, &["neon"]);
     succeeds(fixture.build(&app));
     succeed_amend(&fixture, &app);
-    // The unit adds a rule near the top, away from the section at the end.
+    // The copy is the file as the dependency composes it, section included;
+    // the unit adds a rule near the top, away from the section at the end.
+    assert_eq!(
+        app.read("amendments/AGENTS.md"),
+        with_section("Database", "Use DATABASE_URL.")
+    );
     app.write(
         "amendments/AGENTS.md",
-        &GUIDE.replace(
+        &app.read("amendments/AGENTS.md").replace(
             "- Keep changes small.\n",
             "- Keep changes small.\n- Ask first.\n",
         ),
@@ -298,7 +303,7 @@ fn the_unit_s_own_amendment_joins_the_published_ones() {
 fn succeed_amend(fixture: &Fixture, app: &Repo) {
     let output = succeeds(fixture.assemblr(&app.path, &["unit", "amend", "AGENTS.md"]));
     assert!(
-        stdout(&output).contains("The file is also amended by @acme/neon 1.0.0"),
+        stdout(&output).contains("The copy is composed from the amendments of @acme/neon 1.0.0"),
         "{}",
         stdout(&output)
     );
@@ -327,17 +332,41 @@ fn changes_to_the_same_lines_are_a_conflict_that_names_the_lines_and_the_units()
         ],
     );
     let app = app(&fixture, &["neon", "docker"]);
+    // The unit above the siblings gets the copy with the conflict marked,
+    // and resolves it by editing the copy.
     let err = stderr(&fails(fixture.build(&app)));
     for expected in [
-        "src/AGENTS.md of @acme/guide 1.0.0 is amended by @acme/docker, @acme/neon, and the \
-         amendments cannot be combined",
+        "amendments/AGENTS.md: the amendments of @acme/docker and @acme/neon of src/AGENTS.md of \
+         @acme/guide 1.0.0 conflict, and the copy holds each conflict between markers",
         "line 8: @acme/docker sets \"- Run the checks in the container.\"; @acme/neon sets \
          \"- Run `npm run verify`.\"",
-        "no amender takes precedence over another",
+        "note: manifest.jsonc declares the copy, assemblr-lock.json was created, and build/ was \
+         not changed",
     ] {
         assert!(err.contains(expected), "{expected:?} in {err}");
     }
     assert!(!app.path.join("build").exists());
+    let marked = "<<<<<<< @acme/docker\n- Run the checks in the container.\n||||||| base\n- Run the \
+                  checks.\n=======\n- Run `npm run verify`.\n>>>>>>> @acme/neon\n";
+    assert_eq!(
+        app.read("amendments/AGENTS.md"),
+        GUIDE.replace("- Run the checks.\n", marked)
+    );
+    app.write(
+        "amendments/AGENTS.md",
+        &GUIDE.replace(
+            "- Run the checks.",
+            "- Run `npm run verify` in the container.",
+        ),
+    );
+    succeeds(fixture.build(&app));
+    assert_eq!(
+        app.read("build/AGENTS.md"),
+        GUIDE.replace(
+            "- Run the checks.",
+            "- Run `npm run verify` in the container."
+        )
+    );
 
     // The same change by both is one change.
     let same = Fixture::new("same");
@@ -592,10 +621,15 @@ fn yaml_toml_and_ini_files_are_merged_by_line_like_text() {
     });
     let err = stderr(&fails(fixture.build(&app)));
     assert!(
-        err.contains("change the same lines of the provider's file differently"),
+        err.contains("line 2: @acme/api sets \"port = 8080\"; @acme/db sets \"port = 5432\""),
         "{err}"
     );
     assert!(!app.path.join("build").exists());
+    assert_eq!(
+        app.read("amendments/app.ini"),
+        "[server]\n<<<<<<< @acme/api\nport = 8080\n||||||| base\nport = 80\n=======\nport = \
+         5432\n>>>>>>> @acme/db\n"
+    );
 }
 
 #[test]
@@ -618,7 +652,10 @@ fn xml_files_stay_refused_with_several_amenders() {
 }
 
 #[test]
-fn unit_amend_creates_a_copy_of_a_yaml_file_but_not_of_an_xml_one_another_unit_amends() {
+fn unit_amend_copies_a_file_another_unit_amends_as_composed_whatever_its_format() {
+    // Above the amending dependency, the unit's copy is taken on top of
+    // the dependency's, so even an XML file, which siblings cannot share,
+    // can be amended.
     for (name, file, base) in [
         (
             "amend-yaml",
@@ -641,30 +678,23 @@ fn unit_amend_creates_a_copy_of_a_yaml_file_but_not_of_an_xml_one_another_unit_a
         );
         solo.write("src/solo.txt", "solo");
         succeeds(fixture.build(&solo));
-        let output = fixture.assemblr(&solo.path, &["unit", "amend", file]);
-        if file.ends_with(".yaml") {
-            let output = succeeds(output);
-            assert!(
-                stdout(&output).contains(
-                    "The file is also amended by @acme/db 1.0.0; the build combines the copies"
-                ),
-                "{}",
-                stdout(&output)
-            );
-            assert_eq!(solo.read(&format!("amendments/{file}")), base);
-        } else {
-            let err = stderr(&fails(output));
-            assert!(
-                err.contains(&format!(
-                    "src/{file} of @acme/worker is already amended by @acme/db 1.0.0, a locked \
-                     dependency, based on @acme/worker 1.0.0; several amendments of one file are \
-                     combined for JSON, JSONC, and UTF-8 text files, but not for XML files or a \
-                     file that is not text, so it cannot be amended here"
-                )),
-                "{err}"
-            );
-            assert!(!solo.path.join("amendments").exists());
-        }
+        let output = succeeds(fixture.assemblr(&solo.path, &["unit", "amend", file]));
+        assert!(
+            stdout(&output).contains("The copy is composed from the amendments of @acme/db 1.0.0"),
+            "{}",
+            stdout(&output)
+        );
+        let composed = format!("{base}# 5432\n");
+        assert_eq!(solo.read(&format!("amendments/{file}")), composed);
+        solo.write(
+            &format!("amendments/{file}"),
+            &format!("{composed}# solo\n"),
+        );
+        succeeds(fixture.build(&solo));
+        assert_eq!(
+            solo.read(&format!("build/{file}")),
+            format!("{composed}# solo\n")
+        );
     }
 }
 

@@ -76,7 +76,7 @@ pub fn add_dependency(
             error,
         });
     }
-    let built = publish_validated(root, &opened, &planned.manifest, validated)
+    let built = publish_validated(root, &opened, &planned.text, &planned.manifest, validated)
         .map_err(|failure| AddFailure::Build(Box::new(failure)))?;
     Ok(DependencyAdded {
         built,

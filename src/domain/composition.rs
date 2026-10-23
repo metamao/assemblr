@@ -36,14 +36,18 @@
 //!
 //! # Amendments
 //!
-//! Any member may amend files of its direct dependencies: the unit being
-//! built from its working tree, and a resolved unit from its published
-//! version. Its manifest declares each amended path with the provider and
-//! the exact base version, and the edited copy lives at `amendments/<path>`
-//! (see `docs/domain/amendments-and-composition.md`). The copy takes the
-//! place of the provider's file, at the provider's delivered path and with
-//! the provider's executable bit, and it is a template exactly when the
-//! provider's file is. A member's copy is taken from the provider version
+//! Any member may amend files of the units it depends on, directly or
+//! transitively: the unit being built from its working tree, and a resolved
+//! unit from its published version. Its manifest declares each amended path
+//! with the provider and the exact base version, and the edited copy lives
+//! at `amendments/<path>` (see `docs/domain/amendments-and-composition.md`).
+//! The copy takes the place of the provider's file, at the provider's
+//! delivered path and with the provider's executable bit, and it is a
+//! template exactly when the provider's file is. An amendment's base is
+//! layered: the provider's file as the amenders below the amender, those
+//! in its dependency closure, compose it. The composition records, for each
+//! amendment, which other amenders of the file lie below its amender
+//! ([`Amendment::below`]); layering the copies is the composer's business. A member's copy is taken from the provider version
 //! its declaration names; when the provider resolves to another, the
 //! composer applies the copy's changes to the file at the resolved version
 //! ([`Amendment::base`] says which version the copy was taken from), except
@@ -242,11 +246,12 @@ pub struct ComposedFile<'a> {
 
 /// One amender's copy of a provider's file, with the version the copy was
 /// taken from. The provider may have resolved to another version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Amendment<'a> {
     amender: &'a UnitIdentity,
     copy: &'a UnitFile,
     base: &'a Version,
+    below: BTreeSet<&'a UnitIdentity>,
 }
 
 impl<'a> Amendment<'a> {
@@ -263,6 +268,13 @@ impl<'a> Amendment<'a> {
     /// The provider's version the copy was taken from: its exact base.
     pub fn base(&self) -> &'a Version {
         self.base
+    }
+
+    /// The other amenders of the same file in the amender's dependency
+    /// closure: the amendments its copy was taken on top of. Amenders of
+    /// the file outside it are its siblings, combined side by side.
+    pub fn below(&self) -> &BTreeSet<&'a UnitIdentity> {
+        &self.below
     }
 }
 
@@ -514,6 +526,16 @@ pub enum CompositionError {
         /// The version the provider resolved to.
         resolved: Version,
     },
+    /// The provider is not in the amending member's dependency closure, so
+    /// the amender cannot have taken its copy from the provider's file.
+    AmendmentUnreachable {
+        /// The amending member.
+        amender: Requirer,
+        /// The amended path.
+        path: RelativePath,
+        /// The provider.
+        unit: UnitIdentity,
+    },
     /// The provider's `src/` at the resolved version has no file at the
     /// amended path.
     AmendmentNotProvided {
@@ -687,7 +709,8 @@ impl fmt::Display for CompositionError {
                 f.write_str(
                     "; several amendments of one file are combined for JSON, JSONC, and UTF-8 \
                      text files, but not for XML files or a file that is not text, and no \
-                     amender takes precedence, so the file is not amended",
+                     amender takes precedence unless each depends on the one before, so the \
+                     file is not amended",
                 )
             }
             Self::AmendmentBase {
@@ -706,6 +729,22 @@ impl fmt::Display for CompositionError {
                     f,
                     "{amender} amends src/{path} of {unit} based on {unit} {base}, but {unit} \
                      resolved to {resolved}"
+                ),
+            },
+            Self::AmendmentUnreachable {
+                amender,
+                path,
+                unit,
+            } => match amender {
+                Requirer::Root => write!(
+                    f,
+                    "amendments/{path} amends a file of {unit}, which the unit does not depend \
+                     on, directly or through its dependencies"
+                ),
+                Requirer::Unit(..) => write!(
+                    f,
+                    "{amender} amends src/{path} of {unit}, which it does not depend on, \
+                     directly or through its dependencies"
                 ),
             },
             Self::AmendmentNotProvided {
@@ -1269,7 +1308,11 @@ type Applied<'a> = BTreeMap<
 /// problem with the others, in the documented order.
 fn amendments<'a>(
     members: &BTreeMap<&'a UnitIdentity, Member<'a>>,
-) -> (Applied<'a>, Vec<CompositionError>) {
+) -> (
+    Applied<'a>,
+    BTreeMap<&'a UnitIdentity, BTreeSet<&'a UnitIdentity>>,
+    Vec<CompositionError>,
+) {
     // The members amending each provider file. Members are ordered by
     // identity, and the root is the unit being built, so this order is
     // deterministic too.
@@ -1282,6 +1325,24 @@ fn amendments<'a>(
                 .push(&member.requirer);
         }
     }
+    let closure: BTreeMap<&'a UnitIdentity, BTreeSet<&'a UnitIdentity>> = members
+        .keys()
+        .map(|identity| {
+            let below = dependency_closure(std::iter::once(*identity), |unit| {
+                members
+                    .get(unit)
+                    .map(|member| member.manifest.dependencies())
+            });
+            (
+                *identity,
+                members
+                    .keys()
+                    .copied()
+                    .filter(|unit| below.contains(*unit))
+                    .collect(),
+            )
+        })
+        .collect();
     let mut several = Vec::new();
     let mut contested = BTreeSet::new();
     for ((provider, path), requirers) in &amenders {
@@ -1290,9 +1351,25 @@ fn amendments<'a>(
         };
         // Several amendments of one file are combined by the composer
         // (OC-10): by value for JSON and JSONC, by line for any other file
-        // whose provider file and copies are all text. Anything else could
-        // only be combined by letting one amender win, so none applies.
+        // whose provider file and copies are all text, and, whatever the
+        // file, when the amenders form a chain, each above the one before,
+        // where each copy is taken on top of the one below it. Anything
+        // else could only be combined by letting one amender win, so none
+        // applies.
         let delivered = delivered_path(path).ok().flatten();
+        let chain = || {
+            let mut identities: Vec<&UnitIdentity> = members
+                .values()
+                .filter(|member| requirers.contains(&&member.requirer))
+                .map(|member| member.identity)
+                .collect();
+            identities.sort_by_key(|identity| closure.get(identity).map_or(0, BTreeSet::len));
+            identities.windows(2).all(|pair| {
+                closure
+                    .get(pair[1])
+                    .is_some_and(|below| below.contains(pair[0]))
+            })
+        };
         let all_text = || {
             member
                 .files
@@ -1311,7 +1388,7 @@ fn amendments<'a>(
             MergeFormat::Text => all_text(),
             MergeFormat::Unsupported => false,
         };
-        if combinable {
+        if combinable || chain() {
             continue;
         }
         let mut requirers: Vec<Requirer> = requirers.iter().map(|r| (*r).clone()).collect();
@@ -1333,7 +1410,9 @@ fn amendments<'a>(
             if contested.contains(&(declaration.unit(), path)) {
                 continue;
             }
-            if let Some(problem) = amendment(members, member, path, declaration, &mut applied) {
+            if let Some(problem) =
+                amendment(members, &closure, member, path, declaration, &mut applied)
+            {
                 problems.push(problem);
             }
         }
@@ -1352,21 +1431,60 @@ fn amendments<'a>(
     for copies in applied.values_mut() {
         copies.sort_by(|a, b| a.0.cmp(&b.0));
     }
-    (applied, several)
+    (applied, closure, several)
+}
+
+/// The identities reachable from `start` through `dependencies_of`,
+/// `start` excluded unless a dependency leads back to it. An identity
+/// without a known manifest ends the walk there.
+pub fn dependency_closure<'a, I>(
+    start: I,
+    dependencies_of: impl Fn(&UnitIdentity) -> Option<&'a super::resolution::Dependencies>,
+) -> BTreeSet<UnitIdentity>
+where
+    I: IntoIterator<Item = &'a UnitIdentity>,
+{
+    let mut pending: Vec<&'a UnitIdentity> = start
+        .into_iter()
+        .filter_map(&dependencies_of)
+        .flat_map(|dependencies| dependencies.keys())
+        .collect();
+    let mut closure = BTreeSet::new();
+    while let Some(identity) = pending.pop() {
+        if !closure.insert(identity.clone()) {
+            continue;
+        }
+        if let Some(dependencies) = dependencies_of(identity) {
+            pending.extend(dependencies.keys());
+        }
+    }
+    closure
 }
 
 /// Records the amendment of `path` that `member` declares, or why it cannot
 /// be applied.
 fn amendment<'a>(
     members: &BTreeMap<&'a UnitIdentity, Member<'a>>,
+    closure: &BTreeMap<&'a UnitIdentity, BTreeSet<&'a UnitIdentity>>,
     member: &Member<'a>,
     path: &'a RelativePath,
     declaration: &'a AmendmentDeclaration,
     applied: &mut Applied<'a>,
 ) -> Option<CompositionError> {
-    // Every target is a member: amendments target declared dependencies,
-    // which the graph resolved.
-    let provider = members.get(declaration.unit())?;
+    // The provider must be below the amender: a unit it depends on,
+    // directly or through its dependencies, so a member of the graph.
+    let reachable = members.get(declaration.unit()).filter(|provider| {
+        closure
+            .get(member.identity)
+            .is_some_and(|below| below.contains(provider.identity))
+    });
+    let Some(provider) = reachable else {
+        return Some(CompositionError::AmendmentUnreachable {
+            amender: member.requirer.clone(),
+            path: path.clone(),
+            unit: declaration.unit().clone(),
+        });
+    };
     let resolved = provider.manifest.version();
     // The unit being built amends the version it is locked to, by
     // construction of the lock state; a published amender's base may differ
@@ -1419,7 +1537,7 @@ fn compose_files<'a>(
     BTreeMap<RelativePath, ComposedFile<'a>>,
     Vec<CompositionError>,
 ) {
-    let (applied, mut errors) = amendments(members);
+    let (applied, closure, mut errors) = amendments(members);
     // Files by the collision key of their delivered path.
     let mut folded: BTreeMap<String, Vec<ContributedPath>> = BTreeMap::new();
     let mut files = BTreeMap::new();
@@ -1451,6 +1569,15 @@ fn compose_files<'a>(
                             amender,
                             copy,
                             base,
+                            below: copies
+                                .iter()
+                                .map(|(_, other, _, _)| *other)
+                                .filter(|other| {
+                                    closure
+                                        .get(*amender)
+                                        .is_some_and(|below| below.contains(*other))
+                                })
+                                .collect(),
                         })
                         .collect()
                 })
@@ -2975,12 +3102,11 @@ mod tests {
 
     #[test]
     fn several_amenders_of_one_provider_file_are_refused_together() {
-        // The root and a published unit amend `bin/run`, one of the copies
-        // not being text, which is refused for every amender; two published
-        // units amend
-        // `package.json.assemblr.tmpl`, a JSON file, whose copies are
-        // carried for the merge; and a file only one member amends still
-        // takes that copy.
+        // Two published siblings amend `bin/run`, one of the copies not
+        // being text, which is refused for every amender; two published
+        // units amend `package.json.assemblr.tmpl`, a JSON file, whose
+        // copies are carried for the merge; and a file only one member
+        // amends still takes that copy.
         let other = Spec::new("@metamao/other", "1.0.0")
             .depends("@metamao/node", "=1.0.0")
             .amends("package.json.assemblr.tmpl", "@metamao/node", "1.0.0")
@@ -2988,18 +3114,21 @@ mod tests {
             .amends("README.md", "@metamao/node", "1.0.0")
             .copy("README.md", "amended readme")
             .file("other.txt");
+        let other_binary = other
+            .clone()
+            .amends("bin/run", "@metamao/node", "1.0.0")
+            .copy_bytes("bin/run", b"#!/bin/sh\0binary");
         let built = Spec::new("@metamao/app", "0.1.0")
             .depends("@metamao/amender", "^1")
             .depends("@metamao/other", "^1")
             .depends("@metamao/node", "=1.0.0")
-            .amends("bin/run", "@metamao/node", "1.0.0")
-            .copy_bytes("bin/run", b"#!/bin/sh\0binary")
             .file("index.ts");
         let mut published = provider();
         published[0] = published[0].clone().file("README.md");
         published.push(amender());
-        published.push(other);
-        let errors = run(&For::Build(built.clone()), &published, &[]).unwrap_err();
+        let mut with_binary = published.clone();
+        with_binary.push(other_binary);
+        let errors = run(&For::Build(built.clone()), &with_binary, &[]).unwrap_err();
         assert_eq!(
             errors,
             [CompositionError::SeveralAmenders {
@@ -3007,29 +3136,46 @@ mod tests {
                 unit: identity("@metamao/node"),
                 version: version("1.0.0"),
                 amenders: vec![
-                    Requirer::Root,
                     Requirer::Unit(identity("@metamao/amender"), version("1.0.0")),
+                    Requirer::Unit(identity("@metamao/other"), version("1.0.0")),
                 ],
             }]
         );
         let message = errors[0].to_string();
         for part in [
-            "src/bin/run of @metamao/node 1.0.0 is amended by this unit, @metamao/amender 1.0.0",
+            "src/bin/run of @metamao/node 1.0.0 is amended by @metamao/amender 1.0.0, \
+             @metamao/other 1.0.0",
             "combined for JSON, JSONC, and UTF-8 text files, but not for XML files",
-            "no amender takes precedence",
+            "no amender takes precedence unless each depends on the one before",
         ] {
             assert!(message.contains(part), "{message}");
         }
 
+        // The root, above the published amender, may amend the same file
+        // with a copy that is not text: the amenders form a chain, and the
+        // copy above is taken on top of the one below.
+        published.push(other);
+        let chained = built
+            .clone()
+            .amends("bin/run", "@metamao/node", "1.0.0")
+            .copy_bytes("bin/run", b"#!/bin/sh\0binary");
+        let composed = run(&For::Build(chained), &published, &[]).unwrap();
+        assert_eq!(
+            composed.amended,
+            [
+                ("README.md".to_owned(), "@metamao/other".to_owned()),
+                ("bin/run".to_owned(), "@metamao/app".to_owned()),
+                ("bin/run".to_owned(), "@metamao/amender".to_owned()),
+                ("package.json".to_owned(), "@metamao/amender".to_owned()),
+                ("package.json".to_owned(), "@metamao/other".to_owned()),
+            ]
+        );
+
         // Without the text file's amenders, the JSON file's copies are both
         // carried, in requirer order, with the provider's own contents.
-        let built = Spec::new("@metamao/app", "0.1.0")
-            .depends("@metamao/amender", "^1")
-            .depends("@metamao/other", "^1")
-            .depends("@metamao/node", "=1.0.0")
+        let built = built
             .amends("package.json.assemblr.tmpl", "@metamao/node", "1.0.0")
-            .copy("package.json.assemblr.tmpl", "{ \"app\": true }")
-            .file("index.ts");
+            .copy("package.json.assemblr.tmpl", "{ \"app\": true }");
         let composed = run(&For::Build(built), &published, &[]).unwrap();
         assert_eq!(
             composed.amended,
@@ -3609,6 +3755,7 @@ mod tests {
                     format!("several {unit} {path}")
                 }
                 CompositionError::AmendmentBase { amender, path, .. }
+                | CompositionError::AmendmentUnreachable { amender, path, .. }
                 | CompositionError::AmendmentNotProvided { amender, path, .. }
                 | CompositionError::AmendmentMissingCopy { amender, path, .. }
                 | CompositionError::AmendmentUndeclared { amender, path, .. } => {

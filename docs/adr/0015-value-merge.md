@@ -1,6 +1,6 @@
 # 0015: The value-level merge of several amendments: the domain engine, the JSONC editor, and the projection and round-trip checks
 
-- **Status:** Accepted, point 6 clarified by 0018, the refusal of other formats narrowed by 0021
+- **Status:** Accepted, point 6 clarified by 0018, the refusal of other formats narrowed by 0021, the flat model of point 3 superseded by 0032
 - **Date:** 2026-10-21
 
 ## Context

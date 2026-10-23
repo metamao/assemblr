@@ -6,14 +6,21 @@
 //! dependencies with the lockfile minus the units the author updates, all
 //! of them when none is named. What changed, and whether every kept version
 //! is still published with the content it was locked to, is computed
-//! against the whole previous lockfile. Each amendment whose provider moves
-//! carries over when the provider's file is the same bytes at the old base
-//! and at the new version; the declaration's `base` then follows the lock.
-//! Any other case, and a published amendment whose provider would not
-//! resolve to its base, refuses the update before anything is written.
+//! against the whole previous lockfile. Each of the unit's amendments is
+//! then reconciled with its layered base: the base as the dependencies
+//! compose it before the update, the copy, and the base after it are
+//! merged three ways. A change below that the copy did not touch flows
+//! through; a change to a value or to lines the copy changed too is left
+//! in the copy between `current` and `incoming` markers, and reported. The
+//! declaration's `base` follows the lock. A conflict between sibling
+//! amenders of a file the unit does not amend yet is handed to the unit as
+//! a build does, as a marked copy declared in the manifest. An amendment
+//! whose base cannot be merged, and a published amendment whose provider
+//! would not resolve to its base, refuse the update before anything is
+//! written.
 //!
-//! An update replaces up to two files, `manifest.jsonc` and
-//! `assemblr-lock.json`, and must never leave them half updated. Before the
+//! An update replaces the copies it rebases or creates, `manifest.jsonc`,
+//! and `assemblr-lock.json`, and must never leave them half updated. Before the
 //! first is touched, a **journal** in the repository's Git directory records
 //! both files' contents before and after the update; then each file is
 //! replaced through a temporary file and a rename, and the journal is
@@ -31,18 +38,24 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
-use super::amend::MANIFEST_NEW;
+use super::amend::{self, MANIFEST_NEW};
 use super::exclusive::{BuildLock, BuildLockError};
 use super::output::LOCK_STAGING;
-use super::{BuildProblem, Dependencies, MANIFEST, ManifestFileError, read_working_manifest_text};
+use super::{
+    BuildProblem, Dependencies, MANIFEST, ManifestFileError, PendingFile, Resolved,
+    development_values, layer_sources, pending_files, read_working_manifest_text, render_files,
+    resolve_graph, without_amendments,
+};
 use crate::adapters::git::UnitDirectory;
-use crate::adapters::git::{GitError, GitRepository};
+use crate::adapters::git::{GitError, GitRepository, ReadSrcError};
+use crate::adapters::layered::{has_markers, rebase_json, rebase_text};
 use crate::adapters::lockfile::{self, LOCKFILE, LockfileError, serialize};
-use crate::adapters::manifest::{EditError, read_manifest, rebase_amendments};
+use crate::adapters::manifest::{EditError, declare_amendment, read_manifest, rebase_amendments};
 use crate::adapters::registry::{Registry, StorageError};
 use crate::domain::{
-    FileTree, LockChange, LockError, MergeFormat, ReconcileError, RelativePath, ResolutionError,
-    UnitIdentity, Version, delivered_path, reconcile_amendments, resolve, update_lock,
+    AmendmentDeclaration, Composition, FileTree, LockChange, LockError, Manifest, MergeFormat,
+    ReconcileCause, ReconcileError, RelativePath, ResolutionError, Root, UnitContent, UnitIdentity,
+    UnitLock, Version, compose, delivered_path, is_text, resolve, update_lock,
 };
 
 /// The journal of an update that has started writing, in the Git directory.
@@ -188,33 +201,6 @@ fn update_with(
         UpdateFailure::Rejected(errors.into_iter().map(UpdateProblem::Lock).collect())
     })?;
 
-    // The provider's files at the old base and at the new version, for
-    // each amendment whose provider moves.
-    let mut files: BTreeMap<(UnitIdentity, Version), FileTree> = BTreeMap::new();
-    for declaration in manifest.amendments().values() {
-        let unit = declaration.unit();
-        let Some(resolved) = graph.units().get(unit) else {
-            continue;
-        };
-        if resolved.version() == declaration.base() {
-            continue;
-        }
-        for version in [declaration.base(), resolved.version()] {
-            let key = (unit.clone(), version.clone());
-            if files.contains_key(&key) {
-                continue;
-            }
-            match dependencies.read_src_at(unit, version) {
-                Some(Ok(tree)) => {
-                    files.insert(key, tree);
-                }
-                Some(Err(problem)) => problems.push(UpdateProblem::Build(problem)),
-                // Not indexed: the reconciliation reports the version as
-                // unavailable.
-                None => {}
-            }
-        }
-    }
     // The unit's own copies, which a rebase reads and rewrites.
     let copies = if manifest.amendments().is_empty() {
         FileTree::new()
@@ -227,35 +213,107 @@ fn update_with(
             }
         }
     };
-    let reconciled = match reconcile_amendments(&manifest, &previous, graph, &files, &copies) {
-        Ok(reconciled) => reconciled,
-        Err(errors) => {
-            problems.extend(errors.into_iter().map(UpdateProblem::Reconcile));
-            BTreeMap::new()
+    let src = match repository.read_working_src() {
+        Ok(src) => src,
+        Err(ReadSrcError::Git(error)) => {
+            problems.push(UpdateProblem::Repository(error));
+            FileTree::new()
+        }
+        Err(error) => {
+            problems.push(UpdateProblem::Build(BuildProblem::Src(error)));
+            FileTree::new()
         }
     };
-    // A rebased JSON file must still be JSON: a line merge of structured
-    // text could otherwise leave a key twice or a comma missing.
-    for (path, rebased) in &reconciled {
-        let Some(copy) = &rebased.copy else {
-            continue;
-        };
-        let delivered = delivered_path(path).ok().flatten();
-        if MergeFormat::of_path(delivered.as_ref().unwrap_or(path)) == MergeFormat::Json
-            && delivered.is_none()
-        {
-            let parsed = std::str::from_utf8(copy)
-                .map_err(|_| "it is not UTF-8".to_owned())
-                .and_then(|text| {
-                    crate::adapters::jsonc_edit::parse_value(text)
-                        .map_err(|error| error.to_string())
-                });
-            if let Err(detail) = parsed {
-                problems.push(UpdateProblem::RebasedNotJson {
-                    path: path.clone(),
-                    detail,
-                });
+    if !problems.is_empty() {
+        return Err(UpdateFailure::Rejected(problems));
+    }
+    // The dependencies before the update and after it, each read and
+    // verified as a build reads them, for the layered bases.
+    let mut found = Vec::new();
+    let before = resolve_graph(
+        Some(manifest.name()),
+        manifest.dependencies(),
+        &previous,
+        &index,
+        &mut found,
+    );
+    let after = resolve_graph(
+        Some(manifest.name()),
+        manifest.dependencies(),
+        &new_lock,
+        &index,
+        &mut found,
+    );
+    problems.extend(found.into_iter().map(UpdateProblem::Build));
+    let (Some(before), Some(after)) = (before, after) else {
+        return Err(UpdateFailure::Rejected(problems));
+    };
+    let (development, _) = development_values(&manifest);
+    let bare = without_amendments(&manifest);
+    let no_copies = FileTree::new();
+    let (units_before, units_after) = (before.units(), after.units());
+    let compose_world = |world: &Resolved, units| {
+        compose(
+            world.resolution.graph(),
+            Root::Unit(UnitContent::new(&bare, &src, &no_copies)),
+            units,
+            &development,
+        )
+    };
+    let composed_after = compose_world(&after, &units_after);
+    let mut reconciled: BTreeMap<RelativePath, Reconciled> = BTreeMap::new();
+    if !manifest.amendments().is_empty() {
+        let composed_before = compose_world(&before, &units_before);
+        match (&composed_before, &composed_after) {
+            (Ok(composed_before), Ok(composed_after)) => {
+                let worlds = (
+                    World {
+                        resolved: &before,
+                        composition: composed_before,
+                        lock: &previous,
+                    },
+                    World {
+                        resolved: &after,
+                        composition: composed_after,
+                        lock: &new_lock,
+                    },
+                );
+                match reconcile(&manifest, &previous, &worlds, &copies) {
+                    Ok(carried) => reconciled = carried,
+                    Err(errors) => problems.extend(errors),
+                }
             }
+            (Err(errors), _) | (_, Err(errors)) => problems.extend(
+                errors
+                    .iter()
+                    .cloned()
+                    .map(|error| UpdateProblem::Build(BuildProblem::Composition(error))),
+            ),
+        }
+    }
+    // A conflict between siblings in a file the unit does not amend, after
+    // the update, is the unit's to resolve: it gets the marked copy as a
+    // build would give it. What else the composition after the update
+    // finds is the next build's to report.
+    let mut pending = Vec::new();
+    if let Ok(composed_after) = &composed_after {
+        let mut sink = Vec::new();
+        if let Some(rendered) = render_files(
+            composed_after,
+            &new_lock,
+            Some(manifest.name()),
+            &after.dependencies,
+            &mut sink,
+        ) {
+            pending = pending_files(
+                composed_after,
+                rendered.unresolved,
+                &new_lock,
+                &manifest,
+                &after.dependencies,
+                &mut sink,
+            )
+            .0;
         }
     }
     if !problems.is_empty() {
@@ -276,6 +334,8 @@ fn update_with(
                     from: declaration.base().clone(),
                     to: rebased.base,
                     rebased: rebased.copy.is_some(),
+                    markers: rebased.copy.as_deref().is_some_and(has_markers),
+                    conflicts: rebased.conflicts,
                 },
             ))
         })
@@ -284,27 +344,38 @@ fn update_with(
         recovered,
         changes,
         carried,
+        pending,
         written: false,
     };
-    if updated.changes.is_empty() && updated.carried.is_empty() {
+    if updated.changes.is_empty() && updated.carried.is_empty() && updated.pending.is_empty() {
         return Ok(updated);
     }
 
-    // The plan: both files' new contents, decided before anything is
-    // written.
-    let bases = updated
+    // The plan: every file's new contents, decided before anything is
+    // written. The manifest follows the carried bases and declares the
+    // pending copies.
+    let bases: BTreeMap<RelativePath, Version> = updated
         .carried
         .iter()
+        .filter(|(_, carried)| carried.from != carried.to)
         .map(|(path, carried)| (path.clone(), carried.to.clone()))
         .collect();
-    let edited = if updated.carried.is_empty() {
-        None
-    } else {
-        Some(
-            rebase_amendments(&text, &manifest, &bases)
-                .map_err(|error| rejected(UpdateProblem::ManifestEdit(error)))?,
-        )
-    };
+    let mut edited = text.clone();
+    let mut declared = manifest.clone();
+    if !bases.is_empty() {
+        edited = rebase_amendments(&edited, &declared, &bases)
+            .map_err(|error| rejected(UpdateProblem::ManifestEdit(error)))?;
+        declared = declared.with_bases(&bases).unwrap_or(declared);
+    }
+    for pending in &updated.pending {
+        let declaration = AmendmentDeclaration::new(pending.provider.clone(), pending.base.clone());
+        edited = declare_amendment(&edited, &declared, &pending.source, &declaration)
+            .map_err(|error| rejected(UpdateProblem::ManifestEdit(error)))?;
+        if let Some(next) = declared.with_amendment(pending.source.clone(), declaration) {
+            declared = next;
+        }
+    }
+    let edited = (edited != text).then_some(edited);
     let lock_after = serialize(&new_lock).map_err(|error| {
         UpdateFailure::Write(WriteError {
             operation: "serialize",
@@ -321,6 +392,36 @@ fn update_with(
             .unwrap_or_default();
         copy_plans.push((path, Planned { before, after }));
     }
+    // A pending copy is new: nothing exists at its path, and the
+    // directories on the way are real directories, created here when they
+    // do not exist and removed again if the update is not written.
+    let mut created = Vec::new();
+    match amend::real_directories_of(root, updated.pending.iter().map(|pending| &pending.source)) {
+        Ok(missing) => created = missing,
+        Err(amend::DirectoryProblem::NotADirectory(path)) => {
+            problems.push(UpdateProblem::Build(BuildProblem::NotADirectory { path }));
+        }
+        Err(amend::DirectoryProblem::Unreadable(path, error)) => {
+            problems.push(UpdateProblem::Build(BuildProblem::Unreadable {
+                path,
+                error,
+            }));
+        }
+    }
+    for pending in &updated.pending {
+        let target = copy_target(root, &pending.source);
+        if fs::symlink_metadata(&target).is_ok() {
+            problems.push(UpdateProblem::StagingOccupied { path: target });
+            continue;
+        }
+        copy_plans.push((
+            pending.source.clone(),
+            Planned {
+                before: Vec::new(),
+                after: pending.copy.clone(),
+            },
+        ));
+    }
     let staging_names = [MANIFEST_NEW.to_owned(), LOCK_STAGING.to_owned()];
     let mut staged: Vec<PathBuf> = staging_names.iter().map(|name| root.join(name)).collect();
     staged.extend(copy_plans.iter().map(|(path, _)| copy_staging(root, path)));
@@ -331,6 +432,17 @@ fn update_with(
     }
     if !problems.is_empty() {
         return Err(UpdateFailure::Rejected(problems));
+    }
+    for directory in &created {
+        if let Err(error) = fs::create_dir(directory) {
+            amend::remove_directories(&created);
+            return Err(UpdateFailure::Write(WriteError {
+                operation: "create",
+                path: directory.clone(),
+                error,
+                state: UpdateState::Unchanged,
+            }));
+        }
     }
     let journal = Journal {
         copies: copy_plans,
@@ -343,9 +455,180 @@ fn update_with(
             after: lock_after,
         },
     };
-    commit(root, &git_dir, &journal, fault).map_err(UpdateFailure::Write)?;
+    if let Err(error) = commit(root, &git_dir, &journal, fault) {
+        if error.state == UpdateState::Unchanged {
+            amend::remove_directories(&created);
+        }
+        return Err(UpdateFailure::Write(error));
+    }
     updated.written = true;
     Ok(updated)
+}
+
+/// The dependencies on one side of the update, composed.
+struct World<'w> {
+    resolved: &'w Resolved,
+    composition: &'w Composition<'w>,
+    lock: &'w UnitLock,
+}
+
+/// An amendment carried across the update.
+struct Reconciled {
+    /// The new declared base: the provider's version after the update.
+    base: Version,
+    /// The rebased copy, when its base changed with the update; `None`
+    /// when the copy is untouched.
+    copy: Option<Vec<u8>>,
+    /// Each conflict left marked in the copy, as the merge reports it.
+    conflicts: Vec<String>,
+}
+
+/// Reconciles each amendment of `manifest` with its layered base before
+/// and after the update, given `previous`, the lock before it, `worlds`,
+/// the dependencies composed on each side, and `copies`, the unit's own
+/// copies. An amendment whose base is the same on both sides is carried
+/// over as it is, its declared base following the lock. One whose base
+/// changes is rebased: the copy, the old base, and the new base are merged
+/// three ways, and what both the copy and the update change is left
+/// between markers. Every other case is an error, sorted by path: a
+/// declared base that is not the locked version, which the author edited
+/// by hand; a path the provider does not have at the base or no longer has
+/// after the update; and a base that changes and cannot be merged.
+fn reconcile(
+    manifest: &Manifest,
+    previous: &UnitLock,
+    worlds: &(World<'_>, World<'_>),
+    copies: &FileTree,
+) -> Result<BTreeMap<RelativePath, Reconciled>, Vec<UpdateProblem>> {
+    let (before, after) = worlds;
+    let mut carried = BTreeMap::new();
+    let mut problems = Vec::new();
+    for (path, declaration) in manifest.amendments() {
+        let unit = declaration.unit();
+        let base = declaration.base();
+        // A provider that leaves the graph is the next build's to report.
+        let Some(new) = after.lock.units().get(unit).map(|locked| locked.version()) else {
+            continue;
+        };
+        let moved = |cause| {
+            UpdateProblem::Reconcile(ReconcileError::new(
+                path.clone(),
+                unit.clone(),
+                base.clone(),
+                new.clone(),
+                cause,
+            ))
+        };
+        if let Some(locked) = previous
+            .units()
+            .get(unit)
+            .filter(|locked| locked.version() != base)
+        {
+            problems.push(moved(ReconcileCause::DeclarationChanged {
+                locked: locked.version().clone(),
+            }));
+            continue;
+        }
+        let delivered = delivered_path(path)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| path.clone());
+        let mut found = Vec::new();
+        let base_of = |world: &World<'_>, found: &mut Vec<BuildProblem>| {
+            let composed = world.composition.files().get(&delivered)?;
+            if composed.unit() != unit || composed.source() != path {
+                return None;
+            }
+            layer_sources(
+                world.composition,
+                &delivered,
+                world.lock,
+                Some(manifest.name()),
+                &world.resolved.dependencies,
+                found,
+            )
+        };
+        let old_base = base_of(before, &mut found);
+        let new_base = base_of(after, &mut found);
+        if !found.is_empty() {
+            problems.extend(found.into_iter().map(UpdateProblem::Build));
+            continue;
+        }
+        let (old_base, new_base) = match (old_base, new_base) {
+            (None, _) => {
+                problems.push(moved(ReconcileCause::NotProvidedAtBase));
+                continue;
+            }
+            (Some(_), None) => {
+                problems.push(moved(ReconcileCause::NoLongerProvided));
+                continue;
+            }
+            (Some(old_base), Some(new_base)) => (old_base, new_base),
+        };
+        let untouched = Reconciled {
+            base: new.clone(),
+            copy: None,
+            conflicts: Vec::new(),
+        };
+        if old_base == new_base {
+            if new != base {
+                carried.insert(path.clone(), untouched);
+            }
+            continue;
+        }
+        // A copy that does not exist is the next build's to report; the
+        // base follows the lock meanwhile.
+        let Some(copy) = copies.get(path) else {
+            if new != base {
+                carried.insert(path.clone(), untouched);
+            }
+            continue;
+        };
+        // A template's sources are rebased by line, whatever its format.
+        let format = match MergeFormat::of_path(&delivered) {
+            MergeFormat::Json if delivered != *path => MergeFormat::Text,
+            format => format,
+        };
+        let texts = (
+            std::str::from_utf8(&old_base),
+            std::str::from_utf8(copy.contents()),
+            std::str::from_utf8(&new_base),
+        );
+        let all_text = [old_base.as_slice(), copy.contents(), new_base.as_slice()]
+            .into_iter()
+            .all(is_text);
+        let (Ok(old_text), Ok(copy_text), Ok(new_text)) = texts else {
+            problems.push(moved(ReconcileCause::Changed));
+            continue;
+        };
+        let rebased = match format {
+            MergeFormat::Json => match rebase_json(old_text, copy_text, new_text) {
+                Ok(rebased) => rebased,
+                Err(failure) => {
+                    problems.push(moved(ReconcileCause::Unmergeable(failure.to_string())));
+                    continue;
+                }
+            },
+            MergeFormat::Text if all_text => rebase_text(old_text, copy_text, new_text),
+            MergeFormat::Text | MergeFormat::Unsupported => {
+                problems.push(moved(ReconcileCause::Changed));
+                continue;
+            }
+        };
+        carried.insert(
+            path.clone(),
+            Reconciled {
+                base: new.clone(),
+                copy: Some(rebased.text.into_bytes()),
+                conflicts: rebased.conflicts,
+            },
+        );
+    }
+    if problems.is_empty() {
+        Ok(carried)
+    } else {
+        Err(problems)
+    }
 }
 
 /// Applies `journal`: records it, replaces the manifest if the journal
@@ -812,6 +1095,7 @@ pub struct Updated {
     recovered: Option<Recovered>,
     changes: BTreeMap<UnitIdentity, LockChange>,
     carried: BTreeMap<RelativePath, Carried>,
+    pending: Vec<PendingFile>,
     written: bool,
 }
 
@@ -827,25 +1111,41 @@ impl Updated {
         &self.changes
     }
 
-    /// The amendments carried to their providers' new versions, by path.
+    /// The amendments carried across the update, by path: those whose
+    /// provider moved, and those whose base changed below.
     pub fn carried(&self) -> &BTreeMap<RelativePath, Carried> {
         &self.carried
     }
 
-    /// Whether the lockfile, and the manifest when an amendment was
-    /// carried over, were written. False when there was nothing to update.
+    /// The copies the update created for the unit to resolve a conflict
+    /// between sibling amenders, in path order.
+    pub fn pending(&self) -> &[PendingFile] {
+        &self.pending
+    }
+
+    /// Whether any copy written holds conflict markers: one the update
+    /// created, or one it rebased with a conflict.
+    pub fn has_markers(&self) -> bool {
+        !self.pending.is_empty() || self.carried.values().any(|carried| carried.markers)
+    }
+
+    /// Whether the lockfile, and the manifest and the copies when there
+    /// was something to carry or to create, were written. False when there
+    /// was nothing to update.
     pub fn written(&self) -> bool {
         self.written
     }
 }
 
-/// An amendment carried from its old base to the provider's new version.
+/// An amendment carried across the update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Carried {
     unit: UnitIdentity,
     from: Version,
     to: Version,
     rebased: bool,
+    markers: bool,
+    conflicts: Vec<String>,
 }
 
 impl Carried {
@@ -864,10 +1164,22 @@ impl Carried {
         &self.to
     }
 
-    /// Whether the copy was rewritten to follow the provider's changes, and
+    /// Whether the copy was rewritten to follow its base's changes, and
     /// not only carried over unchanged.
     pub fn rebased(&self) -> bool {
         self.rebased
+    }
+
+    /// Whether the rewritten copy holds conflict markers: those of the
+    /// conflicts below, or markers that flowed in from the base.
+    pub fn has_markers(&self) -> bool {
+        self.markers
+    }
+
+    /// Each conflict between the copy and the update left marked in the
+    /// copy, as the merge reports it.
+    pub fn conflicts(&self) -> &[String] {
+        &self.conflicts
     }
 }
 
@@ -1008,13 +1320,6 @@ pub enum UpdateProblem {
     ManifestEdit(EditError),
     /// The unit's copies under `amendments/` cannot be read.
     Copies(crate::adapters::git::ReadSrcError),
-    /// A copy rebased onto the provider's new file is not JSON any more.
-    RebasedNotJson {
-        /// The amended path.
-        path: RelativePath,
-        /// Why.
-        detail: String,
-    },
     /// Something exists at a reserved path the update writes to.
     StagingOccupied {
         /// The path.
@@ -1045,12 +1350,6 @@ impl fmt::Display for UpdateProblem {
             Self::Reconcile(error) => error.fmt(f),
             Self::ManifestEdit(error) => error.fmt(f),
             Self::Copies(error) => write!(f, "the unit's amendments cannot be read: {error}"),
-            Self::RebasedNotJson { path, detail } => write!(
-                f,
-                "amendments/{path} rebased onto the provider's new file is not valid JSON \
-                 ({detail}); the two sets of changes cannot be combined by line, so re-amend \
-                 the file against the new version"
-            ),
             Self::StagingOccupied { path } => write!(
                 f,
                 "{} exists, and an update writes there; move it away first",
