@@ -70,9 +70,15 @@ Catalog identities use the same rules (see
   (see
   [dependencies.md](dependencies.md#pre-releases-and-build-metadata--approved)).
 
+Requirements use Cargo's SemVer requirement syntax and semantics, with an
+operator on every comparator, such as `^1.2.3`, `~1.2`, `=1.2.3`, or `>=1.2,
+<1.5`; wildcards such as `*` and `1.*` count as one. A bare version such as
+`1.2.3` is refused, because ecosystems disagree on its meaning: Cargo reads
+it as `^1.2.3`, and npm, pip, and Poetry as exactly `1.2.3` (owner decision,
+**OC-15** resolved).
+
 Open:
 
-- The SemVer range dialect. **OC-15.**
 - Whether publication, registration, or synchronization reject versions that
   differ only in build metadata before resolution reports them. **OC-25.**
 
@@ -108,12 +114,9 @@ assemblr-lock.json    the unit lockfile: CLI-managed, tracked, resolved versions
 - The initialized scaffold supports editing the manifest with JSON Schema
   (see [manifest.md](manifest.md#editor-support--approved)).
 
-Open:
-
-- The file name and location of the generated local manifest schema, and
-  whether it is tracked in Git. **OC-17.** **Provisional (D-2)**:
-  `manifest.schema.json` at the top level, tracked; see
-  [authoring-workflow.md](authoring-workflow.md#initialization-details--provisional-d-2-d-5).
+The generated local manifest schema is `manifest.schema.json` at the top
+level, tracked (**OC-17**, resolved; D-2); see
+  [authoring-workflow.md](authoring-workflow.md#initialization-details--provisional-d-5-d-33).
 
 ## Unit contents — Approved
 
@@ -188,7 +191,7 @@ Path collisions:
   is a path collision too.
 - Collisions are detected the same way within one unit's files and across the
   files of several units.
-- Recommended (provisional): paths that differ only in case, such as
+- Paths that differ only in case, such as
   `README.md` and `readme.md`, also collide, and the file-or-directory check
   ignores case too, because a case-insensitive file system would otherwise
   lose one of the files silently (**OC-48**).

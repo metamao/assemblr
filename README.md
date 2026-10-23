@@ -106,6 +106,7 @@ assemblr unit amend package.json     # copy a dependency's file to change it
 assemblr unit check                  # check it before publishing
 git add -A && git commit -m "First version"
 assemblr unit publish                # tag the committed version
+git push --follow-tags               # share the commit and its tag
 ```
 
 **Share units through a catalog.** A catalog is a Git repository that lists

@@ -9,7 +9,7 @@ The authoring-completeness increment (#32) adds the two commands that close
 the authoring loop before `unit init`: `unit check` validates a unit without
 building it, and `unit publish` creates the version tag and indexes it. The
 product rules are in
-[`authoring-workflow.md`](../domain/authoring-workflow.md#check-details--provisional-d-1-d-3)
+[`authoring-workflow.md`](../domain/authoring-workflow.md#check-details--approved-d-1-d-3)
 and the decisions behind them in the autonomous decision log (D-1, D-3,
 D-4). This ADR records how they are implemented: where the build's
 validation now lives, what a publication validates and how it reads it, how

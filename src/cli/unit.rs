@@ -691,6 +691,11 @@ fn report_published(published: &Published) {
             );
         }
     }
+    // Publishing never pushes (OC-13), and other machines see the version
+    // only once the commit and its annotated tag reach the remote.
+    if !published.already_published() {
+        println!("Next: run `git push --follow-tags` so that other machines can sync it.");
+    }
 }
 
 /// The current directory as the author would name it on the command line.

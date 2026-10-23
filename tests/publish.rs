@@ -374,7 +374,7 @@ fn publish_tags_head_indexes_the_version_and_a_dependent_builds_against_it() {
         stdout(&output).trim(),
         format!(
             "Published @acme/app 0.1.0 as tag v0.1.0 at commit {}.\nIndexed it in the local \
-             registry.",
+             registry.\nNext: run `git push --follow-tags` so that other machines can sync it.",
             &head[..12]
         )
     );

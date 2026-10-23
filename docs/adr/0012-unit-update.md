@@ -31,7 +31,7 @@ files is made recoverable without ever leaving them half updated.
 2. **Resolving with a partial lock.** The resolver is given the previous
    lock minus the identities the author updates, all of them when none is
    named, so that the provisional policy of
-   [`dependencies.md`](../domain/dependencies.md#recommended-provisional)
+   [`dependencies.md`](../domain/dependencies.md#resolution-policy--approved)
    keeps every other locked version that still satisfies the requirements
    and replaces one only when an updated unit's requirements force it. The
    resolver reports changes relative to the lock it was given, so an updated

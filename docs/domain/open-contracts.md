@@ -111,55 +111,6 @@ How the status of a statement affects implementation:
 - **Origin:** Owner
 - **Context:** [ordering](amendments-and-composition.md#ordering)
 
-### OC-13
-
-- **Question:** Whether Alpha provides a remote push operation, and its
-  command or flag. Approved: local publication and pushing are distinct, and
-  `unit publish` never pushes commits or tags as a side effect.
-- **Origin:** Owner
-- **Context:** [publication](authoring-workflow.md#publication--approved)
-
-### OC-15
-
-- **Question:** SemVer range dialect. Recommended (provisional) starting
-  point: Cargo-like SemVer requirement semantics. Pre-release and
-  build-metadata handling are approved (see [pre-releases and build
-  metadata](dependencies.md#pre-releases-and-build-metadata--approved)).
-- **Origin:** Foundation
-- **Context:** [versioning](units.md#versioning--approved)
-
-### OC-26
-
-- **Question:** Publication edge cases: untracked files and the clean-state
-  requirement, an existing tag that already points at the validated content,
-  annotated vs lightweight tags (recommended (provisional): consider annotated
-  tags), and whether a new version must be greater than earlier published
-  versions. **Provisional (D-3)**, as the [publication
-  details](authoring-workflow.md#publication-details--provisional-d-3-d-4): committing
-  everything must change nothing, with untracked unignored files refused by
-  name; a tag of the version at `HEAD` means already published and exits zero;
-  annotated tags with the author's identity; no ordering requirement; a
-  version of equal precedence is refused. The entry stays open until the owner
-  closes it.
-- **Origin:** Foundation
-- **Context:** [publication](authoring-workflow.md#publication--approved)
-
-### OC-47
-
-- **Question:** **Conflicts between unit contributions in a consumer
-  composition.** Whether a conflict between units' contributions, for example
-  an amendment that cannot be applied to the dependency version the consumer
-  resolved, is resolved in the pending-resolution state like a conflict with
-  consumer modifications, or is a composition error; and, if it is resolved in
-  place, what the incoming composition and the next reconciliation base are.
-  **Provisional (D-10)** for the first `compose`: a
-  conflict between units' contributions is a composition error, and the
-  project is not modified; unchanged by reconciliation (**Provisional (D-13)**).
-- **Origin:** Readiness
-- **Context:** [conflict
-  resolution](consumer-projects.md#conflict-resolution--approved),
-  [amendments](amendments-and-composition.md#amendments--approved)
-
 ### OC-48
 
 - **Question:** **File-system semantics of contributed files**: executable
@@ -172,7 +123,7 @@ How the status of a statement affects implementation:
   template is delivered without its `.assemblr.tmpl` suffix), and so is a file
   whose delivered path is a directory of another file's, within one unit or
   across units; `src/` paths follow the portable path rules in [unit
-  files](units.md#src-unit-files). Recommended (provisional): paths that
+  files](units.md#src-unit-files). Approved (owner, 2026-10-23): paths that
   differ only in case are also path collisions, because a case-insensitive
   file system would otherwise lose one of the files silently. Approved: paths
   that differ only in Unicode normalization collide too, alone or combined
@@ -183,10 +134,10 @@ How the status of a statement affects implementation:
   Compatibility equivalents do not collide. Approved for `unit build`: how a
   working tree's symbolic links, special files, and executable bits are read
   (see [build details](authoring-workflow.md#build-details--approved)).
-  **Provisional (D-10)** for the first `compose`: files are
+  Approved in the [owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799) (D-10): files are
   written byte for byte with the executable bit as composed, never through a
   symbolic link; `assemblr.jsonc`, `assemblr-lock.json`, and `.assemblr/` are
-  reserved paths a unit cannot deliver. **Provisional (D-15)** for
+  reserved paths a unit cannot deliver. Approved (D-15) for
   reconciliation: a project file that differs from its
   base or the incoming file only by CRLF line endings counts as that content
   and keeps its line endings; the executable bit is reconciled like content,
@@ -194,8 +145,8 @@ How the status of a statement affects implementation:
   Which delivered files are unbased is decided by the project's `.gitignore`
   files only, never by one machine's `.git/info/exclude` or global excludes; a
   file only those ignore, and that the base would store for the first time, is
-  refused with the way out named (**Provisional (D-16)**, which revises D-11 and
-  D-15).
+  refused with the way out named (D-16, which revises D-11 and D-15,
+  approved). **Still open: binary content.**
 - **Origin:** Readiness
 - **Context:** [unit files](units.md#src-unit-files), [file
   contributions](consumer-projects.md#file-contributions--approved)
@@ -307,14 +258,14 @@ How the status of a statement affects implementation:
   `unit check` runs every validation a build runs plus the publication checks
   and writes nothing, and `unit publish` tags the committed tree at `HEAD` and
   updates the index for the registered source (**Provisional (D-3, D-4)**; see
-  [check details](authoring-workflow.md#check-details--provisional-d-1-d-3) and
-  [publication details](authoring-workflow.md#publication-details--provisional-d-3-d-4)).
+  [check details](authoring-workflow.md#check-details--approved-d-1-d-3) and
+  [publication details](authoring-workflow.md#publication-details--approved-d-3-d-4)).
   `unit init <identity> [<directory>] [--description <text>]` establishes the
   repository (initialized, adopted at its top level, nested inside a
   repository that is not a unit's, refused inside a unit's), writes the
   manifest, the schema, and `.gitignore`, never overwrites a manifest, and
   never commits (**Provisional (D-5, D-33)**; see [initialization
-  details](authoring-workflow.md#initialization-details--provisional-d-2-d-5)). `assemblr
+  details](authoring-workflow.md#initialization-details--provisional-d-5-d-33)). `assemblr
   init [<directory>]` writes an empty declaration and nothing else, and
   `assemblr compose` composes the declaration into a project composed for the
   first time (**Provisional (D-9)**; see [initialization
@@ -350,12 +301,13 @@ How the status of a statement affects implementation:
   `info`, and whether unit inspection is spelled `info` or `unit info`; what
   `registry doctor` does beyond diagnosis; how catalog operations (`registry
   create`, catalog refresh) are grouped; how `add` takes parameter values
-  (`--option <name>=<value>`, **Provisional (D-34)**). The grammar of `unit
-  init` (its default directory, **Provisional (D-33)**), `unit
-  check`, `unit publish`, `init`, `compose` (with `--continue` and `--abort`,
-  **Provisional (D-18)**), `add`, and `remove`, and `--verbose` on `compose`,
-  `add`, `remove`, and `update` (**Provisional (D-31)**), stays open until the
-  owner closes it.
+  (`--option <name>=<value>`, **Provisional (D-34)**, its values read by the
+  parameter's type by owner decision). The grammar of `unit init` (its
+  default directory, **Provisional (D-33)**), `init`, `compose`, `add`, and
+  `remove`, and `--verbose` on `compose`, `add`, `remove`, and `update`
+  (**Provisional (D-31)**), stays open until the owner closes it. Approved in
+  the [owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799): `unit check` and `unit publish` (D-3), and
+  `compose --continue` and `--abort` (D-18).
 - **Origin:** Owner
 - **Context:** [commands](authoring-workflow.md#commands--conceptual),
   [initialization](authoring-workflow.md#initialization--approved), [registry
@@ -456,61 +408,6 @@ How the status of a statement affects implementation:
 - **Context:** [merge
   semantics](amendments-and-composition.md#merge-semantics--approved),
   [reconciliation](consumer-projects.md#reconciliation--approved)
-
-### OC-11
-
-- **Approved (normative):** A unit with no effective contribution (files,
-  amendments, or meaningful dependency configuration) is invalid for
-  publication. This is not a "`src/` must contain files" rule. Aggregating
-  dependencies into a reusable composition is a contribution, whatever their
-  number (owner direction, #32).
-- **Open detail:** The precise effective-contribution (no-op) algorithm.
-  **Provisional (D-1)**: a unit is effective when it
-  delivers a `src/` file or declares a dependency; an amendment copy identical
-  to the provider's file at its base is redundant and reported; an option
-  equal to the locked version's default is not reported (see [check
-  details](authoring-workflow.md#check-details--provisional-d-1-d-3)).
-- **Origin:** Owner
-- **Context:** [check](authoring-workflow.md#check--approved)
-
-### OC-16
-
-- **Approved (normative):** Resolution is deterministic, and existing lock
-  state takes precedence over fresh resolution. In consumer projects,
-  operations follow **minimal necessary updates**: compatible locked versions
-  are reused, newly incorporated units get compatible stable versions, locked
-  units are upgraded only when new constraints require it, explicit
-  requirements and pins are respected, one version per identity, unsatisfiable
-  compositions are rejected, and changed versions are explained. Recommended
-  (provisional): preserve satisfying locks, and otherwise prefer the highest
-  compatible stable published version across the full transitive constraint
-  set. Candidates that conflict, depend on a missing or ambiguous identity, or
-  close a cycle are passed over. When raising one unit forces another down,
-  the unit decided first, in dependency order and then identity order, keeps
-  the higher version; this makes selection deterministic without promising an
-  optimal result (see [provisional
-  details](dependencies.md#recommended-provisional)).
-- **Open detail:** Which version is chosen for a newly incorporated unit when
-  several satisfy every requirement.
-- **Origin:** Foundation
-- **Context:** [resolution](dependencies.md#resolution--approved), [version
-  selection](dependencies.md#version-selection--approved)
-
-### OC-17
-
-- **Approved (normative):** `unit init` provides a local, offline manifest
-  JSON Schema referenced through `$schema`. Assemblr's own validation is
-  authoritative.
-- **Open detail:** The schema's file name and location, whether it is tracked
-  in Git, and when it is regenerated. **Provisional (D-2)**
-  and implemented by `unit init`: `manifest.schema.json` at the repository's
-  top level, tracked, created when missing and refreshed by running `unit
-  init` again; `unit check` and `unit publish` never compare it, since
-  Assemblr's validation is authoritative (see [initialization
-  details](authoring-workflow.md#initialization-details--provisional-d-2-d-5)). The entry
-  stays open until the owner closes it.
-- **Origin:** Foundation
-- **Context:** [editor support](manifest.md#editor-support--approved)
 
 ### OC-23
 
@@ -679,16 +576,16 @@ How the status of a statement affects implementation:
   layout) and how the three versions are exposed; how resolution is marked
   complete; which operations are allowed while resolution is pending; the
   snapshot, journal, and restore mechanisms; and recovery after an interrupted
-  application. **Provisional (D-12)** for the first `compose`: a journal in
+  application. Approved in the [owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799) (D-12, D-14, D-18,
+  and the fixes of #72 and #73): a journal in
   `.assemblr/` records the files being created, replaced, and removed, with
   their previous content kept under `.assemblr/previous/`, and the next
   `compose` completes an interrupted composition whose lock is in place and
-  reverts any other to the previous content (**Provisional (D-12, D-14)**). A
+  reverts any other to the previous content. A
   journal whose format number or members this version does not know is refused
   and left as it is (#73, ADR 0027). The journal also records the declaration
   that `add` and `remove` rewrite, with its previous text, and a revert
-  restores it with the files (**Provisional (D-17)**). **Provisional (D-18)**
-  for text conflicts: `compose --continue` and `--abort`; each conflicted file
+  restores it with the files (**Provisional (D-17)**). For text conflicts: `compose --continue` and `--abort`; each conflicted file
   stays at its path holding the project's, the base's, and the composition's
   content between diff3-style markers; the journal keeps the lock and the
   marked files and waits; only `--continue` and `--abort` run while it waits;
@@ -832,88 +729,6 @@ How the status of a statement affects implementation:
 - **Origin:** Consumer
 - **Context:** [file
   contributions](consumer-projects.md#file-contributions--approved)
-
-### OC-45
-
-- **Approved (normative):** `dependencies`, `options`, and `params` are maps:
-  identity to SemVer requirement; direct dependency identity to parameter
-  values; parameter name to a typed definition with a description, an optional
-  default, optional allowed values, and an optional `example` (decision log
-  D-24). Values are JSON values of the parameter's type; in a unit's `options`
-  a value may also be a mapping `{ "from": ... }`. There is no `required`
-  property.
-- **Open detail:** The property names and type spellings inside a parameter
-  definition. Recommended (provisional): `type` (`"string"`, `"integer"`,
-  `"boolean"`), `description`, an optional `default`, an optional `allowed`,
-  which is valid only for strings and makes them enumerated strings, and an
-  optional `example`, decided by the owner on #62.
-- **Origin:** Foundation
-- **Context:** [manifest
-  serialization](manifest.md#serialization-of-dependencies-options-params-and-amendments--approved),
-  [provisional
-  definitions](manifest.md#parameter-definitions-and-manifest-text--recommended-provisional)
-
-### OC-46
-
-- **Approved (normative):** A unit repository has a CLI-managed, tracked unit
-  lockfile, distinct from the consumer lockfile. It records the exact resolved
-  dependency versions used during development; `unit check`, `unit build`, and
-  `unit update` use it consistently; new registry versions never change it
-  silently; it does not determine consumer resolution. Decided for `unit
-  build`: the lockfile is `assemblr-lock.json` at the repository's top level,
-  versioned JSON recording each resolved unit's version, commit, and tree;
-  `unit build` creates it and rewrites it only when resolution changes it; a
-  locked version published with other content is rejected. The lockfile entry
-  for an amended unit is the content identity of the amendment's base
-  (version, commit, and tree); it is published with the unit, a published
-  version with amendments carries a lockfile consistent with its declarations,
-  and dependents and consumers verify bases against it, treating a
-  disagreement with their own registry record as an integrity conflict.
-  Changing the locked version of an amended unit is an explicit `unit update`:
-  a build whose resolution would change it fails and changes nothing, naming
-  the amendments and distinguishing a changed resolution from a hand-edited
-  declaration. `unit amend` requires a lockfile that records the current
-  resolution and never writes it. `unit update` writes it, together with the
-  declared bases of the amendments it carries over, after recording both
-  files' contents in the Git directory so that an interrupted update is
-  completed, never half applied (see [update
-  details](authoring-workflow.md#update-details--approved)).
-- **Open detail:** Whether `unit publish` writes it. **Provisional (D-4)**: it
-  does not; it requires the lockfile to be committed and to record the current
-  resolution, so the writers are `unit build` and `unit update`. The entry
-  stays open until the owner closes it.
-- **Origin:** Owner
-- **Context:** [unit lock
-  state](authoring-workflow.md#unit-lock-state--approved), [base
-  identity](amendments-and-composition.md#base-identity-and-verification)
-
-### OC-50
-
-- **Approved (normative):** Each parameter has a name, which is a key of
-  `params` and of the values in `options`. `own` is reserved for the amending
-  author's template context and is not a valid parameter name.
-- **Open detail:** The syntax of other parameter names. Recommended
-  (provisional): an ASCII letter followed by ASCII letters, digits, or
-  underscores, which keeps names usable in any template syntax chosen under
-  OC-5.
-- **Origin:** Implementation
-- **Context:** [provisional
-  rules](manifest.md#parameter-definitions-and-manifest-text--recommended-provisional),
-  [declaration](parameters-and-options.md#declaration--approved)
-
-### OC-51
-
-- **Approved (normative):** The manifest format is JSONC: JSON with comments.
-  Unknown fields and invalid values are rejected, never silently corrected.
-- **Open detail:** The exact dialect and value details. Recommended
-  (provisional): `//` and `/* */` comments and trailing commas after a value
-  are accepted; other JSON5 extensions are rejected; duplicate keys are
-  rejected; integers are 64-bit signed; descriptions must not be empty or only
-  whitespace.
-- **Origin:** Implementation
-- **Context:** [provisional
-  rules](manifest.md#parameter-definitions-and-manifest-text--recommended-provisional),
-  [format](manifest.md#format--approved)
 
 ### OC-52
 
@@ -1117,3 +932,125 @@ How the status of a statement affects implementation:
 - **Context:** [file
   contributions](consumer-projects.md#file-contributions--approved)
 
+### OC-11
+
+- **Resolution:** **Resolved.** A unit is effective when it delivers a `src/`
+  file or declares a dependency; an amendment copy identical to the provider's
+  file at its base is redundant and reported; an option equal to the locked
+  version's default is not reported (D-1). Owner decision in the [owner review
+  of
+  2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
+- **Context:** [check
+  details](authoring-workflow.md#check-details--approved-d-1-d-3)
+
+### OC-13
+
+- **Resolution:** **Resolved.** Alpha provides no push operation. `unit
+  publish` never pushes; after a new publication its result suggests `git push
+  --follow-tags`, which pushes the commit and its annotated tag but no other
+  local tag. Owner decision in the [owner review of
+  2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
+- **Context:** [publication
+  details](authoring-workflow.md#publication-details--approved-d-3-d-4)
+
+### OC-15
+
+- **Resolution:** **Resolved.** Requirements follow Cargo's SemVer requirement
+  syntax and semantics, and every comparator names its operator: a bare
+  version such as `1.2.3` is refused, because Cargo reads it as `^1.2.3` while
+  npm, pip, and Poetry read it as exactly `1.2.3`. Wildcards such as `*` and
+  `1.*` are explicit. `add <unit>@1.2.3` records `^1.2.3`. Pre-releases and
+  build metadata are as approved. Owner decision in the [owner review of
+  2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
+- **Context:** [versioning](units.md#versioning--approved), [resolution
+  policy](dependencies.md#resolution-policy--approved)
+
+### OC-16
+
+- **Resolution:** **Resolved.** Satisfying locks are preserved, and otherwise
+  the highest compatible stable published version across the full transitive
+  constraint set is chosen, with the details of the [resolution
+  policy](dependencies.md#resolution-policy--approved): candidates that
+  conflict, depend on a missing or ambiguous identity, or close a cycle are
+  passed over, and the unit decided first keeps the higher version. Selection
+  is deterministic and not promised to be optimal. The recommended default,
+  accepted for Alpha, is approved. Owner decision in the [owner review of
+  2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
+- **Context:** [resolution
+  policy](dependencies.md#resolution-policy--approved)
+
+### OC-17
+
+- **Resolution:** **Resolved.** `manifest.schema.json` at the repository's top
+  level, tracked, created when missing and refreshed by running `unit init`
+  again; `unit check` and `unit publish` never compare it, since Assemblr's
+  validation is authoritative (D-2). Owner decision in the [owner review of
+  2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
+- **Context:** [editor support](manifest.md#editor-support--approved)
+
+### OC-26
+
+- **Resolution:** **Resolved.** Committing everything must change nothing,
+  with untracked unignored files refused by name; a tag of the version at
+  `HEAD` means already published and exits zero; tags are annotated with the
+  author's identity; a new version need not be greater than earlier ones, and
+  a version of equal precedence is refused (D-3). Owner decision in the [owner
+  review of
+  2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
+- **Context:** [publication
+  details](authoring-workflow.md#publication-details--approved-d-3-d-4)
+
+### OC-45
+
+- **Resolution:** **Resolved.** A parameter definition has `type` (`"string"`,
+  `"integer"`, `"boolean"`), `description`, an optional `default`, an optional
+  `allowed`, valid only for strings, and an optional `example` (#62). The
+  default accepted for Alpha is approved. Owner decision in the [owner review
+  of
+  2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
+- **Context:** [parameter
+  definitions](manifest.md#parameter-definitions-and-manifest-text--approved)
+
+### OC-46
+
+- **Resolution:** **Resolved.** `unit publish` never writes the unit lockfile;
+  it requires the lockfile to be committed and to record the current
+  resolution, so its writers are `unit build` and `unit update` (D-4). Owner
+  decision in the [owner review of
+  2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
+- **Context:** [unit lock
+  state](authoring-workflow.md#unit-lock-state--approved)
+
+### OC-47
+
+- **Resolution:** **Resolved.** A conflict between units' contributions in a
+  consumer composition, such as an amendment that cannot be applied to the
+  resolved provider version, is a composition error: the project is not
+  modified, and the consumer can select another version, for example the base
+  with `assemblr add <unit>@=<base>` (D-10, D-13). It is never a
+  pending-resolution state, because the consumer is not the author of those
+  units. Owner decision in the [owner review of
+  2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
+- **Context:** [composition
+  details](consumer-projects.md#composition-details--provisional-d-10-to-d-12)
+
+### OC-50
+
+- **Resolution:** **Resolved.** Parameter names start with an ASCII letter and
+  continue with ASCII letters, digits, or underscores; `own` is reserved. The
+  default accepted for Alpha is approved. Owner decision in the [owner review
+  of
+  2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
+- **Context:** [parameter
+  definitions](manifest.md#parameter-definitions-and-manifest-text--approved)
+
+### OC-51
+
+- **Resolution:** **Resolved.** `//` and `/* */` comments and trailing commas
+  after a value are accepted; other JSON5 extensions are rejected; duplicate
+  keys are rejected; integers are 64-bit signed; descriptions must not be
+  empty or only whitespace. The default accepted for Alpha is approved. Owner
+  decision in the [owner review of
+  2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
+- **Context:** [manifest
+  text](manifest.md#parameter-definitions-and-manifest-text--approved)

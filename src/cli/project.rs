@@ -108,8 +108,8 @@ fn unit_only(argument: &str) -> Result<UnitIdentity, String> {
     }
 }
 
-/// Parses `name=value` for `--option`: the value is JSON when it reads as
-/// JSON, such as `8080` or `true`, and a string otherwise.
+/// Parses `name=value` for `--option`; the value is read later, by the
+/// parameter's type.
 fn option_argument(argument: &str) -> Result<(String, String), String> {
     match argument.split_once('=') {
         Some((name, value)) if !name.is_empty() => Ok((name.to_owned(), value.to_owned())),
@@ -126,9 +126,9 @@ pub(super) struct AddArgs {
     unit: UnitArgument,
     /// Set an option of the unit; repeat for several
     ///
-    /// The value is JSON when it reads as JSON, like `8080` or `true`, and a
-    /// string otherwise: `appName=shop` sets the string "shop", and
-    /// `port='"8080"'` the string "8080".
+    /// The value is read by the parameter's type: `appName=true` sets the
+    /// string "true" for a string parameter, and `port=8080` the number 8080
+    /// for an integer one.
     #[arg(long = "option", value_name = "NAME=VALUE", value_parser = option_argument)]
     options: Vec<(String, String)>,
     /// Also show warnings about unchanged files and cross-version amendments

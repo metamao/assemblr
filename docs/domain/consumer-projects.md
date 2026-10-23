@@ -187,8 +187,11 @@ Both workflows produce the same composition from the same declaration.
 ### Composition details — Provisional (D-10 to D-12)
 
 Decided for the first `assemblr compose` under AGENTS.md §1.1 (decision log
-D-10 to D-12) and merged with PR #42; the owner has not approved it
-explicitly. They cover a project composed for the first time; a project
+D-10 to D-12) and merged with PR #42. The owner approved in the
+[owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799) what they decide for OC-47 (a conflict between units'
+contributions is an error), OC-48 (bytes, executable bits, symbolic links,
+reserved paths, and which ignore rules decide, D-16), and OC-37 (the journal
+and recovery); what they decide for OC-44 stays provisional. They cover a project composed for the first time; a project
 composed before is reconciled as [reconciliation
 details](#reconciliation-details--provisional-d-13-to-d-15) describes.
 
@@ -214,8 +217,8 @@ version locked and every file written is reported.
 
 **What it refuses, writing nothing:** a problem a unit build would report,
 with the same wording; a conflict between units' contributions, which is a
-composition error and not a pending-resolution state (**OC-47** stays
-open); a delivered path that already holds content Assemblr did not
+composition error and not a pending-resolution state (**OC-47**,
+resolved); a delivered path that already holds content Assemblr did not
 materialize, or whose directory on the way is a file or a symbolic link,
 naming every such path (**OC-44** stays open; composing over existing
 content is not supported yet); a delivered file that only the consumer's own
@@ -230,7 +233,7 @@ state; a directory holding `manifest.jsonc`.
 read-only, which delivered paths it ignores, and which rule decides. Only
 the project's own rules, its `.gitignore` files, decide what is unbased,
 because the lock records it and every clone of the project must lock the
-same way (**Provisional (D-16)**, which revises D-11 and D-15). A file a
+same way (D-16, which revises D-11 and D-15, approved by the owner). A file a
 `.gitignore` ignores is written to the project, but its content is not
 stored in the tracked base: the lock lists it as unbased, and a warning says
 a later composition cannot reconcile edits to it. A `!` pattern in a
@@ -309,9 +312,13 @@ edits `assemblr.jsonc` and then composes the edited declaration exactly as
 `compose` does, so the report names the declaration change, the versions
 that changed, and every file created, modified, merged, and removed.
 **Provisional (D-34):** `add` also takes `--option <name>=<value>`,
-repeatable, which sets the unit's `options` entry in the same edit; a value
-that reads as JSON (`8080`, `true`, `["a"]`) is that value, and any other
-text is a string. A name given twice is refused before anything is read.
+repeatable, which sets the unit's `options` entry in the same edit. The
+value is read by the parameter's type at the version the unit resolves to
+(owner decision, revising D-34): a string parameter takes the text as it is,
+so `name=true` is the string "true", and a quoted JSON string gives its
+content; any other parameter, or one the unit does not declare, takes the
+JSON value the text reads as (`8080`, `true`), and a string otherwise, so the
+composition reports a value that does not fit. A name given twice is refused before anything is read.
 Otherwise parameter values are edited in the declaration's `options`.
 
 **`add`.** A unit that is not selected is added at the end of
@@ -322,7 +329,9 @@ transitive unit promotes it and changes no file. With a requirement, that
 text is recorded, after it is checked as a SemVer requirement. A unit that
 is selected already keeps its requirement when none is given and has it
 replaced when a different one is, so `add` never re-pins a selection the
-consumer wrote. Resolution keeps the locked versions that still satisfy the
+consumer wrote. A bare version, `add <unit>@1.2.3`, is recorded as `^1.2.3`,
+as `npm install` does, because a requirement in the file always names its
+operator (see [versioning](units.md#versioning--approved)). Resolution keeps the locked versions that still satisfy the
 declaration, as `compose` does. Adding a unit that is selected with the same
 requirement changes nothing.
 
@@ -519,9 +528,9 @@ Open:
   case, and paths reserved for Assemblr's own files such as `assemblr.jsonc`
   and the lockfile. **OC-48.** The first `compose` writes bytes and the
   executable bit as composed, never through a symbolic link, and reserves
-  `assemblr.jsonc`, `assemblr-lock.json`, and `.assemblr/` (**Provisional
-  (D-10)**). A project file that differs from its base only by CRLF line
-  endings counts as unchanged (**Provisional (D-15)**).
+  `assemblr.jsonc`, `assemblr-lock.json`, and `.assemblr/`, and a project
+  file that differs from its base only by CRLF line endings counts as
+  unchanged: approved (D-10, D-15); binary content stays open.
 
 ## Reconciliation — Approved
 
@@ -554,7 +563,11 @@ part in it. **OC-10** stays open until the owner settles it.
 Decided for the first reconciliation under AGENTS.md §1.1 (decision log D-13
 to D-15) and implemented by `compose` on a project composed before. They
 decide the consumer side of OC-10, which the merge-engine decision left to the
-consumer lifecycle; the entry stays open.
+consumer lifecycle; the entry stays open. The owner approved in the
+[owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799) the journal of a reconciliation and its recovery (D-14,
+OC-37), line endings and executable bits (D-15, OC-48), and that a conflict
+between units' contributions stays an error (OC-47); the per-path strategy
+itself (D-13) stays provisional.
 
 **Per path, three-way, without Git.** Every path of the reconciliation
 base and of the incoming composition is decided on its own from three
@@ -596,7 +609,7 @@ each as a mode and a content identity.
 
 **Conflicts.** A conflict between text the consumer and the composition
 both changed is left in the file for the consumer to resolve (see
-[pending-resolution details](#pending-resolution-details--provisional-d-18)). A
+[pending-resolution details](#pending-resolution-details--approved-d-18)). A
 composition with any other conflict is refused before anything is written,
 naming every conflicting path and why; the project, its lock, and its base
 stay as they were (standing default D2). A conflict between units'
@@ -689,18 +702,12 @@ Open:
 - Conflict presentation and the mechanisms behind the pending-resolution
   state beyond text conflicts, and a line-level presentation of them.
   **OC-37.**
-- Whether conflicts **between units' contributions**, for example an amendment
-  that cannot be applied to the dependency version the consumer resolved, are
-  resolved in the pending-resolution state like conflicts with consumer
-  modifications, or are composition errors; and, if they are resolved in
-  place, what the incoming composition and the next reconciliation base are.
-  **OC-47.**
 
-### Pending-resolution details — Provisional (D-18)
+### Pending-resolution details — Approved (D-18)
 
 Decided for the pending-resolution state under AGENTS.md §1.1 (decision log
-D-18) and merged with the pull request that implements it; the owner has not
-approved it explicitly. They decide the presentation and the mechanism of
+D-18), merged with the pull request that implements it, and approved by the
+owner in the [owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799), with the fixes of #72 and #73 (D-28, D-29). They decide the presentation and the mechanism of
 OC-37 and the grammar of OC-7 for `compose`; both entries stay open.
 
 **Commands.** `assemblr compose --continue` and `assemblr compose --abort`,
@@ -839,7 +846,7 @@ Open:
   **OC-37.** The journal and the recovery of an interrupted composition are
   described in [composition details](#composition-details--provisional-d-10-to-d-12),
   [reconciliation details](#reconciliation-details--provisional-d-13-to-d-15), and
-  [pending-resolution details](#pending-resolution-details--provisional-d-18).
+  [pending-resolution details](#pending-resolution-details--approved-d-18).
 - Portability of a lockfile between machines: what happens when the source a
   lock records for a unit differs from the source registered for that identity
   on another machine, and what a lock records for a unit obtained through a
