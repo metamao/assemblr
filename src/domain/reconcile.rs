@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use super::merge::{Combined, Conflict, Plan, Value, combine, derive, plan};
+use super::merge::{Combined, Conflict, Lists, Plan, Value, combine, derive, plan};
 use super::path::RelativePath;
 use super::snapshot::{Snapshot, SnapshotFile};
 
@@ -235,7 +235,9 @@ pub fn merge_values(
         (Contributor::Current, derive(base, current).operations),
         (Contributor::Incoming, derive(base, incoming).operations),
     ]);
-    let combined = combine(&sets)?;
+    // Lists stay whole: a joined list would hold the project's items as
+    // well as the composition's, and only the composition's are planned.
+    let combined = combine(&sets, Lists::Whole)?;
     let only_incoming: Vec<Combined<Contributor>> = combined
         .into_iter()
         .filter(|entry| entry.amenders() == [Contributor::Incoming])
@@ -490,5 +492,17 @@ mod tests {
             conflicts[0].to_string(),
             "/a: the project changes 1 to 2; the composition changes 1 to 3"
         );
+    }
+
+    #[test]
+    fn appends_to_one_list_on_both_sides_still_conflict() {
+        // Unlike a composition of units, a reconciliation compares lists
+        // whole: joining them would drop the composition's items, since
+        // only its own changes are planned onto the project's value.
+        let list =
+            |items: &[i64]| object(&[("a", Value::Array(items.iter().map(|i| n(*i)).collect()))]);
+        let conflicts = merge_values(&list(&[1]), &list(&[1, 2]), &list(&[1, 3])).unwrap_err();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].path(), ["a"]);
     }
 }

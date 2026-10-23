@@ -39,7 +39,7 @@ pub use manifest::{
     AmendmentDeclaration, Manifest, ManifestError, OptionValue, OptionValues, UnitOptionValues,
 };
 pub use merge::{
-    Combined, Conflict, ConflictKind, Derived, Edit, MergeFormat, Operation, Plan, Value,
+    Combined, Conflict, ConflictKind, Derived, Edit, Lists, MergeFormat, Operation, Plan, Value,
     ValueChange, combine, derive, plan, show_path, write_json_string,
 };
 pub use parameter::{
