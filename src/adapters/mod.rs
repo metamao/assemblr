@@ -29,7 +29,7 @@ pub use build::{
 };
 pub use catalog::{
     CATALOG_INDEX, CATALOG_MANIFEST, CatalogInitFailure, CatalogManifest, CatalogManifestError,
-    RefreshFailure, RefreshProblem, Refreshed, init_catalog, read_catalog_manifest,
+    CatalogProblem, RefreshFailure, RefreshProblem, Refreshed, init_catalog, read_catalog_manifest,
     refresh_catalog,
 };
 pub use git::{
@@ -54,8 +54,8 @@ pub use project::{
     continue_compose, init_project, remove_unit, update_units,
 };
 pub use registry::{
-    Added, Found, Indexed, InfoFailure, Problem, ReferenceError, Registry, RegistryFailure, Search,
-    StorageError, Synced, TagProblem, UnitInfo, local_reference, source_reference,
+    Added, Found, Indexed, InfoFailure, Problem, ReferenceError, Registry, RegistryFailure,
+    Removed, Search, StorageError, Synced, TagProblem, UnitInfo, local_reference, source_reference,
 };
 pub use render::{
     Context as RenderContext, RenderError, RenderErrorKind, parameters_referenced, render,

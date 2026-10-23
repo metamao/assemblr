@@ -18,7 +18,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use super::{Provenance, UnitIdentity, Version};
+use super::{CatalogIdentity, ObjectId, Provenance, UnitIdentity, Version};
 
 /// How a registered source is referred to. References are compared exactly,
 /// as stored: two different references never denote the same source, even
@@ -46,16 +46,41 @@ impl fmt::Display for SourceReference {
 
 /// A registered unit repository and the published versions indexed from it,
 /// each with the provenance first recorded for it.
+///
+/// A unit is registered directly, by `registry add`, or managed by the
+/// catalogs that declare it, or both. A unit only catalogs manage is indexed
+/// with the versions their indexes list, and leaves the registry when no
+/// registered catalog declares it any more.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredUnit {
     source: SourceReference,
     versions: BTreeMap<Version, Provenance>,
+    direct: bool,
 }
 
 impl RegisteredUnit {
-    /// A unit registered from `source`, with its indexed versions.
+    /// A unit registered directly from `source`, with its indexed versions.
     pub fn new(source: SourceReference, versions: BTreeMap<Version, Provenance>) -> Self {
-        Self { source, versions }
+        Self {
+            source,
+            versions,
+            direct: true,
+        }
+    }
+
+    /// A unit from `source` that only catalogs manage.
+    pub fn managed(source: SourceReference, versions: BTreeMap<Version, Provenance>) -> Self {
+        Self {
+            source,
+            versions,
+            direct: false,
+        }
+    }
+
+    /// Whether the unit was registered directly, rather than only through
+    /// catalogs.
+    pub fn is_direct(&self) -> bool {
+        self.direct
     }
 
     /// Where the unit is registered from.
@@ -69,13 +94,56 @@ impl RegisteredUnit {
     }
 }
 
-/// The validated index of registered units.
+/// A registered catalog: where it is registered from, the catalog commit its
+/// inventory was read at, and the repository of each unit it declares, with
+/// relative references already resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredCatalog {
+    source: SourceReference,
+    commit: ObjectId,
+    units: BTreeMap<UnitIdentity, SourceReference>,
+}
+
+impl RegisteredCatalog {
+    /// A catalog from `source`, read at `commit`, declaring `units`.
+    pub fn new(
+        source: SourceReference,
+        commit: ObjectId,
+        units: BTreeMap<UnitIdentity, SourceReference>,
+    ) -> Self {
+        Self {
+            source,
+            commit,
+            units,
+        }
+    }
+
+    /// Where the catalog is registered from.
+    pub fn source(&self) -> &SourceReference {
+        &self.source
+    }
+
+    /// The catalog commit the index was built from.
+    pub fn commit(&self) -> &ObjectId {
+        &self.commit
+    }
+
+    /// Each declared unit and its repository, ordered by identity.
+    pub fn units(&self) -> &BTreeMap<UnitIdentity, SourceReference> {
+        &self.units
+    }
+}
+
+/// The validated index of registered units and catalogs.
 ///
-/// Every source is registered for one identity only, and no unit has two
-/// versions of equal SemVer precedence.
+/// Every source is registered for one identity only, no unit has two
+/// versions of equal SemVer precedence, every unit a catalog declares is
+/// registered from the repository the catalog gives, and every unit that is
+/// not registered directly is declared by a catalog.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegistryIndex {
     units: BTreeMap<UnitIdentity, RegisteredUnit>,
+    catalogs: BTreeMap<CatalogIdentity, RegisteredCatalog>,
 }
 
 impl RegistryIndex {
@@ -84,14 +152,33 @@ impl RegistryIndex {
         Self::default()
     }
 
-    /// An index of `units`, checked against the index's invariants. Every
-    /// broken invariant is reported.
+    /// An index of `units` and no catalogs, checked as
+    /// [`from_parts`](Self::from_parts) does.
     pub fn from_units(
         units: BTreeMap<UnitIdentity, RegisteredUnit>,
     ) -> Result<Self, Vec<InvalidIndex>> {
+        Self::from_parts(units, BTreeMap::new())
+    }
+
+    /// An index of `units` and `catalogs`, checked against the index's
+    /// invariants. Every broken invariant is reported.
+    pub fn from_parts(
+        units: BTreeMap<UnitIdentity, RegisteredUnit>,
+        catalogs: BTreeMap<CatalogIdentity, RegisteredCatalog>,
+    ) -> Result<Self, Vec<InvalidIndex>> {
+        let index = Self { units, catalogs };
+        let errors = index.broken_invariants();
+        if errors.is_empty() {
+            Ok(index)
+        } else {
+            Err(errors)
+        }
+    }
+
+    fn broken_invariants(&self) -> Vec<InvalidIndex> {
         let mut errors = Vec::new();
         let mut identities: BTreeMap<&SourceReference, Vec<UnitIdentity>> = BTreeMap::new();
-        for (identity, unit) in &units {
+        for (identity, unit) in &self.units {
             identities
                 .entry(&unit.source)
                 .or_default()
@@ -103,6 +190,11 @@ impl RegistryIndex {
                     versions: ambiguous,
                 });
             }
+            if !unit.direct && self.listing(identity).is_empty() {
+                errors.push(InvalidIndex::Unmanaged {
+                    identity: identity.clone(),
+                });
+            }
         }
         for (source, identities) in identities {
             if identities.len() > 1 {
@@ -112,16 +204,59 @@ impl RegistryIndex {
                 });
             }
         }
-        if errors.is_empty() {
-            Ok(Self { units })
-        } else {
-            Err(errors)
+        let mut catalog_sources: BTreeMap<&SourceReference, Vec<CatalogIdentity>> = BTreeMap::new();
+        for (catalog, registered) in &self.catalogs {
+            catalog_sources
+                .entry(&registered.source)
+                .or_default()
+                .push(catalog.clone());
+            for (identity, source) in &registered.units {
+                if self.units.get(identity).map(RegisteredUnit::source) != Some(source) {
+                    errors.push(InvalidIndex::Undeclared {
+                        catalog: catalog.clone(),
+                        identity: identity.clone(),
+                        source: source.clone(),
+                    });
+                }
+            }
         }
+        for (source, catalogs) in catalog_sources {
+            if catalogs.len() > 1 {
+                errors.push(InvalidIndex::SharedCatalogSource {
+                    source: source.clone(),
+                    catalogs,
+                });
+            }
+        }
+        errors
     }
 
     /// The registered units, ordered by identity.
     pub fn units(&self) -> &BTreeMap<UnitIdentity, RegisteredUnit> {
         &self.units
+    }
+
+    /// The registered catalogs, ordered by identity.
+    pub fn catalogs(&self) -> &BTreeMap<CatalogIdentity, RegisteredCatalog> {
+        &self.catalogs
+    }
+
+    /// The identity the catalog `source` is registered for, if it is
+    /// registered.
+    pub fn catalog_of(&self, source: &SourceReference) -> Option<&CatalogIdentity> {
+        self.catalogs
+            .iter()
+            .find(|(_, catalog)| &catalog.source == source)
+            .map(|(identity, _)| identity)
+    }
+
+    /// The registered catalogs that declare `identity`, in order.
+    pub fn listing(&self, identity: &UnitIdentity) -> Vec<CatalogIdentity> {
+        self.catalogs
+            .iter()
+            .filter(|(_, catalog)| catalog.units.contains_key(identity))
+            .map(|(catalog, _)| catalog.clone())
+            .collect()
     }
 
     /// The identity `source` is registered for, if it is registered.
@@ -145,8 +280,18 @@ impl RegistryIndex {
         identity: UnitIdentity,
         tags: Vec<ObservedTag<R>>,
     ) -> Result<Change<R>, Vec<RegistryError<R>>> {
-        if self.identity_of(&source).is_some() {
-            return Ok(Change::unchanged(self));
+        if let Some(registered) = self.identity_of(&source) {
+            if self.units[registered].direct {
+                return Ok(Change::unchanged(self));
+            }
+            // A unit catalogs manage, now registered directly as well: every
+            // version it publishes is indexed from now on.
+            let registered = registered.clone();
+            let mut index = self.clone();
+            if let Some(unit) = index.units.get_mut(&registered) {
+                unit.direct = true;
+            }
+            return index.sync(BTreeMap::from([(registered, tags)]));
         }
         let mut errors = Vec::new();
         if let Some(registered) = self.units.get(&identity) {
@@ -193,11 +338,12 @@ impl RegistryIndex {
         let added = versions.keys().cloned().collect();
         index
             .units
-            .insert(identity.clone(), RegisteredUnit { source, versions });
+            .insert(identity.clone(), RegisteredUnit::new(source, versions));
         Ok(Change {
             index,
             added: BTreeMap::from([(identity, added)]),
             excluded,
+            removed: Vec::new(),
         })
     }
 
@@ -284,15 +430,357 @@ impl RegistryIndex {
             index,
             added,
             excluded,
+            removed: Vec::new(),
         })
     }
 
-    /// Removes the registration of `identity`, and returns the index without
-    /// it and the registration removed, or `None` if it is not registered.
-    pub fn remove(&self, identity: &UnitIdentity) -> Option<(Self, RegisteredUnit)> {
+    /// Registers the catalog `identity`, or synchronizes it if it is
+    /// registered, as `catalog` declares it now, with the version tags read
+    /// from each unit it declares.
+    ///
+    /// A declared unit that is not registered yet is registered as managed
+    /// by the catalog. One that is registered from the same repository is
+    /// synchronized with its tags. One registered from another repository
+    /// is a source conflict. A unit the catalog no longer declares leaves
+    /// the registry unless it is registered directly or another catalog
+    /// declares it. The catalog's source cannot change identity, and the
+    /// identity cannot change source. Every conflict is reported, and any
+    /// one rejects the whole change.
+    pub fn apply_catalog<R>(
+        &self,
+        identity: CatalogIdentity,
+        catalog: RegisteredCatalog,
+        mut observed: BTreeMap<UnitIdentity, Vec<ObservedTag<R>>>,
+    ) -> Result<Change<R>, Vec<RegistryError<R>>> {
+        let mut errors = Vec::new();
+        if let Some(registered) = self.catalogs.get(&identity) {
+            if registered.source != catalog.source {
+                errors.push(RegistryError::CatalogConflict {
+                    catalog: identity.clone(),
+                    registered: registered.source.clone(),
+                    given: catalog.source.clone(),
+                });
+            }
+        }
+        if let Some(registered) = self.catalog_of(&catalog.source) {
+            if *registered != identity {
+                errors.push(RegistryError::CatalogRenamed {
+                    source: catalog.source.clone(),
+                    registered: registered.clone(),
+                    declared: identity.clone(),
+                });
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
         let mut index = self.clone();
-        let removed = index.units.remove(identity)?;
-        Some((index, removed))
+        let previous = index.catalogs.insert(identity.clone(), catalog.clone());
+        let mut added = BTreeMap::new();
+        let mut excluded = Vec::new();
+        for (unit, source) in &catalog.units {
+            let tags = observed.remove(unit).unwrap_or_default();
+            let change = match index.units.get(unit) {
+                Some(registered) if registered.source != *source => {
+                    errors.push(RegistryError::SourceConflict {
+                        identity: unit.clone(),
+                        registered: registered.source.clone(),
+                        given: source.clone(),
+                    });
+                    continue;
+                }
+                Some(_) => index.sync(BTreeMap::from([(unit.clone(), tags)])),
+                // The repository is registered as another unit.
+                None if index.identity_of(source).is_some() => {
+                    errors.push(RegistryError::Inconsistent(InvalidIndex::Undeclared {
+                        catalog: identity.clone(),
+                        identity: unit.clone(),
+                        source: source.clone(),
+                    }));
+                    continue;
+                }
+                None => index
+                    .add(source.clone(), unit.clone(), tags)
+                    .map(|mut change| {
+                        if let Some(registered) = change.index.units.get_mut(unit) {
+                            registered.direct = false;
+                        }
+                        change
+                    }),
+            };
+            match change {
+                Ok(change) => {
+                    index = change.index;
+                    added.extend(change.added);
+                    excluded.extend(change.excluded);
+                }
+                Err(mut found) => errors.append(&mut found),
+            }
+        }
+        let mut removed = Vec::new();
+        if let Some(previous) = previous {
+            for unit in previous.units.keys() {
+                if !catalog.units.contains_key(unit) && index.prune(unit) {
+                    removed.push(unit.clone());
+                }
+            }
+        }
+        if errors.is_empty() {
+            errors.extend(
+                index
+                    .broken_invariants()
+                    .into_iter()
+                    .map(RegistryError::Inconsistent),
+            );
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        excluded.sort_by(Excluded::order);
+        Ok(Change {
+            index,
+            added,
+            excluded,
+            removed,
+        })
+    }
+
+    /// Removes `unit` if it is not registered directly and no catalog
+    /// declares it. Whether it was removed.
+    fn prune(&mut self, unit: &UnitIdentity) -> bool {
+        let unmanaged = self
+            .units
+            .get(unit)
+            .is_some_and(|registered| !registered.direct)
+            && self.listing(unit).is_empty();
+        if unmanaged {
+            self.units.remove(unit);
+        }
+        unmanaged
+    }
+
+    /// Removes the direct registration of `identity`.
+    ///
+    /// A unit no catalog declares leaves the index. One that catalogs
+    /// declare stays, managed by them, and they are returned. A unit only
+    /// catalogs manage cannot be removed by itself: it leaves with its
+    /// catalogs, or when they no longer declare it.
+    pub fn remove(&self, identity: &UnitIdentity) -> Result<Removed, Unremovable> {
+        let unit = self.units.get(identity).ok_or(Unremovable::NotRegistered)?;
+        let catalogs = self.listing(identity);
+        if !unit.direct {
+            return Err(Unremovable::Managed(catalogs));
+        }
+        let mut index = self.clone();
+        if catalogs.is_empty() {
+            index.units.remove(identity);
+        } else if let Some(unit) = index.units.get_mut(identity) {
+            unit.direct = false;
+        }
+        Ok(Removed {
+            index,
+            unit: unit.clone(),
+            kept_by: catalogs,
+        })
+    }
+
+    /// Removes the catalog `identity`, and with it every unit only it
+    /// manages. `None` if it is not registered.
+    pub fn remove_catalog(&self, identity: &CatalogIdentity) -> Option<RemovedCatalog> {
+        let mut index = self.clone();
+        let catalog = index.catalogs.remove(identity)?;
+        let removed = catalog
+            .units
+            .keys()
+            .filter(|unit| index.prune(unit))
+            .cloned()
+            .collect();
+        Some(RemovedCatalog {
+            index,
+            catalog,
+            removed,
+        })
+    }
+}
+
+/// The tags of the catalog-managed unit `identity` that its registration
+/// reads, from all of `tags`: the versions the catalog's index lists, and
+/// those already indexed, so that an indexed version stays checked. A unit
+/// registered directly reads every tag, and `filter` is false for it.
+///
+/// Every listed version must be a valid tag of the unit with the provenance
+/// listed; otherwise the catalog's index does not describe the unit's
+/// repository, and every such version is reported.
+pub fn listed_tags<R>(
+    identity: &UnitIdentity,
+    listed: &BTreeMap<Version, Provenance>,
+    indexed: Option<&RegisteredUnit>,
+    filter: bool,
+    tags: Vec<ObservedTag<R>>,
+) -> Result<Vec<ObservedTag<R>>, Vec<StaleListing>> {
+    let mut stale = Vec::new();
+    for (version, provenance) in listed {
+        let problem = match tags.iter().find(|tag| &tag.version == version) {
+            None => ListingProblem::NoTag,
+            Some(tag) => match &tag.outcome {
+                Err(_) => ListingProblem::Invalid,
+                Ok(found) if &found.identity != identity => {
+                    ListingProblem::OtherIdentity(found.identity.clone())
+                }
+                Ok(found) if &found.provenance != provenance => ListingProblem::Moved {
+                    listed: provenance.clone(),
+                    found: found.provenance.clone(),
+                },
+                Ok(_) => continue,
+            },
+        };
+        stale.push(StaleListing {
+            identity: identity.clone(),
+            version: version.clone(),
+            problem,
+        });
+    }
+    if !stale.is_empty() {
+        return Err(stale);
+    }
+    if !filter {
+        return Ok(tags);
+    }
+    Ok(tags
+        .into_iter()
+        .filter(|tag| {
+            listed.contains_key(&tag.version)
+                || indexed.is_some_and(|unit| unit.versions.contains_key(&tag.version))
+        })
+        .collect())
+}
+
+/// A version a catalog's index lists that the unit's repository does not
+/// publish as listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleListing {
+    identity: UnitIdentity,
+    version: Version,
+    problem: ListingProblem,
+}
+
+impl StaleListing {
+    /// The unit.
+    pub fn identity(&self) -> &UnitIdentity {
+        &self.identity
+    }
+
+    /// The listed version.
+    pub fn version(&self) -> &Version {
+        &self.version
+    }
+
+    /// How the repository differs.
+    pub fn problem(&self) -> &ListingProblem {
+        &self.problem
+    }
+}
+
+impl fmt::Display for StaleListing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            identity,
+            version,
+            problem,
+        } = self;
+        write!(f, "the catalog's index lists {identity} {version}, but ")?;
+        match problem {
+            ListingProblem::NoTag => write!(f, "its repository has no tag v{version}"),
+            ListingProblem::Invalid => write!(f, "its tag v{version} is not a valid version"),
+            ListingProblem::OtherIdentity(found) => {
+                write!(f, "its tag v{version} declares {found}")
+            }
+            ListingProblem::Moved { listed, found } => write!(
+                f,
+                "its tag v{version} is commit {} (tree {}), not commit {} (tree {})",
+                found.commit(),
+                found.tree(),
+                listed.commit(),
+                listed.tree()
+            ),
+        }
+    }
+}
+
+/// How a unit's repository differs from a version its catalog lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListingProblem {
+    /// No tag publishes the version.
+    NoTag,
+    /// The tag is not a valid version.
+    Invalid,
+    /// The tag's manifest declares another identity.
+    OtherIdentity(UnitIdentity),
+    /// The tag is another commit or tree than the one listed.
+    Moved {
+        /// What the catalog lists.
+        listed: Provenance,
+        /// What the tag is.
+        found: Provenance,
+    },
+}
+
+/// A removed direct registration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Removed {
+    index: RegistryIndex,
+    unit: RegisteredUnit,
+    kept_by: Vec<CatalogIdentity>,
+}
+
+impl Removed {
+    /// The index without the registration.
+    pub fn index(&self) -> &RegistryIndex {
+        &self.index
+    }
+
+    /// The registration as it was.
+    pub fn unit(&self) -> &RegisteredUnit {
+        &self.unit
+    }
+
+    /// The catalogs that still declare the unit, which keep it registered.
+    pub fn kept_by(&self) -> &[CatalogIdentity] {
+        &self.kept_by
+    }
+}
+
+/// Why a unit's registration cannot be removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unremovable {
+    /// The unit is not registered.
+    NotRegistered,
+    /// Only these catalogs manage the unit.
+    Managed(Vec<CatalogIdentity>),
+}
+
+/// A removed catalog.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemovedCatalog {
+    index: RegistryIndex,
+    catalog: RegisteredCatalog,
+    removed: Vec<UnitIdentity>,
+}
+
+impl RemovedCatalog {
+    /// The index without the catalog.
+    pub fn index(&self) -> &RegistryIndex {
+        &self.index
+    }
+
+    /// The catalog as it was registered.
+    pub fn catalog(&self) -> &RegisteredCatalog {
+        &self.catalog
+    }
+
+    /// The units that left the registry with it, in order.
+    pub fn removed(&self) -> &[UnitIdentity] {
+        &self.removed
     }
 }
 
@@ -408,14 +896,21 @@ pub struct Change<R> {
     index: RegistryIndex,
     added: BTreeMap<UnitIdentity, Vec<Version>>,
     excluded: Vec<Excluded<R>>,
+    removed: Vec<UnitIdentity>,
 }
 
 impl<R> Change<R> {
+    /// No change to `index`.
+    pub fn unchanged_from(index: &RegistryIndex) -> Self {
+        Self::unchanged(index)
+    }
+
     fn unchanged(index: &RegistryIndex) -> Self {
         Self {
             index: index.clone(),
             added: BTreeMap::new(),
             excluded: Vec::new(),
+            removed: Vec::new(),
         }
     }
 
@@ -434,6 +929,12 @@ impl<R> Change<R> {
     /// and tag.
     pub fn excluded(&self) -> &[Excluded<R>] {
         &self.excluded
+    }
+
+    /// The units a catalog no longer declares that left the registry, in
+    /// order.
+    pub fn removed(&self) -> &[UnitIdentity] {
+        &self.removed
     }
 
     /// The index after the change, and the excluded tags.
@@ -523,6 +1024,26 @@ pub enum RegistryError<R> {
         /// What changed.
         change: IntegrityChange<R>,
     },
+    /// A different source is already registered for the catalog identity.
+    CatalogConflict {
+        /// The catalog identity.
+        catalog: CatalogIdentity,
+        /// The source registered for it.
+        registered: SourceReference,
+        /// The source being registered.
+        given: SourceReference,
+    },
+    /// A registered catalog now declares another identity.
+    CatalogRenamed {
+        /// The catalog's source.
+        source: SourceReference,
+        /// The identity it is registered for.
+        registered: CatalogIdentity,
+        /// The identity it declares now.
+        declared: CatalogIdentity,
+    },
+    /// The change would break an invariant of the index.
+    Inconsistent(InvalidIndex),
 }
 
 /// How an indexed version's tag changed.
@@ -609,6 +1130,25 @@ impl<R: fmt::Display> fmt::Display for RegistryError<R> {
                     }
                 }
             }
+            Self::CatalogConflict {
+                catalog,
+                registered,
+                given,
+            } => write!(
+                f,
+                "source conflict: {given} declares the catalog {catalog}, \
+                 which is already registered from {registered}"
+            ),
+            Self::CatalogRenamed {
+                source,
+                registered,
+                declared,
+            } => write!(
+                f,
+                "the catalog {source} is registered as {registered}, but it now declares \
+                 {declared}; a registered catalog keeps its identity"
+            ),
+            Self::Inconsistent(invalid) => invalid.fmt(f),
         }
     }
 }
@@ -632,6 +1172,28 @@ pub enum InvalidIndex {
         /// The versions of equal precedence.
         versions: Vec<Version>,
     },
+    /// A unit is neither registered directly nor declared by a catalog.
+    Unmanaged {
+        /// The unit.
+        identity: UnitIdentity,
+    },
+    /// A catalog declares a unit that is not registered from the repository
+    /// it gives.
+    Undeclared {
+        /// The catalog.
+        catalog: CatalogIdentity,
+        /// The unit.
+        identity: UnitIdentity,
+        /// The repository the catalog gives.
+        source: SourceReference,
+    },
+    /// One source is registered for several catalogs.
+    SharedCatalogSource {
+        /// The source.
+        source: SourceReference,
+        /// The catalogs.
+        catalogs: Vec<CatalogIdentity>,
+    },
 }
 
 impl fmt::Display for InvalidIndex {
@@ -649,6 +1211,26 @@ impl fmt::Display for InvalidIndex {
                 "{identity} has versions of equal precedence: {}",
                 list(versions)
             ),
+            Self::Unmanaged { identity } => write!(
+                f,
+                "{identity} is neither registered directly nor declared by a registered catalog"
+            ),
+            Self::Undeclared {
+                catalog,
+                identity,
+                source,
+            } => write!(
+                f,
+                "the catalog {catalog} declares {identity} from {source}, \
+                 but it is not registered from there"
+            ),
+            Self::SharedCatalogSource { source, catalogs } => {
+                write!(f, "{source} is registered for several catalogs:")?;
+                for catalog in catalogs {
+                    write!(f, " {catalog}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -668,10 +1250,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        Change, IntegrityChange, ObservedTag, ObservedVersion, RegisteredUnit, RegistryError,
-        RegistryIndex, SourceReference, declared_identity,
+        Change, IntegrityChange, ListingProblem, ObservedTag, ObservedVersion, RegisteredCatalog,
+        RegisteredUnit, RegistryError, RegistryIndex, SourceReference, Unremovable,
+        declared_identity, listed_tags,
     };
-    use crate::domain::{ObjectId, Provenance, UnitIdentity, Version};
+    use crate::domain::{CatalogIdentity, ObjectId, Provenance, UnitIdentity, Version};
 
     fn id(text: &str) -> UnitIdentity {
         UnitIdentity::parse(text).unwrap()
@@ -1068,11 +1651,190 @@ mod tests {
             ("@acme/web", "/units/web", &[]),
         ]);
 
-        let (after, removed) = before.remove(&id("@acme/node")).unwrap();
+        let removed = before.remove(&id("@acme/node")).unwrap();
 
-        assert_eq!(removed.source(), &source("/units/node"));
-        assert_eq!(after, index(&[("@acme/web", "/units/web", &[])]));
-        assert_eq!(before.remove(&id("@acme/missing")), None);
+        assert_eq!(removed.unit().source(), &source("/units/node"));
+        assert!(removed.kept_by().is_empty());
+        assert_eq!(removed.index(), &index(&[("@acme/web", "/units/web", &[])]));
+        assert_eq!(
+            before.remove(&id("@acme/missing")),
+            Err(Unremovable::NotRegistered)
+        );
+    }
+
+    fn none() -> Vec<ObservedTag<&'static str>> {
+        Vec::new()
+    }
+
+    fn catalog(seed: char, units: &[(&str, &str)]) -> RegisteredCatalog {
+        RegisteredCatalog::new(
+            source("https://example.com/catalog.git"),
+            ObjectId::parse(&seed.to_string().repeat(40)).unwrap(),
+            units
+                .iter()
+                .map(|(identity, reference)| (id(identity), source(reference)))
+                .collect(),
+        )
+    }
+
+    fn web() -> CatalogIdentity {
+        CatalogIdentity::parse("@acme/web").unwrap()
+    }
+
+    #[test]
+    fn a_catalog_registers_the_units_it_declares_as_managed() {
+        let change = RegistryIndex::new()
+            .apply_catalog(
+                web(),
+                catalog(
+                    'c',
+                    &[("@acme/node", "/units/node"), ("@acme/api", "/units/api")],
+                ),
+                BTreeMap::from([
+                    (id("@acme/node"), vec![valid("@acme/node", "1.0.0", 'a')]),
+                    (id("@acme/api"), none()),
+                ]),
+            )
+            .unwrap();
+
+        let index = change.index();
+        assert_eq!(index.catalogs().len(), 1);
+        let node = &index.units()[&id("@acme/node")];
+        assert!(!node.is_direct());
+        assert_eq!(node.versions().len(), 1);
+        assert_eq!(index.listing(&id("@acme/api")), vec![web()]);
+        assert_eq!(change.added()[&id("@acme/api")], Vec::<Version>::new());
+        // A managed unit cannot be removed by itself.
+        assert_eq!(
+            index.remove(&id("@acme/node")),
+            Err(Unremovable::Managed(vec![web()]))
+        );
+    }
+
+    #[test]
+    fn a_unit_the_catalog_drops_leaves_unless_registered_directly() {
+        let start = index(&[("@acme/api", "/units/api", &[])]);
+        let first = start
+            .apply_catalog(
+                web(),
+                catalog(
+                    'c',
+                    &[("@acme/node", "/units/node"), ("@acme/api", "/units/api")],
+                ),
+                BTreeMap::from([(id("@acme/node"), none()), (id("@acme/api"), none())]),
+            )
+            .unwrap();
+        assert!(first.index().units()[&id("@acme/api")].is_direct());
+
+        let second = first
+            .index()
+            .apply_catalog(
+                web(),
+                catalog('d', &[]),
+                BTreeMap::from([(id("@acme/x"), none())]),
+            )
+            .unwrap();
+
+        assert_eq!(second.removed(), &[id("@acme/node")]);
+        assert_eq!(second.index().units().len(), 1);
+        assert!(second.index().units().contains_key(&id("@acme/api")));
+        // Removing the catalog removes what only it manages.
+        let removed = first.index().remove_catalog(&web()).unwrap();
+        assert_eq!(removed.removed(), &[id("@acme/node")]);
+        // Removing the direct registration of a declared unit keeps it.
+        let kept = first.index().remove(&id("@acme/api")).unwrap();
+        assert_eq!(kept.kept_by(), &[web()]);
+        assert!(!kept.index().units()[&id("@acme/api")].is_direct());
+    }
+
+    #[test]
+    fn a_catalog_conflicts_with_another_source_for_a_unit_or_itself() {
+        let start = index(&[("@acme/node", "/units/node", &[])]);
+        let errors = start
+            .apply_catalog(
+                web(),
+                catalog('c', &[("@acme/node", "/elsewhere/node")]),
+                BTreeMap::from([(id("@acme/node"), none())]),
+            )
+            .unwrap_err();
+        assert_eq!(
+            errors,
+            vec![RegistryError::SourceConflict {
+                identity: id("@acme/node"),
+                registered: source("/units/node"),
+                given: source("/elsewhere/node"),
+            }]
+        );
+
+        let registered = RegistryIndex::new()
+            .apply_catalog(
+                web(),
+                catalog('c', &[]),
+                BTreeMap::from([(id("@acme/x"), none())]),
+            )
+            .unwrap();
+        let mut moved = catalog('c', &[]);
+        moved = RegisteredCatalog::new(
+            source("/elsewhere/catalog"),
+            moved.commit().clone(),
+            BTreeMap::new(),
+        );
+        let errors = registered
+            .index()
+            .apply_catalog(web(), moved, BTreeMap::<_, Vec<ObservedTag<&str>>>::new())
+            .unwrap_err();
+        assert!(matches!(errors[0], RegistryError::CatalogConflict { .. }));
+        let renamed = registered
+            .index()
+            .apply_catalog(
+                CatalogIdentity::parse("@acme/other").unwrap(),
+                catalog('c', &[]),
+                BTreeMap::<_, Vec<ObservedTag<&str>>>::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(renamed[0], RegistryError::CatalogRenamed { .. }));
+    }
+
+    #[test]
+    fn listed_tags_keep_listed_and_indexed_versions_and_check_the_listing() {
+        let node = id("@acme/node");
+        let tags = || {
+            vec![
+                valid("@acme/node", "1.0.0", 'a'),
+                valid("@acme/node", "1.1.0", 'b'),
+                valid("@acme/node", "2.0.0", 'c'),
+            ]
+        };
+        let listed = BTreeMap::from([(version("1.1.0"), provenance('b'))]);
+        let indexed = RegisteredUnit::managed(
+            source("/units/node"),
+            BTreeMap::from([(version("1.0.0"), provenance('a'))]),
+        );
+
+        let kept = listed_tags(&node, &listed, Some(&indexed), true, tags()).unwrap();
+        let versions: Vec<_> = kept.iter().map(|tag| tag.version().to_string()).collect();
+        assert_eq!(versions, ["1.0.0", "1.1.0"]);
+        // A unit registered directly keeps every tag.
+        assert_eq!(
+            listed_tags(&node, &listed, None, false, tags())
+                .unwrap()
+                .len(),
+            3
+        );
+
+        let moved = BTreeMap::from([
+            (version("1.1.0"), provenance('f')),
+            (version("3.0.0"), provenance('d')),
+        ]);
+        let stale = listed_tags(&node, &moved, None, true, tags()).unwrap_err();
+        assert_eq!(stale.len(), 2);
+        assert!(matches!(stale[0].problem(), ListingProblem::Moved { .. }));
+        assert_eq!(stale[1].problem(), &ListingProblem::NoTag);
+        assert!(
+            stale[1].to_string().contains("no tag v3.0.0"),
+            "{}",
+            stale[1]
+        );
     }
 
     #[test]
