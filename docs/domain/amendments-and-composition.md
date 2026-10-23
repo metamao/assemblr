@@ -162,8 +162,10 @@ Open:
 - Behavior when a base's historical Git objects are unavailable. **OC-9.**
 
 A conflict between units' contributions in a consumer composition is a
-composition error, not a pending-resolution state (**OC-47**, resolved; see
-[composition details](consumer-projects.md#composition-details--provisional-d-10-to-d-12)).
+composition error, not a pending-resolution state (**OC-47**), except a
+conflict between sibling amendments, which the owner reopened on #101: it is
+left in the project for the consumer to resolve, **Provisional (D-44)** (see
+[pending-resolution details](consumer-projects.md#pending-resolution-details--approved-d-18-sibling-conflicts-provisional-d-44)).
 
 ## Template contexts — Approved
 
@@ -459,9 +461,12 @@ composition below it takes the file's place with its rendered copy, whatever
 the format, and no change is derived. A conflict between siblings is marked
 in the composition, and resolved by a unit above both that replaces the
 marker; a marker no amender above resolves is a conflict of the composition
-as a whole. In a **consumer composition** it is a composition error that
-names the file, the siblings, and each contested value or line, and changes
-nothing (until #101). In a **unit's build**, a marked file the unit does not
+as a whole. In a **consumer composition** the marked file is the
+composition's contribution, the project enters the pending-resolution state
+with it, and the report names the file, the siblings, and each contested
+value or line (**Provisional (D-44)**; see [pending-resolution
+details](consumer-projects.md#pending-resolution-details--approved-d-18-sibling-conflicts-provisional-d-44)).
+In a **unit's build**, a marked file the unit does not
 amend yet puts the build in the **pending state** (see
 [authoring-workflow.md](authoring-workflow.md#build-details--approved)): the
 unit gets the marked copy as its own amendment and resolves it. The other
@@ -500,9 +505,11 @@ until each amender had published again:
   incompatible release.
 - **Compatible and colliding.** Changes the engines can apply without a
   collision (different values, different lines, identical changes) compose.
-  A collision, in a value or in lines of text, is a composition error naming
-  the amender, the file, and the place, with no precedence and no overwrite.
-  The project or unit is left unchanged.
+  A collision, in a value or in lines of text, has no precedence and no
+  overwrite: between siblings it is marked in the file for the unit above or
+  the consumer to resolve (layered model, below); any other is a composition
+  error naming the amender, the file, and the place, and the project or unit
+  is left unchanged.
 - **Layered model.** Each amender's contribution is derived against its own
   base: the provider's file as the units below the amender compose it, at
   the amender's locked versions. Siblings stay independent: applying one

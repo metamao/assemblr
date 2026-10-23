@@ -35,7 +35,7 @@ pub use pending::{Continued, abort_compose, continue_compose};
 pub use store::StoreError;
 use store::{Journal, JournalEntry, Pending, STATE_DIR, Store, write_new};
 
-use super::build::{BuildProblem, render_files, resolve_graph};
+use super::build::{BuildProblem, UnresolvedFile, render_files, resolve_graph};
 use super::git::MANIFEST_LIMIT;
 use super::lockfile::{self, LOCKFILE, Lockfile, LockfileError, serialize_lockfile};
 use super::manifest::{ReadManifestError, read_project};
@@ -562,17 +562,21 @@ fn compose_with(
             .into_iter()
             .map(|problem| ComposeProblem::Build(Box::new(problem))),
     );
-    // A conflict between sibling amenders that no unit above both resolves
-    // is a composition error in a consumer project (OC-47).
-    if let Some(rendered) = &rendered {
-        problems.extend(rendered.unresolved.iter().cloned().map(|unresolved| {
-            ComposeProblem::Build(Box::new(BuildProblem::Unresolved(unresolved)))
-        }));
-    }
     let Some(rendered) = rendered.filter(|_| problems.is_empty()) else {
         return Err(rejected_all(problems));
     };
-    let files: BTreeMap<RelativePath, UnitFile> = rendered.files.into_iter().collect();
+    let mut files: BTreeMap<RelativePath, UnitFile> = rendered.files.into_iter().collect();
+    // A conflict between sibling amenders that no unit above both resolves
+    // is the consumer's to resolve (owner decision on #101): the file, each
+    // conflict between markers, is the composition's, so the markers reach
+    // the project like any incoming change and the composition waits.
+    let unit_conflicts: Vec<UnresolvedFile> = rendered.unresolved;
+    for unresolved in &unit_conflicts {
+        files.insert(
+            unresolved.delivered.clone(),
+            UnitFile::new(unresolved.bytes.clone(), unresolved.executable),
+        );
+    }
     // What the merge reports about a file, its author's to act on, is told
     // to the consumer when this composition writes the file; the others
     // are kept for `--verbose`, with the amendments applied across
@@ -634,6 +638,7 @@ fn compose_with(
                 first: false,
                 declaration: planned_declaration.map(|planned| planned.change),
                 pending: BTreeSet::new(),
+                unit_conflicts: Vec::new(),
             });
         }
     }
@@ -772,6 +777,23 @@ fn compose_with(
     if !conflicts.is_empty() {
         problems.push(ComposeProblem::Conflicts(conflicts));
     }
+    // A file the units leave marked waits for the consumer as long as the
+    // project holds the markers: when this composition writes them, and
+    // when the project holds them already, as a clone of a waiting project
+    // does, where the reconciliation has nothing to write.
+    for unresolved in &unit_conflicts {
+        let path = &unresolved.delivered;
+        let written = matches!(
+            changes.get(path),
+            Some(Change::Create(_) | Change::Modify { .. })
+        );
+        let held = current
+            .get(path)
+            .is_some_and(|held| super::layered::has_markers(&held.bytes));
+        if written || held {
+            marked.insert(path.clone());
+        }
+    }
 
     // Nothing of a created file may exist yet.
     let (existing, mut directories) = (existing_paths(root, created.iter()), Vec::new());
@@ -887,6 +909,11 @@ fn compose_with(
     directories.dedup();
 
     // Writing (see `apply`).
+    let declaration_used = planned_declaration
+        .as_ref()
+        .map(|planned| planned.text.as_str())
+        .or(declaration_text.as_deref())
+        .unwrap_or_default();
     let application = Application {
         files: &files,
         changes: &changes,
@@ -895,6 +922,7 @@ fn compose_with(
         lock_bytes: &lock_bytes,
         directories: &directories,
         marked: &marked,
+        declaration_used: BlobId::of(declaration_used.as_bytes()),
         declaration: planned_declaration
             .as_ref()
             .filter(|_| declaration_changes)
@@ -921,11 +949,13 @@ fn compose_with(
         ));
     }
     drop(guard);
-    let paths = changes
+    let mut paths: BTreeMap<RelativePath, FileChange> = changes
         .iter()
         .map(|(path, change)| {
             let change = match change {
-                Change::Modify { .. } if marked.contains(path) => FileChange::Conflicted,
+                Change::Create(_) | Change::Modify { .. } if marked.contains(path) => {
+                    FileChange::Conflicted
+                }
                 Change::Create(_) => FileChange::Created,
                 Change::Modify { merged: true, .. } => FileChange::Merged,
                 Change::Modify { .. } => FileChange::Modified,
@@ -934,6 +964,9 @@ fn compose_with(
             (path.clone(), change)
         })
         .collect();
+    for path in &marked {
+        paths.entry(path.clone()).or_insert(FileChange::Conflicted);
+    }
     let (written, unwritten): (Vec<_>, Vec<_>) = file_notes
         .into_iter()
         .partition(|(path, _)| changes.contains_key(path));
@@ -957,6 +990,10 @@ fn compose_with(
         first: previous.is_none(),
         declaration: planned_declaration.map(|planned| planned.change),
         pending: marked,
+        unit_conflicts: unit_conflicts
+            .into_iter()
+            .map(|unresolved| (unresolved.delivered.clone(), unresolved.to_string()))
+            .collect(),
     })
 }
 
@@ -1194,6 +1231,9 @@ struct Application<'a> {
     /// composition is written except for its lock, which waits for
     /// `compose --continue`.
     marked: &'a BTreeSet<RelativePath>,
+    /// The identity of the declaration the composition was planned from,
+    /// as the project holds it once the composition is written.
+    declaration_used: BlobId,
 }
 
 /// The declaration's new text, written through the handle that holds its
@@ -1227,6 +1267,7 @@ fn apply(
         directories,
         declaration,
         marked,
+        ref declaration_used,
     } = *application;
     let rejected = |problem| ComposeFailure::Rejected {
         problems: vec![problem],
@@ -1350,6 +1391,7 @@ fn apply(
             pending: Some(Pending {
                 lock: kept,
                 files: marked.iter().cloned().collect(),
+                declaration: Some(declaration_used.clone()),
             }),
             ..journal
         };
@@ -1868,9 +1910,17 @@ pub struct Composed {
     first: bool,
     declaration: Option<DeclarationChange>,
     pending: BTreeSet<RelativePath>,
+    unit_conflicts: Vec<(RelativePath, String)>,
 }
 
 impl Composed {
+    /// The conflicts between units that no unit above them resolves, each
+    /// with the delivered path that holds it between markers and the
+    /// report of what the units contend. Every such path is pending.
+    pub fn unit_conflicts(&self) -> &[(RelativePath, String)] {
+        &self.unit_conflicts
+    }
+
     /// How many units, direct and transitive, are composed.
     pub fn units(&self) -> usize {
         self.units
@@ -2138,6 +2188,9 @@ pub enum ComposeProblem {
     /// A composition waits for the consumer to resolve the conflicts
     /// marked in these files.
     Pending(Vec<RelativePath>),
+    /// `compose --continue` found the declaration changed since the
+    /// waiting composition was planned from it.
+    DeclarationChanged,
     /// `compose --continue` or `--abort` found no composition waiting.
     NothingPending,
     /// `compose --continue` found an interrupted composition, not one
@@ -2346,6 +2399,11 @@ impl fmt::Display for ComposeProblem {
                 }
                 Ok(())
             }
+            Self::DeclarationChanged => f.write_str(
+                "assemblr.jsonc changed since the composition that waits for your resolution was \
+                 planned from it, so the lock it would write no longer records what the \
+                 declaration says",
+            ),
             Self::NothingPending => {
                 f.write_str("no composition is waiting for conflict resolution")
             }

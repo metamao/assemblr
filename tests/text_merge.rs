@@ -431,7 +431,7 @@ fn a_file_that_is_not_text_is_still_refused_with_several_amenders() {
 }
 
 #[test]
-fn a_consumer_composes_the_same_guidance_file_and_a_conflict_refuses_the_composition() {
+fn a_consumer_composes_the_same_guidance_file_and_a_conflict_is_left_for_the_consumer() {
     let fixture = Fixture::new("consumer");
     scenario(
         &fixture,
@@ -467,8 +467,8 @@ fn a_consumer_composes_the_same_guidance_file_and_a_conflict_refuses_the_composi
         )
     );
 
-    // A conflicting pair is refused whole, naming the lines, and the
-    // project is unchanged.
+    // A conflicting pair is marked in the file with the units named, the
+    // rest is composed, and the composition waits (#101).
     let clash = Fixture::new("consumer-clash");
     scenario(
         &clash,
@@ -496,11 +496,31 @@ fn a_consumer_composes_the_same_guidance_file_and_a_conflict_refuses_the_composi
         "{\n  \"dependencies\": {\"@acme/neon\": \"^1\", \"@acme/docker\": \"^1\"},\n  \"options\": {}\n}\n",
     )
     .unwrap();
-    let err = stderr(&fails(clash.assemblr(&project, &["compose"])));
-    assert!(err.contains("line 7: @acme/docker sets"), "{err}");
-    assert!(err.contains("@acme/neon sets"), "{err}");
-    assert!(!project.join("AGENTS.md").exists());
+    let output = fails(clash.assemblr(&project, &["compose"]));
+    let out = stdout(&output);
+    assert!(out.contains("  conflict AGENTS.md"), "{out}");
+    assert!(out.contains("line 7: @acme/docker sets"), "{out}");
+    assert!(out.contains("@acme/neon sets"), "{out}");
+    assert!(
+        stderr(&output).contains("1 file holds conflicts between units"),
+        "{}",
+        stderr(&output)
+    );
+    let marked = fs::read_to_string(project.join("AGENTS.md")).unwrap();
+    assert!(
+        marked.contains(
+            "<<<<<<< @acme/docker\n- Keep it huge.\n||||||| base\n- Keep changes small.\n\
+             =======\n- Keep it tiny.\n>>>>>>> @acme/neon\n"
+        ),
+        "{marked}"
+    );
+    assert!(project.join("NOTES.md").exists());
     assert!(!project.join("assemblr-lock.json").exists());
+    let err = stderr(&fails(clash.assemblr(&project, &["compose", "--continue"])));
+    assert!(
+        err.contains("AGENTS.md: it still holds conflict markers"),
+        "{err}"
+    );
 }
 
 /// A provider `@acme/worker` 1.0.0 with `file` holding `base`, and the

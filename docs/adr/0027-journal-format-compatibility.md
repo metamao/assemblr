@@ -38,7 +38,8 @@ is where this must stop (#73, from the second decision-log review).
    change: they read only format 1 and ignored unknown members, so they
    refuse a format-2 journal instead of misreading its `pending` record.
    This version reads formats 1 and 2, so a journal an earlier version left
-   is still recovered, `pending` included.
+   is still recovered, `pending` included. *Amended (#101):* format 3 adds
+   `declaration` to `pending`; formats 1 to 3 are read.
 4. **The unit-update journal stays at format 1.** Its reader has refused
    unknown members since it was written, so a version from before `copies`
    refuses a journal that has them. Its next change takes format 2 under

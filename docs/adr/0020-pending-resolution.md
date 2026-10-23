@@ -1,6 +1,6 @@
 # 0020: The pending-resolution state: marked files, a journal that waits, and `compose --continue` and `--abort`
 
-- **Status:** Accepted, the whole-file markers of point 3 narrowed to structured files by 0022, points 5 and 6 amended by #72
+- **Status:** Accepted, the whole-file markers of point 3 narrowed to structured files by 0022, points 5 and 6 amended by #72, points 1, 2, 5, and 6 amended by #101
 - **Date:** 2026-10-21
 
 ## Context
@@ -20,6 +20,9 @@ represented, entered, finalized, and left, on top of the journal of ADR
    transient bytes. The format number stays 1, and a journal without the
    record reads as before. The state is in `.assemblr/`, git-ignored with
    the rest of the journal, and the lock is untouched until `--continue`.
+   *Amended (#101):* `pending` also records the blob identity of the
+   `assemblr.jsonc` text the composition was planned from, which takes the
+   consumer journal to format 3 (ADR 0027); formats 1 to 3 are read.
 2. **Entering.** Reconciliation is planned as before. A conflict is turned
    into a change when it is a text conflict (a format with no merge, or the
    merge engine's value conflicts or its failure to merge) and the base, the
@@ -31,7 +34,12 @@ represented, entered, finalized, and left, on top of the journal of ADR
    declaration) apply unchanged. After the declaration, the lock is kept,
    and the journal is rewritten with the `pending` record in one rename.
    Until that rename the journal is an ordinary one, so an interruption
-   reverts everything, marked files included.
+   reverts everything, marked files included. *Amended (#101):* a file
+   whose sibling amendments conflict (ADR 0032) reaches reconciliation as
+   the composition's contribution, markers included, instead of refusing
+   it; it is pending when the reconciliation writes it, or when the
+   project's copy is kept because it already holds those markers (a clone
+   of a waiting project). Nothing else about entering changes.
 3. **The marked file** holds the project's content, the base's, and the
    composition's, each as it is, between `<<<<<<< current (your file)`,
    `||||||| base (the last composition)`, `=======`, and `>>>>>>> incoming
@@ -49,7 +57,11 @@ represented, entered, finalized, and left, on top of the journal of ADR
    interrupted composition, which `compose` recovers, so continue refuses;
    otherwise every pending file is read through real directories only and
    must be absent (the consumer deleted it) or a regular file without a
-   line starting `<<<<<<< current` or `>>>>>>> incoming`. Then the kept lock
+   line starting `<<<<<<< current` or `>>>>>>> incoming`. *Amended (#101):*
+   before the files, the declaration's bytes must hash to the identity the
+   `pending` record holds, else continue refuses with the two ways out; and
+   a line starting `<<<<<<< ` or `>>>>>>> ` of any kind, or the
+   `"<<<<<<< conflict"` member, counts as a marker. Then the kept lock
    is checked to be the composition's own over a base that verifies, and is
    written and renamed into place as a composition's lock is; the journal
    and `previous/` go last. The unresolved files are all listed, and the
@@ -59,7 +71,10 @@ represented, entered, finalized, and left, on top of the journal of ADR
    consumer's edits to them are the resolution being given up. Every other
    entry follows the revert rules of ADR 0017 point 7, so a file the
    composition changed unmarked and the consumer edited since is kept and
-   named. The declaration is restored through the locked handle. A journal
+   named. The declaration is restored through the locked handle.
+   *Amended (#101):* the declaration counts among the pending files, so when
+   the journal holds its previous content it is restored whatever it holds
+   now, and the summary names it only then. A journal
    without the `pending` record, and not completed by the lock, is an
    interrupted composition: abort refuses it as continue does, and
    `compose` recovers it.
@@ -99,7 +114,9 @@ represented, entered, finalized, and left, on top of the journal of ADR
   the previous composition, so its next `compose` finds the conflict again
   and wraps the marked file in a second set of markers. The pending state is
   not portable by design (the journal is transient, ADR 0017 point 6), and
-  the second set is visible and must be removed before `--continue`.
+  the second set is visible and must be removed before `--continue`. A file
+  marked between siblings (#101) is deterministic, so the clone's copy equals
+  the composition's and is kept, pending, without a second set.
 - A line-level text merge can replace whole-file markers with hunks without
   changing the state machine: only `marked_change` produces the file.
 - A file that legitimately needs a line starting with a marker prefix

@@ -2822,7 +2822,7 @@ fn a_journal_from_a_newer_version_is_refused_by_every_command_and_nothing_change
     // waiting composition.
     let path = project.join(".assemblr/journal.json");
     let mut journal: Value = serde_json::from_str(&read(&path)).unwrap();
-    assert_eq!(journal["format"], 2);
+    assert_eq!(journal["format"], 3);
     journal["resolved"] = Value::Array(vec![]);
     fs::write(&path, serde_json::to_string_pretty(&journal).unwrap()).unwrap();
     let waiting = tree(&project);
@@ -2848,10 +2848,10 @@ fn a_journal_from_a_newer_version_is_refused_by_every_command_and_nothing_change
 
     // A newer format number is refused the same way.
     journal.as_object_mut().unwrap().remove("resolved");
-    journal["format"] = Value::from(3);
+    journal["format"] = Value::from(4);
     fs::write(&path, serde_json::to_string_pretty(&journal).unwrap()).unwrap();
     let waiting = tree(&project);
     let err = stderr(&fails(fixture.assemblr(&project, &["compose", "--abort"])));
-    assert!(err.contains("it has format 3"), "{err}");
+    assert!(err.contains("it has format 4"), "{err}");
     assert_eq!(tree(&project), waiting);
 }

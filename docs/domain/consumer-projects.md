@@ -189,7 +189,9 @@ Both workflows produce the same composition from the same declaration.
 Decided for the first `assemblr compose` under AGENTS.md §1.1 (decision log
 D-10 to D-12) and merged with PR #42. The owner approved in the
 [owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799) what they decide for OC-47 (a conflict between units'
-contributions is an error), OC-48 (bytes, executable bits, symbolic links,
+contributions is an error; the owner reopened it on #101 for a conflict
+between sibling amendments, which is a pending-resolution state, see
+[pending-resolution details](#pending-resolution-details--approved-d-18-sibling-conflicts-provisional-d-44)), OC-48 (bytes, executable bits, symbolic links,
 reserved paths, and which ignore rules decide, D-16), and OC-37 (the journal
 and recovery); what they decide for OC-44 stays provisional. They cover a project composed for the first time; a project
 composed before is reconciled as [reconciliation
@@ -216,9 +218,12 @@ with its executable bit, and the lock; and removes the journal. Every
 version locked and every file written is reported.
 
 **What it refuses, writing nothing:** a problem a unit build would report,
-with the same wording; a conflict between units' contributions, which is a
-composition error and not a pending-resolution state (**OC-47**,
-resolved); a delivered path that already holds content Assemblr did not
+with the same wording; a conflict between units' contributions other than
+one between sibling amendments, which is a composition error and not a
+pending-resolution state (**OC-47**; a conflict between siblings is left in
+the project for the consumer to resolve, **Provisional (D-44)**, see
+[pending-resolution details](#pending-resolution-details--approved-d-18-sibling-conflicts-provisional-d-44));
+a delivered path that already holds content Assemblr did not
 materialize, or whose directory on the way is a file or a symbolic link,
 naming every such path (**OC-44** stays open; composing over existing
 content is not supported yet); a delivered file that only the consumer's own
@@ -433,10 +438,12 @@ Decided by the owner on #63 (decision log D-23):
   state with `--continue` and `--abort`, and the recovery of an interrupted
   composition. Amendments are applied across provider versions (see
   [across provider versions](amendments-and-composition.md#across-provider-versions--approved));
-  a collision between units' contributions is a composition error, never a
-  conflict left in the project, and refuses the whole update with the project
-  unchanged. While a resolution is pending, `update` refuses and names the two
-  ways out.
+  a collision between sibling amendments is left in the project as a pending
+  conflict, with the rest of the update applied (see [pending-resolution
+  details](#pending-resolution-details--approved-d-18-sibling-conflicts-provisional-d-44),
+  D-44); any other collision between units' contributions is a composition
+  error and refuses the whole update with the project unchanged. While a
+  resolution is pending, `update` refuses and names the two ways out.
 - **Output.** Every version that changed, with the units that moved only because
   of the ones named, goes to stdout; `Nothing to update` says that nothing
   moved and nothing was touched.
@@ -566,8 +573,9 @@ decide the consumer side of OC-10, which the merge-engine decision left to the
 consumer lifecycle; the entry stays open. The owner approved in the
 [owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799) the journal of a reconciliation and its recovery (D-14,
 OC-37), line endings and executable bits (D-15, OC-48), and that a conflict
-between units' contributions stays an error (OC-47); the per-path strategy
-itself (D-13) stays provisional.
+between units' contributions stays an error (OC-47; reopened on #101 for
+sibling amendments, whose conflict is a pending-resolution state, D-44); the
+per-path strategy itself (D-13) stays provisional.
 
 **Per path, three-way, without Git.** Every path of the reconciliation
 base and of the incoming composition is decided on its own from three
@@ -613,7 +621,9 @@ both changed is left in the file for the consumer to resolve (see
 composition with any other conflict is refused before anything is written,
 naming every conflicting path and why; the project, its lock, and its base
 stay as they were (standing default D2). A conflict between units'
-contributions remains a composition error (OC-47).
+contributions remains a composition error (OC-47), except one between
+sibling amendments, which the composition leaves marked in the file and
+reconciliation handles like any other conflicted file (D-44, below).
 
 **Line endings.** A project file that differs from its base, or from the
 incoming file, only by CRLF line endings throughout counts as that content:
@@ -703,12 +713,15 @@ Open:
   state beyond text conflicts, and a line-level presentation of them.
   **OC-37.**
 
-### Pending-resolution details — Approved (D-18)
+### Pending-resolution details — Approved (D-18), sibling conflicts Provisional (D-44)
 
 Decided for the pending-resolution state under AGENTS.md §1.1 (decision log
 D-18), merged with the pull request that implements it, and approved by the
 owner in the [owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799), with the fixes of #72 and #73 (D-28, D-29). They decide the presentation and the mechanism of
-OC-37 and the grammar of OC-7 for `compose`; both entries stay open.
+OC-37 and the grammar of OC-7 for `compose`; both entries stay open. The
+owner decided on #101 that a conflict between sibling amendments enters this
+state too (OC-47, reopened for that case); its details below are
+**Provisional (D-44)**.
 
 **Commands.** `assemblr compose --continue` and `assemblr compose --abort`,
 mutually exclusive, run at the project's top level.
@@ -722,6 +735,22 @@ other conflict (file modes, a file one side deleted and the other changed,
 a file the composition removes and the consumer edited, a path that is not a
 regular file, a base that is not stored, non-text content) is refused whole,
 as above, so a project never holds marked and refused conflicts together.
+
+A conflict between **sibling amendments** that no unit above them resolves
+(**Provisional (D-44)**) is left in the file as well: the composition's file
+is the marked one that [layered
+amendments](amendments-and-composition.md#composition-builds-and-reconciliation)
+produce, with each sibling's content between `<<<<<<< <unit>` and `>>>>>>>
+<unit>` lines around the base's `||||||| base` section for text, or as a
+`"<<<<<<< conflict"` object naming each unit's value in a JSON or JSONC file.
+That file is the composition's contribution and its reconciliation base, so
+reconciliation treats it like any other file: it is written when the
+project's copy differs from it, merged with the consumer's edits like any
+other change, and a project copy that already holds exactly those markers is
+kept. The file is pending whenever it is written or already holds markers.
+The report names the file, the siblings, and each contested value or line,
+as the unit build does. An amendment that cannot be applied to the resolved
+provider version is not a sibling conflict and stays a composition error.
 
 **Entering the state.** Everything that does not conflict is applied, as in
 any reconciliation, `assemblr.jsonc` included when `add` or `remove`
@@ -739,7 +768,10 @@ composition's:
 >>>>>>> incoming (the declared composition)
 ```
 
-Markers end lines as the project's file does. For a text file, the file holds
+Markers end lines as the project's file does. A file whose siblings
+conflict holds the units' markers instead, or both kinds when the
+consumer's resolution of an earlier conflict and the siblings' new marked
+content collide. For a text file, the file holds
 the merge of the two sides and the markers surround only the lines that
 disagree: every change that does not collide is already applied, and lines
 all three versions agree on at the start and the end of a disagreement stay
@@ -748,29 +780,42 @@ markers cover the whole file, since the merged parts of a structured file
 cannot be told apart from its data, and the composition's other changes to it
 are not applied to the project's side: they are in the incoming section, and
 the consumer carries them over. Marking only the colliding values of a
-structured file is not done. The lock is not written: the journal keeps the lock to write and the
-files that hold markers. The command reports the files and exits non-zero.
-While resolution is pending, `compose`, `add`, and `remove` refuse, naming
-the files and the two ways out, and change nothing.
+structured file is not done. The lock is not written: the journal keeps the lock to write, the
+files that hold markers, and, since #101, the identity of the
+`assemblr.jsonc` text the composition was planned from. The command reports
+the files and exits non-zero. While resolution is pending, `compose`, `add`,
+`remove`, and `update` refuse, naming the files and the two ways out, and
+change nothing.
 
 **Resolving.** The consumer edits each file with their own tools to the
 content they want. Nothing marks a file resolved but the absence of a line
-starting `<<<<<<< current`, `||||||| base`, or `>>>>>>> incoming`; a file the
-consumer deleted counts as resolved. A line of `=` signs is not looked for,
-since it also underlines a Markdown heading (#72).
+starting `<<<<<<< `, `||||||| base`, or `>>>>>>> `, or holding a
+`"<<<<<<< conflict"` member; a file the consumer deleted counts as resolved.
+A line of `=` signs is not looked for, since it also underlines a Markdown
+heading (#72).
 
 **`--continue`** refuses while any file holds such a line, listing every
-such file and leaving the project unchanged. Otherwise it writes the lock
-and removes the journal. The reconciliation base is the composition, and
-the consumer's resolution is their own content over it, so a later
-`compose` keeps it as it keeps any consumer edit. An interrupted
-`--continue` is completed by the next one.
+such file and leaving the project unchanged. It also refuses, naming the two
+ways out, when `assemblr.jsonc` is not the text the waiting composition was
+planned from (**Provisional (D-44)**): the lock it would write records what
+that text declared, and a declaration edited since would not be locked.
+Otherwise it writes the lock and removes the journal. The reconciliation
+base is the composition, markers between units included, and the consumer's
+resolution is their own content over it, so a later `compose` keeps it as it
+keeps any consumer edit. When a later composition changes the contested
+part, its marked content differs from the base, collides with the
+resolution, and the file is marked again between `current` (the resolution),
+`base`, and `incoming` (the siblings' new markers), so a stale resolution is
+visible and never dropped. An interrupted `--continue` is completed by the
+next one.
 
 **`--abort`** restores the project to what it held before the operation:
 every file the composition changed, the conflicted files whatever they hold
-now, and `assemblr.jsonc` where `add` or `remove` rewrote it. A file the
-composition changed without conflict and the consumer edited since is kept
-and named. The aborted composition's base is removed from the store with
+now, and `assemblr.jsonc` where `add` or `remove` rewrote it, whatever it
+holds now too (**Provisional (D-44)**), since an edit to it while the
+composition waited is given up with the resolution; the summary says the
+declaration was restored only when it was. A file the composition changed
+without conflict and the consumer edited since is kept and named. The aborted composition's base is removed from the store with
 the objects only it names, so the store is as it was too; every object the
 lock's base or another stored base names is kept (#72).
 Like `--continue`, it refuses when the journal is an interrupted
@@ -782,7 +827,9 @@ next `compose` like any interrupted composition. The state lives in the
 git-ignored journal. A clone of a pending project has no journal, and its
 lock still records the previous composition, so its next `compose` finds the
 conflict again, around the markers already in the file, and marks the file a
-second time; every marker must go before `--continue` finishes it.
+second time; every marker must go before `--continue` finishes it. A file
+marked between siblings is found holding exactly the composition's content
+and is kept as it is, pending again without a second set of markers.
 
 ## Lock and reconciliation state — Approved
 
