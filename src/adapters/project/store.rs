@@ -61,12 +61,13 @@ const JOURNAL_NEW: &str = "journal.json.new";
 /// The version of the journal's format this version writes. Every change to
 /// the journal's members takes a new number, and a reader refuses a number
 /// or a member it does not know (ADR 0027).
-const JOURNAL_FORMAT: u64 = 2;
+const JOURNAL_FORMAT: u64 = 3;
 /// The formats this version reads. Format 1 has the same members: its
 /// journals were written before the number was raised, by versions that
 /// ignored members they did not know, so a format-2 journal is one they
-/// refuse instead of misreading its `pending` record.
-const JOURNAL_FORMATS: [u64; 2] = [1, 2];
+/// refuse instead of misreading its `pending` record. Format 3 adds the
+/// `declaration` of a `pending` record; a format-2 record has none.
+const JOURNAL_FORMATS: [u64; 3] = [1, 2, 3];
 /// The members of a journal, of a `files` entry, and of `pending`.
 const JOURNAL_MEMBERS: [&str; 5] = ["format", "base", "files", "directories", "pending"];
 const ENTRY_MEMBERS: [&str; 6] = [
@@ -77,7 +78,7 @@ const ENTRY_MEMBERS: [&str; 6] = [
     "previous",
     "previous_executable",
 ];
-const PENDING_MEMBERS: [&str; 2] = ["lock", "files"];
+const PENDING_MEMBERS: [&str; 3] = ["lock", "files", "declaration"];
 /// The largest listing or journal read, in bytes.
 const TEXT_LIMIT: u64 = 64 * 1024 * 1024;
 
@@ -465,6 +466,10 @@ pub(super) struct Pending {
     pub(super) lock: BlobId,
     /// The files that hold conflict markers, in path order.
     pub(super) files: Vec<RelativePath>,
+    /// The identity of the declaration the composition was planned from,
+    /// which `--continue` requires to be the one in place still. Absent
+    /// in a journal an earlier version wrote.
+    pub(super) declaration: Option<BlobId>,
 }
 
 /// What the composition does to one file.
@@ -531,13 +536,19 @@ impl Journal {
             "directories": directories,
         });
         if let (Some(pending), Some(object)) = (&self.pending, document.as_object_mut()) {
-            object.insert(
-                "pending".to_owned(),
-                json!({
-                    "lock": pending.lock.as_str(),
-                    "files": pending.files.iter().map(RelativePath::as_str).collect::<Vec<_>>(),
-                }),
-            );
+            let mut record = json!({
+                "lock": pending.lock.as_str(),
+                "files": pending.files.iter().map(RelativePath::as_str).collect::<Vec<_>>(),
+            });
+            if let (Some(declaration), Some(record)) =
+                (&pending.declaration, record.as_object_mut())
+            {
+                record.insert(
+                    "declaration".to_owned(),
+                    Value::String(declaration.as_str().to_owned()),
+                );
+            }
+            object.insert("pending".to_owned(), record);
         }
         let mut bytes = serde_json::to_vec_pretty(&document)?;
         bytes.push(b'\n');
@@ -644,7 +655,19 @@ impl Journal {
                             .ok_or_else(|| "a `pending` file is not a valid path".to_owned())
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                Some(Pending { lock, files })
+                let declaration = match pending.get("declaration") {
+                    None => None,
+                    Some(value) => {
+                        Some(value.as_str().and_then(BlobId::parse).ok_or_else(|| {
+                            "its `pending` has an invalid `declaration`".to_owned()
+                        })?)
+                    }
+                };
+                Some(Pending {
+                    lock,
+                    files,
+                    declaration,
+                })
             }
         };
         Ok(Self {

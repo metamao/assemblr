@@ -257,11 +257,19 @@ fn report_aborted(recovery: &ComposeRecovery) {
             restored,
             kept,
         } => {
+            let declaration = restored
+                .iter()
+                .any(|path| path.as_str() == assemblr::adapters::DECLARATION);
             println!(
                 "Aborted the composition: removed {} it created and restored {} it changed or \
-                 removed, assemblr.jsonc included.",
+                 removed{}.",
                 count(removed.len(), "file", "files"),
-                restored.len()
+                restored.len(),
+                if declaration {
+                    ", assemblr.jsonc included"
+                } else {
+                    ""
+                }
             );
             for path in kept {
                 eprintln!(
@@ -304,9 +312,16 @@ fn run_with(
             if composed.pending().is_empty() {
                 ExitCode::SUCCESS
             } else {
+                let between_units = !composed.unit_conflicts().is_empty();
+                let with_yours = !composed.consumer_conflicts().is_empty();
+                let what = match (between_units, with_yours) {
+                    (false, _) => "between your changes and the composition",
+                    (true, false) => "between units",
+                    (true, true) => "between units, and between your changes and the composition",
+                };
                 fail(
                     &format!(
-                        "{} conflicts between your changes and the composition",
+                        "{} conflicts {what}",
                         count(composed.pending().len(), "file holds", "files hold"),
                     ),
                     Some(
@@ -539,10 +554,22 @@ fn report_pending(composed: &Composed) {
     for (path, change) in composed.paths() {
         println!("  {} {path}", describe_change(*change));
     }
-    println!(
-        "Each conflicted file shows your content, the last composition's, and the new one, \
-         between <<<<<<<, |||||||, =======, and >>>>>>> lines."
-    );
+    for (_, conflict) in composed.unit_conflicts() {
+        println!("{conflict}");
+    }
+    if !composed.consumer_conflicts().is_empty() {
+        println!(
+            "A conflict with your changes shows your content, the last composition's, and the \
+             new one, between <<<<<<< current, ||||||| base, =======, and >>>>>>> incoming lines."
+        );
+    }
+    if !composed.unit_conflicts().is_empty() {
+        println!(
+            "A conflict between units shows each unit's content between <<<<<<< and >>>>>>> \
+             lines that name the units, or, in a JSON file, as a \"<<<<<<< conflict\" object \
+             naming each unit's value; replace it with the content you want."
+        );
+    }
 }
 
 fn describe_change(change: FileChange) -> &'static str {
@@ -693,8 +720,16 @@ fn diagnosis(failure: &ComposeFailure, root: &Path) -> Diagnosis {
                 .to_owned(),
         ),
         ComposeProblem::Unresolved(_) => Some(
-            "edit each file to the content you want, remove every <<<<<<< current, ||||||| \
-             base, and >>>>>>> incoming line, and run `assemblr compose --continue` again"
+            "edit each file to the content you want, remove every <<<<<<<, ||||||| base, and \
+             >>>>>>> line and every \"<<<<<<< conflict\" object, and run `assemblr compose \
+             --continue` again"
+                .to_owned(),
+        ),
+        ComposeProblem::DeclarationChanged => Some(
+            "put assemblr.jsonc back as the composition left it and run `assemblr compose \
+             --continue` again, or run `assemblr compose --abort`, which gives up the \
+             resolution and restores assemblr.jsonc where `add` or `remove` rewrote it, and \
+             compose from the declaration you want afterwards"
                 .to_owned(),
         ),
         ComposeProblem::NothingPending | ComposeProblem::NotPending => Some(

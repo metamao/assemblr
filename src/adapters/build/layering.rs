@@ -55,6 +55,9 @@ pub struct UnresolvedFile {
     pub(crate) amenders: Vec<UnitIdentity>,
     /// The conflicts, as the merge reports them.
     pub(crate) conflicts: Vec<Unresolved>,
+    /// The file as layered, each conflict between markers.
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) executable: bool,
 }
 
 impl std::fmt::Display for UnresolvedFile {
@@ -145,6 +148,8 @@ pub(crate) fn render_files(
                     .map(|amendment| amendment.amender().clone())
                     .collect(),
                 conflicts: outcome.unresolved,
+                bytes: outcome.bytes,
+                executable: composed.is_executable(),
             });
         }
     }

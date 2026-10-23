@@ -20,11 +20,13 @@ use super::lockfile::{self, Lockfile};
 use super::store::{Journal, Store};
 use super::{
     Change, ComposeFailure, ComposeProblem, ComposeRecovery, CurrentFile, FileConflict,
-    FileConflictKind, Step, StoreError, lock_declaration, recover, write_lock,
+    FileConflictKind, Step, StoreError, declaration_path, lock_declaration, read_bytes, recover,
+    write_lock,
 };
+use crate::adapters::layered;
 use crate::domain::{
-    BaseIdentity, Contributor, Disagreement, Mergeability, RelativePath, Snapshot, TextSegment,
-    UnitFile,
+    BaseIdentity, BlobId, Contributor, Disagreement, Mergeability, RelativePath, Snapshot,
+    TextSegment, UnitFile,
 };
 
 /// Opens the project's side of a conflict. A leftover is looked for by
@@ -169,13 +171,17 @@ fn mark_lines(base: &[u8], current: &[u8], incoming: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Whether `bytes` still holds a line that opens a conflict, starts its
-/// base section, or closes it.
+/// base section, or closes it, of the project's own conflicts or of a
+/// conflict between units, or the member that marks a contested JSON
+/// value. Only Assemblr's own marker lines count, so a file that shows
+/// another tool's markers can be continued.
 fn has_markers(bytes: &[u8]) -> bool {
-    bytes.split(|byte| *byte == b'\n').any(|line| {
-        [CURRENT_MARK, BASE_MARK, INCOMING_MARK]
-            .iter()
-            .any(|mark| line.starts_with(mark.as_bytes()))
-    })
+    layered::has_markers(bytes)
+        || bytes.split(|byte| *byte == b'\n').any(|line| {
+            [CURRENT_MARK, BASE_MARK, INCOMING_MARK]
+                .iter()
+                .any(|mark| line.starts_with(mark.as_bytes()))
+        })
 }
 
 /// Whether the lock records the journal's composition: it is written
@@ -247,6 +253,20 @@ pub(super) fn continue_with(
     let Some(pending) = &journal.pending else {
         return Err(rejected(ComposeProblem::NotPending));
     };
+    // The kept lock records the resolution of the declaration the
+    // composition was planned from; a declaration edited since would not
+    // be what the lock says it is.
+    if let Some(declaration) = &pending.declaration {
+        let held = read_bytes(&guard).map_err(|error| {
+            rejected(ComposeProblem::Io {
+                path: root.join(super::DECLARATION),
+                error,
+            })
+        })?;
+        if BlobId::of(&held) != *declaration {
+            return Err(rejected(ComposeProblem::DeclarationChanged));
+        }
+    }
     let mut unresolved = Vec::new();
     for path in &pending.files {
         match read_resolution(root, path) {
@@ -308,10 +328,12 @@ pub(super) fn continue_with(
 
 /// Restores the project at `root` to what it held before the composition
 /// that waits for the consumer: every file it changed, the marked files
-/// whatever they hold now, and the declaration `add` or `remove` rewrote.
-/// A file edited since that the composition changed without marking it is
-/// kept and named, as in any revert. Refused when the journal is an
-/// interrupted composition's, which `compose` recovers.
+/// whatever they hold now, and the declaration `add` or `remove` rewrote,
+/// whatever it holds now too, since an edit to it while the composition
+/// waited is given up with the resolution. A file edited since that the
+/// composition changed without marking it is kept and named, as in any
+/// revert. Refused when the journal is an interrupted composition's, which
+/// `compose` recovers.
 pub fn abort_compose(root: &Path) -> Result<ComposeRecovery, ComposeFailure> {
     let rejected = |problem| ComposeFailure::Rejected {
         problems: vec![problem],
@@ -322,7 +344,11 @@ pub fn abort_compose(root: &Path) -> Result<ComposeRecovery, ComposeFailure> {
     // as `--continue` also says; only a lock that records this one means an
     // earlier `--continue` got as far as writing it.
     let resolving = match &journal.pending {
-        Some(pending) => pending.files.clone(),
+        Some(pending) => {
+            let mut resolving = pending.files.clone();
+            resolving.push(declaration_path());
+            resolving
+        }
         None if lock_records(root, &journal) => Vec::new(),
         None => return Err(rejected(ComposeProblem::NotPending)),
     };
@@ -434,6 +460,8 @@ mod tests {
         assert!(!has_markers(b"Title\n=======\ntext\n"));
         assert!(has_markers(b"x\r\n<<<<<<< current (your file)\r\n"));
         assert!(!has_markers(b"resolved\n"));
+        assert!(has_markers(b"a\n<<<<<<< @acme/a\nb\n"));
+        assert!(has_markers(b"  \"<<<<<<< conflict\": {\n"));
     }
 
     fn marked(base: &str, current: &str, incoming: &str) -> String {

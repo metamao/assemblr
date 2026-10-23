@@ -36,14 +36,14 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0017](0017-consumer-reconciliation.md) | Consumer reconciliation: the per-path three-way decision, the value merge onto the project's text, the journal of changes, and recovery | Accepted, point 8 revised by 0018, the refusal of text conflicts replaced by 0020, text merged by line by 0022 |
 | [0018](0018-ignore-classification-and-merge-integrity.md) | Which ignore rules decide the lock, and what a failed merge check is | Accepted |
 | [0019](0019-consumer-add-and-remove.md) | `add` and `remove`: editing the declaration, the default requirement, and writing it through the locked handle | Accepted |
-| [0020](0020-pending-resolution.md) | The pending-resolution state: marked files, a journal that waits, and `compose --continue` and `--abort` | Accepted, the whole-file markers of point 3 narrowed to structured files by 0022, points 5 and 6 amended by #72 |
+| [0020](0020-pending-resolution.md) | The pending-resolution state: marked files, a journal that waits, and `compose --continue` and `--abort` | Accepted, the whole-file markers of point 3 narrowed to structured files by 0022, points 5 and 6 amended by #72, points 1, 2, 5, and 6 amended by #101 |
 | [0021](0021-text-merge.md) | The line-level merge of text: the domain engine, which files it covers, and what it reports | Accepted, point 5 amended by #92 |
 | [0022](0022-text-reconciliation.md) | Text reconciliation: the line merge onto the project's file, and conflicts marked where they happen | Accepted |
 | [0023](0023-cross-version-amendments.md) | Amendments across provider versions: deriving against the base, applying to the version resolved, and rebasing in `unit update` | Accepted, point 4 amended by #70, point 5 by #92, point 7 replaced by 0032 |
 | [0024](0024-consumer-update.md) | `assemblr update`: resolving with a reduced lock, the lock as a record of the resolution, and one reconciliation | Accepted |
 | [0025](0025-parameter-mappings-and-examples.md) | Parameter mappings and examples: option values as a union, values decided from dependents to dependencies, and development values | Accepted |
 | [0026](0026-private-alpha-distribution.md) | Private alpha distribution: prebuilt binaries as draft GitHub Releases | Accepted |
-| [0027](0027-journal-format-compatibility.md) | Journal formats: a number for every change, and readers that refuse what they do not know | Accepted |
+| [0027](0027-journal-format-compatibility.md) | Journal formats: a number for every change, and readers that refuse what they do not know | Accepted, consumer journal at format 3 since #101 |
 | [0028](0028-isolated-validation.md) | Isolated validation: shared test fixtures, a sandbox for manual runs, and a reference scenario | Accepted |
 | [0029](0029-remote-sources.md) | Remote unit sources: bare copies, what is fetched, the fetch environment, and accepted transports | Accepted |
 | [0030](0030-catalog-index.md) | Catalog index: `registry-index.json`, embedded manifests, and all-or-nothing refresh | Accepted |

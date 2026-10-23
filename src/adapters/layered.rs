@@ -84,17 +84,27 @@ impl std::fmt::Display for Unresolved {
 }
 
 /// Whether `bytes` hold a conflict marker: a line that opens or closes a
-/// text conflict, or the member that marks a JSON value. The base section
-/// and the separator are not looked for: a line of `=` signs underlines a
-/// Markdown heading.
+/// text conflict, or the member that marks a JSON value. Only the lines
+/// Assemblr writes count, opened or closed by a unit's identity or by the
+/// `current` and `incoming` sides of a rebase or a reconciliation, so a
+/// file that shows another tool's markers, such as `<<<<<<< HEAD` in a
+/// code block, is not pending. The base section and the separator are
+/// not looked for: a line of `=` signs underlines a Markdown heading.
 pub(crate) fn has_markers(bytes: &[u8]) -> bool {
     let json_mark = format!("\"{JSON_MARK}\"");
+    let marks = [
+        format!("{OPEN_MARK}@"),
+        format!("{OPEN_MARK}current"),
+        format!("{CLOSE_MARK}@"),
+        format!("{CLOSE_MARK}incoming"),
+        json_mark,
+    ];
     bytes.split(|byte| *byte == b'\n').any(|line| {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         let trimmed = line.trim_ascii_start();
-        trimmed.starts_with(OPEN_MARK.as_bytes())
-            || trimmed.starts_with(CLOSE_MARK.as_bytes())
-            || trimmed.starts_with(json_mark.as_bytes())
+        marks
+            .iter()
+            .any(|mark| trimmed.starts_with(mark.as_bytes()))
     })
 }
 
@@ -981,8 +991,17 @@ Run two (r2).
     #[test]
     fn markers_are_found_in_text_and_json_but_not_in_underlines() {
         assert!(has_markers(b"a\n<<<<<<< @acme/a\nb\n"));
+        assert!(has_markers(b"a\n>>>>>>> @acme/b\n"));
+        assert!(has_markers(b"<<<<<<< current (your copy)\n"));
+        assert!(has_markers(
+            b">>>>>>> incoming (the base after the update)\n"
+        ));
         assert!(has_markers(b"  \"<<<<<<< conflict\": {}\r\n"));
         assert!(!has_markers(b"Title\n=======\n||||||| base\n"));
+        // Another tool's markers, shown in a code block, are content.
+        assert!(!has_markers(
+            b"```\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feature\n```\n"
+        ));
     }
 
     #[test]

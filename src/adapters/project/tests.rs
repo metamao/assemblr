@@ -15,6 +15,7 @@ use super::{
     WriteStep, apply, recover,
 };
 use crate::adapters::lockfile::serialize_lockfile;
+use crate::domain::BlobId;
 use crate::domain::{
     ReconciliationState, RelativePath, Snapshot, SnapshotFile, UnitFile, UnitLock,
 };
@@ -166,6 +167,7 @@ fn apply_with(
         directories: &plan.directories,
         declaration: None,
         marked: &BTreeSet::new(),
+        declaration_used: BlobId::of(&fs::read(root.join("assemblr.jsonc")).unwrap_or_default()),
     };
     apply(root, &store, &application, &mut fault)
 }
@@ -214,6 +216,7 @@ fn apply_declaring(
             previous: &previous,
         }),
         marked: &BTreeSet::new(),
+        declaration_used: BlobId::of(text.as_bytes()),
     };
     apply(root, &store, &application, &mut fault)
 }
@@ -503,12 +506,13 @@ fn a_journal_is_written_in_format_2_and_both_formats_are_read() {
         pending: Some(super::store::Pending {
             lock: blob.clone(),
             files: vec![path("README.md")],
+            declaration: Some(blob.clone()),
         }),
     };
     store.begin(&journal).unwrap();
     let written: serde_json::Value =
         serde_json::from_slice(&fs::read(root.join(".assemblr/journal.json")).unwrap()).unwrap();
-    assert_eq!(written["format"], 2);
+    assert_eq!(written["format"], 3);
     assert_eq!(store.journal().unwrap().unwrap(), journal);
 
     // Format 1 has the same members, `pending` included: a journal an
@@ -530,8 +534,8 @@ fn a_journal_with_a_newer_format_or_an_unknown_member_is_refused_as_a_journal_an
         format!("{{\"path\": \"README.md\", \"action\": \"create\", \"blob\": \"{blob}\"}}");
     let cases = [
         (
-            format!("{{\"format\": 3, \"base\": \"{base}\", \"files\": [], \"directories\": []}}"),
-            "it has format 3, which this version of Assemblr does not read",
+            format!("{{\"format\": 4, \"base\": \"{base}\", \"files\": [], \"directories\": []}}"),
+            "it has format 4, which this version of Assemblr does not read",
         ),
         (
             format!(
@@ -745,6 +749,9 @@ fn apply_marked(
         }
         Ok(())
     };
+    // The pending record names the declaration in place, which
+    // `--continue` reads back.
+    guard(root);
     let store = Store::new(root);
     let marked = BTreeSet::from([path("README.md")]);
     let application = Application {
@@ -756,6 +763,7 @@ fn apply_marked(
         directories: &plan.directories,
         declaration: None,
         marked: &marked,
+        declaration_used: BlobId::of(&fs::read(root.join("assemblr.jsonc")).unwrap_or_default()),
     };
     apply(root, &store, &application, &mut fault)
 }

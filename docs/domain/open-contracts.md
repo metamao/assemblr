@@ -730,6 +730,27 @@ How the status of a statement affects implementation:
 - **Context:** [file
   contributions](consumer-projects.md#file-contributions--approved)
 
+### OC-47
+
+- **Approved (normative):** A conflict between units' contributions in a
+  consumer composition, such as an amendment that cannot be applied to the
+  resolved provider version, is a composition error: the project is not
+  modified, and the consumer can select another version, for example the base
+  with `assemblr add <unit>@=<base>` (D-10, D-13). Owner decision in the
+  [owner review of
+  2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
+- **Open detail:** Reopened by the owner on
+  [#101](https://github.com/metamao/assemblr/issues/101) (2026-10-23) for a
+  conflict between sibling amendments that no unit above them resolves: it
+  enters the pending-resolution state with the layered markers in the file,
+  the rest of the composition applied, and the composition's marked file as
+  the reconciliation base. Which markers count, the `assemblr.jsonc` check
+  of `--continue`, and what `--abort` restores are **Provisional (D-44)**
+  until the owner settles the reopened case.
+- **Origin:** Consumer
+- **Context:** [pending-resolution
+  details](consumer-projects.md#pending-resolution-details--approved-d-18-sibling-conflicts-provisional-d-44)
+
 ### OC-52
 
 - **Approved (normative):** An amendment's base and copy are rendered against
@@ -1023,19 +1044,6 @@ How the status of a statement affects implementation:
   2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
 - **Context:** [unit lock
   state](authoring-workflow.md#unit-lock-state--approved)
-
-### OC-47
-
-- **Resolution:** **Resolved.** A conflict between units' contributions in a
-  consumer composition, such as an amendment that cannot be applied to the
-  resolved provider version, is a composition error: the project is not
-  modified, and the consumer can select another version, for example the base
-  with `assemblr add <unit>@=<base>` (D-10, D-13). It is never a
-  pending-resolution state, because the consumer is not the author of those
-  units. Owner decision in the [owner review of
-  2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
-- **Context:** [composition
-  details](consumer-projects.md#composition-details--provisional-d-10-to-d-12)
 
 ### OC-50
 
