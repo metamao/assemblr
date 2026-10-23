@@ -1,8 +1,8 @@
 # User-facing copy
 
 How Assemblr writes what its users read: `--help`, errors, notes, hints,
-success output, and the README. The goal is text that a busy person or an
-agent can read once and act on. [AGENTS.md §6](../AGENTS.md#6-errors-and-diagnostics)
+success output, the README, and the agent guide. The goal is text that a busy
+person or an agent can read once and act on. [AGENTS.md §6](../AGENTS.md#6-errors-and-diagnostics)
 defines what a diagnostic must contain; this file defines how it reads.
 
 ## Rules

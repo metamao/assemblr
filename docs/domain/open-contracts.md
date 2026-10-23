@@ -232,9 +232,11 @@ How the status of a statement affects implementation:
   `check`, `build`, `update`, `publish`), the registry command
   responsibilities (`registry create`, `add`, `remove`, `list`, `info`,
   `sync`, `doctor`), catalog refresh, discovery (`search`, `info`, with a
-  machine-readable form), and the consumer operations (`init`, `add`,
-  `remove`, `compose`, and continuing or aborting a pending composition) and
-  their intent. `unit init` establishes the unit's Git repository. There are
+  machine-readable form), the agent guide (`guide`, whose name stays stable in
+  every version; see [agent
+  guide](registries-and-discovery.md#agent-guide--approved)), and the
+  consumer operations (`init`, `add`, `remove`, `compose`, and continuing or
+  aborting a pending composition) and their intent. `unit init` establishes the unit's Git repository. There are
   no commands solely for adding or removing catalog entries. `add` accepts one
   unit per invocation and records a caret (`^`) requirement by default. The
   CLI is non-interactive by default. For local unit repositories, the registry

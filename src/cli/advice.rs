@@ -78,7 +78,11 @@ pub(super) fn composition_advice(error: &CompositionError, audience: Audience) -
                 "run `assemblr add {unit} --option {parameter}=<value>`, or set `{parameter}` \
                  under {unit} in assemblr.jsonc `options`"
             ),
-            Audience::Author => format!("set `{parameter}` under {unit} in {options}"),
+            Audience::Author => format!(
+                "under {unit} in {options}, map `{parameter}` to a parameter this unit \
+                 declares in `params`, as in `\"{parameter}\": {{\"from\": \"{parameter}\"}}`, \
+                 or set a value"
+            ),
         },
         CompositionError::SeveralAmenders { .. } => {
             "remove one of the amending units, or ask an author to deliver the change in a file \

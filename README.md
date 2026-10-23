@@ -121,6 +121,11 @@ assemblr registry add git@github.com:acme/web.git   # on any machine with access
 assemblr registry sync               # pick up what the catalog lists since
 ```
 
+**Work with a coding agent.** `assemblr guide` prints a short guide for
+coding agents that matches the installed version. Point the agent at it from
+its instructions, for example with a line in the project's `AGENTS.md`:
+"Run `assemblr guide` before changing this project's setup, and follow it."
+
 Every command explains itself with `--help`, including examples. The
 concepts and the guarantees are in [`docs/domain/`](docs/domain/README.md).
 

@@ -893,6 +893,30 @@ Open:
   **OC-29.** **Provisional (D-32)**: see the [implemented
   grammar](#implemented-grammar--approved).
 
+## Agent guide — Approved
+
+Decided by the owner on 2026-10-23 (#105).
+
+```text
+assemblr guide
+```
+
+`guide` prints how a coding agent uses Assemblr: when to look for a unit
+before writing code by hand, the project, unit, and catalog workflows, and
+what is never edited by hand.
+
+- The guide describes the **installed version**. Its text changes with each
+  release, and it is not a contract: an agent reads it, a program does not
+  parse it.
+- The command's **name is stable**. Instructions installed outside Assemblr,
+  such as an agent's skill or a project's `AGENTS.md`, only say to run
+  `assemblr guide`, so every later version keeps the command, and they never
+  need updating when Assemblr changes.
+- The guide belongs to the CLI, not to units. Manifests still carry no
+  agent-only fields or instructions (see
+  [above](#discovery-and-information--approved)); a unit documents itself with
+  its own files.
+
 ## Recommended mechanisms — Recommended (provisional)
 
 The owner has accepted the following as default mechanisms and policies for
