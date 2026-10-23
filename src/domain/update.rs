@@ -380,9 +380,8 @@ impl fmt::Display for ReconcileError {
             ReconcileCause::Changed => write!(
                 f,
                 "amendments/{path} is based on {unit} {base}, and src/{path} differs in {unit} \
-                 {resolved}, which the update would select; the file is YAML, TOML, XML, or \
-                 INI, or it or the copy is not UTF-8 text, so the copy follows it only when it \
-                 is unchanged"
+                 {resolved}, which the update would select; the file is XML, or it or the copy \
+                 is not UTF-8 text, so the copy follows it only when it is unchanged"
             ),
             ReconcileCause::Collides(places) => {
                 write!(
@@ -766,6 +765,26 @@ mod tests {
     }
 
     #[test]
+    fn a_changed_yaml_file_is_rebased_by_line_like_text() {
+        let files = files(
+            &[("config/app.yaml", "a: 1\nc: 3\n")],
+            &[("config/app.yaml", "a: 2\nc: 3\n")],
+        );
+
+        let rebased = reconcile_with(
+            &amending("1.0.0"),
+            &files,
+            &copy_of("config/app.yaml", "a: 1\nc: 3\nd: 4\n"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(rebased[&path("config/app.yaml")].copy.clone().unwrap()).unwrap(),
+            "a: 2\nc: 3\nd: 4\n"
+        );
+    }
+
+    #[test]
     fn insertions_the_provider_and_the_copy_make_at_one_place_are_both_kept_provider_first() {
         // Both add a section at the end of the file: the provider in its new
         // version, the copy against the old one.
@@ -817,15 +836,12 @@ mod tests {
     #[test]
     fn a_changed_file_without_a_merge_or_that_is_not_text_is_not_rebased() {
         let new = NOTES_OLD.replace("Two.", "Two, provider.");
-        // YAML has no merge.
-        let files_yaml = files(
-            &[("config/app.yaml", "a: 1\n")],
-            &[("config/app.yaml", "a: 2\n")],
-        );
+        // XML has no merge.
+        let files_xml = files(&[("pom.xml", "<a>1</a>\n")], &[("pom.xml", "<a>2</a>\n")]);
         let errors = reconcile_with(
-            &amending("1.0.0"),
-            &files_yaml,
-            &copy_of("config/app.yaml", "a: 1\nb: 2\n"),
+            &amending_path("pom.xml", "1.0.0"),
+            &files_xml,
+            &copy_of("pom.xml", "<a>1</a>\n<b>2</b>\n"),
         )
         .unwrap_err();
         assert_eq!(errors[0].cause(), &ReconcileCause::Changed);

@@ -583,10 +583,13 @@ fn a_base_the_amender_s_lockfile_misidentifies_is_still_an_integrity_conflict_ac
 }
 
 #[test]
-fn a_file_that_changed_without_a_merge_is_refused_explicitly() {
-    let fixture = Fixture::new("refused-yaml");
+fn a_yaml_file_that_changed_is_merged_by_line_across_versions() {
+    let fixture = Fixture::new("merged-yaml");
     let worker = worker(&fixture);
-    worker.write("src/config.yaml", "a: 1\n");
+    worker.write(
+        "src/compose.yaml",
+        "name: shop\nservices:\n  web:\n    image: app\n",
+    );
     worker.write("manifest.jsonc", &worker_manifest("1.0.1", NAME_PARAM));
     worker.publish("1.0.1");
     succeed(&fixture.assemblr(&fixture.dir, &["registry", "sync"]));
@@ -595,10 +598,46 @@ fn a_file_that_changed_without_a_merge_is_refused_explicitly() {
         &worker,
         "db",
         "1.0.1",
-        &[("config.yaml", "a: 1\nb: 2\n")],
+        &[(
+            "compose.yaml",
+            "name: shop\nservices:\n  web:\n    image: app\n  db:\n    image: postgres\n",
+        )],
     );
     release(&fixture, &worker, "1.1.0", NAME_PARAM, |worker| {
-        worker.write("src/config.yaml", "a: 2\n");
+        worker.write(
+            "src/compose.yaml",
+            "name: store\nservices:\n  web:\n    image: app\n",
+        );
+    });
+    let shop = project(
+        &fixture,
+        "shop",
+        "{\n  \"dependencies\": {\"@acme/db\": \"^1\"},\n  \"options\": {}\n}\n",
+    );
+    succeed(&fixture.assemblr(&shop, &["compose"]));
+    assert_eq!(
+        fs::read_to_string(shop.join("compose.yaml")).unwrap(),
+        "name: store\nservices:\n  web:\n    image: app\n  db:\n    image: postgres\n"
+    );
+}
+
+#[test]
+fn a_file_that_changed_without_a_merge_is_refused_explicitly() {
+    let fixture = Fixture::new("refused-xml");
+    let worker = worker(&fixture);
+    worker.write("src/pom.xml", "<a>1</a>\n");
+    worker.write("manifest.jsonc", &worker_manifest("1.0.1", NAME_PARAM));
+    worker.publish("1.0.1");
+    succeed(&fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    amender(
+        &fixture,
+        &worker,
+        "db",
+        "1.0.1",
+        &[("pom.xml", "<a>1</a>\n<b>2</b>\n")],
+    );
+    release(&fixture, &worker, "1.1.0", NAME_PARAM, |worker| {
+        worker.write("src/pom.xml", "<a>2</a>\n");
     });
     let shop = project(
         &fixture,
@@ -611,7 +650,7 @@ fn a_file_that_changed_without_a_merge_is_refused_explicitly() {
         "{err}"
     );
     assert!(err.contains("`assemblr add @acme/worker@=1.0.1`"), "{err}");
-    assert!(!shop.join("config.yaml").exists());
+    assert!(!shop.join("pom.xml").exists());
 }
 
 #[test]

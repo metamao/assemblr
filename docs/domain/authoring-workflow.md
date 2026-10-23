@@ -171,7 +171,8 @@ dependency; a path the unit's own `src/` holds, which would collide; a path
 the manifest already declares; a file of the same provider that a locked
 dependency, direct or transitive, already amends, naming that amender and
 its version, unless the file is JSON, JSONC, or UTF-8 text outside the
-structured formats the merge does not support, whose amendments the build
+structured formats the merge does not support (XML, and JSON in another case;
+YAML, TOML, and INI are text, owner decision on #92), whose amendments the build
 combines (see
 [amendments-and-composition.md](amendments-and-composition.md#the-merge-engine--approved)),
 in which case the copy is created and the result names the other amenders;
@@ -425,8 +426,9 @@ naming the path and every amender; what a copy carries beyond values is
 reported as a warning. A text file that several units amend is composed by
 line, with a conflict naming the lines and every amender; insertions several
 units make at one position are all kept in the order of the units'
-identities, and the build reports it. A YAML, TOML, XML, or INI file that
-several units amend, or a file or copy that is not UTF-8 text, is not amended
+identities, and the build reports it. YAML, TOML, and INI files are text here
+(owner decision on #92). An XML file that several units amend, or a file or
+copy that is not UTF-8 text, is not amended
 by any of them, and the build is rejected (see
 [amendments-and-composition.md](amendments-and-composition.md#the-merge-engine--approved)).
 The unit's own `src/` file at an amended path is a path collision.
@@ -598,7 +600,8 @@ from the declared base to the new version:
   the declaration's `base` becomes the new version, and the lock records
   that version, in one operation;
 - when the file differs and is text outside the structured formats without a
-  merge (YAML, TOML, XML, INI), the amendment is **rebased**: the changes the
+  merge (XML, and JSON in another case; YAML, TOML, and INI are text, owner
+  decision on #92), the amendment is **rebased**: the changes the
   copy makes against the file at the old base are merged by line into the file
   at the new version, on the source templates and with neither side taking
   precedence, so the copy keeps its template expressions. Insertions the

@@ -243,10 +243,11 @@ composition:
   deterministic conflict detection and strict validation of the output: the
   written text must parse back to exactly the merged value.
 - **JSON and JSONC first**, with format-aware parsing and a format-preserving
-  writer. TOML, YAML, XML, INI, and binary files with several amenders stay
-  refused, and a single amender's copy keeps taking the file's place as it
-  does today, whatever the format. Other UTF-8 text is combined by line, as
-  the next section describes.
+  writer. XML and binary files with several amenders stay refused, and a
+  single amender's copy keeps taking the file's place as it does today,
+  whatever the format. Other UTF-8 text, YAML, TOML, and INI included, is
+  combined by line, as the next section describes (YAML, TOML, and INI:
+  owner decision on #92, which replaces their refusal decided on #33).
 - **Identical contributions** from several amenders are one change.
   **Different changes to one value conflict**, with no precedence and no
   last-writer-wins. A removal, or a replacement by a scalar or a list,
@@ -289,11 +290,11 @@ such as `AGENTS.md`, could not be composed. The details are **Provisional
 (D-20)** (ADR 0021):
 
 - **Scope.** Any file whose provider file and copies are UTF-8 text without a
-  NUL, outside the structured formats the merge does not support: YAML, TOML,
-  XML, and INI files, and JSON in another case, stay refused with several
-  amenders, because a line merge can produce valid text and wrong data such
-  as a key twice. A file or copy that is not text stays refused. A single
-  amender's copy keeps taking the file's place whole.
+  NUL, YAML, TOML, and INI files included (owner decision on #92), outside
+  the structured formats the merge does not support: XML files, and JSON in
+  another case, stay refused with several amenders (**Provisional (D-37)**).
+  A file or copy that is not text stays refused. A single amender's copy
+  keeps taking the file's place whole.
 - **Method.** The provider's file and each copy are rendered as for any
   amendment, compared line by line (a line keeps its terminator), and each
   copy's changes against the verified base are combined. The result is the
@@ -323,8 +324,13 @@ such as `AGENTS.md`, could not be composed. The details are **Provisional
   - `.gitignore` and similar ignore files: a `!` pattern re-includes only what
     the patterns before it excluded, so the order of two units' patterns can
     decide whether a path is ignored;
-  - XML, TOML, or YAML under an extension the merge does not recognize (for
-    example `.svg`, `.csproj`, or `Cargo.lock`), which is merged as text.
+  - YAML, TOML, and INI files: two units that each add the same key leave
+    it twice, which some readers reject and others resolve by taking one of
+    them, and lines added under different parents can land in a block
+    neither unit meant (owner decision on #92: merged by line, with this
+    limit, rather than refused);
+  - XML under an extension the merge does not recognize (for example `.svg`
+    or `.csproj`), which is merged as text.
 
   Such cases are reported only as the warning for insertions at one position.
   Changes to the same line still conflict. The author verifies the composed
@@ -382,9 +388,12 @@ recorded in the decision log:
   on its base is not a formatting matter but a defect in the derivation, and
   it is an error naming the amender, never a warning.
 - The format is recognized by the delivered file's extension, after the
-  template suffix is removed: `.json` or `.jsonc` is JSON; `.yaml`, `.yml`,
-  `.toml`, `.xml`, `.ini`, and `.json` or `.jsonc` in another case are
-  structured formats without an adapter; any other path is text.
+  template suffix is removed: `.json` or `.jsonc` is JSON; `.xml` and
+  `.json` or `.jsonc` in another case are structured formats without an
+  adapter; any other path, `.yaml`, `.yml`, `.toml`, and `.ini` included, is
+  text. A consumer's reconciliation still treats YAML, TOML, and INI as
+  formats without a merge (**Provisional (D-37)**; see
+  [reconciliation details](consumer-projects.md#reconciliation-details--provisional-d-13-to-d-15)).
 
 Open:
 
@@ -467,9 +476,10 @@ until each amender had published again:
   [text files](#text-files--approved-direction-details-provisional-d-20). Changes
   that overlap or touch, including an insertion next to a line the other side
   changed, still collide.
-- **Formats without a merge.** A YAML, TOML, XML, or INI file, and a file that
-  is not UTF-8 text, is applied across versions only when the provider's file
-  has the same bytes at the base and at the resolved version. Otherwise the
+- **Formats without a merge.** An XML file, and a file that is not UTF-8
+  text, is applied across versions only when the provider's file has the same
+  bytes at the base and at the resolved version. YAML, TOML, and INI files are
+  text here (owner decision on #92). Otherwise the
   composition is refused, with no fallback and no replacement.
 - **Rendering.** As described under
   [template contexts](#template-contexts--approved).
