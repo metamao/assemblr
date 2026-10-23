@@ -28,6 +28,8 @@ const PASSTHROUGH: &[&str] = &[
 ];
 
 /// The variables that authenticate Claude Code without the caller's home.
+/// A gateway at `ANTHROPIC_BASE_URL` may authenticate on its own; when it
+/// does not, every run reports that Claude Code ended with an error.
 pub(crate) const AUTHENTICATION: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",

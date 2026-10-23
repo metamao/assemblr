@@ -91,28 +91,18 @@ pub(crate) fn repository(machine: &Machine<'_>, name: &str, dir: &Path) -> Resul
     commit(machine, dir, "Initial commit")
 }
 
-/// The catalog `@acme/catalog` in `catalog/`, listing every unit, with its
-/// index refreshed and committed.
+/// The catalog `@acme/catalog` in `catalog/`, listing every unit by a
+/// `file://` URL, with its index refreshed and committed.
 pub(crate) fn catalog(machine: &Machine<'_>) -> Result<PathBuf, String> {
     let root = &machine.root.path;
-    machine.assemblr(root, &["registry", "create", "@acme/catalog", "catalog"])?;
+    machine.assemblr(root, &["catalog", "init", "@acme/catalog", "catalog"])?;
     let dir = root.join("catalog");
-    let file = dir.join("registry.jsonc");
-    let text = fs::read_to_string(&file)
-        .map_err(|error| format!("cannot read {}: {error}", file.display()))?;
-    let mut registry: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|error| format!("{} is not plain JSON: {error}", file.display()))?;
-    let mut units = serde_json::Map::new();
     for name in UNITS {
         let source = root.join("units").join(name);
-        units.insert(format!("@acme/{name}"), arg(&source)?.into());
+        machine.assemblr(
+            &dir,
+            &["catalog", "add", &format!("file://{}", arg(&source)?)],
+        )?;
     }
-    registry["units"] = units.into();
-    let text = serde_json::to_string_pretty(&registry)
-        .map_err(|error| format!("cannot write {}: {error}", file.display()))?;
-    fs::write(&file, text + "\n")
-        .map_err(|error| format!("cannot write {}: {error}", file.display()))?;
-    machine.assemblr(&dir, &["catalog", "refresh"])?;
-    commit(machine, &dir, "List the acme units")?;
     Ok(dir)
 }

@@ -29,11 +29,18 @@ pub(crate) struct Scenario {
 pub(crate) struct Report {
     pub(crate) checks: Vec<(&'static str, bool)>,
     pub(crate) notes: Vec<String>,
+    /// What went wrong with the run itself rather than with the agent's
+    /// work, such as a timeout or Claude Code failing to start.
+    pub(crate) problems: Vec<String>,
 }
 
 impl Report {
     fn check(&mut self, name: &'static str, passed: bool) {
         self.checks.push((name, passed));
+    }
+
+    pub(crate) fn problem(&mut self, problem: String) {
+        self.problems.push(problem);
     }
 
     pub(crate) fn note(&mut self, note: String) {

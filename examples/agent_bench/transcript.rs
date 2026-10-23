@@ -25,6 +25,10 @@ pub(crate) struct Metrics {
     pub(crate) seconds: f64,
     /// Whether the transcript ends with Claude Code's result event.
     pub(crate) finished: bool,
+    /// How Claude Code says the session ended when it was not a success,
+    /// such as `error_max_budget_usd`: a run cut short, not an agent that
+    /// used Assemblr badly.
+    pub(crate) ended: Option<String>,
 }
 
 /// Commands that read files, for telling a look at Assemblr's state apart
@@ -62,6 +66,10 @@ pub(crate) fn metrics(transcript: &str) -> Metrics {
             }
             Some("result") => {
                 metrics.finished = true;
+                let subtype = event["subtype"].as_str().unwrap_or("unknown");
+                if event["is_error"] == true || subtype != "success" {
+                    metrics.ended = Some(subtype.to_owned());
+                }
                 metrics.cost = event["total_cost_usd"].as_f64().unwrap_or_default();
                 metrics.turns = event["num_turns"].as_u64().unwrap_or_default();
                 metrics.seconds = event["duration_ms"].as_f64().unwrap_or_default() / 1000.0;
@@ -172,7 +180,7 @@ mod tests {
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"2","is_error":true,"content":[{"type":"text","text":"error: unrecognized subcommand 'status'"}]}]}}"#,
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"3","name":"Read","input":{"file_path":"/p/.assemblr/journal.json"}},{"type":"tool_use","id":"4","name":"Bash","input":{"command":"git add .assemblr/ && cat .assemblr/x"}}]}}"#,
             "not json",
-            r#"{"type":"result","total_cost_usd":0.25,"num_turns":7,"duration_ms":61000,"permission_denials":[{}]}"#,
+            r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true,"total_cost_usd":0.25,"num_turns":7,"duration_ms":61000,"permission_denials":[{}]}"#,
         ]
         .join("\n");
         let metrics = metrics(&transcript);
@@ -182,6 +190,7 @@ mod tests {
         assert_eq!(metrics.unknown.into_iter().collect::<Vec<_>>(), ["status"]);
         assert_eq!(metrics.internal_reads, 2);
         assert_eq!((metrics.denials, metrics.turns), (1, 7));
+        assert_eq!(metrics.ended.as_deref(), Some("error_max_budget_usd"));
         assert!((metrics.cost - 0.25).abs() < f64::EPSILON);
     }
 }

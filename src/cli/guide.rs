@@ -60,6 +60,7 @@ mod tests {
                 Err(error) => matches!(
                     error.kind(),
                     ErrorKind::DisplayHelp
+                        | ErrorKind::DisplayVersion
                         | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
                         | ErrorKind::MissingRequiredArgument
                         | ErrorKind::MissingSubcommand

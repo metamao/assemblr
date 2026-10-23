@@ -164,6 +164,20 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
             _ => return Err(USAGE.to_owned()),
         }
     }
+    // A repeated scenario or condition would give two runs the same
+    // directories; `--runs` repeats them instead.
+    let mut seen = Vec::new();
+    options.conditions.retain(|condition| {
+        let new = !seen.contains(condition);
+        seen.push(*condition);
+        new
+    });
+    let mut seen = Vec::new();
+    options.scenarios.retain(|scenario| {
+        let new = !seen.contains(&scenario.name);
+        seen.push(scenario.name);
+        new
+    });
     if options.conditions.is_empty() {
         options.conditions.push(Condition::Pointer);
     }
@@ -333,6 +347,9 @@ fn run_job(job: Job, options: &Options, bin: &Path, fixtures: &Path, results: &P
     for note in &report.notes {
         let _ = writeln!(checks, "NOTE {note}");
     }
+    for problem in &report.problems {
+        let _ = writeln!(checks, "PROBLEM {problem}");
+    }
     if let Err(error) = &result {
         let _ = writeln!(checks, "ERROR {error}");
     }
@@ -400,17 +417,19 @@ fn attempt(
         .map_err(|error| format!("cannot run claude: {error}"))?;
     let started = Instant::now();
     loop {
-        if child
-            .try_wait()
-            .map_err(|error| error.to_string())?
-            .is_some()
-        {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            if !status.success() {
+                report.problem(format!("claude exited with {status}"));
+            }
             break;
         }
         if started.elapsed() > TIMEOUT {
             let _ = child.kill();
             let _ = child.wait();
-            report.note(format!("stopped after {} minutes", TIMEOUT.as_secs() / 60));
+            report.problem(format!(
+                "stopped after {} minutes, at an unknown cost",
+                TIMEOUT.as_secs() / 60
+            ));
             break;
         }
         std::thread::sleep(Duration::from_secs(1));
@@ -512,6 +531,8 @@ fn summary(outcomes: &[Outcome], claude: &str, model: Option<&str>) -> String {
                 || outcome.metrics.internal_reads > 0
                 || outcome.metrics.denials > 0
                 || !outcome.metrics.finished
+                || outcome.metrics.ended.is_some()
+                || !outcome.report.problems.is_empty()
         })
         .collect();
     if !notable.is_empty() {
@@ -531,8 +552,12 @@ fn summary(outcomes: &[Outcome], claude: &str, model: Option<&str>) -> String {
             if let Some(error) = &outcome.error {
                 findings.push(error.clone());
             }
+            findings.extend(outcome.report.problems.iter().cloned());
             if !outcome.metrics.finished {
                 findings.push("no result event".to_owned());
+            }
+            if let Some(ended) = &outcome.metrics.ended {
+                findings.push(format!("Claude Code ended with {ended}"));
             }
             if !outcome.metrics.unknown.is_empty() {
                 let unknown: Vec<_> = outcome.metrics.unknown.iter().map(String::as_str).collect();
