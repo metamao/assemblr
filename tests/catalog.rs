@@ -1,8 +1,7 @@
-//! Catalogs, run as the real binary: creating and refreshing one as its
-//! maintainer, and registering and synchronizing one as a consumer. Units
-//! and catalogs are repositories in the test's directory, declared by
-//! relative path or reached through `file://` URLs, so the tests are
-//! offline.
+//! Catalogs, run as the real binary: creating, editing, and refreshing one
+//! as its maintainer, and registering and synchronizing one as a consumer.
+//! Units and catalogs are repositories in the test's directory, reached
+//! through `file://` URLs, so the tests are offline.
 
 #![allow(
     clippy::unwrap_used,
@@ -27,7 +26,7 @@ impl Fixture {
 
     /// The catalog `@acme/web` in `web`, declaring `units`.
     fn catalog(&self, units: &str) -> PathBuf {
-        succeeds(self.assemblr(&self.dir, &["registry", "create", "@acme/web"]));
+        succeeds(self.assemblr(&self.dir, &["catalog", "init", "@acme/web"]));
         let catalog = self.dir.join("web");
         fs::write(
             catalog.join("registry.jsonc"),
@@ -90,11 +89,9 @@ fn publish(path: &Path, identity: &str, version: &str) {
     git(path, &["tag", &format!("v{version}")]);
 }
 
-/// Refreshes the catalog's index and commits it with `registry.jsonc`.
+/// Refreshes the catalog's index, which commits it with `registry.jsonc`.
 fn commit_refresh(fixture: &Fixture, catalog: &Path) {
     succeeds(fixture.assemblr(catalog, &["catalog", "refresh"]));
-    git(catalog, &["add", "-A"]);
-    git(catalog, &["commit", "-q", "--allow-empty", "-m", "Refresh"]);
 }
 
 fn url(path: &Path) -> String {
@@ -113,7 +110,7 @@ fn index(catalog: &Path) -> Value {
 #[test]
 fn create_makes_a_git_repository_with_an_empty_catalog() {
     let fixture = Fixture::new("init");
-    let created = succeeds(fixture.assemblr(&fixture.dir, &["registry", "create", "@acme/web"]));
+    let created = succeeds(fixture.assemblr(&fixture.dir, &["catalog", "init", "@acme/web"]));
     assert!(
         stdout(&created).contains("Created the catalog @acme/web in web"),
         "{}",
@@ -134,13 +131,13 @@ fn create_makes_a_git_repository_with_an_empty_catalog() {
     assert_eq!(index(&catalog)["units"], serde_json::json!({}));
 
     // A directory with files in it is not used.
-    let rejected = fails(fixture.assemblr(&fixture.dir, &["registry", "create", "@acme/web"]));
+    let rejected = fails(fixture.assemblr(&fixture.dir, &["catalog", "init", "@acme/web"]));
     assert!(
         stderr(&rejected).contains("is not empty"),
         "{}",
         stderr(&rejected)
     );
-    let rejected = fixture.assemblr(&fixture.dir, &["registry", "create", "acme"]);
+    let rejected = fixture.assemblr(&fixture.dir, &["catalog", "init", "acme"]);
     assert!(!rejected.status.success());
     assert!(
         stderr(&rejected).contains(r#"invalid catalog "acme""#),
@@ -150,13 +147,13 @@ fn create_makes_a_git_repository_with_an_empty_catalog() {
 }
 
 #[test]
-fn refresh_indexes_local_and_remote_units_deterministically() {
+fn refresh_indexes_units_deterministically_and_commits() {
     let fixture = Fixture::new("refresh");
-    fixture.unit("node", "@acme/node", &["1.0.0", "1.1.0"]);
+    let node_url = url(&fixture.unit("node", "@acme/node", &["1.0.0", "1.1.0"]));
     let react = fixture.unit("react", "@acme/react", &["2.0.0"]);
     let react_url = url(&react);
     let catalog = fixture.catalog(&format!(
-        r#""@acme/react": "{react_url}", "@acme/node": "../node""#
+        r#""@acme/react": "{react_url}", "@acme/node": "{node_url}""#
     ));
 
     let refreshed = succeeds(fixture.assemblr(&catalog, &["catalog", "refresh"]));
@@ -164,15 +161,21 @@ fn refresh_indexes_local_and_remote_units_deterministically() {
     assert!(out.contains("2 units and 3 versions"), "{out}");
     assert!(out.contains("@acme/node: 1.0.0, 1.1.0"), "{out}");
     assert!(
-        out.contains("Next: commit and push registry-index.json"),
+        out.contains("Committed registry.jsonc and registry-index.json"),
         "{out}"
+    );
+    assert!(out.contains("Next: run `git push`"), "{out}");
+    assert_eq!(git(&catalog, &["status", "--porcelain"]), "");
+    assert_eq!(
+        git(&catalog, &["log", "-1", "--format=%s"]).trim(),
+        "Refresh the catalog index"
     );
 
     let written = index(&catalog);
     assert_eq!(written["format"], 1);
     assert_eq!(written["name"], "@acme/web");
     let node = &written["units"]["@acme/node"];
-    assert_eq!(node["source"], "../node");
+    assert_eq!(node["source"], node_url.as_str());
     let version = &node["versions"]["1.1.0"];
     assert_eq!(
         version["manifest"]["description"],
@@ -184,7 +187,8 @@ fn refresh_indexes_local_and_remote_units_deterministically() {
         react_url.as_str()
     );
 
-    // The same sources give the same bytes, and nothing is rewritten.
+    // The same sources give the same bytes, and nothing is rewritten or
+    // committed.
     let before = fs::read(catalog.join("registry-index.json")).unwrap();
     let again = succeeds(fixture.assemblr(&catalog, &["catalog", "refresh"]));
     assert!(
@@ -192,6 +196,7 @@ fn refresh_indexes_local_and_remote_units_deterministically() {
         "{}",
         stdout(&again)
     );
+    assert!(!stdout(&again).contains("Committed"), "{}", stdout(&again));
     assert_eq!(
         fs::read(catalog.join("registry-index.json")).unwrap(),
         before
@@ -206,33 +211,31 @@ fn refresh_indexes_local_and_remote_units_deterministically() {
 #[test]
 fn a_unit_whose_repository_is_another_unit_is_rejected() {
     let fixture = Fixture::new("mismatch");
-    fixture.unit("node", "@acme/node", &["1.0.0"]);
-    let catalog = fixture.catalog(r#""@acme/deno": "../node""#);
+    let node = fixture.unit("node", "@acme/node", &["1.0.0"]);
+    let catalog = fixture.catalog(&format!(r#""@acme/deno": "{}""#, url(&node)));
 
     let rejected = fails(fixture.assemblr(&catalog, &["catalog", "refresh"]));
     let err = stderr(&rejected);
     assert!(err.contains("@acme/deno"), "{err}");
     assert!(err.contains("@acme/node"), "{err}");
-    assert!(
-        err.contains("note: registry-index.json was not changed"),
-        "{err}"
-    );
+    assert!(err.contains("note: nothing was changed"), "{err}");
     assert!(!catalog.join("registry-index.json").exists());
 }
 
 #[test]
 fn one_unreadable_unit_leaves_the_index_untouched() {
     let fixture = Fixture::new("unreadable");
-    fixture.unit("node", "@acme/node", &["1.0.0"]);
-    let catalog = fixture.catalog(r#""@acme/node": "../node""#);
+    let node = url(&fixture.unit("node", "@acme/node", &["1.0.0"]));
+    let catalog = fixture.catalog(&format!(r#""@acme/node": "{node}""#));
     succeeds(fixture.assemblr(&catalog, &["catalog", "refresh"]));
     let before = fs::read(catalog.join("registry-index.json")).unwrap();
 
+    // One unit that cannot be fetched, and one declared by a local path.
     let missing = url(&fixture.dir.join("missing"));
     fs::write(
         catalog.join("registry.jsonc"),
         format!(
-            r#"{{"name": "@acme/web", "units": {{"@acme/node": "../node", "@acme/gone": "{missing}", "@acme/lost": "../lost"}}}}"#
+            r#"{{"name": "@acme/web", "units": {{"@acme/node": "{node}", "@acme/gone": "{missing}", "@acme/lost": "../node"}}}}"#
         ),
     )
     .unwrap();
@@ -240,7 +243,10 @@ fn one_unreadable_unit_leaves_the_index_untouched() {
     let err = stderr(&rejected);
     // Every failing unit is reported, not only the first.
     assert!(err.contains("@acme/gone"), "{err}");
-    assert!(err.contains("@acme/lost"), "{err}");
+    assert!(
+        err.contains(r#"@acme/lost: "../node" is a local path, which a catalog cannot declare"#),
+        "{err}"
+    );
     assert_eq!(
         fs::read(catalog.join("registry-index.json")).unwrap(),
         before
@@ -253,7 +259,7 @@ fn an_invalid_tag_is_excluded_with_a_warning() {
     let node = fixture.unit("node", "@acme/node", &["1.0.0"]);
     // A tag whose manifest declares another version.
     git(&node, &["tag", "v1.1.0"]);
-    let catalog = fixture.catalog(r#""@acme/node": "../node""#);
+    let catalog = fixture.catalog(&format!(r#""@acme/node": "{}""#, url(&node)));
 
     let refreshed = succeeds(fixture.assemblr(&catalog, &["catalog", "refresh"]));
     assert!(
@@ -470,29 +476,181 @@ fn a_catalog_whose_index_does_not_describe_its_units_is_rejected() {
 }
 
 #[test]
-fn a_local_catalog_is_read_as_committed_and_resolves_relative_paths() {
+fn a_local_catalog_is_read_as_committed() {
     let fixture = Fixture::new("local");
-    fixture.unit("node", "@acme/node", &["1.0.0"]);
-    let catalog = fixture.published_catalog(r#""@acme/node": "../node""#);
+    let node = fixture.unit("node", "@acme/node", &["1.0.0"]);
+    let catalog = fixture.published_catalog(&format!(r#""@acme/node": "{}""#, url(&node)));
     // An uncommitted edit is not read.
     fs::write(catalog.join("registry.jsonc"), "not json").unwrap();
 
     succeeds(fixture.assemblr(&fixture.dir, &["registry", "add", "web"]));
     let listing = fixture.list();
-    let source = listing["units"][0]["source"].as_str().unwrap();
-    assert!(Path::new(source).is_absolute(), "{source}");
-    assert!(source.ends_with("node"), "{source}");
+    assert_eq!(listing["units"][0]["source"], url(&node).as_str());
+}
 
-    // A remote catalog cannot declare a local path.
-    let fixture = Fixture::new("remote_relative");
-    fixture.unit("node", "@acme/node", &["1.0.0"]);
-    let catalog = fixture.published_catalog(r#""@acme/node": "../node""#);
-    let rejected = fails(fixture.assemblr(&fixture.dir, &["registry", "add", &url(&catalog)]));
-    assert!(
-        stderr(&rejected).contains("which a remote catalog cannot declare"),
-        "{}",
-        stderr(&rejected)
+#[test]
+fn a_catalog_cannot_declare_a_local_path() {
+    let fixture = Fixture::new("local_path");
+    let node = fixture.unit("node", "@acme/node", &["1.0.0"]);
+    let catalog = fixture.published_catalog(&format!(r#""@acme/node": "{}""#, url(&node)));
+    // A declaration and an index that agree on a local path, written by
+    // hand, as an earlier Assemblr accepted.
+    for file in ["registry.jsonc", "registry-index.json"] {
+        let text = fs::read_to_string(catalog.join(file)).unwrap();
+        fs::write(catalog.join(file), text.replace(&url(&node), "../node")).unwrap();
+    }
+    git(&catalog, &["commit", "-q", "-am", "Declare a path"]);
+
+    for reference in ["web".to_owned(), url(&catalog)] {
+        let rejected = fails(fixture.assemblr(&fixture.dir, &["registry", "add", &reference]));
+        assert!(
+            stderr(&rejected).contains("is a local path, which a catalog cannot declare"),
+            "{}",
+            stderr(&rejected)
+        );
+    }
+    assert_eq!(
+        fixture.list(),
+        serde_json::json!({ "units": [], "catalogs": [] })
     );
+}
+
+#[test]
+fn add_and_remove_edit_refresh_and_commit_the_catalog() {
+    let fixture = Fixture::new("entries");
+    let node = url(&fixture.unit("node", "@acme/node", &["1.0.0", "1.1.0"]));
+    let api = url(&fixture.unit("api", "@acme/api", &["0.1.0"]));
+    // A unit with a committed manifest and no published version yet.
+    let deno = fixture.unit("deno", "@acme/deno", &["0.1.0"]);
+    git(&deno, &["tag", "-d", "v0.1.0"]);
+    let deno = url(&deno);
+    succeeds(fixture.assemblr(&fixture.dir, &["catalog", "init", "@acme/web"]));
+    let catalog = fixture.dir.join("web");
+    let commits = || git(&catalog, &["log", "--format=%s"]);
+
+    // The name is read from the unit's repository, and the entry is
+    // committed with the index, in a catalog with no commit yet.
+    let added = stdout(&succeeds(
+        fixture.assemblr(&catalog, &["catalog", "add", &node]),
+    ));
+    assert!(
+        added.contains("Added @acme/node to the catalog @acme/web, with versions 1.0.0, 1.1.0"),
+        "{added}"
+    );
+    assert!(added.contains("Next: run `git push`"), "{added}");
+    assert_eq!(commits(), "Add @acme/node to the catalog");
+    assert_eq!(git(&catalog, &["status", "--porcelain"]), "");
+    let versions = &index(&catalog)["units"]["@acme/node"]["versions"];
+    assert_eq!(versions.as_object().unwrap().len(), 2);
+
+    // An entry goes where its name sorts, and the file keeps its comments.
+    let declaration = catalog.join("registry.jsonc");
+    let text = fs::read_to_string(&declaration).unwrap();
+    fs::write(&declaration, format!("// The web units.\n{text}")).unwrap();
+    git(&catalog, &["commit", "-q", "-am", "Comment"]);
+    succeeds(fixture.assemblr(&catalog, &["catalog", "add", &api]));
+    let text = fs::read_to_string(&declaration).unwrap();
+    assert!(text.starts_with("// The web units."), "{text}");
+    let api_at = text.find("@acme/api").unwrap();
+    assert!(api_at < text.find("@acme/node").unwrap(), "{text}");
+
+    // Adding it again changes nothing.
+    let again = stdout(&succeeds(
+        fixture.assemblr(&catalog, &["catalog", "add", &api]),
+    ));
+    assert!(again.contains("declares @acme/api from"), "{again}");
+    assert!(again.contains("nothing changed"), "{again}");
+
+    // A local path, a repository that cannot be read, and a second
+    // repository for a declared unit are refused, and nothing is written.
+    let before = (
+        fs::read(&declaration).unwrap(),
+        fs::read(catalog.join("registry-index.json")).unwrap(),
+        commits(),
+    );
+    let state = || {
+        (
+            fs::read(&declaration).unwrap(),
+            fs::read(catalog.join("registry-index.json")).unwrap(),
+            commits(),
+        )
+    };
+    let rejected = stderr(&fails(
+        fixture.assemblr(&catalog, &["catalog", "add", "../node"]),
+    ));
+    assert!(
+        rejected.contains(r#""../node" is a local path, which a catalog cannot declare"#),
+        "{rejected}"
+    );
+    assert!(rejected.contains("note: nothing was changed"), "{rejected}");
+    let missing = url(&fixture.dir.join("missing"));
+    let rejected = stderr(&fails(
+        fixture.assemblr(&catalog, &["catalog", "add", &missing]),
+    ));
+    assert!(rejected.contains("cannot be added"), "{rejected}");
+    git(
+        &fixture.dir,
+        &["clone", "-q", "--bare", "node", "node-mirror.git"],
+    );
+    let mirror = url(&fixture.dir.join("node-mirror.git"));
+    let rejected = stderr(&fails(
+        fixture.assemblr(&catalog, &["catalog", "add", &mirror]),
+    ));
+    assert!(rejected.contains("declares @acme/node from"), "{rejected}");
+    assert!(
+        rejected.contains("assemblr catalog remove @acme/node"),
+        "{rejected}"
+    );
+    // A unit with no published version is declared all the same.
+    let added = stdout(&succeeds(
+        fixture.assemblr(&catalog, &["catalog", "add", &deno, "--no-commit"]),
+    ));
+    assert!(added.contains("with no published version"), "{added}");
+    assert!(
+        added.contains("Next: commit and push registry.jsonc and registry-index.json"),
+        "{added}"
+    );
+    assert_eq!(commits(), before.2);
+    assert_ne!(state(), before);
+    git(&catalog, &["checkout", "-q", "--", "."]);
+    assert_eq!(state(), before);
+
+    // Removing takes the entry and its versions, and commits.
+    let removed = stdout(&succeeds(
+        fixture.assemblr(&catalog, &["catalog", "remove", "@acme/node"]),
+    ));
+    assert!(
+        removed.contains(&format!("Removed @acme/node, declared from {node}")),
+        "{removed}"
+    );
+    assert!(commits().starts_with("Remove @acme/node from the catalog\n"));
+    assert!(
+        !fs::read_to_string(&declaration)
+            .unwrap()
+            .contains("@acme/node")
+    );
+    assert!(index(&catalog)["units"].get("@acme/node").is_none());
+    let rejected = stderr(&fails(
+        fixture.assemblr(&catalog, &["catalog", "remove", "@acme/node"]),
+    ));
+    assert!(
+        rejected.contains("the catalog @acme/web does not declare @acme/node"),
+        "{rejected}"
+    );
+}
+
+#[test]
+fn a_catalog_commit_leaves_other_changes_alone() {
+    let fixture = Fixture::new("other_changes");
+    let node = url(&fixture.unit("node", "@acme/node", &["1.0.0"]));
+    let catalog = fixture.published_catalog("");
+    fs::write(catalog.join("README.md"), "Web units.\n").unwrap();
+    git(&catalog, &["add", "README.md"]);
+
+    succeeds(fixture.assemblr(&catalog, &["catalog", "add", &node]));
+    let committed = git(&catalog, &["show", "--name-only", "--format=", "HEAD"]);
+    assert_eq!(committed, "registry-index.json\nregistry.jsonc");
+    assert_eq!(git(&catalog, &["status", "--porcelain"]), "A  README.md");
 }
 
 #[test]
@@ -567,8 +725,11 @@ fn a_catalog_cannot_give_a_registered_unit_another_repository() {
 fn publishing_a_catalog_managed_unit_points_to_the_catalog() {
     let fixture = Fixture::new("publish");
     let node = fixture.unit("node", "@acme/node", &["1.0.0"]);
-    fixture.published_catalog(r#""@acme/node": "../node""#);
-    succeeds(fixture.assemblr(&fixture.dir, &["registry", "add", "web"]));
+    // The catalog declares the unit by its URL, and the author publishes
+    // from a checkout, whose path is another reference: the version still
+    // reaches discovery only through the catalog.
+    let catalog = fixture.published_catalog(&format!(r#""@acme/node": "{}""#, url(&node)));
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "add", &url(&catalog)]));
 
     fs::write(
         node.join("manifest.jsonc"),
@@ -584,6 +745,10 @@ fn publishing_a_catalog_managed_unit_points_to_the_catalog() {
     assert!(published.contains("through @acme/web"), "{published}");
     assert!(
         published.contains("assemblr catalog refresh"),
+        "{published}"
+    );
+    assert!(
+        !published.contains("not from this repository"),
         "{published}"
     );
     let versions = &fixture.list()["units"][0]["versions"];

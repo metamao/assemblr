@@ -209,6 +209,11 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
                 Registration::None
             }
             None => match index.units().get(&identity) {
+                // Only the catalogs' indexes list the versions of a unit
+                // they manage, whichever repository it is published from.
+                Some(unit) if !unit.is_direct() => Registration::Managed {
+                    catalogs: index.listing(&identity),
+                },
                 Some(unit) => Registration::Elsewhere {
                     source: unit.source().clone(),
                 },
@@ -263,6 +268,10 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
             published.index = IndexOutcome::RegisteredElsewhere { source };
             return Ok(published);
         }
+        Registration::Managed { catalogs } => {
+            published.index = IndexOutcome::Managed { catalogs };
+            return Ok(published);
+        }
         Registration::None => return Ok(published),
     };
     match registry.index_source(&source) {
@@ -294,6 +303,9 @@ enum Registration {
     Here { source: SourceReference },
     /// It registers the identity from another reference.
     Elsewhere { source: SourceReference },
+    /// Only registered catalogs declare the identity, from another
+    /// reference.
+    Managed { catalogs: Vec<CatalogIdentity> },
     /// It does not register the identity.
     None,
 }

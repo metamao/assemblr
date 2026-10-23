@@ -813,10 +813,17 @@ fn only_the_implemented_registry_commands_are_offered() {
     let output = succeeds(assemblr(&data, &dir, &["registry", "--help"]));
 
     let help = stdout(&output);
-    for command in ["create", "add", "list", "remove", "sync"] {
+    for command in ["add", "list", "remove", "sync"] {
         assert!(help.contains(&format!("  {command} ")), "{command}: {help}");
     }
-    for missing in ["info", "doctor"] {
+    for missing in ["info", "doctor", "create"] {
         assert!(!help.contains(missing), "{missing}: {help}");
+    }
+
+    // A catalog's maintainer has commands of their own.
+    let output = succeeds(assemblr(&data, &dir, &["catalog", "--help"]));
+    let help = stdout(&output);
+    for command in ["init", "add", "remove", "refresh"] {
+        assert!(help.contains(&format!("  {command} ")), "{command}: {help}");
     }
 }

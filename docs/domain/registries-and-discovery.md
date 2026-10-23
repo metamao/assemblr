@@ -293,7 +293,7 @@ contents.
   "name": "@metamao/cloudflare",
   "units": {
     "@metamao/cloudflare-worker": "git@github.com:metamao/worker.git",
-    "@metamao/node": "../assemblr-node"
+    "@metamao/node": "https://github.com/metamao/assemblr-node.git"
   }
 }
 ```
@@ -304,10 +304,10 @@ contents.
   **separate namespaces**.
 - `units` maps each expected unit identity **directly** to a Git repository
   reference. A reference is a **plain string**, not an object.
-- HTTPS, SSH, and local Git repository references are permitted.
-- A relative local reference resolves against the **catalog's root**, never
-  against the caller's working directory. Local references may not be
-  portable between environments.
+- HTTPS and SSH Git repository references are permitted, and `file://` URLs.
+  A local path is **not** a valid reference, absolute or relative: a catalog
+  is shared between machines, and a path names nothing on another one. This
+  holds for a catalog registered from a local path as well.
 - A referenced unit's manifest must declare **exactly** the identity the
   catalog declares for it. The manifest remains authoritative, and a catalog
   never overrides it.
@@ -326,16 +326,17 @@ contents.
   authoring or publishing a unit.
 - A catalog needs no SemVer version and no unit-style release publication.
 - A catalog can be shared or cloned onto other machines.
-- `registry create` initializes a new catalog. Entries may be edited directly
-  in `registry.jsonc`, then validated through registration or synchronization.
+- `catalog init` initializes a new catalog. `catalog add` and `catalog
+  remove` add and remove entries. Entries may also be edited directly in
+  `registry.jsonc`, then validated through refresh, registration, or
+  synchronization.
 
 Open:
 
 - Whether `registry.jsonc` may contain fields beyond `name` and `units`; how
   conflicting catalog identities are handled; which revision synchronization
-  reads for a local catalog, and how uncommitted local catalog changes are
-  treated; and how identical references are recognized when relative
-  references come from different catalogs. **OC-32.**
+  reads for a local catalog; and how uncommitted local catalog changes are
+  treated. **OC-32.**
 
 ## Catalog metadata index — Approved
 
@@ -615,7 +616,6 @@ The user-facing registry command surface is deliberately minimal:
 
 | Command | Responsibility |
 |---------|----------------|
-| `registry create` | Initialize a new Git catalog. |
 | `registry add` | Register and validate a source. |
 | `registry remove` | Remove a registered source. |
 | `registry list` | List registered sources. |
@@ -623,13 +623,19 @@ The user-facing registry command surface is deliberately minimal:
 | `registry sync` | Synchronize registered catalogs and units. |
 | `registry doctor` | Diagnose registry inconsistencies. |
 
-The table fixes **responsibilities**, not arguments or flags. There are no
-commands solely for adding or removing individual catalog entries: entries are
-edited in `registry.jsonc` and validated through registration or
-synchronization.
+The table fixes **responsibilities**, not arguments or flags.
 
-Catalog maintenance adds one conceptual operation outside this table,
-[catalog refresh](#catalog-refresh--approved).
+Catalog maintenance adds operations outside this table, run by its
+maintainer: initializing a new catalog's Git repository, [catalog
+refresh](#catalog-refresh--approved), and adding and removing an entry of
+`registry.jsonc`. They are grouped under `catalog`, apart from the
+consumer's `registry` commands. Adding an entry takes only the unit's repository
+reference: the identity is read from the unit's manifest, never typed a
+second time. Both refresh the catalog's metadata index in the same step, so
+the declaration and the index never disagree, and neither writes anything
+unless the whole refresh succeeds. Refresh, add, and remove commit
+`registry.jsonc` and the index, and nothing else, unless the maintainer asks
+them not to. None of them pushes.
 
 ### Implemented grammar — Approved
 
@@ -705,14 +711,17 @@ assemblr registry sync
   versions and, separately, the tags excluded and not indexed.
 
 For catalogs, the maintainer's commands (**Provisional (D-36)**, see
-[ADR 0030](../adr/0030-catalog-index.md)):
+[ADR 0030](../adr/0030-catalog-index.md); `catalog add` and `catalog remove`
+**Provisional (D-45)**, see [ADR 0033](../adr/0033-catalog-entry-commands.md)):
 
 ```text
-assemblr registry create <catalog> [<directory>]
-assemblr catalog refresh
+assemblr catalog init <catalog> [<directory>]
+assemblr catalog add <reference> [--no-commit]
+assemblr catalog remove <identity> [--no-commit]
+assemblr catalog refresh [--no-commit]
 ```
 
-- `registry create` makes a Git repository in `<directory>`, by default the
+- `catalog init` makes a Git repository in `<directory>`, by default the
   catalog's name in the current directory, which must be new or empty, and
   writes a `registry.jsonc` with the catalog identity and no units. It
   commits nothing.
@@ -721,12 +730,29 @@ assemblr catalog refresh
   catalog manifest.
 - `catalog refresh` runs at the catalog's root and reads `registry.jsonc` from
   the working tree, so uncommitted edits count. For each declared unit it
-  resolves the reference (a relative path against the catalog's root),
-  fetches a remote one as `registry add` does, and validates the published
-  versions as registration does, including that the repository declares the
-  identity the catalog gives it. It then writes `registry-index.json` at the
-  catalog's root, replacing the old one only if the content changed, and
-  commits nothing.
+  takes the reference, which must be remote, fetches it as `registry add`
+  does, and validates the published versions as registration does,
+  including that the repository declares the identity the catalog gives it.
+  It then writes `registry-index.json` at the catalog's root, replacing the
+  old one only if the content changed.
+- `catalog add` takes a reference `registry add` accepts for a remote
+  repository. It reads the unit's identity as registration does, from its
+  valid tags, or its committed manifest when it has none. It inserts the
+  entry into `registry.jsonc` where its identity sorts, keeping the file's
+  comments and layout, refreshes the whole index from the edited
+  declaration, and writes the index, then `registry.jsonc`, only when the
+  refresh succeeds. A unit already declared from the same reference changes
+  nothing; one declared from another reference is refused, so changing a
+  unit's repository is a `remove` and an `add`.
+- `catalog remove` takes the unit's identity, which must be declared,
+  removes its entry, and refreshes and writes as `add` does. The unit's
+  repository is not touched.
+- `catalog add`, `catalog remove`, and `catalog refresh` then commit
+  `registry.jsonc` and `registry-index.json` when the working tree changes
+  them, and no other path, with a fixed message, the user's Git
+  configuration and identity, and the repository's hooks. Other staged
+  changes stay staged. `--no-commit` writes the files and stops. A commit
+  that fails leaves the files written and says so. Nothing is pushed.
 - The index is JSON with sorted keys, two-space indentation, and a trailing
   newline: `format` (1), `name`, and `units`, from identity to `source` (the
   reference as declared) and `versions`, from version to `commit`, `tree`
@@ -746,8 +772,8 @@ assemblr catalog refresh
   `registry-index.json` are read as committed at `HEAD`, never from a
   working tree, and must agree: the same catalog, units, and references. A
   catalog with no committed index is refused, with a hint to run `catalog
-  refresh`. A relative reference resolves against a local catalog's
-  directory; a remote catalog can declare only remote references.
+  refresh`. A catalog declares only remote references, whether it is
+  registered from a path or a URL.
 - Registering or synchronizing a catalog reads only the catalog, never its
   units' repositories. Each manifest its index lists must be valid and
   declare the listed unit and version. A unit only catalogs declare is
@@ -776,7 +802,9 @@ assemblr catalog refresh
   removes a catalog and the units only it declares.
 - `unit publish` of a unit only catalogs manage indexes nothing, and says
   that the version becomes discoverable once the catalog is refreshed,
-  pushed, and synchronized.
+  pushed, and synchronized. This holds whichever repository the version is
+  published from, such as a local checkout of the unit the catalog
+  declares by URL.
 
 For a registered unit, the top-level `info` command (**Provisional (D-19)**):
 
@@ -839,9 +867,8 @@ Open:
 
 - Exact grammar, arguments, and flags beyond the implemented grammar above,
   including for catalogs and remote sources; how `registry info` relates to the
-  top-level `info` command; what `registry doctor` does beyond diagnosis; and
-  how catalog operations (`registry create`, catalog refresh) are grouped.
-  **OC-7.**
+  top-level `info` command; and what `registry doctor` does beyond
+  diagnosis. **OC-7.**
 
 ## Discovery and information — Approved
 

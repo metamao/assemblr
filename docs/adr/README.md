@@ -46,6 +46,7 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0027](0027-journal-format-compatibility.md) | Journal formats: a number for every change, and readers that refuse what they do not know | Accepted, consumer journal at format 3 since #101 |
 | [0028](0028-isolated-validation.md) | Isolated validation: shared test fixtures, a sandbox for manual runs, and a reference scenario | Accepted |
 | [0029](0029-remote-sources.md) | Remote unit sources: bare copies, what is fetched, the fetch environment, and accepted transports | Accepted |
-| [0030](0030-catalog-index.md) | Catalog index: `registry-index.json`, embedded manifests, and all-or-nothing refresh | Accepted |
-| [0031](0031-catalog-registration.md) | Catalog registration: catalogs in the registry index, versions from the catalog index, and content on demand | Accepted |
+| [0030](0030-catalog-index.md) | Catalog index: `registry-index.json`, embedded manifests, and all-or-nothing refresh | Accepted, refresh commits and references are URLs since 0033 |
+| [0031](0031-catalog-registration.md) | Catalog registration: catalogs in the registry index, versions from the catalog index, and content on demand | Accepted, point 4 amended by 0033 |
 | [0032](0032-layered-amendments.md) | Layered amendments: the base below an amender, marked sibling conflicts, the pending state, and the rebase in `unit update` | Accepted |
+| [0033](0033-catalog-entry-commands.md) | Catalog entry commands: `catalog init`, `add`, and `remove`, URL-only references, and commits | Accepted |

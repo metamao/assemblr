@@ -121,7 +121,7 @@ Details that are still open are listed in
 | **Contribution** | What a unit adds beyond its dependencies: files, amendments, or meaningful configuration of dependencies. |
 | **Local registry** | The CLI-managed subsystem, global to the user's Assemblr installation, that records registered sources, their published versions, and discoverable metadata. |
 | **Registered source** | A unit repository or a catalog that has been explicitly registered and validated. |
-| **Catalog** | A Git repository with an `@owner/name` identity, in a namespace separate from units, whose `registry.jsonc` maps unit identities to Git repository references. An inventory of sources: it contains no unit sources, and its hand-maintained declaration lists no unit versions. |
+| **Catalog** | A Git repository with an `@owner/name` identity, in a namespace separate from units, whose `registry.jsonc` maps unit identities to Git repository references. An inventory of sources: it contains no unit sources, and its declaration lists no unit versions. |
 | **Catalog manifest** | `registry.jsonc`, the catalog's declarative manifest: a `name` and a `units` map of identities to plain-string Git references. |
 | **Catalog metadata index** | The Assemblr-generated, derived metadata a catalog publishes about the published versions of the units it declares. Never edited by hand. Unit manifests remain authoritative. |
 | **Source** | The Git repository reference from which a unit is obtained. Different references are never assumed to denote the same repository. |
