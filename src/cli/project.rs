@@ -12,8 +12,8 @@ use std::process::ExitCode;
 
 use assemblr::adapters::{
     BuildProblem, ComposeFailure, ComposeProblem, ComposeRecovery, Composed, DeclarationChange,
-    FileChange, InitProjectFailure, Registry, StoreError, WriteStep, abort_compose, add_unit,
-    compose_project, continue_compose, init_project, remove_unit, update_units,
+    FileChange, GitErrorKind, InitProjectFailure, Registry, StoreError, WriteStep, abort_compose,
+    add_unit, compose_project, continue_compose, init_project, remove_unit, update_units,
 };
 use assemblr::domain::{LockChange, LockError, ResolutionError, UnitIdentity};
 use clap::Args;
@@ -745,6 +745,14 @@ fn build_advice(problem: &BuildProblem) -> Option<String> {
         }
         BuildProblem::Resolution(ResolutionError::Missing { .. }) => {
             "register the unit's repository with `assemblr registry add <path>`".to_owned()
+        }
+        BuildProblem::Source { error, .. }
+            if matches!(error.kind(), GitErrorKind::Unretrievable(_)) =>
+        {
+            format!(
+                "check that `git ls-remote {}` works with your Git credentials",
+                error.repository().display()
+            )
         }
         BuildProblem::Source { .. } => "if a registered repository was moved or deleted, \
                                         `assemblr registry remove <identity>` removes its \

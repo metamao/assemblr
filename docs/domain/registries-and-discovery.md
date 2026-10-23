@@ -673,16 +673,28 @@ assemblr registry sync
       {
         "identity": "@acme/node",
         "source": "/home/me/units/node",
+        "direct": true,
+        "catalogs": ["@acme/web"],
         "versions": [
           { "commit": "<commit id>", "tree": "<tree id>", "version": "1.0.0" }
         ]
+      }
+    ],
+    "catalogs": [
+      {
+        "identity": "@acme/web",
+        "source": "git@github.com:acme/web.git",
+        "commit": "<catalog commit id>",
+        "units": ["@acme/node"]
       }
     ]
   }
   ```
 
-  Units are ordered by identity, and versions in SemVer order. `source` is the
-  stored [reference](#local-repository-references--approved). `commit` is the
+  Units and catalogs are ordered by identity, and versions in SemVer order.
+  `direct` says whether the unit is registered by itself, and `catalogs`
+  lists the registered catalogs that declare it (**Provisional (D-39)**).
+  `source` is the stored [reference](#local-repository-references--approved). `commit` is the
   version's provenance and `tree` its content identity, as lowercase
   hexadecimal Git object ids. The order of keys within an object is not
   significant. Fields may be added, and existing fields keep their meaning. A
@@ -727,7 +739,44 @@ assemblr catalog refresh
   other than the declared one, a source conflict) is reported for every
   failing unit, rejects the refresh, and leaves `registry-index.json`
   unchanged.
-- Registering or synchronizing a catalog is not implemented yet.
+- `registry add` takes a catalog's path or reference as well
+  (**Provisional (D-39)**, see [ADR 0031](../adr/0031-catalog-registration.md)).
+  A repository whose `HEAD` has a `registry.jsonc` and no `manifest.jsonc`
+  is a catalog; one with both is refused. Its `registry.jsonc` and
+  `registry-index.json` are read as committed at `HEAD`, never from a
+  working tree, and must agree: the same catalog, units, and references. A
+  catalog with no committed index is refused, with a hint to run `catalog
+  refresh`. A relative reference resolves against a local catalog's
+  directory; a remote catalog can declare only remote references.
+- Registering or synchronizing a catalog reads only the catalog, never its
+  units' repositories. Each manifest its index lists must be valid and
+  declare the listed unit and version. A unit only catalogs declare is
+  indexed with the versions their indexes list, with the listed commit and
+  tree; a unit also registered directly is indexed from its own tags, and a
+  catalog that lists another commit for one of its versions is rejected. Any
+  problem rejects the whole registration or synchronization.
+- `search` and `info` describe a unit only catalogs declare from the
+  manifest its catalog lists, until its content has been retrieved.
+- A remote unit's content is retrieved into its copy the first time an
+  operation reads a version the copy does not hold: `add`, `compose`, and
+  `update` in a project, and `unit build`, `unit check`, `unit update`, and
+  `unit amend` for a dependency. This retrieves exactly the
+  commit the index records, which must still exist and hold the indexed
+  tree and manifest, so it never changes what is indexed or resolved
+  (**Provisional (D-39)**, under OC-42).
+- `registry sync` reads directly registered units, then each catalog again
+  as committed at its `HEAD`: units it now declares are registered, units it
+  no longer declares leave the registry unless they are registered directly
+  or another catalog declares them, and newly listed versions are indexed.
+  A catalog that now declares another identity, or another repository for a
+  registered unit, is a conflict.
+- `registry remove <identity>` removes a direct registration; a unit a
+  catalog still declares stays, managed by it. A unit only catalogs manage
+  cannot be removed by itself. `registry remove --catalog <identity>`
+  removes a catalog and the units only it declares.
+- `unit publish` of a unit only catalogs manage indexes nothing, and says
+  that the version becomes discoverable once the catalog is refreshed,
+  pushed, and synchronized.
 
 For a registered unit, the top-level `info` command (**Provisional (D-19)**):
 

@@ -403,6 +403,48 @@ fn lists_are_whole_values_and_jsonc_comments_and_trailing_commas_survive() {
 }
 
 #[test]
+fn appends_of_scalars_to_one_list_are_joined() {
+    // Each amender appends to the provider's list, one item shared.
+    let fixture = Fixture::new("lists-joined");
+    let db = PACKAGE.replace("[\"dist\"]", "[\"dist\", \"migrations\", \"README.md\"]");
+    let api = PACKAGE.replace("[\"dist\"]", "[\"dist\", \"README.md\", \"openapi.json\"]");
+    // Each amender creates the same list of flags, with its own flag.
+    let db_flags = WRANGLER.replace(
+        "  \"compatibility_date\": \"2026-01-01\",\n",
+        "  \"compatibility_date\": \"2026-01-01\",\n  \"compatibility_flags\": [\"nodejs_compat\"],\n",
+    );
+    let api_flags = WRANGLER.replace(
+        "  \"compatibility_date\": \"2026-01-01\",\n",
+        "  \"compatibility_date\": \"2026-01-01\",\n  \"compatibility_flags\": [\"global_fetch\"],\n",
+    );
+    let (_worker, app) = scenario(
+        &fixture,
+        &[
+            ("package.json", &db),
+            ("wrangler.jsonc.assemblr.tmpl", &db_flags),
+        ],
+        &[
+            ("package.json", &api),
+            ("wrangler.jsonc.assemblr.tmpl", &api_flags),
+        ],
+    );
+    succeeds(fixture.build(&app));
+    // The provider's items first, then each amender's new ones in identity
+    // order (@acme/api before @acme/db), each item once.
+    let package = app.read("build/package.json");
+    assert!(
+        package.contains("\"files\": [\"dist\", \"README.md\", \"openapi.json\", \"migrations\"]"),
+        "{package}"
+    );
+    let wrangler = app.read("build/wrangler.jsonc");
+    assert!(
+        wrangler.contains("\"compatibility_flags\": [\"global_fetch\", \"nodejs_compat\"],"),
+        "{wrangler}"
+    );
+    assert!(wrangler.contains("// The worker's name."), "{wrangler}");
+}
+
+#[test]
 fn what_a_copy_carries_beyond_values_is_reported_and_the_build_succeeds() {
     let fixture = Fixture::new("notes");
     let commented = PACKAGE.replace(

@@ -365,7 +365,10 @@ fn listing_an_empty_registry_creates_no_state() {
 
     let output = succeeds(assemblr(&data, &dir, &["registry", "list"]));
     assert!(stdout(&output).contains("No unit repositories are registered"));
-    assert_eq!(list_json(&data, &dir), serde_json::json!({ "units": [] }));
+    assert_eq!(
+        list_json(&data, &dir),
+        serde_json::json!({ "units": [], "catalogs": [] })
+    );
     succeeds(assemblr(&data, &dir, &["registry", "sync"]));
 
     assert!(!data.exists());
@@ -697,7 +700,10 @@ fn removal_drops_only_the_registration() {
     let output = succeeds(assemblr(&data, &dir, &["registry", "remove", "@acme/node"]));
 
     assert!(stdout(&output).contains("The repository was not modified"));
-    assert_eq!(list_json(&data, &dir), serde_json::json!({ "units": [] }));
+    assert_eq!(
+        list_json(&data, &dir),
+        serde_json::json!({ "units": [], "catalogs": [] })
+    );
     assert_eq!(repo.git(&["status", "--porcelain"]), status);
     assert_eq!(repo.rev("HEAD"), head);
     assert_eq!(repo.rev("v1.0.0"), head);

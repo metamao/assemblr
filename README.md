@@ -109,6 +109,18 @@ assemblr unit publish                # tag the committed version
 git push --follow-tags               # share the commit and its tag
 ```
 
+**Share units through a catalog.** A catalog is a Git repository that lists
+unit repositories, so one `registry add` registers them all.
+
+```sh
+assemblr registry create @acme/web   # create web/ with an empty registry.jsonc
+cd web                               # list units in registry.jsonc
+assemblr catalog refresh             # write registry-index.json from their tags
+git add -A && git commit -m "Index" && git push
+assemblr registry add git@github.com:acme/web.git   # on any machine with access
+assemblr registry sync               # pick up what the catalog lists since
+```
+
 Every command explains itself with `--help`, including examples. The
 concepts and the guarantees are in [`docs/domain/`](docs/domain/README.md).
 

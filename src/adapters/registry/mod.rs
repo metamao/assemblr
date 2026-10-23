@@ -22,21 +22,24 @@ use std::sync::Arc;
 
 pub(crate) use self::observe as observe_tags;
 pub use info::{Found, InfoFailure, Search, UnitInfo};
-pub(crate) use reference::catalog_reference;
 use reference::is_remote_reference;
 pub use reference::{ReferenceError, local_reference, source_reference};
+pub(crate) use reference::{catalog_reference, declared_reference};
 use sha2::{Digest, Sha256};
 pub use store::StorageError;
 use store::Store;
 
+use super::catalog::{CatalogProblem, PublishedCatalog, is_catalog, read_published_catalog};
 use super::git::{
     FetchError, GitError, GitRepository, HeadManifestError, InvalidVersion, ReadFileError,
     ReadSrcError, VersionTag, fetch,
 };
 use super::lockfile::{PublishedLockfileError, read_published};
 use crate::domain::{
-    Excluded, ObservedTag, ObservedVersion, PublishedAmendmentError, RegisteredUnit, RegistryError,
-    RegistryIndex, SourceReference, UnitIdentity, Version, declared_identity, published_amendments,
+    CatalogIdentity, Change, Excluded, ObjectId, ObservedTag, ObservedVersion,
+    PublishedAmendmentError, RegisteredUnit, RegistryError, RegistryIndex, RemovedCatalog,
+    SourceReference, UnitIdentity, Unremovable, Version, catalog_tags, declared_identity,
+    published_amendments,
 };
 
 /// The environment variable that places the registry under another
@@ -93,11 +96,20 @@ impl Registry {
         GitRepository::open(&copy)
     }
 
-    /// Opens the repository registered from `source` in the user's registry,
-    /// as [`open_source`](Self::open_source) does. Callers that hold only an
-    /// index use this: there is one registry per user, so it is the one the
-    /// index came from.
-    pub(crate) fn open_registered(source: &SourceReference) -> Result<GitRepository, GitError> {
+    /// Opens the repository registered from `source` in the user's registry
+    /// to read the content of `commits`, which the index records for it.
+    /// Callers that hold only an index use this: there is one registry per
+    /// user, so it is the one the index came from.
+    ///
+    /// A remote source whose copy is missing or lacks one of `commits` is
+    /// fetched first: that is how the content of a unit only catalogs
+    /// manage is retrieved, when a build or a composition first needs it.
+    /// The index is never changed, and the caller checks that each commit
+    /// still has the tree the index records.
+    pub(crate) fn open_registered(
+        source: &SourceReference,
+        commits: &[&ObjectId],
+    ) -> Result<GitRepository, GitError> {
         if !is_remote_reference(source) {
             return GitRepository::open(Path::new(source.as_str()));
         }
@@ -107,7 +119,26 @@ impl Registry {
                 format!("the registry that holds its copy cannot be found: {error}"),
             )
         })?;
-        registry.open_source(source)
+        if registry.copy_of(source).is_dir() {
+            let repository = registry.open_source(source)?;
+            if repository.has_commits(commits)? {
+                return Ok(repository);
+            }
+        }
+        registry.fetch_source(source).map_err(|error| {
+            GitError::unretrievable(PathBuf::from(source.as_str()), error.to_string())
+        })?;
+        let repository = registry.open_source(source)?;
+        if repository.has_commits(commits)? {
+            Ok(repository)
+        } else {
+            Err(GitError::unretrievable(
+                PathBuf::from(source.as_str()),
+                "it no longer has a commit that was indexed, so a published version was \
+                 rewritten"
+                    .to_owned(),
+            ))
+        }
     }
 
     /// Where the copy of the remote `source` is kept: a directory named by
@@ -134,22 +165,20 @@ impl Registry {
         Ok(self.store.load()?.unwrap_or_default())
     }
 
-    /// Registers the unit repository `path` names: a local path, or a remote
-    /// reference, which is fetched first.
+    /// Registers the unit repository or catalog `path` names: a local path,
+    /// or a remote reference, which is fetched first.
     ///
-    /// Its valid published versions are indexed, after their `src/` is
+    /// A unit's valid published versions are indexed, after their `src/` is
     /// read and validated, and invalid version tags are excluded. With no
     /// valid version, the unit's identity comes from the manifest committed
-    /// at `HEAD`. A repository already registered by the same reference is
-    /// left as it is.
+    /// at `HEAD`. A repository whose `HEAD` has a `registry.jsonc` and no
+    /// manifest is a catalog, registered as [`add_catalog`] describes. A
+    /// source already registered by the same reference is left as it is.
     pub fn add(&self, path: &Path) -> Result<Added, RegistryFailure> {
         let source = source_reference(path)?;
         let current = self.index()?;
-        if let Some(identity) = current.identity_of(&source) {
-            return Ok(Added::AlreadyRegistered {
-                identity: identity.clone(),
-                source,
-            });
+        if let Some(already) = already_registered(&current, &source) {
+            return Ok(already);
         }
         self.fetch_source(&source).map_err(|error| {
             RegistryFailure::Rejected(vec![Problem::Unfetchable {
@@ -159,6 +188,11 @@ impl Registry {
         })?;
         let unreadable = |error| RegistryFailure::unreadable(&source, error);
         let repository = self.open_source(&source).map_err(unreadable)?;
+        let catalog = is_catalog(&repository)
+            .map_err(|problem| RegistryFailure::catalog(&source, problem))?;
+        if catalog {
+            return self.add_catalog(source, &repository, &current);
+        }
         let tags = observe(&repository, None).map_err(unreadable)?;
         let identity = match declared_identity(&source, &tags) {
             Ok(Some(identity)) => identity,
@@ -182,16 +216,18 @@ impl Registry {
             .map_err(RegistryFailure::invalid)?;
         let lock = self.store.lock()?;
         let latest = self.index()?;
-        if let Some(identity) = latest.identity_of(&source) {
-            return Ok(Added::AlreadyRegistered {
-                identity: identity.clone(),
-                source,
-            });
+        if let Some(already) = already_registered(&latest, &source) {
+            return Ok(already);
         }
         let change = latest
             .add(source.clone(), identity.clone(), tags)
             .map_err(RegistryFailure::invalid)?;
-        let versions = change.added().get(&identity).cloned().unwrap_or_default();
+        let versions = change
+            .index()
+            .units()
+            .get(&identity)
+            .map(|unit| unit.versions().keys().cloned().collect())
+            .unwrap_or_default();
         let (index, excluded) = change.into_parts();
         self.store.replace(&lock, &index)?;
         Ok(Added::Registered {
@@ -200,6 +236,118 @@ impl Registry {
             versions,
             excluded,
         })
+    }
+
+    /// Registers the catalog in `repository`, from `source`.
+    ///
+    /// The catalog's `registry.jsonc` and `registry-index.json` are read as
+    /// committed at `HEAD`, and must agree. A unit only the catalog declares
+    /// is indexed with the versions its index lists, from that metadata
+    /// alone: its repository is fetched when a build or a composition first
+    /// needs its content. Any problem rejects the registration.
+    ///
+    /// [`add_catalog`]: Self::add
+    fn add_catalog(
+        &self,
+        source: SourceReference,
+        repository: &GitRepository,
+        current: &RegistryIndex,
+    ) -> Result<Added, RegistryFailure> {
+        let published = read_published_catalog(repository, &source)
+            .map_err(|problem| RegistryFailure::catalog(&source, problem))?;
+        // Decided once before the lock, as `add` does, and again under it.
+        let apply = |index: &RegistryIndex| {
+            index
+                .apply_catalog(
+                    published.identity().clone(),
+                    published.registered(source.clone()),
+                    Self::observe_catalog(index, &published),
+                )
+                .map_err(RegistryFailure::invalid)
+        };
+        apply(current)?;
+        let lock = self.store.lock()?;
+        let latest = self.index()?;
+        if let Some(already) = already_registered(&latest, &source) {
+            return Ok(already);
+        }
+        let change = apply(&latest)?;
+        let units = published
+            .units()
+            .keys()
+            .map(|identity| {
+                let versions = change
+                    .index()
+                    .units()
+                    .get(identity)
+                    .map(|unit| unit.versions().keys().cloned().collect())
+                    .unwrap_or_default();
+                (identity.clone(), versions)
+            })
+            .collect();
+        let (index, excluded) = change.into_parts();
+        self.store.replace(&lock, &index)?;
+        Ok(Added::CatalogRegistered {
+            catalog: published.identity().clone(),
+            source,
+            units,
+            excluded,
+        })
+    }
+
+    /// The versions `published` lists for each unit it declares, as the
+    /// observations [`RegistryIndex::apply_catalog`] takes. The units'
+    /// repositories are not read: their content is retrieved, and checked
+    /// against these versions, when a build or a composition first needs it.
+    fn observe_catalog(
+        index: &RegistryIndex,
+        published: &PublishedCatalog,
+    ) -> BTreeMap<UnitIdentity, Vec<ObservedTag<TagProblem>>> {
+        published
+            .units()
+            .iter()
+            .map(|(identity, listed)| {
+                let indexed = index
+                    .units()
+                    .get(identity)
+                    .filter(|unit| unit.source() == listed.source());
+                (
+                    identity.clone(),
+                    catalog_tags(identity, &listed.provenances(), indexed),
+                )
+            })
+            .collect()
+    }
+
+    /// Fetches `source` unless this operation fetched it already, and
+    /// whether it is fetched. A source that fails is reported in `problems`
+    /// once.
+    fn fetch_once(
+        &self,
+        source: &SourceReference,
+        fetched: &mut Fetched,
+        problems: &mut Vec<Problem>,
+    ) -> bool {
+        if fetched.done.contains(source) {
+            return true;
+        }
+        if fetched.failed.contains(source) {
+            return false;
+        }
+        match self.fetch_source(source) {
+            Ok(()) => {
+                fetched.done.insert(source.clone());
+                true
+            }
+            Err(error) => {
+                fetched.failed.insert(source.clone());
+                problems.push(Problem::Unfetchable {
+                    source: source.clone(),
+                    error,
+                });
+                false
+            }
+        }
     }
 
     /// Reads the repository registered from `source` again, and indexes the
@@ -219,6 +367,11 @@ impl Registry {
             return Ok(Indexed::NotRegistered);
         };
         let identity = identity.clone();
+        if !unit.is_direct() {
+            return Ok(Indexed::Managed {
+                catalogs: index.listing(&identity),
+            });
+        }
         let tags = self
             .open_source(source)
             .and_then(|repository| observe(&repository, Some(unit)))
@@ -238,24 +391,58 @@ impl Registry {
         })
     }
 
-    /// Removes the registration of `identity`, and returns it. The
-    /// repository is not touched, and need not exist any more.
-    pub fn remove(&self, identity: &UnitIdentity) -> Result<RegisteredUnit, RegistryFailure> {
-        let not_registered = || RegistryFailure::NotRegistered(identity.clone());
-        if self.index()?.remove(identity).is_none() {
-            return Err(not_registered());
-        }
+    /// Removes the direct registration of `identity`, and returns it with
+    /// the catalogs that still declare the unit, which keep it registered.
+    /// The repository is not touched, and need not exist any more. A unit
+    /// only catalogs manage is not removed by itself.
+    pub fn remove(&self, identity: &UnitIdentity) -> Result<Removed, RegistryFailure> {
+        let unremovable = |error| match error {
+            Unremovable::NotRegistered => RegistryFailure::NotRegistered(identity.clone()),
+            Unremovable::Managed(catalogs) => RegistryFailure::Managed {
+                identity: identity.clone(),
+                catalogs,
+            },
+        };
+        self.index()?.remove(identity).map_err(unremovable)?;
         let lock = self.store.lock()?;
-        let (index, removed) = self.index()?.remove(identity).ok_or_else(not_registered)?;
-        self.store.replace(&lock, &index)?;
+        let removed = self.index()?.remove(identity).map_err(unremovable)?;
+        self.store.replace(&lock, removed.index())?;
+        Ok(Removed {
+            unit: removed.unit().clone(),
+            kept_by: removed.kept_by().to_vec(),
+        })
+    }
+
+    /// Removes the catalog `identity`, and every unit only it manages. The
+    /// catalog's repository is not touched.
+    pub fn remove_catalog(
+        &self,
+        identity: &CatalogIdentity,
+    ) -> Result<RemovedCatalog, RegistryFailure> {
+        let not_registered = || RegistryFailure::CatalogNotRegistered(identity.clone());
+        self.index()?
+            .remove_catalog(identity)
+            .ok_or_else(not_registered)?;
+        let lock = self.store.lock()?;
+        let removed = self
+            .index()?
+            .remove_catalog(identity)
+            .ok_or_else(not_registered)?;
+        self.store.replace(&lock, removed.index())?;
         Ok(removed)
     }
 
-    /// Reads every registered repository again, fetching each remote one
-    /// first, and indexes the versions they have published since.
+    /// Reads every registered repository and catalog again, fetching each
+    /// remote one first, and indexes the versions they have published since.
     ///
-    /// A source that cannot be fetched or read, or any conflict in any unit,
-    /// rejects the whole synchronization, and every problem is reported.
+    /// Units registered directly are read first. Each catalog is then read
+    /// as committed at its `HEAD`, as [`add`](Self::add) reads one: units it
+    /// now declares are registered, units it no longer declares leave the
+    /// registry unless something else keeps them, and the versions its index
+    /// lists are indexed. The repositories of units only catalogs manage are
+    /// not fetched. A source that cannot be fetched or read, or any
+    /// conflict in any unit or catalog, rejects the whole synchronization,
+    /// and every problem is reported.
     pub fn sync(&self) -> Result<Synced, RegistryFailure> {
         if self.store.load()?.is_none() {
             return Ok(Synced::default());
@@ -263,13 +450,13 @@ impl Registry {
         let lock = self.store.lock()?;
         let index = self.index()?;
         let mut problems = Vec::new();
+        let mut fetched = Fetched::default();
         let mut observed = BTreeMap::new();
         for (identity, unit) in index.units() {
-            if let Err(error) = self.fetch_source(unit.source()) {
-                problems.push(Problem::Unfetchable {
-                    source: unit.source().clone(),
-                    error,
-                });
+            if !unit.is_direct() {
+                continue;
+            }
+            if !self.fetch_once(unit.source(), &mut fetched, &mut problems) {
                 continue;
             }
             let tags = self
@@ -285,26 +472,140 @@ impl Registry {
                 }),
             }
         }
-        let change = match index.sync(observed) {
-            Ok(change) if problems.is_empty() => change,
-            Ok(_) => return Err(RegistryFailure::Rejected(problems)),
+        let mut next = match index.sync(observed) {
+            Ok(change) => Synchronizing::from(change),
             Err(errors) => {
                 problems.extend(errors.into_iter().map(Problem::Invalid));
-                return Err(RegistryFailure::Rejected(problems));
+                Synchronizing::from(Change::unchanged_from(&index))
             }
         };
-        let units = index.units().len();
-        let added = change.added().clone();
-        let (next, excluded) = change.into_parts();
-        if next != index {
-            self.store.replace(&lock, &next)?;
+        for catalog in index.catalogs().values() {
+            let source = catalog.source();
+            if !self.fetch_once(source, &mut fetched, &mut problems) {
+                continue;
+            }
+            let published = self
+                .open_source(source)
+                .map_err(CatalogProblem::Unreadable)
+                .and_then(|repository| read_published_catalog(&repository, source));
+            let published = match published {
+                Ok(published) => published,
+                Err(problem) => {
+                    problems.push(Problem::Catalog {
+                        catalog: source.clone(),
+                        problem,
+                    });
+                    continue;
+                }
+            };
+            let observed = Self::observe_catalog(&next.index, &published);
+            match next.index.apply_catalog(
+                published.identity().clone(),
+                published.registered(source.clone()),
+                observed,
+            ) {
+                Ok(change) => next.merge(change),
+                Err(errors) => problems.extend(errors.into_iter().map(Problem::Invalid)),
+            }
+        }
+        if !problems.is_empty() {
+            return Err(RegistryFailure::Rejected(problems));
+        }
+        let Synchronizing {
+            index: synced,
+            mut added,
+            mut excluded,
+            removed,
+        } = next;
+        // A unit removed after versions were indexed for it in the same
+        // synchronization is reported only as removed.
+        added.retain(|identity, _| !removed.contains(identity));
+        excluded.retain(|excluded| !removed.contains(excluded.identity()));
+        if synced != index {
+            self.store.replace(&lock, &synced)?;
         }
         Ok(Synced {
-            units,
+            units: synced.units().len(),
+            catalogs: synced.catalogs().len(),
             added,
             excluded,
+            removed,
         })
     }
+}
+
+/// The sources one operation has fetched, so each is fetched once.
+#[derive(Debug, Default)]
+struct Fetched {
+    done: std::collections::BTreeSet<SourceReference>,
+    failed: std::collections::BTreeSet<SourceReference>,
+}
+
+/// A synchronization's changes so far.
+struct Synchronizing {
+    index: RegistryIndex,
+    added: BTreeMap<UnitIdentity, Vec<Version>>,
+    excluded: Vec<Excluded<TagProblem>>,
+    removed: Vec<UnitIdentity>,
+}
+
+impl From<Change<TagProblem>> for Synchronizing {
+    fn from(change: Change<TagProblem>) -> Self {
+        let added = change.added().clone();
+        let removed = change.removed().to_vec();
+        let (index, excluded) = change.into_parts();
+        Self {
+            index,
+            added,
+            excluded,
+            removed,
+        }
+    }
+}
+
+impl Synchronizing {
+    fn merge(&mut self, change: Change<TagProblem>) {
+        let Self {
+            index,
+            added,
+            excluded,
+            removed,
+        } = Self::from(change);
+        self.index = index;
+        for (identity, mut versions) in added {
+            let entry = self.added.entry(identity).or_default();
+            entry.append(&mut versions);
+            entry.sort();
+            entry.dedup();
+        }
+        self.excluded.extend(excluded);
+        self.excluded
+            .sort_by(|a, b| (a.identity(), a.tag()).cmp(&(b.identity(), b.tag())));
+        for identity in removed {
+            if !self.removed.contains(&identity) {
+                self.removed.push(identity);
+            }
+        }
+        self.removed.sort();
+    }
+}
+
+/// The outcome for `source` when it is registered already, as a unit
+/// registered directly or as a catalog.
+fn already_registered(index: &RegistryIndex, source: &SourceReference) -> Option<Added> {
+    if let Some(catalog) = index.catalog_of(source) {
+        return Some(Added::CatalogAlreadyRegistered {
+            catalog: catalog.clone(),
+            source: source.clone(),
+        });
+    }
+    let identity = index.identity_of(source)?;
+    index.units()[identity]
+        .is_direct()
+        .then(|| Added::AlreadyRegistered {
+            identity: identity.clone(),
+            source: source.clone(),
+        })
 }
 
 /// Reads the version tags of `repository`. The `src/` and `amendments/` of
@@ -396,6 +697,44 @@ pub enum Added {
         /// The reference.
         source: SourceReference,
     },
+    /// The catalog was registered.
+    CatalogRegistered {
+        /// The catalog's identity.
+        catalog: CatalogIdentity,
+        /// Its reference.
+        source: SourceReference,
+        /// Each unit it declares, with its indexed versions in order.
+        units: BTreeMap<UnitIdentity, Vec<Version>>,
+        /// The version tags excluded as invalid.
+        excluded: Vec<Excluded<TagProblem>>,
+    },
+    /// The same reference was already registered as a catalog, and nothing
+    /// changed.
+    CatalogAlreadyRegistered {
+        /// The catalog's identity.
+        catalog: CatalogIdentity,
+        /// The reference.
+        source: SourceReference,
+    },
+}
+
+/// A removed direct registration.
+#[derive(Debug)]
+pub struct Removed {
+    unit: RegisteredUnit,
+    kept_by: Vec<CatalogIdentity>,
+}
+
+impl Removed {
+    /// The registration as it was.
+    pub fn unit(&self) -> &RegisteredUnit {
+        &self.unit
+    }
+
+    /// The catalogs that still declare the unit, which keep it registered.
+    pub fn kept_by(&self) -> &[CatalogIdentity] {
+        &self.kept_by
+    }
 }
 
 /// The outcome of indexing one registered source again.
@@ -412,14 +751,22 @@ pub enum Indexed {
     },
     /// No unit is registered from the source, so nothing changed.
     NotRegistered,
+    /// Only catalogs manage the unit, so its versions are those their
+    /// indexes list, and nothing changed.
+    Managed {
+        /// The catalogs that declare it.
+        catalogs: Vec<CatalogIdentity>,
+    },
 }
 
 /// The outcome of a synchronization.
 #[derive(Debug, Default)]
 pub struct Synced {
     units: usize,
+    catalogs: usize,
     added: BTreeMap<UnitIdentity, Vec<Version>>,
     excluded: Vec<Excluded<TagProblem>>,
+    removed: Vec<UnitIdentity>,
 }
 
 impl Synced {
@@ -428,9 +775,20 @@ impl Synced {
         self.units
     }
 
+    /// How many catalogs were synchronized.
+    pub fn catalogs(&self) -> usize {
+        self.catalogs
+    }
+
     /// The newly indexed versions of each unit.
     pub fn added(&self) -> &BTreeMap<UnitIdentity, Vec<Version>> {
         &self.added
+    }
+
+    /// The units that left the registry because no catalog declares them
+    /// any more, in order.
+    pub fn removed(&self) -> &[UnitIdentity] {
+        &self.removed
     }
 
     /// The version tags excluded as invalid.
@@ -487,6 +845,15 @@ pub enum RegistryFailure {
     Reference(ReferenceError),
     /// The identity is not registered.
     NotRegistered(UnitIdentity),
+    /// No catalog is registered for the identity.
+    CatalogNotRegistered(CatalogIdentity),
+    /// Only catalogs manage the unit, so it cannot be removed by itself.
+    Managed {
+        /// The unit.
+        identity: UnitIdentity,
+        /// The catalogs that declare it.
+        catalogs: Vec<CatalogIdentity>,
+    },
     /// The operation was rejected. Every problem found is listed.
     Rejected(Vec<Problem>),
 }
@@ -501,6 +868,13 @@ impl RegistryFailure {
 
     fn invalid(errors: Vec<RegistryError<TagProblem>>) -> Self {
         Self::Rejected(errors.into_iter().map(Problem::Invalid).collect())
+    }
+
+    fn catalog(catalog: &SourceReference, problem: CatalogProblem) -> Self {
+        Self::Rejected(vec![Problem::Catalog {
+            catalog: catalog.clone(),
+            problem,
+        }])
     }
 }
 
@@ -522,6 +896,20 @@ impl fmt::Display for RegistryFailure {
             Self::Storage(error) => error.fmt(f),
             Self::Reference(error) => error.fmt(f),
             Self::NotRegistered(identity) => write!(f, "{identity} is not registered"),
+            Self::CatalogNotRegistered(identity) => {
+                write!(f, "no catalog {identity} is registered")
+            }
+            Self::Managed { identity, catalogs } => {
+                write!(f, "{identity} is registered through the catalog")?;
+                if catalogs.len() > 1 {
+                    f.write_str("s")?;
+                }
+                for (index, catalog) in catalogs.iter().enumerate() {
+                    f.write_str(if index == 0 { " " } else { ", " })?;
+                    catalog.fmt(f)?;
+                }
+                f.write_str(", not by itself")
+            }
             Self::Rejected(problems) => {
                 for (index, problem) in problems.iter().enumerate() {
                     if index > 0 {
@@ -564,6 +952,13 @@ pub enum Problem {
     },
     /// What was read breaks the registry's rules.
     Invalid(RegistryError<TagProblem>),
+    /// A catalog cannot be registered or synchronized.
+    Catalog {
+        /// The catalog's source.
+        catalog: SourceReference,
+        /// What is wrong.
+        problem: CatalogProblem,
+    },
 }
 
 impl fmt::Display for Problem {
@@ -577,6 +972,7 @@ impl fmt::Display for Problem {
                  the manifest committed at `HEAD`, but {error}"
             ),
             Self::Invalid(error) => error.fmt(f),
+            Self::Catalog { catalog, problem } => write!(f, "catalog {catalog}: {problem}"),
         }
     }
 }

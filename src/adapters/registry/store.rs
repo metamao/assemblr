@@ -16,7 +16,8 @@ use serde_json::{Map, Value, json};
 
 use super::reference::{is_local_reference, is_remote, remote_reference};
 use crate::domain::{
-    ObjectId, Provenance, RegisteredUnit, RegistryIndex, SourceReference, UnitIdentity, Version,
+    CatalogIdentity, ObjectId, Provenance, RegisteredCatalog, RegisteredUnit, RegistryIndex,
+    SourceReference, UnitIdentity, Version,
 };
 
 /// The index's file.
@@ -25,11 +26,12 @@ const INDEX: &str = "index.json";
 const TEMPORARY: &str = "index.json.tmp";
 /// The file writers lock.
 const LOCK: &str = "lock";
-/// The version of the index's format. Format 2 allows remote sources, so a
-/// version of Assemblr that reads only format 1 refuses the index rather
-/// than misreading it. Format 1 is still read, and is written as 2 by the
-/// next change. Any other version is rejected, never guessed at.
-const FORMAT: u64 = 2;
+/// The version of the index's format. Format 2 allows remote sources, and
+/// format 3 adds catalogs and units only catalogs manage, so a version of
+/// Assemblr that reads only an earlier format refuses the index rather than
+/// misreading it. Formats 1 and 2 are still read, and are written as 3 by
+/// the next change. Any other version is rejected, never guessed at.
+const FORMAT: u64 = 3;
 
 /// The registry's directory.
 #[derive(Debug, Clone)]
@@ -127,19 +129,43 @@ fn serialize(index: &RegistryIndex) -> Value {
                 .collect();
             (
                 identity.to_string(),
-                json!({ "source": unit.source().as_str(), "versions": versions }),
+                json!({
+                    "source": unit.source().as_str(),
+                    "direct": unit.is_direct(),
+                    "versions": versions,
+                }),
             )
         })
         .collect();
-    json!({ "format": FORMAT, "units": units })
+    let catalogs: Map<String, Value> = index
+        .catalogs()
+        .iter()
+        .map(|(identity, catalog)| {
+            let units: Map<String, Value> = catalog
+                .units()
+                .iter()
+                .map(|(unit, source)| (unit.to_string(), json!(source.as_str())))
+                .collect();
+            (
+                identity.to_string(),
+                json!({
+                    "source": catalog.source().as_str(),
+                    "commit": catalog.commit().as_str(),
+                    "units": units,
+                }),
+            )
+        })
+        .collect();
+    json!({ "format": FORMAT, "units": units, "catalogs": catalogs })
 }
 
 /// Reads an index, or describes what is wrong with it.
 fn parse(bytes: &[u8]) -> Result<RegistryIndex, String> {
     let value: Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     let root = object(&value, "the index")?;
-    let remote_allowed = match root.get("format").and_then(Value::as_u64) {
-        Some(FORMAT) => true,
+    let format = root.get("format").and_then(Value::as_u64);
+    let remote_allowed = match format {
+        Some(2 | FORMAT) => true,
         Some(1) => false,
         Some(other) => {
             return Err(format!(
@@ -153,15 +179,16 @@ fn parse(bytes: &[u8]) -> Result<RegistryIndex, String> {
         let identity = UnitIdentity::parse(key).map_err(|error| error.to_string())?;
         let context = format!("unit {identity}");
         let unit = object(unit, &context)?;
-        let source = field(unit, "source", &context)?
-            .as_str()
-            .filter(|source| {
-                is_local_reference(source)
-                    || (remote_allowed && is_remote(source) && remote_reference(source).is_ok())
-            })
-            .ok_or_else(|| {
+        let source =
+            stored_source(field(unit, "source", &context)?, remote_allowed).ok_or_else(|| {
                 format!("{context} has no absolute, normalized source path or remote reference")
             })?;
+        let direct = match (format, unit.get("direct")) {
+            (Some(FORMAT), Some(Value::Bool(direct))) => *direct,
+            (Some(FORMAT), _) => return Err(format!("{context} has no valid `direct`")),
+            // Earlier formats have only units registered directly.
+            _ => true,
+        };
         let mut versions = BTreeMap::new();
         for (key, provenance) in object(field(unit, "versions", &context)?, &context)? {
             let version = Version::parse(key).map_err(|error| error.to_string())?;
@@ -175,17 +202,55 @@ fn parse(bytes: &[u8]) -> Result<RegistryIndex, String> {
             };
             versions.insert(version, Provenance::new(id("commit")?, id("tree")?));
         }
-        units.insert(
-            identity,
-            RegisteredUnit::new(SourceReference::new(source), versions),
-        );
+        let source = SourceReference::new(source);
+        let unit = if direct {
+            RegisteredUnit::new(source, versions)
+        } else {
+            RegisteredUnit::managed(source, versions)
+        };
+        units.insert(identity, unit);
     }
-    RegistryIndex::from_units(units).map_err(|errors| {
+    let mut catalogs = BTreeMap::new();
+    if format == Some(FORMAT) {
+        for (key, catalog) in object(field(root, "catalogs", "the index")?, "`catalogs`")? {
+            let identity = CatalogIdentity::parse(key).map_err(|error| error.to_string())?;
+            let context = format!("catalog {identity}");
+            let catalog = object(catalog, &context)?;
+            let source = stored_source(field(catalog, "source", &context)?, true)
+                .ok_or_else(|| format!("{context} has no valid source"))?;
+            let commit = field(catalog, "commit", &context)?
+                .as_str()
+                .and_then(ObjectId::parse)
+                .ok_or_else(|| format!("{context} has an invalid `commit`"))?;
+            let mut declared = BTreeMap::new();
+            for (unit, reference) in object(field(catalog, "units", &context)?, &context)? {
+                let unit = UnitIdentity::parse(unit).map_err(|error| error.to_string())?;
+                let reference = stored_source(reference, true)
+                    .ok_or_else(|| format!("{context} has no valid source for {unit}"))?;
+                declared.insert(unit, SourceReference::new(reference));
+            }
+            catalogs.insert(
+                identity,
+                RegisteredCatalog::new(SourceReference::new(source), commit, declared),
+            );
+        }
+    }
+    RegistryIndex::from_parts(units, catalogs).map_err(|errors| {
         errors
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("; ")
+    })
+}
+
+/// A stored source reference, if it is one Assemblr would have stored: an
+/// absolute, normalized local path, or a remote reference when the format
+/// allows them.
+fn stored_source(value: &Value, remote_allowed: bool) -> Option<&str> {
+    value.as_str().filter(|source| {
+        is_local_reference(source)
+            || (remote_allowed && is_remote(source) && remote_reference(source).is_ok())
     })
 }
 
@@ -280,7 +345,8 @@ mod tests {
 
     use super::{parse, serialize};
     use crate::domain::{
-        ObjectId, Provenance, RegisteredUnit, RegistryIndex, SourceReference, UnitIdentity, Version,
+        CatalogIdentity, ObjectId, Provenance, RegisteredCatalog, RegisteredUnit, RegistryIndex,
+        SourceReference, UnitIdentity, Version,
     };
 
     fn root() -> String {
@@ -336,12 +402,13 @@ mod tests {
             "https://github.com/acme/node.git"
         );
         assert!(parse(remote(1).as_bytes()).unwrap_err().contains("remote"));
-        // Format 1 is still read, and written as format 2.
+        // Formats 1 and 2 are still read, and written as format 3.
         let local = serde_json::json!({"format": 1, "units": {"@acme/node": {
             "source": format!("{}units", root()), "versions": {}
         }}});
         let index = parse(local.to_string().as_bytes()).unwrap();
-        assert_eq!(serialize(&index)["format"], 2);
+        assert_eq!(serialize(&index)["format"], 3);
+        assert!(index.units().values().all(RegisteredUnit::is_direct));
         // A reference Assemblr would never fetch is not accepted from a file.
         let unsafe_source = serde_json::json!({"format": 2, "units": {"@acme/node": {
             "source": "ext::sh -c id", "versions": {}
@@ -350,12 +417,42 @@ mod tests {
     }
 
     #[test]
+    fn catalogs_and_managed_units_round_trip() {
+        let node = UnitIdentity::parse("@acme/node").unwrap();
+        let source = SourceReference::new("https://example.com/node.git");
+        let index = RegistryIndex::from_parts(
+            BTreeMap::from([(
+                node.clone(),
+                RegisteredUnit::managed(source.clone(), BTreeMap::new()),
+            )]),
+            BTreeMap::from([(
+                CatalogIdentity::parse("@acme/web").unwrap(),
+                RegisteredCatalog::new(
+                    SourceReference::new("git@example.com:acme/web.git"),
+                    ObjectId::parse(&"c".repeat(40)).unwrap(),
+                    BTreeMap::from([(node, source)]),
+                ),
+            )]),
+        )
+        .unwrap();
+        let bytes = serde_json::to_vec(&serialize(&index)).unwrap();
+
+        assert_eq!(parse(&bytes), Ok(index));
+        // A managed unit no catalog declares breaks the index.
+        let orphan = serde_json::json!({"format": 3, "catalogs": {}, "units": {"@acme/node": {
+            "source": "https://example.com/node.git", "direct": false, "versions": {}
+        }}});
+        let error = parse(orphan.to_string().as_bytes()).unwrap_err();
+        assert!(error.contains("neither registered directly"), "{error}");
+    }
+
+    #[test]
     fn invalid_indexes_are_rejected_with_a_reason() {
         let source = format!("{}units", root());
         let cases = [
             ("[]".to_owned(), "not a JSON object"),
             (r#"{"units": {}}"#.to_owned(), "no format"),
-            (r#"{"format": 3, "units": {}}"#.to_owned(), "format 3"),
+            (r#"{"format": 4, "units": {}}"#.to_owned(), "format 4"),
             (r#"{"format": 1, "units": {"acme": {}}}"#.to_owned(), "acme"),
             (
                 r#"{"format": 1, "units": {"@acme/node": {"source": "units", "versions": {}}}}"#

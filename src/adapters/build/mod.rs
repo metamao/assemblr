@@ -971,18 +971,18 @@ impl Dependencies {
                 unit: identity.clone(),
                 error,
             };
-            let repository = match Registry::open_registered(unit.source()) {
+            let commits: Vec<&ObjectId> = unit
+                .versions()
+                .values()
+                .map(|provenance| provenance.commit())
+                .collect();
+            let repository = match Registry::open_registered(unit.source(), &commits) {
                 Ok(repository) => repository,
                 Err(error) => {
                     problems.push(unreadable(error));
                     continue;
                 }
             };
-            let commits: Vec<&ObjectId> = unit
-                .versions()
-                .values()
-                .map(|provenance| provenance.commit())
-                .collect();
             let outcomes = match repository.read_published(&commits) {
                 Ok(outcomes) => outcomes,
                 Err(error) => {
