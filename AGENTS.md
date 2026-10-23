@@ -285,7 +285,7 @@ hand on a branch when a change needs Windows or the MSRV before the merge.
   (ADR 0028).
 - **Agents on real tasks:** `cargo agent-bench` gives Claude Code fixed
   scenarios against a development build and reports how it did
-  ([ADR 0033](docs/adr/0033-agent-bench.md)). It costs money and never runs
+  ([ADR 0034](docs/adr/0034-agent-bench.md)). It costs money and never runs
   in CI. Run it before a release, and in a change to the agent guide, a
   command or workflow the guide describes, or a hint agents follow, on the
   scenarios it affects (`cargo agent-bench --list`). Say in the PR what ran

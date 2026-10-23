@@ -1,4 +1,4 @@
-//! The agent bench's fixtures and checks, without an agent (ADR 0033).
+//! The agent bench's fixtures and checks, without an agent (ADR 0034).
 //!
 //! The bench itself runs Claude Code and never runs in CI. This test builds
 //! every scenario's starting state with the binary under test, so that a

@@ -2,7 +2,7 @@
 //! checks of the state it leaves.
 //!
 //! Prompts are in Spanish, as in the measurements this bench reproduces
-//! (ADR 0033). Checks look only at the end state, never at how the agent got
+//! (ADR 0034). Checks look only at the end state, never at how the agent got
 //! there; the transcript metrics cover that.
 
 use std::fs;

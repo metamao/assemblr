@@ -1,5 +1,5 @@
 //! Gives coding agents (Claude Code) tasks that call for Assemblr, against a
-//! development build, and reports how they did. See ADR 0033.
+//! development build, and reports how they did. See ADR 0034.
 //!
 //! ```text
 //! cargo agent-bench [--condition <condition>]... [--runs <n>] [--jobs <n>]

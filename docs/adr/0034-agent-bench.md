@@ -1,4 +1,4 @@
-# 0033: The agent bench: coding agents on fixed scenarios, run by hand before a release
+# 0034: The agent bench: coding agents on fixed scenarios, run by hand before a release
 
 - **Status:** Accepted
 - **Date:** 2026-10-23

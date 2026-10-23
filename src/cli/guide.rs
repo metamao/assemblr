@@ -23,45 +23,52 @@ pub(super) fn run() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use clap::error::ErrorKind;
     use clap::{Command, CommandFactory};
 
     use super::GUIDE;
     use crate::cli::Cli;
 
-    /// Every `assemblr ...` command line quoted in `text` whose subcommands or
-    /// long flags the CLI does not define.
+    /// Every `assemblr ...` command line quoted in `text` that the CLI's own
+    /// parser rejects: an unknown subcommand, flag, or argument, or a flag
+    /// on the wrong command. A placeholder such as `<path or URL>` stands for
+    /// one value, a line without a command's required arguments still names
+    /// it, and values themselves are not checked.
     fn unknown_commands(text: &str, cli: &Command) -> Vec<String> {
         let mut unknown = Vec::new();
         for quoted in text.split('`').skip(1).step_by(2) {
             let Some(rest) = quoted.strip_prefix("assemblr ") else {
                 continue;
             };
-            let mut command = cli;
+            if rest.starts_with('<') {
+                continue; // `assemblr <command> --help` names no command.
+            }
+            let mut words = vec!["assemblr".to_owned()];
+            let mut placeholder = false;
             for word in rest.split_whitespace() {
-                if let Some(flag) = word.strip_prefix("--") {
-                    let known = flag == "help"
-                        || command
-                            .get_arguments()
-                            .any(|argument| argument.get_long() == Some(flag));
-                    if !known {
-                        unknown.push(quoted.to_owned());
-                    }
-                } else if word.chars().all(|c| c.is_ascii_lowercase()) {
-                    // A plain word right after a command with subcommands
-                    // must be one of them; anything else is an argument.
-                    if command.has_subcommands() {
-                        match command.find_subcommand(word) {
-                            Some(sub) => command = sub,
-                            None => {
-                                unknown.push(quoted.to_owned());
-                                break;
-                            }
-                        }
-                    }
-                } else if command.has_subcommands() && !word.starts_with('<') {
-                    unknown.push(quoted.to_owned());
-                    break;
+                if placeholder {
+                    placeholder = !word.ends_with('>');
+                } else if word.starts_with('<') {
+                    words.push("value".to_owned());
+                    placeholder = !word.ends_with('>');
+                } else {
+                    words.push(word.to_owned());
                 }
+            }
+            let accepted = match cli.clone().try_get_matches_from(words) {
+                Ok(_) => true,
+                Err(error) => matches!(
+                    error.kind(),
+                    ErrorKind::DisplayHelp
+                        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                        | ErrorKind::MissingRequiredArgument
+                        | ErrorKind::MissingSubcommand
+                        | ErrorKind::InvalidValue
+                        | ErrorKind::ValueValidation
+                ),
+            };
+            if !accepted {
+                unknown.push(quoted.to_owned());
             }
         }
         unknown
@@ -76,13 +83,19 @@ mod tests {
     #[test]
     fn a_command_or_flag_that_does_not_exist_is_reported() {
         let text = "Run `assemblr frobnicate`, `assemblr unit shrink`, \
-                    `assemblr compose --resume`, and `assemblr add @acme/web --option a=b`.";
+                    `assemblr compose --resume`, `assemblr compose continue`, \
+                    `assemblr compose -c`, `assemblr unit build --continue`, \
+                    `assemblr add @acme/web --option a=b`, `assemblr registry add <path or URL>`, \
+                    `assemblr add`, and `assemblr <command> --help`.";
         assert_eq!(
             unknown_commands(text, &Cli::command()),
             [
                 "assemblr frobnicate",
                 "assemblr unit shrink",
-                "assemblr compose --resume"
+                "assemblr compose --resume",
+                "assemblr compose continue",
+                "assemblr compose -c",
+                "assemblr unit build --continue",
             ]
         );
     }
