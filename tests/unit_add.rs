@@ -472,20 +472,24 @@ fn a_unit_cannot_add_itself_and_an_unknown_unit_leaves_the_manifest_alone() {
 #[test]
 fn a_requirement_spelled_differently_is_kept_as_written() {
     let fixture = Fixture::new("a_requirement_spelled_differently_is_kept_as_written");
-    fixture.base();
+    let tool = fixture.repo("tool");
+    tool.write("manifest.jsonc", &manifest("@acme/tool", "1.0.0", &[], ""));
+    tool.write("src/tool.txt", "tool\n");
+    tool.publish("1.0.0");
+    fixture.register(&tool);
     let app = fixture.app();
     app.write(
         "manifest.jsonc",
         &manifest(
             "@acme/app",
             "0.1.0",
-            &[("@acme/base", ">=1.0.0,<2.0.0")],
+            &[("@acme/tool", ">=1.0.0,<2.0.0")],
             "",
         ),
     );
     succeeds(fixture.assemblr(&app.path, &["unit", "build"]));
     let before = app.read("manifest.jsonc");
-    let output = succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
+    let output = succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/tool"]));
     assert!(
         stdout(&output).contains("already a dependency (>=1.0.0,<2.0.0)"),
         "{}",
