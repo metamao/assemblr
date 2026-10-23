@@ -1840,8 +1840,8 @@ fn a_dependent_builds_with_the_amendments_a_transitive_dependency_publishes() {
     assert!(fresh.read("assemblr-lock.json").contains("\"1.1.0\""));
 
     // 1.2.0 changes a line of `bin/run` that the amender changed too, which
-    // collides, and the YAML template the amender amends, which has no merge
-    // and is applied across versions only when unchanged. Nothing is built.
+    // collides, and adds a line to the YAML template next to the line the
+    // amender changed, which the line merge reports too. Nothing is built.
     node.write("manifest.jsonc", &node_manifest("1.2.0"));
     node.write("src/bin/run", "#!/bin/sh\necho node v3\n");
     node.write(
@@ -1856,7 +1856,7 @@ fn a_dependent_builds_with_the_amendments_a_transitive_dependency_publishes() {
         "src/bin/run of @acme/node 1.2.0 is amended by @acme/app, and the amendments cannot be \
          combined: the amendment of @acme/app and the provider change the same lines",
         "line 2: @acme/app sets \"echo amended\"; @acme/node sets \"echo node v3\"",
-        "its format has no merge (it is applied across versions only to a file that is unchanged)",
+        "line 2: @acme/app sets \"name: Demo\"; @acme/node adds \"owner: node\"",
         "the amendment of @acme/app was taken from @acme/node 1.0.0",
         "note: build/ and assemblr-lock.json were not changed",
         "`\"@acme/node\": \"=1.0.0\"` in the manifest's `dependencies`",
@@ -1957,8 +1957,8 @@ fn several_amenders_of_one_text_file_are_combined_by_line() {
         err.contains(
             "src/bin/run of @acme/node 1.0.0 is amended by this unit, @acme/app 0.1.0; several \
              amendments of one file are combined for JSON, JSONC, and UTF-8 text files, but not \
-             for YAML, TOML, XML, or INI files or a file that is not text, and no amender takes \
-             precedence, so the file is not amended"
+             for XML files or a file that is not text, and no amender takes precedence, so the \
+             file is not amended"
         ),
         "{err}"
     );

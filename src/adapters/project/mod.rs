@@ -644,7 +644,7 @@ fn compose_with(
     let mergeable = |path: &RelativePath| {
         if previously_unbased.contains(path) {
             Mergeability::BaseNotStored
-        } else if MergeFormat::of_path(path) == MergeFormat::Unsupported {
+        } else if MergeFormat::of_project_path(path) == MergeFormat::Unsupported {
             Mergeability::Format
         } else {
             Mergeability::Mergeable
@@ -1136,7 +1136,7 @@ fn merge_file(
     let base_text = text(&base_bytes, "its base")?;
     let current_text = text(&held.bytes, "the project's file")?;
     let incoming_text = text(incoming.contents(), "the composed file")?;
-    if MergeFormat::of_path(path) == MergeFormat::Text {
+    if MergeFormat::of_project_path(path) == MergeFormat::Text {
         return lines::reconcile(&base_text, &current_text, &incoming_text)
             .map(|merged| (merged.into_bytes(), Vec::new()))
             .map_err(|places| FileConflictKind::Lines { places });
