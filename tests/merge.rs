@@ -248,9 +248,10 @@ fn independent_amendments_of_package_json_compose_with_the_provider_s_layout() {
             ),
         ),
     );
+    let composed = app.read("build/package.json");
     app.write(
         "amendments/package.json",
-        &PACKAGE.replace("\"name\": \"worker\"", "\"name\": \"app\""),
+        &composed.replace("\"name\": \"worker\"", "\"name\": \"app\""),
     );
     app.write(
         "amendments/wrangler.jsonc.assemblr.tmpl",
@@ -260,9 +261,9 @@ fn independent_amendments_of_package_json_compose_with_the_provider_s_layout() {
         ),
     );
     succeeds(fixture.build(&app));
-    assert!(
-        app.read("build/package.json")
-            .starts_with("{\n  \"name\": \"app\",\n  \"scripts\"")
+    assert_eq!(
+        app.read("build/package.json"),
+        composed.replace("\"name\": \"worker\"", "\"name\": \"app\"")
     );
     assert!(
         app.read("build/wrangler.jsonc")
@@ -286,36 +287,66 @@ fn identical_contributions_merge_and_different_ones_refuse_the_build_naming_both
             .contains("\"hono\": \"^4.1\"")
     );
 
+    // Siblings that disagree leave the unit above them a copy with the
+    // conflict marked, declared and locked, and `build/` untouched; `unit
+    // check` reports the same conflict without writing anything.
     let fixture = Fixture::new("conflict-different");
     let (_worker, app) = scenario(
         &fixture,
         &[("package.json", &bump("^4.2"))],
         &[("package.json", &bump("^4.1"))],
     );
-    let err = stderr(&fails(fixture.build(&app)));
-    assert!(
-        err.contains(
-            "error: src/package.json of @acme/worker 1.0.0 is amended by @acme/api, @acme/db, and the \
-             amendments cannot be combined: the amendments conflict:\nerror:   /dependencies/hono: \
-             @acme/api changes \"^4\" to \"^4.1\"; @acme/db changes \"^4\" to \"^4.2\""
-        ),
-        "{err}"
-    );
-    assert!(
-        err.contains("build/ and assemblr-lock.json were not changed"),
-        "{err}"
-    );
-    assert!(
-        err.contains("the amendments of one file must agree"),
-        "{err}"
-    );
-    assert!(!app.path.join("build").exists());
-    // The same refusal from `unit check`.
     let check = stderr(&fails(fixture.assemblr(&app.path, &["unit", "check"])));
     assert!(
-        check.contains("/dependencies/hono: @acme/api changes"),
+        check.contains(
+            "error: src/package.json of @acme/worker 1.0.0: the amendments of @acme/api and \
+             @acme/db conflict, and this unit does not resolve them:\nerror:   \
+             /dependencies/hono: @acme/api changes \"^4\" to \"^4.1\"; @acme/db changes \"^4\" \
+             to \"^4.2\""
+        ),
         "{check}"
     );
+    assert!(!app.path.join("amendments").exists());
+    let err = stderr(&fails(fixture.build(&app)));
+    for expected in [
+        "error: amendments/package.json: the amendments of @acme/api and @acme/db of \
+         src/package.json of @acme/worker 1.0.0 conflict, and the copy holds each conflict \
+         between markers:\nerror:   /dependencies/hono: @acme/api changes \"^4\" to \"^4.1\"; \
+         @acme/db changes \"^4\" to \"^4.2\"",
+        "note: manifest.jsonc declares the copy, assemblr-lock.json was created, and build/ was \
+         not changed",
+    ] {
+        assert!(err.contains(expected), "{expected:?} in {err}");
+    }
+    assert!(!app.path.join("build").exists());
+    let copy = app.read("amendments/package.json");
+    assert!(
+        copy.contains(
+            "\"hono\": {\n      \"<<<<<<< conflict\": {\n        \"@acme/api\": \"^4.1\",\n        \
+             \"@acme/db\": \"^4.2\"\n      }\n    }"
+        ),
+        "{copy}"
+    );
+    assert!(
+        app.read("manifest.jsonc")
+            .contains(r#""package.json": { "unit": "@acme/worker", "base": "1.0.0" }"#)
+    );
+    // Resolving the conflict is replacing the marker; the copy is then the
+    // unit's amendment like any other.
+    app.write(
+        "amendments/package.json",
+        &copy.replace(
+            "\"hono\": {\n      \"<<<<<<< conflict\": {\n        \"@acme/api\": \"^4.1\",\n        \
+             \"@acme/db\": \"^4.2\"\n      }\n    }",
+            "\"hono\": \"^4.2\"",
+        ),
+    );
+    succeeds(fixture.build(&app));
+    assert!(
+        app.read("build/package.json")
+            .contains("\"hono\": \"^4.2\"")
+    );
+    succeeds(fixture.assemblr(&app.path, &["unit", "check"]));
 }
 
 #[test]
@@ -611,16 +642,21 @@ fn unit_amend_creates_a_copy_of_a_json_file_another_amender_amends() {
     let output = succeeds(fixture.assemblr(&app.path, &["unit", "amend", "package.json"]));
     assert!(
         stdout(&output).contains(
-            "The file is also amended by @acme/db 1.0.0; the build combines the copies, and \
-             changes to the same value conflict."
+            "The copy is composed from the amendments of @acme/db 1.0.0; a change to what they \
+             added or changed overrides it in this unit."
         ),
         "{}",
         stdout(&output)
     );
-    assert_eq!(app.read("amendments/package.json"), PACKAGE);
+    // The copy is the file as the unit's dependencies compose it.
+    assert_eq!(app.read("amendments/package.json"), db);
+    assert_eq!(
+        app.read("amendments/package.json"),
+        app.read("build/package.json")
+    );
     app.write(
         "amendments/package.json",
-        &PACKAGE.replace(
+        &db.replace(
             "    \"deploy\": \"wrangler deploy\"\n",
             "    \"deploy\": \"wrangler deploy\",\n    \"test\": \"vitest\"\n",
         ),

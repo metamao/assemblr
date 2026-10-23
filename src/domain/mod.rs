@@ -27,7 +27,7 @@ pub(crate) use composition::mapping_problem;
 pub use composition::{
     Amendment, ComposedFile, Composition, CompositionError, ContributedPath, FileTree,
     OptionRequirement, ParameterValues, Root, RootTargetReason, TEMPLATE_SUFFIX, UnitContent,
-    UnitFile, compose, delivered_path,
+    UnitFile, compose, delivered_path, dependency_closure,
 };
 pub use contribution::{ContributionError, contribution_problems};
 pub use discovery::{EmptyQuery, SearchQuery};

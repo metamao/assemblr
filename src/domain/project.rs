@@ -35,12 +35,7 @@ impl Project {
         options: BTreeMap<UnitIdentity, OptionValues>,
     ) -> Result<Self, Vec<ManifestError>> {
         let declared: BTreeSet<UnitIdentity> = dependencies.keys().cloned().collect();
-        let errors = relation_errors(
-            None,
-            &declared,
-            options.keys(),
-            std::iter::empty::<(&RelativePath, &UnitIdentity)>(),
-        );
+        let errors = relation_errors(None, &declared, options.keys());
         if errors.is_empty() {
             Ok(Self {
                 dependencies,

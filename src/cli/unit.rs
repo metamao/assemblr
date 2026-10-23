@@ -13,14 +13,14 @@ use std::process::ExitCode;
 use assemblr::adapters::{
     AddFailure, AddProblem, AddedParameter, AmendFailure, AmendProblem, AmendState, BuildFailure,
     BuildProblem, Built, CheckFailure, CheckProblem, DeclarationChange, FileOutcome, GitOutcome,
-    IndexOutcome, InitFailure, Initialized, LockfileOutcome, ManifestFileError, PublishFailure,
-    PublishProblem, PublishState, Published, RecoveryError, Registry, TagProblem, UpdateFailure,
-    UpdateProblem, UpdateState, Updated, add_dependency, amend_unit, build_unit, check_unit,
-    init_unit, publish_unit, update_unit,
+    IndexOutcome, InitFailure, Initialized, LockfileOutcome, ManifestFileError, Pending,
+    PublishFailure, PublishProblem, PublishState, Published, RecoveryError, Registry, TagProblem,
+    UpdateFailure, UpdateProblem, UpdateState, Updated, add_dependency, amend_unit, build_unit,
+    check_unit, init_unit, publish_unit, update_unit,
 };
 use assemblr::domain::{
     ContributionError, Excluded, IntegrityChange, LockChange, LockError, RegistryError,
-    ResolutionError, UnitIdentity,
+    RelativePath, ResolutionError, UnitIdentity,
 };
 use clap::{Args, Subcommand};
 
@@ -123,7 +123,7 @@ pub(super) struct AmendArgs {
     /// The file to amend: a file name, or a path in the dependency's src/;
     /// a template matches with or without `.assemblr.tmpl`
     file: String,
-    /// Look only in this direct dependency, like `@acme/base`
+    /// Look only in this dependency, direct or transitive, like `@acme/base`
     #[arg(long, value_name = "UNIT", value_parser = UnitIdentity::parse)]
     unit: Option<UnitIdentity>,
 }
@@ -333,16 +333,23 @@ fn amend(args: &AmendArgs) -> ExitCode {
                 "Amended {found}: {copy} amendments/{} and declared it in manifest.jsonc.",
                 found.path()
             );
-            if !amended.shared_with().is_empty() {
+            if !amended.below().is_empty() {
                 let others: Vec<String> = amended
-                    .shared_with()
+                    .below()
                     .iter()
                     .map(|(unit, version)| format!("{unit} {version}"))
                     .collect();
                 println!(
-                    "The file is also amended by {}; the build combines the copies, and changes \
-                     to the same value conflict.",
+                    "The copy is composed from the amendments of {}; a change to what they \
+                     added or changed overrides it in this unit.",
                     others.join(", ")
+                );
+            }
+            if amended.has_markers() {
+                eprintln!(
+                    "note: the amendments below conflict, and the copy holds each conflict \
+                     between markers; edit it to the content you want, remove every marker, \
+                     and run `assemblr unit build`"
                 );
             }
             ExitCode::SUCCESS
@@ -656,6 +663,15 @@ fn add_diagnosis(failure: &AddFailure, root: &Path) -> Diagnosis {
                     distinct(problems.iter().filter_map(|problem| advice(problem, root)))
                 }
                 BuildFailure::Publish(_) => Vec::new(),
+                BuildFailure::Pending(pending) => {
+                    return pending_diagnosis(pending, "manifest.jsonc holds the dependency and ");
+                }
+                BuildFailure::PendingWrite { written, .. } => {
+                    return pending_write_diagnosis(
+                        written,
+                        "manifest.jsonc holds the dependency; ",
+                    );
+                }
             };
             let note = match failure.as_ref() {
                 BuildFailure::Publish(error)
@@ -805,6 +821,11 @@ fn check_advice(problem: &CheckProblem, root: &Path, command: &str) -> Option<St
         CheckProblem::Contribution(ContributionError::RedundantAmendment { .. }) => {
             return None;
         }
+        CheckProblem::Pending { path, .. } => format!(
+            "run `assemblr unit build`, which creates amendments/{path} with each conflict \
+             marked and declares it; edit it to the content you want, remove every marker, and \
+             build again"
+        ),
     })
 }
 
@@ -1010,6 +1031,8 @@ fn diagnosis(failure: &BuildFailure, root: &Path) -> Diagnosis {
             };
         }
         BuildFailure::Rejected(problems) => problems,
+        BuildFailure::Pending(pending) => return pending_diagnosis(pending, ""),
+        BuildFailure::PendingWrite { written, .. } => return pending_write_diagnosis(written, ""),
     };
     let advice = distinct(problems.iter().filter_map(|problem| advice(problem, root)));
     let diagnosis = Diagnosis::note("build/ and assemblr-lock.json were not changed");
@@ -1018,6 +1041,51 @@ fn diagnosis(failure: &BuildFailure, root: &Path) -> Diagnosis {
     } else {
         diagnosis.advise(advice.join("; "))
     }
+}
+
+/// What the pending state left, and how to leave it.
+fn pending_diagnosis(pending: &Pending, prefix: &str) -> Diagnosis {
+    let copies = if pending.files().len() == 1 {
+        "the copy"
+    } else {
+        "the copies"
+    };
+    let lockfile = match pending.lockfile() {
+        LockfileOutcome::Created => "assemblr-lock.json was created",
+        LockfileOutcome::Updated => "assemblr-lock.json was updated",
+        LockfileOutcome::Unchanged => "assemblr-lock.json is unchanged",
+    };
+    Diagnosis::note(format!(
+        "{prefix}manifest.jsonc declares {copies}, {lockfile}, and build/ was not changed"
+    ))
+    .advise(format!(
+        "edit {copies} under amendments/ to the content you want, remove every conflict marker, \
+         and run `assemblr unit build`"
+    ))
+}
+
+/// What a failed write of the pending state left.
+fn pending_write_diagnosis(written: &[RelativePath], prefix: &str) -> Diagnosis {
+    let note = if written.is_empty() {
+        format!("{prefix}build/, assemblr-lock.json, and amendments/ were not changed")
+    } else {
+        let paths: Vec<String> = written
+            .iter()
+            .map(|path| {
+                if path.as_str() == "manifest.jsonc" {
+                    path.to_string()
+                } else {
+                    format!("amendments/{path}")
+                }
+            })
+            .collect();
+        format!(
+            "{prefix}{} {} written before the failure; build/ was not changed",
+            paths.join(", "),
+            if paths.len() == 1 { "was" } else { "were" }
+        )
+    };
+    Diagnosis::note(note).advise("fix the problem and run `assemblr unit build` again")
 }
 
 /// What deleting the lockfile does, which is not a repair.

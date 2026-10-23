@@ -629,14 +629,8 @@ impl Reader {
                 }
             }
         }
-        for error in domain::relation_errors(
-            name.as_ref(),
-            &dependencies.declared,
-            options.keys(),
-            amendments
-                .iter()
-                .map(|(path, declaration)| (path, declaration.unit())),
-        ) {
+        for error in domain::relation_errors(name.as_ref(), &dependencies.declared, options.keys())
+        {
             self.inconsistent(error);
         }
 
@@ -667,12 +661,7 @@ impl Reader {
             self.options(&root.key("options"), json, false)
         });
         let dependencies = dependencies.unwrap_or_else(|| Some(Dependencies::default()))?;
-        for error in domain::relation_errors(
-            None,
-            &dependencies.declared,
-            options.keys(),
-            std::iter::empty(),
-        ) {
+        for error in domain::relation_errors(None, &dependencies.declared, options.keys()) {
             self.inconsistent(error);
         }
         let options = options
@@ -707,10 +696,6 @@ impl Reader {
                 .key(&target.to_string())
                 .key(parameter.as_str())
                 .key("from"),
-            ManifestError::UndeclaredAmendmentTarget { path, .. } => FieldPath::default()
-                .key("amendments")
-                .key(path.as_str())
-                .key("unit"),
         };
         self.report(path, IssueKind::Inconsistent(error));
     }
@@ -1213,7 +1198,7 @@ mod tests {
             .iter()
             .map(|(path, kind)| (path.as_str(), kind))
             .collect();
-        assert_eq!(found.len(), 6, "{found:#?}");
+        assert_eq!(found.len(), 5, "{found:#?}");
         assert!(matches!(
             found[0],
             ("amendments[\"../escape\"]", IssueKind::InvalidPath(_))
@@ -1238,13 +1223,6 @@ mod tests {
         ));
         assert!(matches!(
             found[4],
-            (
-                "amendments[\"other.txt\"].unit",
-                IssueKind::Inconsistent(ManifestError::UndeclaredAmendmentTarget { .. })
-            )
-        ));
-        assert!(matches!(
-            found[5],
             (
                 "amendments[\"range.txt\"].base",
                 IssueKind::InvalidVersion(_)
@@ -1669,7 +1647,7 @@ mod tests {
 
     #[test]
     fn an_edit_that_cannot_be_made_safely_names_the_member_to_add() {
-        // Already declared, and a target that is not a dependency.
+        // Already declared.
         let error = declared(FULL, "config/wrangler.toml").unwrap_err();
         assert!(error.contains("unchanged"), "{error}");
         assert!(
@@ -1678,8 +1656,6 @@ mod tests {
             ),
             "{error}"
         );
-        let text = with(r#""dependencies": {"@metamao/docker": "^1"}"#);
-        assert!(declared(&text, "a.txt").is_err());
         // Text that is not the manifest's own.
         let manifest = read_manifest(FULL).unwrap();
         let declaration =
