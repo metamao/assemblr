@@ -429,6 +429,11 @@ fn dependency_parameters_set_through_options_build() {
         stderr.contains("@acme/node 1.0.0 needs a value for `port`"),
         "{stderr}"
     );
+    // The hint offers a mapping, not only a literal value.
+    assert!(
+        stderr.contains(r#"as in `"port": {"from": "port"}`, or set a value"#),
+        "{stderr}"
+    );
     assert!(!stderr.contains("development values"), "{stderr}");
 }
 

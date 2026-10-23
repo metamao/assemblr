@@ -104,3 +104,20 @@ fn help_offers_only_implemented_commands() {
     assert!(help.contains("<UNIT> [DIRECTORY]"), "{help}");
     assert!(help.contains("--description <TEXT>"), "{help}");
 }
+
+#[test]
+fn guide_prints_the_agent_guide_and_help_points_to_it() {
+    let output = assemblr(&["guide"]);
+
+    assert!(output.status.success());
+    let guide = stdout(&output);
+    assert!(
+        guide.starts_with("Assemblr (the `assemblr` CLI)"),
+        "{guide}"
+    );
+    for section in ["Projects:", "Units:", "Catalogs:", "Always:"] {
+        assert!(guide.contains(section), "{guide}");
+    }
+    assert!(stderr(&output).is_empty());
+    assert!(stdout(&assemblr(&["--help"])).contains("`assemblr guide`"));
+}

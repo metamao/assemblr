@@ -234,9 +234,11 @@ How the status of a statement affects implementation:
   the catalog maintainer's commands (`catalog init`, `catalog add`, `catalog
   remove`, `catalog refresh`, which commit the catalog's two files unless
   told not to and never push), discovery (`search`, `info`, with a
-  machine-readable form), and the consumer operations (`init`, `add`,
-  `remove`, `compose`, and continuing or aborting a pending composition) and
-  their intent. `unit init` establishes the unit's Git repository. There are
+  machine-readable form), the agent guide (`guide`, whose name stays stable in
+  every version; see [agent
+  guide](registries-and-discovery.md#agent-guide--approved)), and the
+  consumer operations (`init`, `add`, `remove`, `compose`, and continuing or
+  aborting a pending composition) and their intent. `unit init` establishes the unit's Git repository.
   `catalog add` takes a unit's repository reference and reads its identity
   from the unit. `add` accepts one
   unit per invocation and records a caret (`^`) requirement by default. The

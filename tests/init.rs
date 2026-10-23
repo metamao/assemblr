@@ -79,6 +79,12 @@ fn init_creates_the_scaffold_and_a_repository_in_a_new_directory() {
         "{}",
         stdout(&output)
     );
+    // Dependencies are added with the command that maps their parameters.
+    assert!(
+        stdout(&output).contains("add dependencies with `assemblr unit add <unit>`"),
+        "{}",
+        stdout(&output)
+    );
     assert_eq!(
         entries(&unit),
         [".gitignore", "manifest.jsonc", "manifest.schema.json"]
