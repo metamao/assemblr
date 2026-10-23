@@ -220,7 +220,11 @@ How the status of a statement affects implementation:
 - **Open detail:** Manifest schema for list identity hints. **Provisional
   (D-8)** for the JSON merge: lists are compared whole, so no identity is
   inferred and changes inside one list are never merged independently;
-  identical whole-list changes are one change.
+  identical whole-list changes are one change. Decided by the owner for the
+  alpha: lists of scalars several units amend are joined, provider items
+  first, then each amender's in identity order, without duplicates; which
+  changes are joinable, and whole lists in consumer reconciliation, are
+  **Provisional (D-38)**.
 - **Origin:** Owner
 - **Context:** [merge
   semantics](amendments-and-composition.md#structured-and-unknown-formats)
@@ -427,7 +431,8 @@ How the status of a statement affects implementation:
   writer and the written text checked against the merged value; identical
   contributions are one change and different changes to one value conflict
   without precedence; no layered overrides; lists compared whole, never merged
-  inside; other formats refused with several amenders, except UTF-8 text,
+  inside, except appends to lists of scalars, which are joined (owner, alpha;
+  **Provisional (D-38)** for the details); other formats refused with several amenders, except UTF-8 text,
   which is combined by line (owner direction after the reference scenario;
   **Provisional (D-20)**; see [text
   files](amendments-and-composition.md#text-files--approved-direction-details-provisional-d-20)),

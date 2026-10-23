@@ -20,7 +20,12 @@
 //!
 //! Lists are compared whole: identity of list items is never inferred, so
 //! two amenders that change one list differently conflict, and changes to
-//! the objects around a list are unaffected (OC-4 stays open). Object
+//! the objects around a list are unaffected (OC-4 stays open). The one
+//! exception is a list of scalars that every amender only appends to, or
+//! creates: in a composition of units its items are joined, the provider's
+//! first and then each amender's new ones in amender order, without
+//! duplicates, since equal scalars are the same item ([`Lists::Union`]).
+//! Object
 //! member order carries no meaning in JSON, so members added at the same
 //! place by several amenders are placed in a fixed order, by amender, which
 //! never changes the document's value (OC-12 stays open for formats where
@@ -354,13 +359,28 @@ impl<A> Combined<A> {
     }
 }
 
+/// How [`combine`] treats one list that several amenders change
+/// differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lists {
+    /// The changes conflict: lists are compared whole.
+    Whole,
+    /// When every change only appends scalars to a list of scalars, or
+    /// creates one, the items are joined: the base's first, then each
+    /// amender's new ones in amender order, each item once. Any other
+    /// change, such as a removal, a reorder, or an object item, is compared
+    /// whole.
+    Union,
+}
+
 /// Combines the operations of every amender. `sets` holds each amender's
 /// operations; the amenders are taken in order of identity, whatever order
 /// they are given in. Equal operations on one path are one; different ones
-/// are a conflict, as is an edit inside a value another amender removes or
-/// replaces with a scalar or a list.
+/// are a conflict, unless `lists` joins them, as is an edit inside a value
+/// another amender removes or replaces with a scalar or a list.
 pub fn combine<A: Ord + Clone>(
     sets: &BTreeMap<A, Vec<Operation>>,
+    lists: Lists,
 ) -> Result<Vec<Combined<A>>, Vec<Conflict<A>>> {
     let mut by_path: BTreeMap<Path, Vec<(A, &Operation)>> = BTreeMap::new();
     for (amender, operations) in sets {
@@ -395,6 +415,12 @@ pub fn combine<A: Ord + Clone>(
         if distinct.len() == 1 {
             combined.extend(distinct);
             continue;
+        }
+        if lists == Lists::Union {
+            if let Some(joined) = join_appends(&distinct) {
+                combined.push(joined);
+                continue;
+            }
         }
         // The same addition placed differently by two amenders is still
         // the same addition: it is placed as the first amender places it.
@@ -456,6 +482,65 @@ pub fn combine<A: Ord + Clone>(
         conflicts.sort();
         Err(conflicts)
     }
+}
+
+/// The appends of `distinct`, the different changes amenders make to one
+/// path in amender order, joined into one change, or `None` when one of
+/// them is not an append of new, distinct scalars to the same list of
+/// scalars, or the creation of such a list.
+fn join_appends<A: Ord + Clone>(distinct: &[Combined<A>]) -> Option<Combined<A>> {
+    let is_scalar = |value: &Value| !matches!(value, Value::Array(_) | Value::Object(_));
+    let (from, base) = match &distinct.first()?.operation.change {
+        ValueChange::ValueChange {
+            from: from @ Value::Array(base),
+            ..
+        } => (Some(from), base.as_slice()),
+        ValueChange::Add(_) => (None, [].as_slice()),
+        _ => return None,
+    };
+    if !base.iter().all(is_scalar) {
+        return None;
+    }
+    let mut items = base.to_vec();
+    let mut amenders = Vec::new();
+    for entry in distinct {
+        let copy = match (&entry.operation.change, from) {
+            (ValueChange::ValueChange { from: own, to }, Some(from)) if own == from => to,
+            (ValueChange::Add(value), None) => value,
+            _ => return None,
+        };
+        let Value::Array(copy) = copy else {
+            return None;
+        };
+        let appended = copy.strip_prefix(base)?;
+        for (index, item) in appended.iter().enumerate() {
+            if !is_scalar(item) || base.contains(item) || appended[..index].contains(item) {
+                return None;
+            }
+            if !items.contains(item) {
+                items.push(item.clone());
+            }
+        }
+        amenders.extend(entry.amenders.iter().cloned());
+    }
+    amenders.sort();
+    amenders.dedup();
+    let joined = Value::Array(items);
+    let change = match from {
+        Some(from) => ValueChange::ValueChange {
+            from: from.clone(),
+            to: joined,
+        },
+        None => ValueChange::Add(joined),
+    };
+    Some(Combined {
+        operation: Operation {
+            path: distinct[0].operation.path.clone(),
+            change,
+            after: distinct[0].operation.after.clone(),
+        },
+        amenders,
+    })
 }
 
 /// An edit to make on the provider's file.
@@ -779,8 +864,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        Combined, Conflict, ConflictKind, Edit, MergeFormat, Operation, Path, Value, ValueChange,
-        combine, derive, plan,
+        Combined, Conflict, ConflictKind, Edit, Lists, MergeFormat, Operation, Path, Value,
+        ValueChange, combine, derive, plan,
     };
     use crate::domain::{RelativePath, UnitIdentity};
 
@@ -853,7 +938,7 @@ mod tests {
             .iter()
             .map(|(amender, copy)| (identity(amender), derive(base, copy).operations))
             .collect();
-        let combined = combine(&sets)?;
+        let combined = combine(&sets, Lists::Union)?;
         plan(base, combined).map(|plan| (plan.edits, plan.result))
     }
 
@@ -1101,11 +1186,12 @@ mod tests {
         );
         assert_eq!(result.at(&path("/scripts/lint")), Some(&s("eslint")));
 
-        // Different changes inside one list are not merged: they conflict.
+        // Different changes that are not appends are not merged inside
+        // the list: they conflict.
         let conflicts = merge(
             &base,
             &[
-                ("@acme/a", files(&["dist", "a"])),
+                ("@acme/a", files(&["a", "dist"])),
                 ("@acme/b", files(&["dist", "b"])),
             ],
         )
@@ -1114,8 +1200,150 @@ mod tests {
         assert!(
             conflicts[0]
                 .to_string()
-                .starts_with("/files: @acme/a changes [\"dist\"] to [\"dist\",\"a\"]")
+                .starts_with("/files: @acme/a changes [\"dist\"] to [\"a\",\"dist\"]")
         );
+    }
+
+    #[test]
+    fn appends_to_a_list_of_scalars_are_joined_in_amender_order() {
+        let base = package();
+        let files = |items: &[&str]| {
+            with(&base, |members| {
+                members
+                    .iter_mut()
+                    .find(|(key, _)| key == "files")
+                    .unwrap()
+                    .1 = Value::Array(items.iter().map(|item| s(item)).collect());
+            })
+        };
+        let copies = [
+            ("@acme/c", files(&["dist", "c", "shared"])),
+            ("@acme/a", files(&["dist", "a"])),
+            ("@acme/b", files(&["dist", "shared", "b"])),
+        ];
+        let joined = Value::Array(vec![s("dist"), s("a"), s("shared"), s("b"), s("c")]);
+        // The provider's items first, then each amender's new ones in
+        // identity order, each item once, whatever order the copies come in.
+        let mut reversed = copies.clone();
+        reversed.reverse();
+        for copies in [&copies[..], &reversed[..]] {
+            let (edits, result) = merge(&base, copies).unwrap();
+            assert_eq!(
+                edits,
+                [Edit::Set {
+                    path: path("/files"),
+                    value: joined.clone()
+                }]
+            );
+            assert_eq!(result.at(&path("/files")), Some(&joined));
+        }
+
+        // The joined change names every amender in a later conflict.
+        let target = with(&base, |members| {
+            members.retain(|(key, _)| key != "files");
+        });
+        let sets: BTreeMap<UnitIdentity, Vec<Operation>> = copies
+            .iter()
+            .map(|(amender, copy)| (identity(amender), derive(&base, copy).operations))
+            .collect();
+        let conflicts = plan(&target, combine(&sets, Lists::Union).unwrap()).unwrap_err();
+        assert_eq!(conflicts.len(), 1);
+        assert!(
+            conflicts[0]
+                .to_string()
+                .starts_with("/files: @acme/a and @acme/b and @acme/c changes [\"dist\"] to")
+        );
+
+        // Compared whole, the same changes conflict.
+        let conflicts = combine(&sets, Lists::Whole).unwrap_err();
+        assert_eq!(conflicts.len(), 1);
+    }
+
+    #[test]
+    fn lists_of_scalars_several_amenders_create_are_joined() {
+        let base = object(&[("name", s("app"))]);
+        let extensions = |items: &[&str]| {
+            with(&base, |members| {
+                members.push((
+                    "customizations".to_owned(),
+                    object(&[(
+                        "vscode",
+                        object(&[(
+                            "extensions",
+                            Value::Array(items.iter().map(|item| s(item)).collect()),
+                        )]),
+                    )]),
+                ));
+            })
+        };
+        let (_, result) = merge(
+            &base,
+            &[
+                ("@acme/b", extensions(&["rust-lang.rust-analyzer"])),
+                ("@acme/a", extensions(&["esbenp.prettier-vscode"])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            result.at(&path("/customizations/vscode/extensions")),
+            Some(&Value::Array(vec![
+                s("esbenp.prettier-vscode"),
+                s("rust-lang.rust-analyzer")
+            ]))
+        );
+    }
+
+    #[test]
+    fn list_changes_that_are_not_appends_of_new_scalars_still_conflict() {
+        let base = object(&[
+            ("tags", Value::Array(vec![s("x"), s("y")])),
+            ("items", Value::Array(vec![object(&[("id", n("1"))])])),
+        ]);
+        let set = |key: &str, items: Vec<Value>| {
+            with(&base, |members| {
+                members.iter_mut().find(|(name, _)| name == key).unwrap().1 = Value::Array(items);
+            })
+        };
+        let append = set("tags", vec![s("x"), s("y"), s("z")]);
+        let cases = [
+            // A removal.
+            set("tags", vec![s("x")]),
+            // A reorder.
+            set("tags", vec![s("y"), s("x"), s("w")]),
+            // An insertion before the provider's last item.
+            set("tags", vec![s("x"), s("w"), s("y")]),
+            // An item the provider already has, or one appended twice.
+            set("tags", vec![s("x"), s("y"), s("x")]),
+            set("tags", vec![s("x"), s("y"), s("w"), s("w")]),
+            // An object or a list appended.
+            set("tags", vec![s("x"), s("y"), object(&[("k", n("1"))])]),
+            set("tags", vec![s("x"), s("y"), Value::Array(vec![s("w")])]),
+            // A replacement by something that is not a list.
+            with(&base, |members| {
+                members
+                    .iter_mut()
+                    .find(|(name, _)| name == "tags")
+                    .unwrap()
+                    .1 = s("x");
+            }),
+        ];
+        for other in cases {
+            let conflicts =
+                merge(&base, &[("@acme/a", append.clone()), ("@acme/b", other)]).unwrap_err();
+            assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+        }
+
+        // A list of objects is compared whole, even when both append.
+        let first = set(
+            "items",
+            vec![object(&[("id", n("1"))]), object(&[("id", n("2"))])],
+        );
+        let second = set(
+            "items",
+            vec![object(&[("id", n("1"))]), object(&[("id", n("3"))])],
+        );
+        let conflicts = merge(&base, &[("@acme/a", first), ("@acme/b", second)]).unwrap_err();
+        assert_eq!(conflicts.len(), 1);
     }
 
     #[test]
@@ -1130,7 +1358,7 @@ mod tests {
             members_mut(members, "scripts")[0].1 = s("rollup");
         });
         let sets = BTreeMap::from([(identity("@acme/a"), derive(&base, &copy).operations)]);
-        let conflicts = plan(&target, combine(&sets).unwrap()).unwrap_err();
+        let conflicts = plan(&target, combine(&sets, Lists::Union).unwrap()).unwrap_err();
         assert_eq!(
             conflicts[0].to_string(),
             "/scripts/build: @acme/a changes \"tsc\" to \"tsc -b\", but the provider's file holds \
@@ -1258,7 +1486,7 @@ mod tests {
             (identity("@acme/z"), derive(&base, &copy).operations),
             (identity("@acme/a"), derive(&base, &copy).operations),
         ]);
-        let combined = combine(&sets).unwrap();
+        let combined = combine(&sets, Lists::Union).unwrap();
         assert_eq!(
             combined,
             [Combined {

@@ -25,8 +25,8 @@ use std::fmt;
 
 use super::jsonc_edit::{EditError, ValueError, apply, comments_of, parse_value};
 use crate::domain::{
-    Conflict, Contributor, Derived, InsertTie, Operation, TextMerge, UnitIdentity, Value, combine,
-    derive, describe_change, describe_lines, merge_text, merge_values, plan,
+    Conflict, Contributor, Derived, InsertTie, Lists, Operation, TextMerge, UnitIdentity, Value,
+    combine, derive, describe_change, describe_lines, merge_text, merge_values, plan,
 };
 
 /// Composes `copies`, each amender's rendered copy, onto `base`, the
@@ -81,7 +81,7 @@ pub(crate) fn merge_json_from(
         round_trip(amender, &base_value, &copy_value, &derived.operations)?;
         sets.insert((*amender).clone(), derived.operations);
     }
-    let combined = combine(&sets).map_err(MergeFailure::Conflicts)?;
+    let combined = combine(&sets, Lists::Union).map_err(MergeFailure::Conflicts)?;
     let planned = plan(&provider_value, combined).map_err(MergeFailure::Conflicts)?;
     let text = apply(provider, &planned.edits).map_err(MergeFailure::Edit)?;
     let written = parse_value(&text).map_err(|error| MergeFailure::Projection {
@@ -319,7 +319,7 @@ fn round_trip(
     operations: &[Operation],
 ) -> Result<(), MergeFailure> {
     let own = BTreeMap::from([(amender.clone(), operations.to_vec())]);
-    let detail = match combine(&own).and_then(|combined| plan(base, combined)) {
+    let detail = match combine(&own, Lists::Union).and_then(|combined| plan(base, combined)) {
         Ok(planned) if sorted(&planned.result) == sorted(copy) => return Ok(()),
         Ok(planned) => format!(
             "replayed on its base they give {}, not {}",
