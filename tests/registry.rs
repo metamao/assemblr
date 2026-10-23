@@ -304,16 +304,23 @@ fn versions_declaring_different_identities_reject_the_source() {
 }
 
 #[test]
-fn invalid_paths_and_remote_references_are_rejected_without_creating_state() {
+fn invalid_paths_and_references_are_rejected_without_creating_state() {
     let dir = scratch("invalid_paths");
     let data = dir.join("data");
     fs::create_dir_all(dir.join("plain")).unwrap();
 
     for (path, expected) in [
-        ("git@github.com:acme/node.git", "only local repositories"),
         (
-            "https://github.com/acme/node.git",
-            "only local repositories",
+            "ext::sh -c touch% pwned",
+            "not a repository reference Assemblr can fetch",
+        ),
+        (
+            "http://github.com/acme/node.git",
+            "not a repository reference Assemblr can fetch",
+        ),
+        (
+            "https://token@github.com/acme/node.git",
+            "contains credentials",
         ),
         ("missing", "not a Git repository"),
         ("plain", "not a Git repository"),

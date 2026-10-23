@@ -17,6 +17,7 @@
 
 mod authoring;
 mod command;
+mod fetch;
 mod object;
 mod working_tree;
 
@@ -27,6 +28,8 @@ use std::process::ExitStatus;
 
 pub use authoring::{Discovered, discover_repository, init_repository};
 use command::{Object, Objects};
+pub(crate) use fetch::fetch;
+pub use fetch::{FetchError, FetchErrorKind};
 use object::{EntryKind, TreeEntry, commit_tree, parse_tree};
 
 use super::manifest::{ReadManifestError, read_manifest};
@@ -1069,6 +1072,14 @@ pub struct GitError {
 }
 
 impl GitError {
+    /// The error for a path that is not a repository, for `reason`.
+    pub(crate) fn not_a_repository(repository: PathBuf, reason: String) -> Self {
+        Self {
+            repository,
+            kind: GitErrorKind::NotARepository(reason),
+        }
+    }
+
     /// The path of the repository being read.
     pub fn repository(&self) -> &Path {
         &self.repository

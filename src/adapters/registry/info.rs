@@ -6,9 +6,8 @@
 //! matches the index is reported, never described from what it holds now.
 
 use std::fmt;
-use std::path::Path;
 
-use super::{GitError, GitRepository, InvalidVersion, Registry, StorageError};
+use super::{GitError, InvalidVersion, Registry, StorageError};
 use crate::domain::{
     Manifest, Provenance, RegisteredUnit, SearchQuery, SourceReference, UnitIdentity, Version,
 };
@@ -201,7 +200,7 @@ impl Registry {
             .units()
             .get(identity)
             .ok_or_else(|| InfoFailure::NotRegistered(identity.clone()))?;
-        describe(identity, unit, version)
+        describe(self, identity, unit, version)
     }
 
     /// The registered units that `query` matches, in identity order, each
@@ -213,7 +212,7 @@ impl Registry {
         let mut found = Vec::new();
         let mut undescribed = Vec::new();
         for (identity, unit) in index.units() {
-            let described = describe(identity, unit, None);
+            let described = describe(self, identity, unit, None);
             let description = described
                 .as_ref()
                 .ok()
@@ -238,6 +237,7 @@ impl Registry {
 /// Describes the registered `unit` at `version`, or at its newest stable
 /// version.
 fn describe(
+    registry: &Registry,
     identity: &UnitIdentity,
     unit: &RegisteredUnit,
     version: Option<&Version>,
@@ -267,8 +267,7 @@ fn describe(
         identity: identity.clone(),
         error: Box::new(error),
     };
-    let repository =
-        GitRepository::open(Path::new(unit.source().as_str())).map_err(source_error)?;
+    let repository = registry.open_source(unit.source()).map_err(source_error)?;
     let outcome = repository
         .read_published(&[provenance.commit()])
         .map_err(source_error)?

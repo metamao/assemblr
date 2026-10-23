@@ -84,6 +84,7 @@ repository).
 
 ```sh
 assemblr registry add ../web         # register a unit's Git repository
+assemblr registry add git@github.com:acme/api.git   # or a remote one, by URL
 assemblr init                        # create assemblr.jsonc here
 assemblr add @acme/web               # select the unit and compose the project
 assemblr add @acme/api --option port=8080   # set a parameter while adding

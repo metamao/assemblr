@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
-use super::reference::is_local_reference;
+use super::reference::{is_local_reference, is_remote, remote_reference};
 use crate::domain::{
     ObjectId, Provenance, RegisteredUnit, RegistryIndex, SourceReference, UnitIdentity, Version,
 };
@@ -25,9 +25,11 @@ const INDEX: &str = "index.json";
 const TEMPORARY: &str = "index.json.tmp";
 /// The file writers lock.
 const LOCK: &str = "lock";
-/// The version of the index's format. A different version is rejected,
-/// never guessed at.
-const FORMAT: u64 = 1;
+/// The version of the index's format. Format 2 allows remote sources, so a
+/// version of Assemblr that reads only format 1 refuses the index rather
+/// than misreading it. Format 1 is still read, and is written as 2 by the
+/// next change. Any other version is rejected, never guessed at.
+const FORMAT: u64 = 2;
 
 /// The registry's directory.
 #[derive(Debug, Clone)]
@@ -136,15 +138,16 @@ fn serialize(index: &RegistryIndex) -> Value {
 fn parse(bytes: &[u8]) -> Result<RegistryIndex, String> {
     let value: Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     let root = object(&value, "the index")?;
-    match root.get("format").and_then(Value::as_u64) {
-        Some(FORMAT) => {}
+    let remote_allowed = match root.get("format").and_then(Value::as_u64) {
+        Some(FORMAT) => true,
+        Some(1) => false,
         Some(other) => {
             return Err(format!(
                 "it has format {other}, which this version of Assemblr does not read"
             ));
         }
         None => return Err("it has no format number".to_owned()),
-    }
+    };
     let mut units = BTreeMap::new();
     for (key, unit) in object(field(root, "units", "the index")?, "`units`")? {
         let identity = UnitIdentity::parse(key).map_err(|error| error.to_string())?;
@@ -152,8 +155,13 @@ fn parse(bytes: &[u8]) -> Result<RegistryIndex, String> {
         let unit = object(unit, &context)?;
         let source = field(unit, "source", &context)?
             .as_str()
-            .filter(|source| is_local_reference(source))
-            .ok_or_else(|| format!("{context} has no absolute, normalized source path"))?;
+            .filter(|source| {
+                is_local_reference(source)
+                    || (remote_allowed && is_remote(source) && remote_reference(source).is_ok())
+            })
+            .ok_or_else(|| {
+                format!("{context} has no absolute, normalized source path or remote reference")
+            })?;
         let mut versions = BTreeMap::new();
         for (key, provenance) in object(field(unit, "versions", &context)?, &context)? {
             let version = Version::parse(key).map_err(|error| error.to_string())?;
@@ -313,12 +321,41 @@ mod tests {
     }
 
     #[test]
+    fn remote_sources_need_format_2() {
+        let remote = |format: u64| {
+            serde_json::json!({"format": format, "units": {"@acme/node": {
+                "source": "https://github.com/acme/node.git", "versions": {}
+            }}})
+            .to_string()
+        };
+        let index = parse(remote(2).as_bytes()).unwrap();
+        assert_eq!(
+            index.units()[&UnitIdentity::parse("@acme/node").unwrap()]
+                .source()
+                .as_str(),
+            "https://github.com/acme/node.git"
+        );
+        assert!(parse(remote(1).as_bytes()).unwrap_err().contains("remote"));
+        // Format 1 is still read, and written as format 2.
+        let local = serde_json::json!({"format": 1, "units": {"@acme/node": {
+            "source": format!("{}units", root()), "versions": {}
+        }}});
+        let index = parse(local.to_string().as_bytes()).unwrap();
+        assert_eq!(serialize(&index)["format"], 2);
+        // A reference Assemblr would never fetch is not accepted from a file.
+        let unsafe_source = serde_json::json!({"format": 2, "units": {"@acme/node": {
+            "source": "ext::sh -c id", "versions": {}
+        }}});
+        assert!(parse(unsafe_source.to_string().as_bytes()).is_err());
+    }
+
+    #[test]
     fn invalid_indexes_are_rejected_with_a_reason() {
         let source = format!("{}units", root());
         let cases = [
             ("[]".to_owned(), "not a JSON object"),
             (r#"{"units": {}}"#.to_owned(), "no format"),
-            (r#"{"format": 2, "units": {}}"#.to_owned(), "format 2"),
+            (r#"{"format": 3, "units": {}}"#.to_owned(), "format 3"),
             (r#"{"format": 1, "units": {"acme": {}}}"#.to_owned(), "acme"),
             (
                 r#"{"format": 1, "units": {"@acme/node": {"source": "units", "versions": {}}}}"#

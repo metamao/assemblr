@@ -1,10 +1,12 @@
 //! The managed local registry of unit repositories.
 //!
-//! The registry keeps a validated index of registered local unit
-//! repositories and their published versions, in the user's data directory
-//! (see `docs/adr/0007-local-registry-storage.md`). Sources are read through
+//! The registry keeps a validated index of registered unit repositories and
+//! their published versions, in the user's data directory (see
+//! `docs/adr/0007-local-registry-storage.md`). Sources are read through
 //! [`GitRepository`], which never touches a working tree, and the rules for
-//! what enters the index are the domain's ([`RegistryIndex`]).
+//! what enters the index are the domain's ([`RegistryIndex`]). A remote
+//! source is read from a bare copy beside the index, which only `add` and
+//! `sync` fetch into (see `docs/adr/0029-remote-sources.md`).
 //!
 //! Every change is decided completely before the index is written, and a
 //! rejected change leaves the index as it was.
@@ -20,13 +22,15 @@ use std::sync::Arc;
 
 pub(crate) use self::observe as observe_tags;
 pub use info::{Found, InfoFailure, Search, UnitInfo};
-pub use reference::{ReferenceError, local_reference};
+use reference::is_remote_reference;
+pub use reference::{ReferenceError, local_reference, source_reference};
+use sha2::{Digest, Sha256};
 pub use store::StorageError;
 use store::Store;
 
 use super::git::{
-    GitError, GitRepository, HeadManifestError, InvalidVersion, ReadFileError, ReadSrcError,
-    VersionTag,
+    FetchError, GitError, GitRepository, HeadManifestError, InvalidVersion, ReadFileError,
+    ReadSrcError, VersionTag, fetch,
 };
 use super::lockfile::{PublishedLockfileError, read_published};
 use crate::domain::{
@@ -43,6 +47,8 @@ const DATA_DIR_VARIABLE: &str = "ASSEMBLR_DATA_DIR";
 #[derive(Debug, Clone)]
 pub struct Registry {
     store: Store,
+    /// Where the bare copies of remote sources are kept.
+    copies: PathBuf,
 }
 
 impl Registry {
@@ -64,7 +70,62 @@ impl Registry {
         };
         Ok(Self {
             store: Store::new(root.join("registry")),
+            copies: root.join("sources"),
         })
+    }
+
+    /// Opens the repository registered from `source`: the local repository
+    /// itself, or the copy of a remote one. Nothing is fetched.
+    pub(crate) fn open_source(&self, source: &SourceReference) -> Result<GitRepository, GitError> {
+        if !is_remote_reference(source) {
+            return GitRepository::open(Path::new(source.as_str()));
+        }
+        let copy = self.copy_of(source);
+        if !copy.is_dir() {
+            return Err(GitError::not_a_repository(
+                copy,
+                format!(
+                    "Assemblr has no copy of {source}; `assemblr registry sync` fetches it again"
+                ),
+            ));
+        }
+        GitRepository::open(&copy)
+    }
+
+    /// Opens the repository registered from `source` in the user's registry,
+    /// as [`open_source`](Self::open_source) does. Callers that hold only an
+    /// index use this: there is one registry per user, so it is the one the
+    /// index came from.
+    pub(crate) fn open_registered(source: &SourceReference) -> Result<GitRepository, GitError> {
+        if !is_remote_reference(source) {
+            return GitRepository::open(Path::new(source.as_str()));
+        }
+        let registry = Self::locate().map_err(|error| {
+            GitError::not_a_repository(
+                PathBuf::from(source.as_str()),
+                format!("the registry that holds its copy cannot be found: {error}"),
+            )
+        })?;
+        registry.open_source(source)
+    }
+
+    /// Where the copy of the remote `source` is kept: a directory named by
+    /// the SHA-256 of the reference, which is compared exactly, so two
+    /// spellings of one URL get two copies.
+    fn copy_of(&self, source: &SourceReference) -> PathBuf {
+        let digest = Sha256::digest(source.as_str().as_bytes());
+        let name: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        self.copies.join(name)
+    }
+
+    /// Fetches the remote `source` into its copy. A local source is read in
+    /// place and needs nothing.
+    fn fetch_source(&self, source: &SourceReference) -> Result<(), FetchError> {
+        if is_remote_reference(source) {
+            fetch(source.as_str(), &self.copy_of(source))
+        } else {
+            Ok(())
+        }
     }
 
     /// The index. An empty one if nothing has been registered.
@@ -72,7 +133,8 @@ impl Registry {
         Ok(self.store.load()?.unwrap_or_default())
     }
 
-    /// Registers the local unit repository at `path`.
+    /// Registers the unit repository `path` names: a local path, or a remote
+    /// reference, which is fetched first.
     ///
     /// Its valid published versions are indexed, after their `src/` is
     /// read and validated, and invalid version tags are excluded. With no
@@ -80,7 +142,7 @@ impl Registry {
     /// at `HEAD`. A repository already registered by the same reference is
     /// left as it is.
     pub fn add(&self, path: &Path) -> Result<Added, RegistryFailure> {
-        let source = local_reference(path)?;
+        let source = source_reference(path)?;
         let current = self.index()?;
         if let Some(identity) = current.identity_of(&source) {
             return Ok(Added::AlreadyRegistered {
@@ -88,8 +150,14 @@ impl Registry {
                 source,
             });
         }
+        self.fetch_source(&source).map_err(|error| {
+            RegistryFailure::Rejected(vec![Problem::Unfetchable {
+                source: source.clone(),
+                error,
+            }])
+        })?;
         let unreadable = |error| RegistryFailure::unreadable(&source, error);
-        let repository = GitRepository::open(Path::new(source.as_str())).map_err(unreadable)?;
+        let repository = self.open_source(&source).map_err(unreadable)?;
         let tags = observe(&repository, None).map_err(unreadable)?;
         let identity = match declared_identity(&source, &tags) {
             Ok(Some(identity)) => identity,
@@ -150,7 +218,8 @@ impl Registry {
             return Ok(Indexed::NotRegistered);
         };
         let identity = identity.clone();
-        let tags = GitRepository::open(Path::new(source.as_str()))
+        let tags = self
+            .open_source(source)
             .and_then(|repository| observe(&repository, Some(unit)))
             .map_err(|error| RegistryFailure::unreadable(source, error))?;
         let change = index
@@ -181,11 +250,11 @@ impl Registry {
         Ok(removed)
     }
 
-    /// Reads every registered repository again, and indexes the versions
-    /// they have published since.
+    /// Reads every registered repository again, fetching each remote one
+    /// first, and indexes the versions they have published since.
     ///
-    /// A source that cannot be read, or any conflict in any unit, rejects
-    /// the whole synchronization, and every problem is reported.
+    /// A source that cannot be fetched or read, or any conflict in any unit,
+    /// rejects the whole synchronization, and every problem is reported.
     pub fn sync(&self) -> Result<Synced, RegistryFailure> {
         if self.store.load()?.is_none() {
             return Ok(Synced::default());
@@ -195,7 +264,15 @@ impl Registry {
         let mut problems = Vec::new();
         let mut observed = BTreeMap::new();
         for (identity, unit) in index.units() {
-            let tags = GitRepository::open(Path::new(unit.source().as_str()))
+            if let Err(error) = self.fetch_source(unit.source()) {
+                problems.push(Problem::Unfetchable {
+                    source: unit.source().clone(),
+                    error,
+                });
+                continue;
+            }
+            let tags = self
+                .open_source(unit.source())
                 .and_then(|repository| observe(&repository, Some(unit)));
             match tags {
                 Ok(tags) => {
@@ -462,6 +539,13 @@ impl std::error::Error for RegistryFailure {}
 /// A problem that rejects a registry operation.
 #[derive(Debug)]
 pub enum Problem {
+    /// A remote source could not be fetched.
+    Unfetchable {
+        /// The source.
+        source: SourceReference,
+        /// Why.
+        error: FetchError,
+    },
     /// A source could not be read as a Git repository.
     Unreadable {
         /// The source.
@@ -484,6 +568,7 @@ pub enum Problem {
 impl fmt::Display for Problem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Unfetchable { error, .. } => error.fmt(f),
             Self::Unreadable { error, .. } => error.fmt(f),
             Self::NoIdentity { source, error } => write!(
                 f,

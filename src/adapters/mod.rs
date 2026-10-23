@@ -27,9 +27,10 @@ pub use build::{
     Updated, WriteError, amend_unit, build_unit, check_unit, publish_unit, update_unit,
 };
 pub use git::{
-    Discovered, GitError, GitErrorKind, GitRepository, HeadManifestError, InvalidVersion,
-    ObjectTooLarge, PublishedVersion, ReadFileError, ReadSrcError, SrcEntryError,
-    SrcEntryErrorReason, UnitDirectory, VersionTag, discover_repository, init_repository,
+    Discovered, FetchError, FetchErrorKind, GitError, GitErrorKind, GitRepository,
+    HeadManifestError, InvalidVersion, ObjectTooLarge, PublishedVersion, ReadFileError,
+    ReadSrcError, SrcEntryError, SrcEntryErrorReason, UnitDirectory, VersionTag,
+    discover_repository, init_repository,
 };
 pub use init::{FileOutcome, GitOutcome, InitFailure, Initialized, Step as InitStep, init_unit};
 pub use jsonc::SyntaxError;
@@ -48,7 +49,7 @@ pub use project::{
 };
 pub use registry::{
     Added, Found, Indexed, InfoFailure, Problem, ReferenceError, Registry, RegistryFailure, Search,
-    StorageError, Synced, TagProblem, UnitInfo, local_reference,
+    StorageError, Synced, TagProblem, UnitInfo, local_reference, source_reference,
 };
 pub use render::{
     Context as RenderContext, RenderError, RenderErrorKind, parameters_referenced, render,
