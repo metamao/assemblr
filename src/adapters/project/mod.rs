@@ -35,7 +35,7 @@ pub use pending::{Continued, abort_compose, continue_compose};
 pub use store::StoreError;
 use store::{Journal, JournalEntry, Pending, STATE_DIR, Store, write_new};
 
-use super::build::{BuildProblem, UnresolvedFile, render_files, resolve_graph};
+use super::build::{BuildProblem, render_files, resolve_graph};
 use super::git::MANIFEST_LIMIT;
 use super::lockfile::{self, LOCKFILE, Lockfile, LockfileError, serialize_lockfile};
 use super::manifest::{ReadManifestError, read_project};
@@ -570,12 +570,14 @@ fn compose_with(
     // is the consumer's to resolve (owner decision on #101): the file, each
     // conflict between markers, is the composition's, so the markers reach
     // the project like any incoming change and the composition waits.
-    let unit_conflicts: Vec<UnresolvedFile> = rendered.unresolved;
-    for unresolved in &unit_conflicts {
+    let mut unit_conflicts: Vec<(RelativePath, String)> = Vec::new();
+    for unresolved in rendered.unresolved {
+        let report = unresolved.to_string();
         files.insert(
             unresolved.delivered.clone(),
-            UnitFile::new(unresolved.bytes.clone(), unresolved.executable),
+            UnitFile::new(unresolved.bytes, unresolved.executable),
         );
+        unit_conflicts.push((unresolved.delivered, report));
     }
     // What the merge reports about a file, its author's to act on, is told
     // to the consumer when this composition writes the file; the others
@@ -638,6 +640,7 @@ fn compose_with(
                 first: false,
                 declaration: planned_declaration.map(|planned| planned.change),
                 pending: BTreeSet::new(),
+                consumer_conflicts: BTreeSet::new(),
                 unit_conflicts: Vec::new(),
             });
         }
@@ -780,9 +783,11 @@ fn compose_with(
     // A file the units leave marked waits for the consumer as long as the
     // project holds the markers: when this composition writes them, and
     // when the project holds them already, as a clone of a waiting project
-    // does, where the reconciliation has nothing to write.
-    for unresolved in &unit_conflicts {
-        let path = &unresolved.delivered;
+    // does, where the reconciliation has nothing to write. A conflict the
+    // consumer resolved before, which the composition keeps, is not
+    // theirs to resolve again.
+    let consumer_conflicts = marked.clone();
+    unit_conflicts.retain(|(path, _)| {
         let written = matches!(
             changes.get(path),
             Some(Change::Create(_) | Change::Modify { .. })
@@ -793,7 +798,8 @@ fn compose_with(
         if written || held {
             marked.insert(path.clone());
         }
-    }
+        written || held
+    });
 
     // Nothing of a created file may exist yet.
     let (existing, mut directories) = (existing_paths(root, created.iter()), Vec::new());
@@ -990,10 +996,8 @@ fn compose_with(
         first: previous.is_none(),
         declaration: planned_declaration.map(|planned| planned.change),
         pending: marked,
-        unit_conflicts: unit_conflicts
-            .into_iter()
-            .map(|unresolved| (unresolved.delivered.clone(), unresolved.to_string()))
-            .collect(),
+        consumer_conflicts,
+        unit_conflicts,
     })
 }
 
@@ -1509,7 +1513,9 @@ fn recover(
         };
         match entry {
             JournalEntry::Create { blob } => match held {
-                Held::File(bytes) if BlobId::of(&bytes) == *blob => {
+                // A created file the consumer was resolving holds their
+                // edits, which an abort gives up with the rest.
+                Held::File(bytes) if BlobId::of(&bytes) == *blob || resolving.contains(path) => {
                     fs::remove_file(&target).map_err(|error| StoreError::Io {
                         path: target.clone(),
                         error,
@@ -1910,15 +1916,25 @@ pub struct Composed {
     first: bool,
     declaration: Option<DeclarationChange>,
     pending: BTreeSet<RelativePath>,
+    consumer_conflicts: BTreeSet<RelativePath>,
     unit_conflicts: Vec<(RelativePath, String)>,
 }
 
 impl Composed {
-    /// The conflicts between units that no unit above them resolves, each
-    /// with the delivered path that holds it between markers and the
-    /// report of what the units contend. Every such path is pending.
+    /// The conflicts between units that no unit above them resolves and
+    /// that the project holds between markers, each with the delivered
+    /// path and the report of what the units contend. Every such path is
+    /// pending; a conflict the consumer resolved earlier, which this
+    /// composition keeps, is not listed.
     pub fn unit_conflicts(&self) -> &[(RelativePath, String)] {
         &self.unit_conflicts
+    }
+
+    /// The pending files that hold a conflict between the consumer's
+    /// changes and the composition, between `current`, `base`, and
+    /// `incoming` markers. A file can hold both kinds.
+    pub fn consumer_conflicts(&self) -> &BTreeSet<RelativePath> {
+        &self.consumer_conflicts
     }
 
     /// How many units, direct and transitive, are composed.

@@ -788,11 +788,13 @@ the files and exits non-zero. While resolution is pending, `compose`, `add`,
 change nothing.
 
 **Resolving.** The consumer edits each file with their own tools to the
-content they want. Nothing marks a file resolved but the absence of a line
-starting `<<<<<<< `, `||||||| base`, or `>>>>>>> `, or holding a
-`"<<<<<<< conflict"` member; a file the consumer deleted counts as resolved.
-A line of `=` signs is not looked for, since it also underlines a Markdown
-heading (#72).
+content they want. Nothing marks a file resolved but the absence of
+Assemblr's own marker lines, those starting `<<<<<<< current`,
+`<<<<<<< @`, `||||||| base`, `>>>>>>> incoming`, or `>>>>>>> @`, and of a
+line holding a `"<<<<<<< conflict"` member; a file the consumer deleted
+counts as resolved. Another tool's markers, such as `<<<<<<< HEAD` shown in
+a code block, are content. A line of `=` signs is not looked for, since it
+also underlines a Markdown heading (#72).
 
 **`--continue`** refuses while any file holds such a line, listing every
 such file and leaving the project unchanged. It also refuses, naming the two
@@ -811,7 +813,8 @@ next one.
 
 **`--abort`** restores the project to what it held before the operation:
 every file the composition changed, the conflicted files whatever they hold
-now, and `assemblr.jsonc` where `add` or `remove` rewrote it, whatever it
+now (a conflicted file the composition created is removed), and
+`assemblr.jsonc` where `add` or `remove` rewrote it, whatever it
 holds now too (**Provisional (D-44)**), since an edit to it while the
 composition waited is given up with the resolution; the summary says the
 declaration was restored only when it was. A file the composition changed
@@ -829,7 +832,9 @@ lock still records the previous composition, so its next `compose` finds the
 conflict again, around the markers already in the file, and marks the file a
 second time; every marker must go before `--continue` finishes it. A file
 marked between siblings is found holding exactly the composition's content
-and is kept as it is, pending again without a second set of markers.
+and is kept as it is, pending again without a second set of markers;
+`--abort` there restores nothing, since the markers are what the project
+held, and the way out is to resolve the file and `--continue`.
 
 ## Lock and reconciliation state — Approved
 

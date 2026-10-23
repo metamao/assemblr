@@ -312,21 +312,12 @@ fn run_with(
             if composed.pending().is_empty() {
                 ExitCode::SUCCESS
             } else {
-                let between_units = composed.unit_conflicts().len();
-                let with_yours = composed
-                    .pending()
-                    .iter()
-                    .filter(|path| {
-                        !composed
-                            .unit_conflicts()
-                            .iter()
-                            .any(|(conflicted, _)| conflicted == *path)
-                    })
-                    .count();
+                let between_units = !composed.unit_conflicts().is_empty();
+                let with_yours = !composed.consumer_conflicts().is_empty();
                 let what = match (between_units, with_yours) {
-                    (0, _) => "between your changes and the composition",
-                    (_, 0) => "between units",
-                    _ => "between units, and between your changes and the composition",
+                    (false, _) => "between your changes and the composition",
+                    (true, false) => "between units",
+                    (true, true) => "between units, and between your changes and the composition",
                 };
                 fail(
                     &format!(
@@ -566,7 +557,7 @@ fn report_pending(composed: &Composed) {
     for (_, conflict) in composed.unit_conflicts() {
         println!("{conflict}");
     }
-    if composed.unit_conflicts().len() < composed.pending().len() {
+    if !composed.consumer_conflicts().is_empty() {
         println!(
             "A conflict with your changes shows your content, the last composition's, and the \
              new one, between <<<<<<< current, ||||||| base, =======, and >>>>>>> incoming lines."
@@ -736,8 +727,9 @@ fn diagnosis(failure: &ComposeFailure, root: &Path) -> Diagnosis {
         ),
         ComposeProblem::DeclarationChanged => Some(
             "put assemblr.jsonc back as the composition left it and run `assemblr compose \
-             --continue` again, or run `assemblr compose --abort`, which restores it, and \
-             declare the change afterwards"
+             --continue` again, or run `assemblr compose --abort`, which gives up the \
+             resolution and restores assemblr.jsonc where `add` or `remove` rewrote it, and \
+             compose from the declaration you want afterwards"
                 .to_owned(),
         ),
         ComposeProblem::NothingPending | ComposeProblem::NotPending => Some(

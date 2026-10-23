@@ -60,8 +60,11 @@ represented, entered, finalized, and left, on top of the journal of ADR
    line starting `<<<<<<< current` or `>>>>>>> incoming`. *Amended (#101):*
    before the files, the declaration's bytes must hash to the identity the
    `pending` record holds, else continue refuses with the two ways out; and
-   a line starting `<<<<<<< ` or `>>>>>>> ` of any kind, or the
-   `"<<<<<<< conflict"` member, counts as a marker. Then the kept lock
+   a line opened or closed by a unit's identity (`<<<<<<< @`, `>>>>>>> @`),
+   or the `"<<<<<<< conflict"` member, counts as a marker too. Only
+   Assemblr's own marker lines count (`layered::has_markers`), so a file
+   that shows `<<<<<<< HEAD` in a code block is continued. Then the kept
+   lock
    is checked to be the composition's own over a base that verifies, and is
    written and renamed into place as a composition's lock is; the journal
    and `previous/` go last. The unresolved files are all listed, and the
@@ -74,7 +77,9 @@ represented, entered, finalized, and left, on top of the journal of ADR
    named. The declaration is restored through the locked handle.
    *Amended (#101):* the declaration counts among the pending files, so when
    the journal holds its previous content it is restored whatever it holds
-   now, and the summary names it only then. A journal
+   now, and the summary names it only then; and a pending file the
+   composition created is removed whatever it holds, since a sibling
+   conflict can now mark a `create` change. A journal
    without the `pending` record, and not completed by the lock, is an
    interrupted composition: abort refuses it as continue does, and
    `compose` recovers it.
@@ -116,7 +121,9 @@ represented, entered, finalized, and left, on top of the journal of ADR
   not portable by design (the journal is transient, ADR 0017 point 6), and
   the second set is visible and must be removed before `--continue`. A file
   marked between siblings (#101) is deterministic, so the clone's copy equals
-  the composition's and is kept, pending, without a second set.
+  the composition's and is kept, pending, without a second set; `--abort`
+  in the clone has nothing to restore and leaves the markers, which the
+  consumer resolves and continues.
 - A line-level text merge can replace whole-file markers with hunks without
   changing the state machine: only `marked_change` produces the file.
 - A file that legitimately needs a line starting with a marker prefix

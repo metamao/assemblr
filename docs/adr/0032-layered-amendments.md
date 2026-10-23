@@ -69,8 +69,11 @@ and the flat model of point 3 of ADR 0015, and replaces point 7 of ADR
    written, while `build/` is left as it was and the command exits
    non-zero. `unit build`, `unit check`, and `unit publish` refuse while
    any copy holds a marker (`has_markers`, which looks only for the opening
-   and closing lines and the JSON member, so an `=` underline in Markdown
-   is not one); `unit amend` of another file still works, and composes
+   and closing lines Assemblr writes, `<<<<<<< @`, `<<<<<<< current`,
+   `>>>>>>> @`, `>>>>>>> incoming`, and the JSON member, so an `=`
+   underline in Markdown or another tool's `<<<<<<< HEAD` in a code block is
+   not one; narrowed to Assemblr's lines by #101); `unit amend` of another
+   file still works, and composes
    without the unit's own copies, so an unresolved copy never feeds a base.
 5. **`unit amend` copies the layered base.** The command searches every
    locked unit, with `--unit` naming any of them, and writes the file as
@@ -117,5 +120,5 @@ and the flat model of point 3 of ADR 0015, and replaces point 7 of ADR
 - Markers are part of a copy's text. A tool that parses `amendments/` must
   expect them, and the marker lines and member are reserved: a provider
   file that contains them cannot be distinguished from a pending copy.
-- Consumer reconciliation (ADR 0017, 0020, 0022) still reports a sibling
-  conflict as an error; marking it there is #101.
+- Consumer reconciliation (ADR 0017, 0020, 0022) marks a sibling conflict
+  in the project since #101 (ADR 0020 amended).

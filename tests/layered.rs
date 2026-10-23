@@ -599,6 +599,25 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
+/// Publishes `@acme/db` at `version` amending `package.json` with `copy`
+/// and delivering `db.txt` holding `text`.
+fn publish_db(fixture: &Fixture, db: &Repo, version: &str, copy: &str, text: &str) {
+    db.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/db",
+            version,
+            &[("@acme/base", "=1.0.0")],
+            &amending("package.json", "@acme/base", "1.0.0"),
+        ),
+    );
+    db.write("src/db.txt", text);
+    db.write("amendments/package.json", copy);
+    succeeds(fixture.build(db));
+    db.publish(version);
+    fixture.sync();
+}
+
 const UNIT_CONFLICT: &str = "src/package.json of @acme/base 1.0.0: the amendments of @acme/api \
                              and @acme/db conflict, and no unit above them resolves the \
                              conflict:";
@@ -707,18 +726,45 @@ fn a_consumer_resolves_a_conflict_between_siblings_and_the_resolution_is_kept() 
     );
     assert_eq!(read(&project.join("package.json")), resolved);
 
-    // A sibling that changes the contested value marks the file again,
-    // with the resolution as the project's side.
-    publish_amender(&fixture, &db, "db", "1.1.0", &hono("^4.3"));
+    // A sibling that leaves the contested value alone keeps the
+    // resolution, and a conflict of the consumer's own elsewhere is
+    // reported as theirs alone: the resolved conflict is not listed.
+    publish_db(&fixture, &db, "1.1.0", &hono("^4.2"), "db, second edition");
+    fs::write(project.join("db.txt"), "db, my edition").unwrap();
     let output = fails(fixture.assemblr(&project, &["update"]));
+    let out = stdout(&output);
     assert!(
-        stdout(&output).contains("  conflict package.json"),
-        "{}",
-        stdout(&output)
+        out.contains("  conflict db.txt"),
+        "{out}\n{}\n{}",
+        stderr(&output),
+        read(&project.join("package.json"))
     );
+    assert!(!out.contains("conflict package.json"), "{out}");
+    assert!(!out.contains("A conflict between units"), "{out}");
+    assert!(out.contains("A conflict with your changes"), "{out}");
+    assert_eq!(read(&project.join("package.json")), resolved);
     let err = stderr(&output);
     assert!(
-        err.contains("1 file holds conflicts between units"),
+        err.contains("1 file holds conflicts between your changes and the composition"),
+        "{err}"
+    );
+    fs::write(project.join("db.txt"), "db, my edition").unwrap();
+    succeeds(fixture.assemblr(&project, &["compose", "--continue"]));
+
+    // A sibling that changes the contested value marks the file again,
+    // with the resolution as the project's side, and the file holds both
+    // kinds of conflict.
+    publish_db(&fixture, &db, "1.2.0", &hono("^4.3"), "db, second edition");
+    let output = fails(fixture.assemblr(&project, &["update"]));
+    let out = stdout(&output);
+    assert!(out.contains("  conflict package.json"), "{out}");
+    assert!(out.contains("A conflict between units"), "{out}");
+    assert!(out.contains("A conflict with your changes"), "{out}");
+    let err = stderr(&output);
+    assert!(
+        err.contains(
+            "1 file holds conflicts between units, and between your changes and the composition"
+        ),
         "{err}"
     );
     let again = read(&project.join("package.json"));
@@ -834,8 +880,12 @@ fn a_clone_of_a_project_waiting_on_a_conflict_between_units_waits_again() {
     assert_eq!(read(&clone.join("package.json")), marked);
     let err = stderr(&fails(fixture.assemblr(&clone, &["compose", "--continue"])));
     assert!(err.contains("still holds conflict markers"), "{err}");
-    fs::write(clone.join("package.json"), resolve_hono(&marked, "^4.2")).unwrap();
+    // Another tool's markers in the resolution are content.
+    let resolved = resolve_hono(&marked, "^4.2")
+        .replace("\"name\"", "\"<<<<<<< HEAD\": \">>>>>>> x\",\n  \"name\"");
+    fs::write(clone.join("package.json"), &resolved).unwrap();
     succeeds(fixture.assemblr(&clone, &["compose", "--continue"]));
+    assert_eq!(read(&clone.join("package.json")), resolved);
     let lock: serde_json::Value =
         serde_json::from_str(&read(&clone.join("assemblr-lock.json"))).unwrap();
     assert_eq!(lock["units"]["@acme/db"]["version"], "1.0.0");
@@ -881,6 +931,22 @@ fn a_text_conflict_between_siblings_is_marked_for_the_consumer_with_the_units_na
     // The rest of the composition is in place, and the lock waits.
     assert_eq!(read(&project.join("api.txt")), "api");
     assert!(!project.join("assemblr-lock.json").exists());
+    // Giving up removes the created file whatever the consumer made of it.
+    fs::write(
+        project.join("README.md"),
+        "# Base\n\nRun it (api,\n>>>>>>> @acme/db\n",
+    )
+    .unwrap();
+    let output = succeeds(fixture.assemblr(&project, &["compose", "--abort"]));
+    assert!(
+        stdout(&output).contains("Aborted the composition: removed"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    assert!(!project.join("README.md").exists());
+    assert!(!project.join("api.txt").exists());
+    fails(fixture.assemblr(&project, &["compose"]));
     fs::write(project.join("README.md"), "# Base\n\nRun it (api, db).\n").unwrap();
     succeeds(fixture.assemblr(&project, &["compose", "--continue"]));
     assert!(project.join("assemblr-lock.json").exists());

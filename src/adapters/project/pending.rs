@@ -173,7 +173,8 @@ fn mark_lines(base: &[u8], current: &[u8], incoming: &[u8]) -> Option<Vec<u8>> {
 /// Whether `bytes` still holds a line that opens a conflict, starts its
 /// base section, or closes it, of the project's own conflicts or of a
 /// conflict between units, or the member that marks a contested JSON
-/// value.
+/// value. Only Assemblr's own marker lines count, so a file that shows
+/// another tool's markers can be continued.
 fn has_markers(bytes: &[u8]) -> bool {
     layered::has_markers(bytes)
         || bytes.split(|byte| *byte == b'\n').any(|line| {
