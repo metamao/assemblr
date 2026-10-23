@@ -5,6 +5,7 @@ mod diagnostic;
 mod info;
 mod project;
 mod registry;
+mod search;
 mod unit;
 
 use std::process::ExitCode;
@@ -86,6 +87,14 @@ enum Command {
         assemblr info @acme/web\n  \
         assemblr info @acme/web@1.2.0 --json")]
     Info(info::InfoArgs),
+    /// Find registered units by name or description
+    ///
+    /// Lists the units whose name or description contains every term,
+    /// ignoring case. Reads the local registry, offline.
+    #[command(after_long_help = "Examples:\n  \
+        assemblr search cloudflare\n  \
+        assemblr search cloudflare worker --json")]
+    Search(search::SearchArgs),
     /// Manage the local registry of unit repositories
     #[command(subcommand)]
     Registry(registry::RegistryCommand),
@@ -103,6 +112,7 @@ pub(crate) fn run() -> ExitCode {
         Command::Remove(args) => project::remove(&args),
         Command::Update(args) => project::update(&args),
         Command::Info(args) => info::run(&args),
+        Command::Search(args) => search::run(&args),
         Command::Registry(command) => registry::run(command),
         Command::Unit(command) => unit::run(command),
     }

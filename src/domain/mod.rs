@@ -6,6 +6,7 @@
 
 mod composition;
 mod contribution;
+mod discovery;
 mod identity;
 mod lock;
 mod manifest;
@@ -28,6 +29,7 @@ pub use composition::{
     UnitFile, compose, delivered_path,
 };
 pub use contribution::{ContributionError, contribution_problems};
+pub use discovery::{EmptyQuery, SearchQuery};
 pub use identity::{IdentityError, IdentityErrorReason, Segment, UnitIdentity};
 pub use lock::{
     AmendmentBaseError, BaseIntegrityError, LockError, LockedUnit, PublishedAmendmentError,

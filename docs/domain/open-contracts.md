@@ -329,6 +329,9 @@ How the status of a statement affects implementation:
   or named version from the index and its repository, offline (**Provisional
   (D-19)**; see the [implemented
   grammar](registries-and-discovery.md#implemented-grammar--approved)).
+  `assemblr search <term>... [--json]` lists the registered units whose
+  identity or newest stable description contains every term, offline
+  (**Provisional (D-32)**, under OC-29).
 - **Open detail:** Exact grammar and semantics of every other command, flag,
   and argument, including: how `registry info` relates to the top-level
   `info`, and whether unit inspection is spelled `info` or `unit info`; what
@@ -552,7 +555,13 @@ How the status of a statement affects implementation:
   AI-driven. `info` content is specified. Human and machine output derive from
   the same data.
 - **Open detail:** Exact `search` matching rules and deterministic result
-  ordering.
+  ordering. **Provisional (D-32)** and implemented by `search`: every
+  whitespace-separated term must occur as a substring, ignoring case by
+  Unicode's default lowercase mapping, in the unit's identity or in the
+  description of its newest stable version (the version `info` describes);
+  results are in identity order (see the [implemented
+  grammar](registries-and-discovery.md#implemented-grammar--approved)). The
+  entry stays open until the owner closes it.
 - **Origin:** Foundation
 - **Context:** [discovery](registries-and-discovery.md#discovery-and-information--approved)
 
