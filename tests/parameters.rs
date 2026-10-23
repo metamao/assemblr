@@ -316,17 +316,12 @@ fn the_example_is_never_a_consumer_value() {
     );
     let err = failure(&fixture.assemblr(&shop, &["compose"]));
     assert!(
-        err.contains(
-            "required parameter `appName` of @acme/stack 1.0.0 has no value and no default"
-        ),
+        err.contains("@acme/stack 1.0.0 needs a value for `appName`, which has no default"),
         "{err}"
     );
-    assert!(
-        err.contains("the unit's example is \"demo-app\", which is not used as a value"),
-        "{err}"
-    );
+    assert!(err.contains("(example: \"demo-app\")"), "{err}");
     // Only the stack is asked: the dependencies' parameters come through it.
-    assert!(!err.contains("@acme/worker 1.0.0 has no value"), "{err}");
+    assert!(!err.contains("@acme/worker 1.0.0 needs a value"), "{err}");
     assert!(!shop.join("package.json").exists());
 }
 

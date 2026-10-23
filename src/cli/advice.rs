@@ -65,9 +65,21 @@ pub(super) fn composition_advice(error: &CompositionError, audience: Audience) -
                 ),
             }
         }
-        CompositionError::MissingValue { .. } => {
-            format!("supply the value in {options}, under the unit's identity")
-        }
+        CompositionError::MissingValue {
+            unit,
+            parameter,
+            responsible,
+            ..
+        } => match audience {
+            _ if !responsible.contains(&Requirer::Root) => {
+                "the units that depend on it must set the value; ask their authors".to_owned()
+            }
+            Audience::Consumer => format!(
+                "run `assemblr add {unit} --option {parameter}=<value>`, or set `{parameter}` \
+                 under {unit} in assemblr.jsonc `options`"
+            ),
+            Audience::Author => format!("set `{parameter}` under {unit} in {options}"),
+        },
         CompositionError::SeveralAmenders { .. } => {
             "remove one of the amending units, or ask an author to deliver the change in a file \
              of its own"

@@ -218,6 +218,27 @@ fn init_creates_the_declaration_and_nothing_else() {
         read(&project.join("assemblr.jsonc")),
         "{\n  \"dependencies\": {},\n  \"options\": {}\n}\n"
     );
+
+    // A command run below the project points at it.
+    fs::create_dir_all(project.join("src/pages")).unwrap();
+    let err = stderr(&fails(
+        fixture.assemblr(&project.join("src/pages"), &["compose"]),
+    ));
+    assert!(err.contains("error: no assemblr.jsonc in "), "{err}");
+    assert!(
+        err.contains(&format!(
+            "hint: the project is in {}; run the command there",
+            project.display()
+        )),
+        "{err}"
+    );
+    // Outside any project, the hint is to create one.
+    let err = stderr(&fails(fixture.assemblr(&fixture.dir, &["compose"])));
+    assert!(
+        err.contains("run `assemblr init` to create a project here"),
+        "{err}"
+    );
+    fs::remove_dir_all(project.join("src")).unwrap();
     assert_eq!(tree(&project).len(), 1);
     assert!(!project.join(".git").exists());
 
@@ -229,7 +250,8 @@ fn init_creates_the_declaration_and_nothing_else() {
     .unwrap();
     let output = succeeds(fixture.assemblr(&project, &["init"]));
     assert!(
-        stdout(&output).contains("already a consumer project"),
+        stdout(&output)
+            .contains("is already a project: assemblr.jsonc is in place; nothing changed."),
         "{}",
         stdout(&output)
     );
@@ -264,8 +286,7 @@ fn the_first_compose_materializes_the_files_the_lock_and_the_base() {
 
     let output = succeeds(fixture.compose(&project));
     assert!(
-        stdout(&output)
-            .contains("Composed 2 units into 4 file(s); the reconciliation base sha256-v1:"),
+        stdout(&output).contains("Composed 2 units into 4 files."),
         "{}",
         stdout(&output)
     );
@@ -341,7 +362,7 @@ fn the_first_compose_materializes_the_files_the_lock_and_the_base() {
     let before = tree(&project);
     let output = succeeds(fixture.compose(&project));
     assert!(
-        stdout(&output).contains("Nothing to compose: the project already holds"),
+        stdout(&output).contains("Nothing to compose: the project already matches assemblr.jsonc."),
         "{}",
         stdout(&output)
     );
@@ -421,7 +442,7 @@ fn a_rejected_composition_leaves_the_project_unmodified() {
         "{err}"
     );
     assert!(
-        err.contains("composing over existing content is not supported yet"),
+        err.contains("composing over existing files is not supported yet"),
         "{err}"
     );
     assert_eq!(read(&project.join("README.md")), "mine");
@@ -568,7 +589,8 @@ fn a_missing_required_value_still_points_at_options() {
     let project = fixture.project("shop", &[("@acme/need", "^1")], "");
     let err = stderr(&fails(fixture.compose(&project)));
     assert!(
-        hint_of(&err).contains("supply the value in assemblr.jsonc `options`"),
+        hint_of(&err).contains("assemblr add @acme/need --option name=<value>")
+            && hint_of(&err).contains("assemblr.jsonc `options`"),
         "{err}"
     );
 }
@@ -619,10 +641,7 @@ fn a_changed_declaration_is_reconciled_three_way_and_a_bad_base_is_detected() {
     let output = succeeds(fixture.compose(&project));
     let out = stdout(&output);
     assert!(
-        out.contains(
-            "Reconciled the project with 2 units (4 file(s)): created 1, modified 0, merged 1, \
-             removed 0; the reconciliation base sha256-v1:"
-        ),
+        out.contains("Composed 2 units into 4 files: 1 created, 1 merged."),
         "{out}"
     );
     assert!(
@@ -678,7 +697,7 @@ fn a_changed_declaration_is_reconciled_three_way_and_a_bad_base_is_detected() {
     let output = succeeds(fixture.compose(&project));
     let out = stdout(&output);
     assert!(
-        out.contains("created 0, modified 0, merged 1, removed 1;"),
+        out.contains("Composed 1 unit into 3 files: 1 merged, 1 removed."),
         "{out}"
     );
     assert!(
@@ -713,7 +732,7 @@ fn a_changed_declaration_is_reconciled_three_way_and_a_bad_base_is_detected() {
         "{err}"
     );
     assert!(
-        err.contains("conflicts between text content are left in the files to resolve"),
+        err.contains("only conflicts between text files are left in the files to resolve"),
         "{err}"
     );
     assert_eq!(tree(&project), before);
@@ -751,7 +770,10 @@ fn a_changed_declaration_is_reconciled_three_way_and_a_bad_base_is_detected() {
         err.contains("the reconciliation base the lockfile records is not stored"),
         "{err}"
     );
-    assert!(err.contains("restore it from version control"), "{err}");
+    assert!(
+        err.contains("restore .assemblr/ from version control"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -817,7 +839,7 @@ fn conflicts_are_refused_before_anything_is_written() {
     let output = succeeds(fixture.compose(&project));
     let out = stdout(&output);
     assert!(
-        out.contains("created 0, modified 3, merged 0, removed 0;"),
+        out.contains("Composed 1 unit into 3 files: 3 modified."),
         "{out}"
     );
     assert_eq!(read(&project.join("README.md")), "node v2\n");
@@ -855,10 +877,7 @@ fn crlf_line_endings_in_the_project_count_as_unchanged_and_are_kept() {
     );
     let output = succeeds(fixture.compose(&project));
     let out = stdout(&output);
-    assert!(
-        out.contains("created 0, modified 1, merged 0, removed 0;"),
-        "{out}"
-    );
+    assert!(out.contains(": 1 modified."), "{out}");
     assert!(
         stderr(&output).contains(
             "warning: config/app.json has CRLF line endings in the project, so the composed \
@@ -919,10 +938,7 @@ fn unbased_files_are_compared_by_identity_and_the_ignore_rules_are_read_again() 
     declare(&project, &[("@acme/env", "^1.1")], "");
     let output = succeeds(fixture.compose(&project));
     let out = stdout(&output);
-    assert!(
-        out.contains("created 0, modified 1, merged 0, removed 0;"),
-        "{out}"
-    );
+    assert!(out.contains(": 1 modified."), "{out}");
     assert!(out.contains("  modified app.txt\n"), "{out}");
     assert!(
         !stderr(&output).contains("warning: .env is ignored"),
@@ -1027,9 +1043,8 @@ fn an_interrupted_composition_is_reverted_by_the_next_one() {
     let output = fails(fixture.compose(&project));
     assert!(
         stderr(&output).contains(
-            "note: reverted a composition that was interrupted earlier: removed 1 file(s) it had \
-             created, restored 0 it had changed or removed, kept 1 whose content changed since \
-             (bin/run)"
+            "note: reverted a composition that was interrupted earlier: removed 1 file it created, \
+             restored 0 it changed or removed, kept 1 whose content changed since (bin/run)"
         ),
         "{}",
         stderr(&output)
@@ -1229,7 +1244,7 @@ fn a_file_only_the_consumer_s_own_rules_ignore_is_refused_not_stored_or_left_out
     );
     assert!(err.contains("a.secret (pattern \"*.secret\" in "), "{err}");
     assert!(
-        err.contains("add the file to the project's .gitignore"),
+        err.contains("add it to the project's .gitignore"),
         "the way out is named: {err}"
     );
     assert!(!err.contains("b.txt"), "{err}");
@@ -1444,7 +1459,7 @@ fn add_selects_a_unit_records_a_caret_requirement_and_composes() {
         out.contains("Selected @acme/node (^1.0.0) in assemblr.jsonc."),
         "{out}"
     );
-    assert!(out.contains("Composed 1 unit into 3 file(s)"), "{out}");
+    assert!(out.contains("Composed 1 unit into 3 files."), "{out}");
     assert_eq!(read(&project.join("README.md")), "node\n");
     assert!(declaration(&project).contains("\"@acme/node\": \"^1.0.0\""));
     assert_eq!(
@@ -1525,6 +1540,72 @@ fn add_promotes_a_transitive_unit_and_replaces_a_requirement_only_when_given_one
 }
 
 #[test]
+fn add_sets_options_and_refuses_values_the_unit_does_not_accept() {
+    let fixture = Fixture::new("add-options");
+    registry(&fixture);
+    let project = initialized(&fixture, "shop");
+
+    // A value that reads as JSON is that JSON value.
+    let output =
+        succeeds(fixture.assemblr(&project, &["add", "@acme/node", "--option", "port=9090"]));
+    assert!(
+        stdout(&output).contains("Selected @acme/node (^1.0.0) and set option `port`"),
+        "{}",
+        stdout(&output)
+    );
+    let text = declaration(&project);
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["options"]["@acme/node"]["port"], 9090, "{text}");
+    assert!(read(&project.join("config/app.json")).contains("9090"));
+
+    // On a unit already selected, the value replaces the one there.
+    let output =
+        succeeds(fixture.assemblr(&project, &["add", "@acme/node", "--option", "port=9091"]));
+    assert!(
+        stdout(&output).contains("@acme/node is already selected (^1.0.0); set option `port`"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(read(&project.join("config/app.json")).contains("9091"));
+
+    // Any other text is a string, which an integer parameter refuses:
+    // nothing changes.
+    let before = tree(&project);
+    let err = stderr(&fails(
+        fixture.assemblr(&project, &["add", "@acme/node", "--option", "port=eighty"]),
+    ));
+    assert!(err.contains("`port`"), "{err}");
+    assert!(err.contains("note: nothing was changed"), "{err}");
+    assert_eq!(tree(&project), before);
+
+    // The same option twice, and one without `=`.
+    let err = stderr(&fails(fixture.assemblr(
+        &project,
+        &[
+            "add",
+            "@acme/node",
+            "--option",
+            "port=1",
+            "--option",
+            "port=2",
+        ],
+    )));
+    assert!(
+        err.contains("--option port is given more than once"),
+        "{err}"
+    );
+    assert_eq!(tree(&project), before);
+    let output = fixture.assemblr(&project, &["add", "@acme/node", "--option", "port"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("NAME=VALUE"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(tree(&project), before);
+}
+
+#[test]
 fn a_refused_add_leaves_the_declaration_and_the_project_as_they_were() {
     let fixture = Fixture::new("add-refused");
     registry(&fixture);
@@ -1544,10 +1625,13 @@ fn a_refused_add_leaves_the_declaration_and_the_project_as_they_were() {
         "{err}"
     );
     assert!(err.contains("@owner/name@^1.2.0"), "{err}");
-    let err = stderr(&fails(add(&fixture, &project, "web")));
-    assert!(err.contains("`web` is not a unit identity"), "{err}");
-    let err = stderr(&fails(add(&fixture, &project, "@acme/web@")));
-    assert!(err.contains("names no version requirement"), "{err}");
+    // An argument that is not a unit is a usage error.
+    let output = add(&fixture, &project, "web");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("invalid unit \"web\""));
+    let output = add(&fixture, &project, "@acme/web@");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("nothing follows the last `@`"));
     assert_eq!(tree(&project), before);
 
     // A composition that the project's own content refuses: the file the
@@ -1743,7 +1827,7 @@ fn a_text_conflict_is_left_marked_and_continue_finalizes_it() {
 
     let output = fails(fixture.compose(&project));
     let out = stdout(&output);
-    assert!(out.contains("1 file(s) hold conflicts"), "{out}");
+    assert!(out.contains("but 1 file has conflicts"), "{out}");
     assert!(out.contains("  conflict README.md"), "{out}");
     assert!(out.contains("  modified bin/run"), "{out}");
     let err = stderr(&output);
@@ -1797,7 +1881,7 @@ fn a_text_conflict_is_left_marked_and_continue_finalizes_it() {
     fs::write(project.join("README.md"), "mine and node v2\n").unwrap();
     let output = succeeds(fixture.assemblr(&project, &["compose", "--continue"]));
     assert!(
-        stdout(&output).contains("Resolved 1 file(s) and finalized the composition"),
+        stdout(&output).contains("Resolved 1 file and finished the composition"),
         "{}",
         stdout(&output)
     );
@@ -1892,7 +1976,7 @@ fn value_conflicts_in_json_are_marked_with_the_text_ones() {
 
     let output = fails(fixture.compose(&project));
     let out = stdout(&output);
-    assert!(out.contains("2 file(s) hold conflicts"), "{out}");
+    assert!(out.contains("but 2 files have conflicts"), "{out}");
     assert!(out.contains("  conflict README.md"), "{out}");
     assert!(out.contains("  conflict config/app.json"), "{out}");
     let json = read(&project.join("config/app.json"));
@@ -2569,9 +2653,14 @@ fn update_refuses_unknown_units_and_projects_never_composed_and_changes_nothing(
         "{err}"
     );
     assert!(err.contains("@acme/node"), "{err}");
-    let err = stderr(&fails(update(&fixture, &project, &["@acme/node@^1"])));
-    assert!(err.contains("names a version requirement"), "{err}");
-    assert!(err.contains("assemblr add"), "{err}");
+    let output = update(&fixture, &project, &["@acme/node@^1"]);
+    assert_eq!(output.status.code(), Some(2));
+    let err = stderr(&output);
+    assert!(err.contains("includes a version"), "{err}");
+    assert!(
+        err.contains("assemblr add @acme/node@<requirement>"),
+        "{err}"
+    );
     assert_eq!(tree(&project), before);
 }
 
@@ -2726,7 +2815,7 @@ fn a_journal_from_a_newer_version_is_refused_by_every_command_and_nothing_change
             "{args:?}: {err}"
         );
         assert!(
-            err.contains("may come from a newer version of Assemblr"),
+            err.contains("the journal may come from a newer Assemblr"),
             "{args:?}: {err}"
         );
         assert_eq!(tree(&project), waiting, "{args:?}");

@@ -129,14 +129,9 @@ fn registration_indexes_valid_versions_and_reports_excluded_tags() {
     );
     assert!(warnings[0].contains("not indexed"), "{stderr}");
     let stdout = stdout(&output);
+    assert!(stdout.contains("with versions 1.0.0, 1.2.0."), "{stdout}");
     assert!(
-        stdout.contains("with published versions 1.0.0, 1.2.0."),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains(
-            "Excluded 1 invalid version tag(s), which are not indexed: @acme/node v1.1.0."
-        ),
+        stdout.contains("Excluded 1 invalid version tag, which is not indexed: @acme/node v1.1.0."),
         "{stdout}"
     );
 
@@ -226,7 +221,7 @@ fn an_unpublished_unit_without_a_usable_committed_manifest_is_rejected() {
     let stderr = stderr(&output);
     assert!(stderr.contains("committed at `HEAD`"), "{stderr}");
     assert!(
-        stderr.contains("registry index was not changed"),
+        stderr.contains("note: the registry was not changed"),
         "{stderr}"
     );
     assert!(!data.exists(), "a rejected registration created state");
@@ -433,7 +428,8 @@ fn sync_indexes_new_versions_and_excludes_new_invalid_tags() {
     );
     assert!(stderr(&output).contains("excluded tag v1.1.0"));
     assert!(
-        stdout(&output).contains("which are not indexed: @acme/node v1.1.0."),
+        stdout(&output)
+            .contains("Excluded 1 invalid version tag, which is not indexed: @acme/node v1.1.0."),
         "{}",
         stdout(&output)
     );
@@ -441,7 +437,7 @@ fn sync_indexes_new_versions_and_excludes_new_invalid_tags() {
 
     let before = fs::read(index_file(&data)).unwrap();
     let output = succeeds(assemblr(&data, &dir, &["registry", "sync"]));
-    assert!(stdout(&output).contains("no new published versions"));
+    assert!(stdout(&output).contains("Synchronized 1 unit; no new versions."));
     assert_eq!(fs::read(index_file(&data)).unwrap(), before);
 }
 
@@ -606,7 +602,7 @@ fn sync_is_rejected(dir: &Path, data: &Path, expected: &[&str]) {
         assert!(stderr.contains(expected), "{expected}: {stderr}");
     }
     assert!(
-        stderr.contains("registry index was not changed"),
+        stderr.contains("note: the registry was not changed"),
         "{stderr}"
     );
     assert_eq!(fs::read(index_file(data)).unwrap(), before);

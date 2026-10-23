@@ -80,8 +80,15 @@ Decided for the first `unit init` under AGENTS.md §1.1 (decision log D-2 and
 D-5) and merged with PR #37. The owner has not approved it explicitly.
 
 **Command.** `assemblr unit init <identity> [<directory>]
-[--description <text>]`. The directory defaults to the current one and is
-created, parents included, when it does not exist. The description is the
+[--description <text>]`. The directory is created, parents included, when it
+does not exist. **Provisional (D-33):** without a directory, the unit gets a
+new one named after it in the current directory, `web` for `@acme/web`. That
+directory is used when it does not exist, is empty, or already holds a
+`manifest.jsonc`; otherwise the command refuses, changing nothing, so a unit
+never lands among unrelated files by default. A name that cannot be a
+directory on every platform, such as `con`, is refused and needs a directory.
+`.` sets up the unit in the current directory, for example to adopt an
+existing repository. The description is the
 manifest's; without one, a placeholder names the unit. The result says what
 was created, replaced, and already in place, and what to do next.
 

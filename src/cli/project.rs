@@ -6,6 +6,7 @@
 use super::advice::{
     Audience, composition_advice, cross_version_advice, distinct, merge_problem_advice,
 };
+use super::diagnostic::{Diagnosis, count, fail, fail_with};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -19,8 +20,7 @@ use clap::Args;
 
 #[derive(Debug, Args)]
 pub(super) struct InitArgs {
-    /// The project's directory, created if it does not exist. Defaults to
-    /// the current directory.
+    /// The project's directory, created if missing [default: .]
     directory: Option<PathBuf>,
 }
 
@@ -29,7 +29,7 @@ pub(super) fn init(args: &InitArgs) -> ExitCode {
     match init_project(&directory) {
         Ok(initialized) if initialized.created() => {
             println!(
-                "Initialized a consumer project in {}: created {}assemblr.jsonc.",
+                "Initialized a project in {}: created {}assemblr.jsonc.",
                 initialized.directory().display(),
                 if initialized.directory_created() {
                     "the directory and "
@@ -38,151 +38,169 @@ pub(super) fn init(args: &InitArgs) -> ExitCode {
                 }
             );
             println!(
-                "Next: declare units in assemblr.jsonc, or run `assemblr compose` once they are \
-                 declared."
+                "Next: add a unit with `assemblr add @owner/name`; `assemblr registry list` shows \
+                 the units you can add."
             );
             ExitCode::SUCCESS
         }
         Ok(initialized) => {
             println!(
-                "{} is already a consumer project: assemblr.jsonc is in place; nothing changed.",
+                "{} is already a project: assemblr.jsonc is in place; nothing changed.",
                 initialized.directory().display()
             );
             ExitCode::SUCCESS
         }
         Err(failure) => {
-            let hint = match &failure {
-                InitProjectFailure::UnitRepository(_) => {
-                    "nothing was changed; run `assemblr init` in a directory that is not a unit's \
-                     repository"
-                }
-                _ => "nothing was changed",
+            let diagnosis = Diagnosis::note("nothing was changed");
+            let diagnosis = match &failure {
+                InitProjectFailure::UnitRepository(_) => diagnosis
+                    .advise("run `assemblr init` in a directory that is not a unit's repository"),
+                _ => diagnosis,
             };
-            fail(&failure.to_string(), Some(hint))
+            fail_with(&failure.to_string(), &diagnosis)
         }
+    }
+}
+
+/// A unit on the command line, `@owner/name`, with the text after a second
+/// `@` when there is one: a version requirement or an exact version.
+#[derive(Debug, Clone)]
+pub(super) struct UnitArgument {
+    identity: UnitIdentity,
+    version: Option<String>,
+}
+
+impl UnitArgument {
+    pub(super) fn identity(&self) -> &UnitIdentity {
+        &self.identity
+    }
+
+    pub(super) fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+}
+
+/// Parses `@owner/name`, optionally followed by `@` and a version.
+pub(super) fn unit_argument(argument: &str) -> Result<UnitArgument, String> {
+    let (identity, version) = match argument.get(1..).and_then(|rest| rest.find('@')) {
+        Some(at) => (&argument[..=at], Some(argument[at + 2..].to_owned())),
+        None => (argument, None),
+    };
+    if version.as_deref() == Some("") {
+        return Err(format!("nothing follows the last `@` in `{argument}`"));
+    }
+    let identity = identity
+        .parse::<UnitIdentity>()
+        .map_err(|error| error.to_string())?;
+    Ok(UnitArgument { identity, version })
+}
+
+/// Parses `@owner/name` alone, for the commands that take no version.
+fn unit_only(argument: &str) -> Result<UnitIdentity, String> {
+    let parsed = unit_argument(argument)?;
+    match parsed.version {
+        None => Ok(parsed.identity),
+        Some(_) => Err(format!(
+            "`{argument}` includes a version; give the unit only, like `{}`, and change a \
+             requirement with `assemblr add {}@<requirement>`",
+            parsed.identity, parsed.identity
+        )),
+    }
+}
+
+/// Parses `name=value` for `--option`: the value is JSON when it reads as
+/// JSON, such as `8080` or `true`, and a string otherwise.
+fn option_argument(argument: &str) -> Result<(String, String), String> {
+    match argument.split_once('=') {
+        Some((name, value)) if !name.is_empty() => Ok((name.to_owned(), value.to_owned())),
+        _ => Err(format!(
+            "`{argument}` is not name=value, like `appName=shop`"
+        )),
     }
 }
 
 #[derive(Debug, Args)]
 pub(super) struct AddArgs {
-    /// The unit to select, `@owner/name`, optionally followed by `@` and a
-    /// version requirement, as in `@owner/name@~1.2`. Without one, the
-    /// unit is recorded with a caret requirement on the version the
-    /// resolution picks.
-    unit: String,
-    /// Also report the warnings about files this composition does not
-    /// write, and each amendment applied to another version of its
-    /// provider than the one it was taken from.
+    /// The unit, like `@acme/web` or `@acme/web@^1.2`
+    #[arg(value_name = "UNIT", value_parser = unit_argument)]
+    unit: UnitArgument,
+    /// Set an option of the unit; repeat for several
+    ///
+    /// The value is JSON when it reads as JSON, like `8080` or `true`, and a
+    /// string otherwise: `appName=shop` sets the string "shop", and
+    /// `port='"8080"'` the string "8080".
+    #[arg(long = "option", value_name = "NAME=VALUE", value_parser = option_argument)]
+    options: Vec<(String, String)>,
+    /// Also show warnings about unchanged files and cross-version amendments
     #[arg(long)]
     verbose: bool,
 }
 
 #[derive(Debug, Args)]
 pub(super) struct RemoveArgs {
-    /// The explicitly selected unit to remove, `@owner/name`.
-    unit: String,
-    /// Also report the warnings about files this composition does not
-    /// write, and each amendment applied to another version of its
-    /// provider than the one it was taken from.
+    /// The unit to remove, like `@acme/web`
+    #[arg(value_name = "UNIT", value_parser = unit_only)]
+    unit: UnitIdentity,
+    /// Also show warnings about unchanged files and cross-version amendments
     #[arg(long)]
     verbose: bool,
 }
 
-/// `@owner/name` and the requirement after a second `@`, if any.
-pub(super) fn split_unit(argument: &str) -> Result<(UnitIdentity, Option<String>), String> {
-    let (identity, requirement) = match argument.get(1..).and_then(|rest| rest.find('@')) {
-        Some(at) => (&argument[..=at], Some(argument[at + 2..].to_owned())),
-        None => (argument, None),
-    };
-    if requirement.as_deref() == Some("") {
-        return Err(format!(
-            "`{argument}` ends with `@` and names no version requirement"
-        ));
-    }
-    identity
-        .parse::<UnitIdentity>()
-        .map(|identity| (identity, requirement))
-        .map_err(|error| format!("`{identity}` is not a unit identity: {error}"))
-}
-
 pub(super) fn add(args: &AddArgs) -> ExitCode {
-    let (identity, requirement) = match split_unit(&args.unit) {
-        Ok(parsed) => parsed,
-        Err(message) => {
+    let identity = args.unit.identity();
+    let mut options: Vec<(&str, &str)> = Vec::new();
+    for (name, value) in &args.options {
+        if options.iter().any(|(given, _)| given == name) {
             return fail(
-                &message,
-                Some("write the unit as @owner/name, or @owner/name@<requirement>"),
+                &format!("--option {name} is given more than once"),
+                Some("give each option once"),
             );
         }
-    };
-    run(Some(&identity), args.verbose, |root, registry| {
-        add_unit(root, registry, &identity, requirement.as_deref())
-    })
+        options.push((name, value));
+    }
+    let names: Vec<&str> = options.iter().map(|(name, _)| *name).collect();
+    run_with(
+        Some((identity, &names)),
+        None,
+        args.verbose,
+        |root, registry| add_unit(root, registry, identity, args.unit.version(), &options),
+    )
 }
 
 pub(super) fn remove(args: &RemoveArgs) -> ExitCode {
-    let (identity, requirement) = match split_unit(&args.unit) {
-        Ok(parsed) => parsed,
-        Err(message) => return fail(&message, Some("write the unit as @owner/name")),
-    };
-    if requirement.is_some() {
-        return fail(
-            &format!("`{}` names a version requirement", args.unit),
-            Some("`assemblr remove` takes the unit only: @owner/name"),
-        );
-    }
-    run(Some(&identity), args.verbose, |root, registry| {
-        remove_unit(root, registry, &identity)
-    })
+    run_with(
+        Some((&args.unit, &[])),
+        None,
+        args.verbose,
+        |root, registry| remove_unit(root, registry, &args.unit),
+    )
 }
 
 #[derive(Debug, Args)]
 pub(super) struct UpdateArgs {
-    /// The locked units to update, `@owner/name`: selected or transitive.
-    /// Without any, every locked unit is updated within its requirements.
-    units: Vec<String>,
-    /// Also report the warnings about files this composition does not
-    /// write, and each amendment applied to another version of its
-    /// provider than the one it was taken from.
+    /// The units to update, like `@acme/web` [default: every unit]
+    #[arg(value_name = "UNIT", value_parser = unit_only)]
+    units: Vec<UnitIdentity>,
+    /// Also show warnings about unchanged files and cross-version amendments
     #[arg(long)]
     verbose: bool,
 }
 
 pub(super) fn update(args: &UpdateArgs) -> ExitCode {
-    let mut units = Vec::new();
-    for argument in &args.units {
-        match split_unit(argument) {
-            Ok((identity, None)) => units.push(identity),
-            Ok((_, Some(_))) => {
-                return fail(
-                    &format!("`{argument}` names a version requirement"),
-                    Some(
-                        "`assemblr update` takes units only: @owner/name; change a requirement \
-                         with `assemblr add @owner/name@<requirement>`",
-                    ),
-                );
-            }
-            Err(message) => return fail(&message, Some("write each unit as @owner/name")),
-        }
-    }
-    run_with(None, Some(&units), args.verbose, |root, registry| {
-        update_units(root, registry, &units)
+    run_with(None, Some(&args.units), args.verbose, |root, registry| {
+        update_units(root, registry, &args.units)
     })
 }
 
 #[derive(Debug, Args)]
 pub(super) struct ComposeArgs {
-    /// Finalize a composition that left conflicts in files, once you have
-    /// resolved them: no conflict marker may remain.
+    /// Finish a composition after you resolve its conflicts
     #[arg(long = "continue", conflicts_with = "abort")]
     resume: bool,
-    /// Give up a composition that left conflicts in files: restore the
-    /// project, `assemblr.jsonc` included, to what it held before.
+    /// Undo a composition that left conflicts, assemblr.jsonc included
     #[arg(long)]
     abort: bool,
-    /// Also report the warnings about files this composition does not
-    /// write, and each amendment applied to another version of its
-    /// provider than the one it was taken from.
+    /// Also show warnings about unchanged files and cross-version amendments
     #[arg(long, conflicts_with_all = ["resume", "abort"])]
     verbose: bool,
 }
@@ -210,27 +228,18 @@ fn settle(operation: impl FnOnce(&Path) -> Result<(), ComposeFailure>) -> ExitCo
     };
     match operation(&root) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(failure) => {
-            let hint = hint(&failure, &root);
-            fail(&failure.to_string(), Some(&hint))
-        }
+        Err(failure) => fail_with(&failure.to_string(), &diagnosis(&failure, &root)),
     }
 }
 
 fn report_continued(continued: &assemblr::adapters::Continued) {
     if continued.completed() {
-        println!(
-            "The composition had been continued already; removed its journal. The \
-             reconciliation base is {}.",
-            continued.base()
-        );
+        println!("The composition was already finished; removed its journal.");
         return;
     }
     println!(
-        "Resolved {} file(s) and finalized the composition; the reconciliation base {} is \
-         stored in .assemblr/ and assemblr-lock.json is updated.",
-        continued.files().len(),
-        continued.base()
+        "Resolved {} and finished the composition; assemblr-lock.json is updated.",
+        count(continued.files().len(), "file", "files")
     );
     for path in continued.files() {
         println!("  resolved {path}");
@@ -240,8 +249,8 @@ fn report_continued(continued: &assemblr::adapters::Continued) {
 fn report_aborted(recovery: &ComposeRecovery) {
     match recovery {
         ComposeRecovery::Completed => println!(
-            "The composition had been continued already, so there is nothing to abort; removed \
-             its journal."
+            "The composition was already finished, so there is nothing to abort; removed its \
+             journal."
         ),
         ComposeRecovery::Reverted {
             removed,
@@ -249,9 +258,9 @@ fn report_aborted(recovery: &ComposeRecovery) {
             kept,
         } => {
             println!(
-                "Aborted the composition: removed {} file(s) it had created and restored {} it \
-                 had changed or removed, assemblr.jsonc included where it was rewritten.",
-                removed.len(),
+                "Aborted the composition: removed {} it created and restored {} it changed or \
+                 removed, assemblr.jsonc included.",
+                count(removed.len(), "file", "files"),
                 restored.len()
             );
             for path in kept {
@@ -265,20 +274,12 @@ fn report_aborted(recovery: &ComposeRecovery) {
 }
 
 /// Runs `operation` on the project in the current directory and reports
-/// it. `unit` is the unit `add` or `remove` was given, and `verbose` says
-/// whether `--verbose` was.
-fn run(
-    unit: Option<&UnitIdentity>,
-    verbose: bool,
-    operation: impl FnOnce(&Path, &Registry) -> Result<Composed, ComposeFailure>,
-) -> ExitCode {
-    run_with(unit, None, verbose, operation)
-}
-
-/// [`run`] for `update` when `named` is given: the units it was asked to
-/// update, which the report tells apart from the ones that moved with them.
+/// it. `unit` is the unit `add` or `remove` was given, with the options
+/// `add` sets; `named` holds the units `update` was asked to update, which
+/// the report tells apart from the ones that moved with them; and `verbose`
+/// says whether `--verbose` was given.
 fn run_with(
-    unit: Option<&UnitIdentity>,
+    unit: Option<(&UnitIdentity, &[&str])>,
     named: Option<&[UnitIdentity]>,
     verbose: bool,
     operation: impl FnOnce(&Path, &Registry) -> Result<Composed, ComposeFailure>,
@@ -305,8 +306,8 @@ fn run_with(
             } else {
                 fail(
                     &format!(
-                        "{} file(s) hold conflicts between your changes and the composition",
-                        composed.pending().len()
+                        "{} conflicts between your changes and the composition",
+                        count(composed.pending().len(), "file holds", "files hold"),
                     ),
                     Some(
                         "resolve the conflict markers in each file, then run `assemblr compose \
@@ -323,14 +324,14 @@ fn run_with(
             {
                 report_recovered(recovered);
             }
-            let mut hint = hint(&failure, &root);
+            let mut diagnosis = diagnosis(&failure, &root);
             if named.is_some_and(<[UnitIdentity]>::is_empty) && crosses_versions(&failure) {
-                hint.push_str(
-                    "; `assemblr update` with the units to move updates only those, and the \
+                diagnosis = diagnosis.advise(
+                    "`assemblr update` with the units to move updates only those, and the \
                      units they do not require to move stay where they are",
                 );
             }
-            fail(&failure.to_string(), Some(&hint))
+            fail_with(&failure.to_string(), &diagnosis)
         }
     }
 }
@@ -352,19 +353,38 @@ fn crosses_versions(failure: &ComposeFailure) -> bool {
     })
 }
 
-fn report_declaration(unit: Option<&UnitIdentity>, composed: &Composed) {
-    let (Some(unit), Some(change)) = (unit, composed.declaration()) else {
+fn report_declaration(unit: Option<(&UnitIdentity, &[&str])>, composed: &Composed) {
+    let (Some((unit, options)), Some(change)) = (unit, composed.declaration()) else {
         return;
+    };
+    let set = match options {
+        [] => String::new(),
+        [one] => format!("set option `{one}`"),
+        many => format!(
+            "set options {}",
+            many.iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    let and_set = if set.is_empty() {
+        String::new()
+    } else {
+        format!(" and {set}")
     };
     match change {
         DeclarationChange::Added { requirement } => {
-            println!("Selected {unit} ({requirement}) in assemblr.jsonc.");
+            println!("Selected {unit} ({requirement}){and_set} in assemblr.jsonc.");
         }
-        DeclarationChange::Replaced { from, to } => {
-            println!("Changed the requirement of {unit} from {from} to {to} in assemblr.jsonc.")
+        DeclarationChange::Replaced { from, to } => println!(
+            "Changed the requirement of {unit} from {from} to {to}{and_set} in assemblr.jsonc."
+        ),
+        DeclarationChange::Kept { requirement } if set.is_empty() => {
+            println!("{unit} is already selected ({requirement}); assemblr.jsonc is unchanged.")
         }
         DeclarationChange::Kept { requirement } => {
-            println!("{unit} is already selected ({requirement}); assemblr.jsonc is unchanged.")
+            println!("{unit} is already selected ({requirement}); {set} in assemblr.jsonc.")
         }
         DeclarationChange::Removed { options } => println!(
             "Removed {unit}{} from assemblr.jsonc.",
@@ -387,6 +407,7 @@ fn report(composed: &Composed, named: Option<&[UnitIdentity]>, verbose: bool) {
         for line in composed.crossed() {
             eprintln!("note: {line}");
         }
+        eprintln!("note: the stored base is {}", composed.base());
     }
     if !composed.pending().is_empty() {
         report_pending(composed);
@@ -400,21 +421,17 @@ fn report(composed: &Composed, named: Option<&[UnitIdentity]>, verbose: bool) {
         && !composed.first();
     if composed.unchanged() && named.is_some() {
         println!(
-            "Nothing to update: every {} is at the newest version its requirements allow ({}).",
+            "Nothing to update: every {} is at the newest version its requirements allow.",
             if named.is_some_and(|named| named.len() == 1) {
                 "named unit"
             } else {
                 "unit"
             },
-            composed.base()
         );
         return;
     }
     if composed.unchanged() || declaration_only {
-        println!(
-            "Nothing to compose: the project already holds the declared composition ({}).",
-            composed.base()
-        );
+        println!("Nothing to compose: the project already matches assemblr.jsonc.");
         return;
     }
     let changes: Vec<String> = composed
@@ -471,33 +488,39 @@ fn report(composed: &Composed, named: Option<&[UnitIdentity]>, verbose: bool) {
     }
     if composed.first() {
         println!(
-            "Composed {} unit{} into {} file(s); the reconciliation base {} is stored in \
-             .assemblr/.",
-            composed.units(),
-            if composed.units() == 1 { "" } else { "s" },
-            composed.files(),
-            composed.base()
+            "Composed {} into {}.",
+            count(composed.units(), "unit", "units"),
+            count(composed.files(), "file", "files")
         );
         return;
     }
-    let count = |change: FileChange| {
+    let changed = |change: FileChange| {
         composed
             .paths()
             .values()
             .filter(|found| **found == change)
             .count()
     };
+    let changed: Vec<String> = [
+        (FileChange::Created, "created"),
+        (FileChange::Modified, "modified"),
+        (FileChange::Merged, "merged"),
+        (FileChange::Removed, "removed"),
+    ]
+    .into_iter()
+    .map(|(change, word)| (changed(change), word))
+    .filter(|(found, _)| *found > 0)
+    .map(|(found, word)| format!("{found} {word}"))
+    .collect();
     println!(
-        "Reconciled the project with {} unit{} ({} file(s)): created {}, modified {}, merged {}, \
-         removed {}; the reconciliation base {} is stored in .assemblr/.",
-        composed.units(),
-        if composed.units() == 1 { "" } else { "s" },
-        composed.files(),
-        count(FileChange::Created),
-        count(FileChange::Modified),
-        count(FileChange::Merged),
-        count(FileChange::Removed),
-        composed.base()
+        "Composed {} into {}: {}.",
+        count(composed.units(), "unit", "units"),
+        count(composed.files(), "file", "files"),
+        if changed.is_empty() {
+            "no file changed".to_owned()
+        } else {
+            changed.join(", ")
+        }
     );
     for (path, change) in composed.paths() {
         println!("  {} {path}", describe_change(*change));
@@ -507,19 +530,18 @@ fn report(composed: &Composed, named: Option<&[UnitIdentity]>, verbose: bool) {
 /// A composition that waits for the consumer: the lock is not written yet.
 fn report_pending(composed: &Composed) {
     println!(
-        "Reconciled the project with {} unit{} ({} file(s)), but {} file(s) hold conflicts; the \
-         rest of the composition is applied and its lock waits for you:",
-        composed.units(),
-        if composed.units() == 1 { "" } else { "s" },
-        composed.files(),
-        composed.pending().len(),
+        "Composed {} into {}, but {} conflicts; the rest is applied, and the lock is written \
+         when you finish:",
+        count(composed.units(), "unit", "units"),
+        count(composed.files(), "file", "files"),
+        count(composed.pending().len(), "file has", "files have"),
     );
     for (path, change) in composed.paths() {
         println!("  {} {path}", describe_change(*change));
     }
     println!(
-        "Each conflicted file holds your content, the last composition's, and the declared \
-         composition's between <<<<<<<, |||||||, =======, and >>>>>>> lines."
+        "Each conflicted file shows your content, the last composition's, and the new one, \
+         between <<<<<<<, |||||||, =======, and >>>>>>> lines."
     );
 }
 
@@ -544,9 +566,9 @@ fn report_recovered(recovered: &ComposeRecovery) {
             restored,
             kept,
         } => eprintln!(
-            "note: reverted a composition that was interrupted earlier: removed {} file(s) it \
-             had created, restored {} it had changed or removed{}",
-            removed.len(),
+            "note: reverted a composition that was interrupted earlier: removed {} it created, \
+             restored {} it changed or removed{}",
+            count(removed.len(), "file", "files"),
             restored.len(),
             if kept.is_empty() {
                 String::new()
@@ -572,54 +594,56 @@ fn describe(identity: &UnitIdentity, change: &LockChange) -> String {
     }
 }
 
-/// What remains after a failure, and what the user can do about it.
-fn hint(failure: &ComposeFailure, root: &Path) -> String {
+/// What a failure left, and what the user can do about it.
+fn diagnosis(failure: &ComposeFailure, root: &Path) -> Diagnosis {
     let problems = match failure {
         ComposeFailure::Write { step, .. } => {
             return match step {
                 WriteStep::Store | WriteStep::Previous | WriteStep::Journal => {
-                    "the project's files were not changed; fix the problem and run `assemblr \
-                     compose` again"
-                        .to_owned()
+                    Diagnosis::note("the project's files were not changed")
+                        .advise("fix the problem and run `assemblr compose` again")
                 }
                 WriteStep::File(_)
                 | WriteStep::Declaration
                 | WriteStep::Pending
                 | WriteStep::Lock => {
-                    "the composition is recorded in .assemblr/journal.json; the next `assemblr \
-                     compose` reverts what was changed, assemblr.jsonc included, and starts over"
-                        .to_owned()
+                    Diagnosis::note("the composition is recorded in .assemblr/journal.json").advise(
+                        "run `assemblr compose`: it reverts what was changed, assemblr.jsonc \
+                         included, and starts over",
+                    )
                 }
-                WriteStep::Finish => "the composition is complete except for its journal; the \
-                                      next `assemblr compose` removes it"
-                    .to_owned(),
+                WriteStep::Finish => {
+                    Diagnosis::note("the composition is complete except for its journal")
+                        .advise("the next `assemblr compose` removes the journal")
+                }
             };
         }
         ComposeFailure::Rejected { problems, .. } => problems,
     };
-    let mut hint = "the composition was rejected and the project was not changed".to_owned();
     let advice = distinct(problems.iter().filter_map(|problem| {
         match problem {
-        ComposeProblem::NoDeclaration(_) => Some(format!(
-            "{} is not a consumer project's top level; run `assemblr init` to create one, or \
-             `assemblr compose` in the directory that holds `assemblr.jsonc`",
-            root.display()
-        )),
+        ComposeProblem::NoDeclaration(_) => Some(match enclosing_project(root) {
+            Some(project) => format!(
+                "the project is in {}; run the command there",
+                project.display()
+            ),
+            None => "run `assemblr init` to create a project here, or change to the project's \
+                     directory"
+                .to_owned(),
+        }),
         ComposeProblem::Existing(_) => Some(
-            "move the existing content away, or compose into an empty project; composing over \
-             existing content is not supported yet"
+            "move the existing files away, or compose into an empty project; composing over \
+             existing files is not supported yet"
                 .to_owned(),
         ),
         ComposeProblem::LocallyIgnored(_) => Some(
-            "whether a file enters the tracked base must not depend on one machine's rules: add \
-             the file to the project's .gitignore to keep it out of the base for everyone, or \
-             re-include it there with a `!` pattern (a directory with `!dir/`) to store it, or \
-             remove your own rule"
+            "a file must be tracked or ignored the same way on every machine: add it to the \
+             project's .gitignore, re-include it there with a `!` pattern (`!dir/` for a \
+             directory), or remove your own ignore rule"
                 .to_owned(),
         ),
         ComposeProblem::NotSelected { transitive, .. } => Some(if *transitive {
-            "remove the selected unit that requires it, or select it with `assemblr add` first"
-                .to_owned()
+            "remove the unit that requires it, or add it with `assemblr add` first".to_owned()
         } else {
             "assemblr.jsonc lists the units this project selects".to_owned()
         }),
@@ -631,7 +655,7 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
             "no unit is locked yet; run `assemblr compose` first".to_owned()
         } else {
             format!(
-                "`assemblr update` takes the units of the composition: {}",
+                "the units you can update are: {}",
                 locked
                     .iter()
                     .map(ToString::to_string)
@@ -640,8 +664,8 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
             )
         }),
         ComposeProblem::InvalidRequirement(_) => Some(
-            "write a SemVer requirement such as ^1.2.0, ~1.2, or =1.2.3 after the unit: \
-             @owner/name@^1.2.0"
+            "write a SemVer requirement after the unit, like @owner/name@^1.2.0, @owner/name@~1.2, \
+             or @owner/name@=1.2.3"
                 .to_owned(),
         ),
         ComposeProblem::CannotEdit(_) => {
@@ -653,9 +677,9 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
                 .to_owned(),
         ),
         ComposeProblem::Conflicts(_) => Some(
-            "for each file, make the project's content the composed one or restore the \
-             composed content, or change the declaration; conflicts between text content are \
-             left in the files to resolve, but not together with conflicts of other kinds"
+            "for each file, restore the composed content or change the declaration; only \
+             conflicts between text files are left in the files to resolve, and only when no \
+             other kind of conflict is found"
                 .to_owned(),
         ),
         ComposeProblem::Pending(_) => Some(
@@ -664,28 +688,28 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
                 .to_owned(),
         ),
         ComposeProblem::Unresolved(_) => Some(
-            "edit each file to the content you want, with no <<<<<<< current, ||||||| base, or \
-             >>>>>>> incoming line left, then run `assemblr compose --continue` again"
+            "edit each file to the content you want, remove every <<<<<<< current, ||||||| \
+             base, and >>>>>>> incoming line, and run `assemblr compose --continue` again"
                 .to_owned(),
         ),
         ComposeProblem::NothingPending | ComposeProblem::NotPending => Some(
-            "`assemblr compose` completes or reverts an interrupted composition, and composes the \
-             declaration"
+            "`--continue` and `--abort` only apply to a composition that left conflicts; run \
+             `assemblr compose` to compose the project"
                 .to_owned(),
         ),
         ComposeProblem::Base(StoreError::Missing(_)) => Some(
-            "the stored base in .assemblr/ is missing: restore it from version control; a \
-             project cannot be reconciled without it"
+            "restore .assemblr/ from version control; a project cannot be reconciled without its \
+             stored base"
                 .to_owned(),
         ),
         ComposeProblem::Base(_) => Some(
-            "restore .assemblr/ from version control; a base that does not verify is never used"
+            "restore .assemblr/ from version control; a stored base that does not verify is never \
+             used"
                 .to_owned(),
         ),
         ComposeProblem::Store(StoreError::Journal { .. }) => Some(
-            "a journal this version cannot read may come from a newer version of Assemblr: \
-             finish the composition with that version (`assemblr compose`, or `assemblr compose \
-             --continue` or `--abort` when it waits); nothing was changed"
+            "the journal may come from a newer Assemblr: finish the composition with that version \
+             (`assemblr compose`, or `--continue` or `--abort` when it waits)"
                 .to_owned(),
         ),
         ComposeProblem::ForeignLockfile(_) => Some(
@@ -696,11 +720,18 @@ fn hint(failure: &ComposeFailure, root: &Path) -> String {
         _ => None,
     }
     }));
+    let mut diagnosis = Diagnosis::note("nothing was changed");
     if !advice.is_empty() {
-        hint.push_str("; ");
-        hint.push_str(&advice.join("; "));
+        diagnosis = diagnosis.advise(advice.join("; "));
     }
-    hint
+    diagnosis
+}
+
+/// The nearest directory above `root` that holds a project's declaration.
+fn enclosing_project(root: &Path) -> Option<&Path> {
+    root.ancestors()
+        .skip(1)
+        .find(|directory| directory.join("assemblr.jsonc").is_file())
 }
 
 /// Advice for the problems a unit build also reports.
@@ -738,12 +769,4 @@ fn build_advice(problem: &BuildProblem) -> Option<String> {
         } => cross_version_advice(unit, amender, base, reason, Audience::Consumer),
         _ => return None,
     })
-}
-
-fn fail(message: &str, hint: Option<&str>) -> ExitCode {
-    eprintln!("error: {}", message.replace('\n', "\nerror: "));
-    if let Some(hint) = hint {
-        eprintln!("hint: {hint}");
-    }
-    ExitCode::FAILURE
 }
