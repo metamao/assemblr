@@ -23,60 +23,84 @@ use assemblr::domain::{
 };
 use clap::{Args, Subcommand};
 
+use super::diagnostic::{Diagnosis, count, fail, fail_with};
+
 #[derive(Debug, Subcommand)]
 pub(super) enum UnitCommand {
-    /// Create a unit's scaffold: its Git repository, `manifest.jsonc`, the
-    /// manifest's JSON Schema, and `.gitignore`.
+    /// Create a new unit in its own directory
+    ///
+    /// Creates the directory, a Git repository, `manifest.jsonc`, the
+    /// manifest's JSON Schema, and `.gitignore`. Without a directory, the
+    /// unit goes in a new directory named after it: `@acme/web` goes in
+    /// `web/`. Give `.` to set up the unit in the current directory, for
+    /// example in a repository you already have. Running it again only
+    /// adds what is missing.
+    #[command(after_long_help = "Examples:\n  \
+        assemblr unit init @acme/web\n  \
+        assemblr unit init @acme/web . --description \"Web server setup\"")]
     Init(InitArgs),
-    /// Compose the unit in the current directory with its published
-    /// dependencies into `build/`.
+    /// Build the unit and its dependencies into build/
+    ///
+    /// Run it in the unit's directory. The first build creates
+    /// `assemblr-lock.json`, which records the versions of the
+    /// dependencies.
     Build,
-    /// Run every validation a build runs, plus the checks that gate
-    /// publication, without writing anything.
+    /// Check the unit for build and publication problems
+    ///
+    /// Writes nothing.
     Check,
-    /// Tag the committed unit as the version its manifest declares, and
-    /// index it in the local registry when the repository is registered.
+    /// Publish the committed unit as the version in its manifest
+    ///
+    /// Tags the commit at `HEAD` as `v<version>` and indexes the version in
+    /// the local registry when the repository is registered.
     Publish,
-    /// Copy a dependency's file to `amendments/` for editing, and declare
-    /// the amendment in `manifest.jsonc`.
+    /// Copy a dependency's file to amendments/ to change it
+    ///
+    /// The copy is declared in `manifest.jsonc`, and the build delivers it
+    /// in place of the dependency's file.
+    #[command(after_long_help = "Examples:\n  \
+        assemblr unit amend package.json\n  \
+        assemblr unit amend config/app.json --unit @acme/base")]
     Amend(AmendArgs),
-    /// Move dependencies to the newest published versions their declared
-    /// ranges allow, in `assemblr-lock.json`, carrying the unit's
-    /// amendments over.
+    /// Update dependencies to the newest versions allowed
+    ///
+    /// Updates `assemblr-lock.json` within the requirements in
+    /// `manifest.jsonc`, and carries the unit's amendments over to the new
+    /// versions.
+    #[command(after_long_help = "Examples:\n  \
+        assemblr unit update\n  \
+        assemblr unit update @acme/base")]
     Update(UpdateArgs),
 }
 
 #[derive(Debug, Args)]
 pub(super) struct InitArgs {
-    /// The unit's identity, such as `@owner/unit`.
-    #[arg(value_parser = UnitIdentity::parse)]
+    /// The unit, like `@acme/web`
+    #[arg(value_name = "UNIT", value_parser = UnitIdentity::parse)]
     identity: UnitIdentity,
-    /// The unit's directory, created if it does not exist. Defaults to the
-    /// current directory.
+    /// The unit's directory, created if missing [default: the unit's name]
     directory: Option<PathBuf>,
-    /// The manifest's description. Defaults to a placeholder that names the
-    /// unit.
+    /// The manifest's description [default: "The <UNIT> unit."]
     #[arg(long, value_name = "TEXT")]
     description: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub(super) struct UpdateArgs {
-    /// The dependencies to update, such as `@owner/unit`, direct or
-    /// transitive. Without any, every dependency is updated.
-    #[arg(value_name = "IDENTITY")]
-    units: Vec<String>,
+    /// The dependencies to update, like `@acme/base`, direct or not
+    /// [default: every dependency]
+    #[arg(value_name = "UNIT", value_parser = UnitIdentity::parse)]
+    units: Vec<UnitIdentity>,
 }
 
 #[derive(Debug, Args)]
 pub(super) struct AmendArgs {
-    /// The file to amend: a name, found in the `src/` of the direct
-    /// dependencies at their locked versions, or a path in that `src/`.
-    /// A template matches by its name with or without `.assemblr.tmpl`.
+    /// The file to amend: a file name, or a path in the dependency's src/;
+    /// a template matches with or without `.assemblr.tmpl`
     file: String,
-    /// Search only this direct dependency, such as `@owner/unit`.
-    #[arg(long, value_name = "IDENTITY")]
-    unit: Option<String>,
+    /// Look only in this direct dependency, like `@acme/base`
+    #[arg(long, value_name = "UNIT", value_parser = UnitIdentity::parse)]
+    unit: Option<UnitIdentity>,
 }
 
 pub(super) fn run(command: UnitCommand) -> ExitCode {
@@ -91,17 +115,25 @@ pub(super) fn run(command: UnitCommand) -> ExitCode {
 }
 
 fn init(args: &InitArgs) -> ExitCode {
-    let directory = args.directory.clone().unwrap_or_else(|| PathBuf::from("."));
-    match init_unit(&directory, &args.identity, args.description.as_deref()) {
+    match init_unit(
+        args.directory.as_deref(),
+        &args.identity,
+        args.description.as_deref(),
+    ) {
         Ok(initialized) => {
             println!("{}", describe_initialized(&initialized));
+            let enter = match &args.directory {
+                Some(directory) if directory.as_os_str() == "." => String::new(),
+                Some(directory) => format!("`cd {}`, then ", directory.display()),
+                None => format!("`cd {}`, then ", args.identity.name()),
+            };
             println!(
-                "Next: add files under src/, declare dependencies in manifest.jsonc, and run \
-                 `assemblr unit build`."
+                "Next: {enter}add files under src/, declare dependencies in manifest.jsonc, and \
+                 run `assemblr unit build`."
             );
             ExitCode::SUCCESS
         }
-        Err(failure) => fail(&failure.to_string(), Some(&init_hint(&failure))),
+        Err(failure) => fail_with(&failure.to_string(), &init_diagnosis(&failure, args)),
     }
 }
 
@@ -173,8 +205,8 @@ fn describe_initialized(initialized: &Initialized) -> String {
     )
 }
 
-/// What remains after a failed initialization, and what the author can do.
-fn init_hint(failure: &InitFailure) -> String {
+/// What a failed initialization left, and what the author can do.
+fn init_diagnosis(failure: &InitFailure, args: &InitArgs) -> Diagnosis {
     match failure {
         InitFailure::Write { done, .. } | InitFailure::Init { done, .. } => {
             let mut state = Vec::new();
@@ -195,33 +227,53 @@ fn init_hint(failure: &InitFailure) -> String {
                     state.push(name);
                 }
             }
-            let written = if state.is_empty() {
+            let note = if state.is_empty() {
                 "nothing was written".to_owned()
             } else {
                 format!("written so far: {}", state.join(", "))
             };
-            let git = if matches!(failure, InitFailure::Init { .. }) {
-                "; Assemblr needs Git installed and on the PATH"
+            let diagnosis = Diagnosis::note(note);
+            let diagnosis = if matches!(failure, InitFailure::Init { .. }) {
+                diagnosis.advise("Assemblr needs Git installed and on the PATH")
             } else {
-                ""
+                diagnosis
             };
-            format!(
-                "{written}{git}; fix the problem and run the same command again, which \
-                 completes the scaffold"
-            )
+            diagnosis.advise("fix the problem and run the same command again to finish")
         }
-        InitFailure::Inside { top_level, .. } => format!(
-            "initialize the unit in a directory outside {}",
-            top_level.display()
-        ),
-        InitFailure::OtherIdentity { declared, .. } => format!(
-            "to work on {declared}, run `assemblr unit init {declared}`; for a new unit, choose \
-             another directory"
-        ),
-        InitFailure::Git(_) => {
-            "nothing was changed; Assemblr needs Git installed and on the PATH".to_owned()
+        InitFailure::Inside { top_level, .. } => {
+            let diagnosis = Diagnosis::note("nothing was changed").advise(format!(
+                "initialize the unit in a directory outside {}",
+                top_level.display()
+            ));
+            if args.directory.is_none() {
+                // Run again at a unit's top level, the derived directory
+                // lands inside it: `.` is what completes the scaffold.
+                diagnosis.advise(format!(
+                    "to complete the scaffold of the unit here, run `assemblr unit init {} .`",
+                    args.identity
+                ))
+            } else {
+                diagnosis
+            }
         }
-        _ => "nothing was changed".to_owned(),
+        InitFailure::OtherIdentity { declared, .. } => Diagnosis::note("nothing was changed")
+            .advise(format!(
+                "to work on {declared}, run `assemblr unit init {declared} .`; for a new unit, \
+                 choose another directory"
+            )),
+        InitFailure::NotEmpty(directory) => Diagnosis::note("nothing was changed").advise(format!(
+            "give a new directory, like `assemblr unit init {identity} {name}-unit`, or name \
+                 the directory to use it anyway: `assemblr unit init {identity} {name}`",
+            identity = args.identity,
+            name = directory.display()
+        )),
+        InitFailure::ReservedName(_) => Diagnosis::note("nothing was changed").advise(format!(
+            "give the unit a directory: `assemblr unit init {} <DIRECTORY>`",
+            args.identity
+        )),
+        InitFailure::Git(_) => Diagnosis::note("nothing was changed")
+            .advise("Assemblr needs Git installed and on the PATH"),
+        _ => Diagnosis::note("nothing was changed"),
     }
 }
 
@@ -239,16 +291,11 @@ fn locate() -> Result<(PathBuf, Registry), ExitCode> {
 }
 
 fn amend(args: &AmendArgs) -> ExitCode {
-    let unit = match args.unit.as_deref().map(UnitIdentity::parse) {
-        None => None,
-        Some(Ok(unit)) => Some(unit),
-        Some(Err(error)) => return fail(&format!("--unit: {error}"), None),
-    };
     let (root, registry) = match locate() {
         Ok(located) => located,
         Err(code) => return code,
     };
-    match amend_unit(&root, &registry, &args.file, unit.as_ref()) {
+    match amend_unit(&root, &registry, &args.file, args.unit.as_ref()) {
         Ok(amended) => {
             let found = amended.file();
             let copy = if amended.kept_existing() {
@@ -274,30 +321,25 @@ fn amend(args: &AmendArgs) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(failure) => {
-            let hint = amend_hint(&failure, &root);
-            fail(&failure.to_string(), hint.as_deref())
-        }
+        Err(failure) => fail_with(&failure.to_string(), &amend_diagnosis(&failure, &root)),
     }
 }
 
-/// What remains after a failed amendment, and what the author can do.
-fn amend_hint(failure: &AmendFailure, root: &Path) -> Option<String> {
+/// What a failed amendment left, and what the author can do.
+fn amend_diagnosis(failure: &AmendFailure, root: &Path) -> Diagnosis {
     let problems = match failure {
         AmendFailure::Write(error) => {
-            return Some(match error.state() {
-                AmendState::Unchanged => {
-                    "nothing was changed; fix the problem and run the command again".to_owned()
+            return match error.state() {
+                AmendState::Unchanged => Diagnosis::note("nothing was changed")
+                    .advise("fix the problem and run the command again"),
+                AmendState::CopyWithoutDeclaration => {
+                    Diagnosis::note("the copy was created but not declared in manifest.jsonc")
+                        .advise("run the same command again to declare it")
                 }
-                AmendState::CopyWithoutDeclaration => "the copy was created but not declared in \
-                                                       manifest.jsonc; run the same command again \
-                                                       to declare it"
-                    .to_owned(),
-            });
+            };
         }
         AmendFailure::Rejected(problems) => problems,
     };
-    let mut hint = "nothing was changed".to_owned();
     let advice = problems.iter().find_map(|problem| match problem {
         AmendProblem::Manifest(ManifestFileError::Missing { .. }) => Some(format!(
             "{} is not a unit repository's top level; run `assemblr unit amend` in the \
@@ -314,26 +356,16 @@ fn amend_hint(failure: &AmendFailure, root: &Path) -> Option<String> {
         AmendProblem::Resolution(error) => advice(&BuildProblem::Resolution(error.clone()), root),
         _ => None,
     });
-    if let Some(advice) = advice {
-        hint.push_str("; ");
-        hint.push_str(&advice);
-    }
-    Some(hint)
+    Diagnosis::note("nothing was changed").advise_if(advice)
 }
 
 fn update(args: &UpdateArgs) -> ExitCode {
-    let mut units = Vec::new();
-    for unit in &args.units {
-        match UnitIdentity::parse(unit) {
-            Ok(unit) => units.push(unit),
-            Err(error) => return fail(&format!("{unit}: {error}"), None),
-        }
-    }
+    let units = &args.units;
     let (root, registry) = match locate() {
         Ok(located) => located,
         Err(code) => return code,
     };
-    match update_unit(&root, &registry, &units) {
+    match update_unit(&root, &registry, units) {
         Ok(updated) => {
             report_recovered(&updated);
             if !updated.written() {
@@ -385,10 +417,7 @@ fn update(args: &UpdateArgs) -> ExitCode {
             println!("{result}");
             ExitCode::SUCCESS
         }
-        Err(failure) => {
-            let hint = update_hint(&failure, &root);
-            fail(&failure.to_string(), hint.as_deref())
-        }
+        Err(failure) => fail_with(&failure.to_string(), &update_diagnosis(&failure, &root)),
     }
 }
 
@@ -404,19 +433,21 @@ fn report_recovered(updated: &Updated) {
     };
     let copies = match recovered.copies() {
         0 => String::new(),
-        count => format!("; {count} copy file(s) under amendments/ were replaced"),
+        copies => format!(
+            "; {} under amendments/",
+            count(copies, "copy was replaced", "copies were replaced")
+        ),
     };
     eprintln!("note: completed an update that was interrupted earlier: {replaced}{copies}");
 }
 
-/// What remains after a failed update, and what the author can do.
-fn update_hint(failure: &UpdateFailure, root: &Path) -> Option<String> {
+/// What a failed update left, and what the author can do.
+fn update_diagnosis(failure: &UpdateFailure, root: &Path) -> Diagnosis {
     let problems = match failure {
         UpdateFailure::Write(error) => {
-            return Some(match error.state() {
-                UpdateState::Unchanged => {
-                    "nothing was changed; fix the problem and run the command again".to_owned()
-                }
+            return match error.state() {
+                UpdateState::Unchanged => Diagnosis::note("nothing was changed")
+                    .advise("fix the problem and run the command again"),
                 UpdateState::Interrupted {
                     copies_replaced,
                     manifest_replaced,
@@ -427,12 +458,17 @@ fn update_hint(failure: &UpdateFailure, root: &Path) -> Option<String> {
                         (true, false) => "manifest.jsonc was replaced, assemblr-lock.json was not",
                         _ => "neither manifest.jsonc nor assemblr-lock.json was replaced",
                     };
-                    format!(
-                        "{replaced}; {copies_replaced} amendment copy file(s) were replaced; the \
-                         update is recorded, and running `assemblr unit update` again completes it"
-                    )
+                    Diagnosis::note(format!(
+                        "{replaced}; {} replaced; the update is recorded",
+                        count(
+                            copies_replaced,
+                            "amendment copy was",
+                            "amendment copies were"
+                        )
+                    ))
+                    .advise("run `assemblr unit update` again to finish it")
                 }
-            });
+            };
         }
         UpdateFailure::Rejected(problems) => problems,
     };
@@ -442,17 +478,17 @@ fn update_hint(failure: &UpdateFailure, root: &Path) -> Option<String> {
         .iter()
         .find(|problem| matches!(problem, UpdateProblem::Recovery(_)))
     {
-        return Some(match error {
-            RecoveryError::Write { .. } => "the record of the interrupted update remains; fix \
-                                            the problem and run `assemblr unit update` again \
-                                            to complete it"
-                .to_owned(),
-            _ => "nothing was changed now; the record of the interrupted update is kept, and \
-                  only `assemblr unit update` completes it"
-                .to_owned(),
-        });
+        return match error {
+            RecoveryError::Write { .. } => {
+                Diagnosis::note("the record of the interrupted update remains")
+                    .advise("fix the problem and run `assemblr unit update` again to finish it")
+            }
+            _ => Diagnosis::note(
+                "nothing was changed now; the record of the interrupted update is kept",
+            )
+            .advise("only `assemblr unit update` finishes it"),
+        };
     }
-    let mut hint = "nothing was changed".to_owned();
     let advice = problems.iter().find_map(|problem| match problem {
         UpdateProblem::Manifest(ManifestFileError::Missing { .. }) => Some(format!(
             "{} is not a unit repository's top level; run `assemblr unit update` in the \
@@ -480,11 +516,7 @@ fn update_hint(failure: &UpdateFailure, root: &Path) -> Option<String> {
         ),
         _ => None,
     });
-    if let Some(advice) = advice {
-        hint.push_str("; ");
-        hint.push_str(&advice);
-    }
-    Some(hint)
+    Diagnosis::note("nothing was changed").advise_if(advice)
 }
 
 fn build() -> ExitCode {
@@ -504,23 +536,15 @@ fn build() -> ExitCode {
                 );
             }
             println!(
-                "Built {} {} into build/: {} file(s), with {} dependenc{}.",
+                "Built {} {} into build/: {}, with {}.",
                 built.unit(),
                 built.version(),
-                built.files(),
-                built.dependencies(),
-                if built.dependencies() == 1 {
-                    "y"
-                } else {
-                    "ies"
-                }
+                count(built.files(), "file", "files"),
+                count(built.dependencies(), "dependency", "dependencies")
             );
             ExitCode::SUCCESS
         }
-        Err(failure) => {
-            let hint = hint(&failure, &root);
-            fail(&failure.to_string(), Some(&hint))
-        }
+        Err(failure) => fail_with(&failure.to_string(), &diagnosis(&failure, &root)),
     }
 }
 
@@ -533,30 +557,22 @@ fn check() -> ExitCode {
         Ok(checked) => {
             warn_notes(checked.notes());
             println!(
-                "Checked {} {}: no problems; a build delivers {} file(s), with {} dependenc{}.",
+                "Checked {} {}: no problems; a build delivers {}, with {}.",
                 checked.unit(),
                 checked.version(),
-                checked.files(),
-                checked.dependencies(),
-                if checked.dependencies() == 1 {
-                    "y"
-                } else {
-                    "ies"
-                }
+                count(checked.files(), "file", "files"),
+                count(checked.dependencies(), "dependency", "dependencies")
             );
             ExitCode::SUCCESS
         }
         Err(failure) => {
             let CheckFailure::Rejected(problems) = &failure;
-            let mut hint = "nothing was changed".to_owned();
-            if let Some(advice) = problems
-                .iter()
-                .find_map(|problem| check_advice(problem, &root, "check"))
-            {
-                hint.push_str("; ");
-                hint.push_str(&advice);
-            }
-            fail(&failure.to_string(), Some(&hint))
+            let diagnosis = Diagnosis::note("nothing was changed").advise_if(
+                problems
+                    .iter()
+                    .find_map(|problem| check_advice(problem, &root, "check")),
+            );
+            fail_with(&failure.to_string(), &diagnosis)
         }
     }
 }
@@ -608,10 +624,7 @@ fn publish() -> ExitCode {
                 ),
             )
         }
-        Err(failure) => {
-            let hint = publish_hint(&failure, &root);
-            fail(&failure.to_string(), Some(&hint))
-        }
+        Err(failure) => fail_with(&failure.to_string(), &publish_diagnosis(&failure, &root)),
     }
 }
 
@@ -687,23 +700,21 @@ fn warn_excluded(excluded: &[Excluded<TagProblem>]) {
     }
 }
 
-/// What remains after a refused publication, and what the author can do.
-fn publish_hint(failure: &PublishFailure, root: &Path) -> String {
+/// What a refused publication left, and what the author can do.
+fn publish_diagnosis(failure: &PublishFailure, root: &Path) -> Diagnosis {
     let problems = match failure {
         PublishFailure::Tag(_) => {
-            return "no tag was created and nothing was changed; a tag needs the author's Git \
-                    identity (`user.name` and `user.email` in the Git configuration) and, if \
-                    signing is configured, a working signing setup"
-                .to_owned();
+            return Diagnosis::note("no tag was created and nothing was changed").advise(
+                "a tag needs your Git identity (`user.name` and `user.email` in the Git \
+                 configuration) and, if signing is configured, a working signing setup",
+            );
         }
         PublishFailure::IndexNotUpdated { .. } => {
-            return "the published tag stands; run `assemblr registry sync` to index the version"
-                .to_owned();
+            return Diagnosis::note("the published tag stands")
+                .advise("run `assemblr registry sync` to index the version");
         }
         PublishFailure::Rejected(problems) => problems,
     };
-    let mut hint =
-        "the publication was rejected; no tag was created and nothing was changed".to_owned();
     let advice = problems.iter().find_map(|problem| match problem {
         PublishProblem::Check(problem) => check_advice(problem, root, "publish"),
         PublishProblem::NoCommit | PublishProblem::Uncommitted { .. } => Some(
@@ -734,11 +745,7 @@ fn publish_hint(failure: &PublishFailure, root: &Path) -> String {
         }),
         PublishProblem::Reference(_) => None,
     });
-    if let Some(advice) = advice {
-        hint.push_str("; ");
-        hint.push_str(&advice);
-    }
-    hint
+    Diagnosis::note("no tag was created and nothing was changed").advise_if(advice)
 }
 
 /// Reports on stderr how the lockfile changed.
@@ -770,30 +777,28 @@ fn describe(identity: &UnitIdentity, change: &LockChange) -> String {
     }
 }
 
-/// What remains after a failure, and what the author can do about it.
-fn hint(failure: &BuildFailure, root: &Path) -> String {
+/// What a failed build left, and what the author can do about it.
+fn diagnosis(failure: &BuildFailure, root: &Path) -> Diagnosis {
     let problems = match failure {
         BuildFailure::Publish(error) => {
             return match error.state() {
-                PublishState::Unchanged => {
-                    "nothing was changed; fix the problem and run `assemblr unit build` again"
-                        .to_owned()
-                }
+                PublishState::Unchanged => Diagnosis::note("nothing was changed")
+                    .advise("fix the problem and run `assemblr unit build` again"),
                 PublishState::BuildRemoved | PublishState::LockfileWithoutBuild => {
-                    "there is no build/ now; run `assemblr unit build` again".to_owned()
+                    Diagnosis::note("there is no build/ now")
+                        .advise("run `assemblr unit build` again")
                 }
             };
         }
         BuildFailure::Rejected(problems) => problems,
     };
-    let mut hint =
-        "the build was rejected; build/ and assemblr-lock.json were not changed".to_owned();
     let advice = distinct(problems.iter().filter_map(|problem| advice(problem, root)));
-    if !advice.is_empty() {
-        hint.push_str("; ");
-        hint.push_str(&advice.join("; "));
+    let diagnosis = Diagnosis::note("build/ and assemblr-lock.json were not changed");
+    if advice.is_empty() {
+        diagnosis
+    } else {
+        diagnosis.advise(advice.join("; "))
     }
-    hint
 }
 
 /// What deleting the lockfile does, which is not a repair.
@@ -817,9 +822,8 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
             "published versions never change: restore the tag in the unit's repository; \
              {DELETING_THE_LOCKFILE}"
         ),
-        BuildProblem::AmendmentBase(_) => {
-            "a build never changes the locked version of an amended unit".to_owned()
-        }
+        // The message already says what to do.
+        BuildProblem::AmendmentBase(_) => return None,
         BuildProblem::BaseIntegrity(_) => "published versions never change: either the \
                                            provider's tag was moved and its source registered \
                                            again, or the amender was published against other \
@@ -855,12 +859,4 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
         }
         _ => return None,
     })
-}
-
-fn fail(message: &str, hint: Option<&str>) -> ExitCode {
-    eprintln!("error: {}", message.replace('\n', "\nerror: "));
-    if let Some(hint) = hint {
-        eprintln!("hint: {hint}");
-    }
-    ExitCode::FAILURE
 }

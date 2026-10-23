@@ -227,16 +227,24 @@ pub fn update_units(
 /// `root`, then composes it as [`compose_project`] does. Without a
 /// `requirement` the unit is recorded with a caret requirement on the
 /// version the resolution picks; a unit already selected keeps its own.
-/// A composition that is refused leaves the declaration as it was.
+/// Each of `options`, a parameter name and the text of its value, is set
+/// in the unit's `options` entry: the text is the JSON value it reads as,
+/// such as `8080` or `true`, and a string when it is not JSON. A
+/// composition that is refused leaves the declaration as it was.
 pub fn add_unit(
     root: &Path,
     registry: &Registry,
     identity: &UnitIdentity,
     requirement: Option<&str>,
+    options: &[(&str, &str)],
 ) -> Result<Composed, ComposeFailure> {
     let edit = DeclarationEdit::Add {
         identity: identity.clone(),
         requirement: requirement.map(str::to_owned),
+        options: options
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect(),
     };
     compose_with(root, registry, Some(&edit), None, &mut |_| Ok(()))
 }
@@ -260,6 +268,7 @@ enum DeclarationEdit {
     Add {
         identity: UnitIdentity,
         requirement: Option<String>,
+        options: Vec<(String, String)>,
     },
     Remove {
         identity: UnitIdentity,
@@ -1681,6 +1690,7 @@ fn plan_declaration(
         DeclarationEdit::Add {
             identity,
             requirement,
+            options,
         } => {
             let requirement = match requirement {
                 Some(requirement) => {
@@ -1695,12 +1705,24 @@ fn plan_declaration(
                     None => probe_requirement(text, identity, previous_lock, index)?,
                 },
             };
-            declaration::add(text, identity, &requirement).map_err(|failure| match failure {
-                declaration::EditFailure::Cannot(detail) => cannot(detail),
-                declaration::EditFailure::NotSelected => {
-                    cannot("the unit is not selected".to_owned())
-                }
-            })?
+            let (edited, change) = declaration::add(text, identity, &requirement).map_err(
+                |failure| match failure {
+                    declaration::EditFailure::Cannot(detail) => cannot(detail),
+                    declaration::EditFailure::NotSelected => {
+                        cannot("the unit is not selected".to_owned())
+                    }
+                },
+            )?;
+            let edited =
+                declaration::set_options(&edited, identity, options).map_err(|failure| {
+                    match failure {
+                        declaration::EditFailure::Cannot(detail) => cannot(detail),
+                        declaration::EditFailure::NotSelected => {
+                            cannot("the unit is not selected".to_owned())
+                        }
+                    }
+                })?;
+            (edited, change)
         }
         DeclarationEdit::Remove { identity } => {
             declaration::remove(text, identity).map_err(|failure| match failure {
@@ -2139,7 +2161,10 @@ impl fmt::Display for FileConflict {
 impl fmt::Display for ComposeProblem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoDeclaration(path) => write!(f, "{} does not exist", path.display()),
+            Self::NoDeclaration(path) => match path.parent() {
+                Some(directory) => write!(f, "no {DECLARATION} in {}", directory.display()),
+                None => write!(f, "{} does not exist", path.display()),
+            },
             Self::UnitRepository(path) => write!(
                 f,
                 "{} holds `manifest.jsonc`, so it is a unit's repository, not a consumer project",

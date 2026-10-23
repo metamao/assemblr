@@ -110,7 +110,7 @@ impl IdentityError {
 
 impl fmt::Display for IdentityError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "invalid unit identity {:?}: {}", self.input, self.reason)
+        write!(f, "invalid unit {:?}: {}", self.input, self.reason)
     }
 }
 
@@ -161,10 +161,10 @@ pub enum IdentityErrorReason {
 impl fmt::Display for IdentityErrorReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingAtSign => f.write_str("it must start with `@`, as in `@owner/unit-name`"),
-            Self::MissingSlash => f.write_str(
-                "it must separate the owner and the unit name with `/`, as in `@owner/unit-name`",
-            ),
+            Self::MissingAtSign => f.write_str("it must start with `@`, like `@acme/web`"),
+            Self::MissingSlash => {
+                f.write_str("it must separate the owner and the name with `/`, like `@acme/web`")
+            }
             Self::EmptySegment(segment) => write!(f, "the {segment} is empty"),
             Self::InvalidCharacter { segment, character } => write!(
                 f,

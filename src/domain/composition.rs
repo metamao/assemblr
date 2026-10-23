@@ -663,15 +663,16 @@ impl fmt::Display for CompositionError {
             } => {
                 write!(
                     f,
-                    "required parameter `{parameter}` of {unit} {version} has no value and no \
-                     default; it must be supplied by "
+                    "{unit} {version} needs a value for `{parameter}`, which has no default"
                 )?;
-                write_list(f, responsible)?;
+                // The root is whoever runs the command, and the advice says
+                // where they set it; other units are named.
+                if responsible.as_slice() != [Requirer::Root] {
+                    f.write_str("; it must be set by ")?;
+                    write_list(f, responsible)?;
+                }
                 if let Some(example) = example {
-                    write!(
-                        f,
-                        " (the unit's example is {example}, which is not used as a value)"
-                    )?;
+                    write!(f, " (example: {example})")?;
                 }
                 Ok(())
             }
@@ -2264,12 +2265,13 @@ mod tests {
         );
         let message = errors[0].to_string();
         for expected in [
-            "required parameter `accountId` of @metamao/worker 1.0.0",
+            "@metamao/worker 1.0.0 needs a value for `accountId`",
             "no default",
-            "supplied by the root",
         ] {
             assert!(message.contains(expected), "{message}");
         }
+        // The project or the built unit is not named "the root".
+        assert!(!message.contains("root"), "{message}");
     }
 
     #[test]
@@ -2302,7 +2304,7 @@ mod tests {
         let message = errors[0].to_string();
         assert!(!message.contains("the root"), "{message}");
         assert!(
-            message.contains("supplied by @metamao/admin 1.0.0, @metamao/api 1.0.0"),
+            message.contains("set by @metamao/admin 1.0.0, @metamao/api 1.0.0"),
             "{message}"
         );
     }

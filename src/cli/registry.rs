@@ -13,27 +13,39 @@ use assemblr::domain::{Excluded, IntegrityChange, RegistryError, RegistryIndex, 
 use clap::Subcommand;
 use serde_json::{Value, json};
 
+use super::diagnostic::{Diagnosis, count, fail, fail_with};
+
 #[derive(Debug, Subcommand)]
 pub(super) enum RegistryCommand {
-    /// Register a local unit repository and index its published versions.
+    /// Register a unit's local Git repository
+    ///
+    /// Indexes the versions the repository has published, so that projects
+    /// and other units can use them.
+    #[command(
+        after_long_help = "Examples:\n  assemblr registry add ../web\n  assemblr registry add ~/units/web"
+    )]
     Add {
-        /// The path of the unit's Git repository.
+        /// The path of the unit's Git repository
         path: PathBuf,
     },
-    /// List the registered units and their published versions.
+    /// List the registered units and their versions
+    #[command(
+        after_long_help = "Examples:\n  assemblr registry list\n  assemblr registry list --json"
+    )]
     List {
-        /// Print JSON instead of text.
+        /// Print JSON instead of text
         #[arg(long)]
         json: bool,
     },
-    /// Remove a unit's registration. Its repository is not touched.
+    /// Remove a unit's registration
+    ///
+    /// The unit's repository is not changed.
     Remove {
-        /// The identity of the unit, such as `@acme/node`.
-        #[arg(value_parser = UnitIdentity::parse)]
+        /// The unit, like `@acme/web`
+        #[arg(value_name = "UNIT", value_parser = UnitIdentity::parse)]
         identity: UnitIdentity,
     },
-    /// Read every registered repository again and index newly published
-    /// versions.
+    /// Index newly published versions of every registered unit
     Sync,
 }
 
@@ -63,7 +75,12 @@ fn add(registry: &Registry, path: &std::path::Path) -> ExitCode {
                 println!("Registered {identity} from {source}, with no published versions yet.");
             } else {
                 println!(
-                    "Registered {identity} from {source}, with published versions {}.",
+                    "Registered {identity} from {source}, with {} {}.",
+                    if versions.len() == 1 {
+                        "version"
+                    } else {
+                        "versions"
+                    },
                     join(&versions)
                 );
             }
@@ -71,10 +88,8 @@ fn add(registry: &Registry, path: &std::path::Path) -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Added::AlreadyRegistered { identity, source }) => {
-            println!(
-                "{source} is already registered as {identity}; nothing changed. \
-                 Run `assemblr registry sync` to index newly published versions."
-            );
+            println!("{source} is already registered as {identity}; nothing changed.");
+            println!("Next: run `assemblr registry sync` to index newly published versions.");
             ExitCode::SUCCESS
         }
         Err(failure) => rejected("registration", &failure),
@@ -159,8 +174,8 @@ fn sync(registry: &Registry) -> ExitCode {
         println!("No unit repositories are registered.");
     } else if synced.added().is_empty() {
         println!(
-            "Synchronized {} unit(s); no new published versions.",
-            synced.units()
+            "Synchronized {}; no new versions.",
+            count(synced.units(), "unit", "units")
         );
     } else {
         for (identity, versions) in synced.added() {
@@ -173,21 +188,15 @@ fn sync(registry: &Registry) -> ExitCode {
 
 /// Reports a failed operation, with a hint where one helps.
 fn rejected(operation: &str, failure: &RegistryFailure) -> ExitCode {
-    let hint = match failure {
+    let diagnosis = match failure {
         RegistryFailure::NotRegistered(_) => {
-            Some("run `assemblr registry list` to see the registered units".to_owned())
+            Diagnosis::hint("`assemblr registry list` shows the registered units")
         }
-        RegistryFailure::Rejected(problems) => Some(rejection_hint(operation, problems).map_or_else(
-            || format!("the {operation} was rejected, and the registry index was not changed"),
-            |hint| {
-                format!(
-                    "the {operation} was rejected, and the registry index was not changed; {hint}"
-                )
-            },
-        )),
-        RegistryFailure::Storage(_) | RegistryFailure::Reference(_) => None,
+        RegistryFailure::Rejected(problems) => Diagnosis::note("the registry was not changed")
+            .advise_if(rejection_hint(operation, problems)),
+        RegistryFailure::Storage(_) | RegistryFailure::Reference(_) => Diagnosis::default(),
     };
-    fail(&failure.to_string(), hint.as_deref())
+    fail_with(&failure.to_string(), &diagnosis)
 }
 
 fn rejection_hint(operation: &str, problems: &[Problem]) -> Option<String> {
@@ -238,18 +247,15 @@ fn report_excluded(excluded: &[Excluded<TagProblem>]) {
         .map(|excluded| format!("{} {}", excluded.identity(), excluded.tag()))
         .collect();
     println!(
-        "Excluded {} invalid version tag(s), which are not indexed: {}.",
-        excluded.len(),
+        "Excluded {}, which {} not indexed: {}.",
+        count(
+            excluded.len(),
+            "invalid version tag",
+            "invalid version tags"
+        ),
+        if excluded.len() == 1 { "is" } else { "are" },
         tags.join(", ")
     );
-}
-
-fn fail(message: &str, hint: Option<&str>) -> ExitCode {
-    eprintln!("error: {}", message.replace('\n', "\nerror: "));
-    if let Some(hint) = hint {
-        eprintln!("hint: {hint}");
-    }
-    ExitCode::FAILURE
 }
 
 fn join<T: ToString>(items: &[T]) -> String {

@@ -226,12 +226,19 @@ fn failures_say_what_is_wrong_and_what_to_do() {
     );
     assert!(err.contains("registry sync"), "{err}");
 
-    let err = stderr(&fails(fixture.assemblr(&["info", "@acme/node@^1"])));
+    // A malformed argument is a usage error, reported before anything is
+    // read.
+    let output = fixture.assemblr(&["info", "@acme/node@^1"]);
+    assert_eq!(output.status.code(), Some(2));
+    let err = stderr(&output);
     assert!(err.contains("invalid version"), "{err}");
-    assert!(err.contains("exact version"), "{err}");
+    assert!(err.contains("exact SemVer version"), "{err}");
 
-    let err = stderr(&fails(fixture.assemblr(&["info", "node"])));
-    assert!(err.contains("is not a unit identity"), "{err}");
+    let output = fixture.assemblr(&["info", "node"]);
+    assert_eq!(output.status.code(), Some(2));
+    let err = stderr(&output);
+    assert!(err.contains("invalid unit \"node\""), "{err}");
+    assert!(err.contains("like `@acme/web`"), "{err}");
 
     // A registered repository that moved away.
     let moved = fixture.dir.join("node-moved");

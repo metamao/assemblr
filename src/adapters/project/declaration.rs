@@ -166,6 +166,106 @@ pub(super) fn remove(
     Ok((edited, DeclarationChange::Removed { options }))
 }
 
+/// `text` with each of `options`, a parameter name and the text of its
+/// value, set in the `options` entry of `identity`. The text is the JSON
+/// value it reads as, and a string when it is not JSON, so that
+/// `appName=shop` needs no quotes and `port=8080` stays a number. Entries
+/// and members that are missing are created after the last one there.
+pub(super) fn set_options(
+    text: &str,
+    identity: &UnitIdentity,
+    options: &[(String, String)],
+) -> Result<String, EditFailure> {
+    if options.is_empty() {
+        return Ok(text.to_owned());
+    }
+    let mut text = text.to_owned();
+    let key = identity.to_string();
+    for (name, raw) in options {
+        let value = parse_value(raw).unwrap_or_else(|_| Value::String(raw.clone()));
+        let root = parse_value(&text).map_err(|error| EditFailure::Cannot(error.to_string()))?;
+        let Value::Object(members) = &root else {
+            return Err(EditFailure::Cannot("it is not a JSON object".to_owned()));
+        };
+        let edit = match root.member(OPTIONS) {
+            None => Edit::Insert {
+                parent: Vec::new(),
+                key: OPTIONS.to_owned(),
+                value: Value::Object(vec![(
+                    key.clone(),
+                    Value::Object(vec![(name.clone(), value.clone())]),
+                )]),
+                after: members.last().map(|(member, _)| member.clone()),
+            },
+            Some(Value::Object(entries)) => match entries.iter().find(|(entry, _)| *entry == key) {
+                None => Edit::Insert {
+                    parent: vec![OPTIONS.to_owned()],
+                    key: key.clone(),
+                    value: Value::Object(vec![(name.clone(), value.clone())]),
+                    after: entries.last().map(|(entry, _)| entry.clone()),
+                },
+                Some((_, Value::Object(set))) => {
+                    match set.iter().find(|(given, _)| given == name) {
+                        Some(_) => Edit::Set {
+                            path: vec![OPTIONS.to_owned(), key.clone(), name.clone()],
+                            value: value.clone(),
+                        },
+                        None => Edit::Insert {
+                            parent: vec![OPTIONS.to_owned(), key.clone()],
+                            key: name.clone(),
+                            value: value.clone(),
+                            after: set.last().map(|(given, _)| given.clone()),
+                        },
+                    }
+                }
+                Some(_) => {
+                    return Err(EditFailure::Cannot(format!(
+                        "the options of {identity} are not an object"
+                    )));
+                }
+            },
+            Some(_) => return Err(EditFailure::Cannot("`options` is not an object".to_owned())),
+        };
+        let mut expected = root.clone();
+        set_option(&mut expected, &key, name, value);
+        text = apply_checked(&text, &[edit], &expected)?;
+    }
+    Ok(text)
+}
+
+/// Sets `options.<key>.<name>` in `root`, creating what is missing last.
+fn set_option(root: &mut Value, key: &str, name: &str, value: Value) {
+    let Value::Object(members) = root else {
+        return;
+    };
+    let entries = match members.iter().position(|(member, _)| member == OPTIONS) {
+        Some(at) => &mut members[at].1,
+        None => {
+            members.push((OPTIONS.to_owned(), Value::Object(Vec::new())));
+            let last = members.len() - 1;
+            &mut members[last].1
+        }
+    };
+    let Value::Object(entries) = entries else {
+        return;
+    };
+    let set = match entries.iter().position(|(entry, _)| entry == key) {
+        Some(at) => &mut entries[at].1,
+        None => {
+            entries.push((key.to_owned(), Value::Object(Vec::new())));
+            let last = entries.len() - 1;
+            &mut entries[last].1
+        }
+    };
+    let Value::Object(set) = set else {
+        return;
+    };
+    match set.iter().position(|(given, _)| given == name) {
+        Some(at) => set[at].1 = value,
+        None => set.push((name.to_owned(), value)),
+    }
+}
+
 /// Applies `edits` to `text` and requires the result to hold `expected`.
 fn apply_checked(text: &str, edits: &[Edit], expected: &Value) -> Result<String, EditFailure> {
     let edited = apply(text, edits).map_err(|error| EditFailure::Cannot(error.to_string()))?;

@@ -308,8 +308,11 @@ The owner has not approved them explicitly.
 edits `assemblr.jsonc` and then composes the edited declaration exactly as
 `compose` does, so the report names the declaration change, the versions
 that changed, and every file created, modified, merged, and removed.
-Parameter values are not command-line arguments: they are edited in the
-declaration's `options`.
+**Provisional (D-34):** `add` also takes `--option <name>=<value>`,
+repeatable, which sets the unit's `options` entry in the same edit; a value
+that reads as JSON (`8080`, `true`, `["a"]`) is that value, and any other
+text is a string. A name given twice is refused before anything is read.
+Otherwise parameter values are edited in the declaration's `options`.
 
 **`add`.** A unit that is not selected is added at the end of
 `dependencies`. Without a requirement it is recorded with a caret

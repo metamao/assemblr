@@ -309,7 +309,7 @@ How the status of a statement affects implementation:
   repository (initialized, adopted at its top level, nested inside a
   repository that is not a unit's, refused inside a unit's), writes the
   manifest, the schema, and `.gitignore`, never overwrites a manifest, and
-  never commits (**Provisional (D-5)**; see [initialization
+  never commits (**Provisional (D-5, D-33)**; see [initialization
   details](authoring-workflow.md#initialization-details--provisional-d-2-d-5)). `assemblr
   init [<directory>]` writes an empty declaration and nothing else, and
   `assemblr compose` composes the declaration into a project composed for the
@@ -333,8 +333,9 @@ How the status of a statement affects implementation:
   and argument, including: how `registry info` relates to the top-level
   `info`, and whether unit inspection is spelled `info` or `unit info`; what
   `registry doctor` does beyond diagnosis; how catalog operations (`registry
-  create`, catalog refresh) are grouped; whether `add` accepts parameter
-  values as arguments, which it does not. The grammar of `unit init`, `unit
+  create`, catalog refresh) are grouped; how `add` takes parameter values
+  (`--option <name>=<value>`, **Provisional (D-34)**). The grammar of `unit
+  init` (its default directory, **Provisional (D-33)**), `unit
   check`, `unit publish`, `init`, `compose` (with `--continue` and `--abort`,
   **Provisional (D-18)**), `add`, and `remove`, and `--verbose` on `compose`,
   `add`, `remove`, and `update` (**Provisional (D-31)**), stays open until the

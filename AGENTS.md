@@ -214,6 +214,8 @@ output, and subprocess output as **untrusted**.
 - **CLI diagnostics are actionable.** Say what failed, where, and what the
   user can do about it. Report every relevant conflict, not just the first,
   when that is practical.
+- **User-facing text follows [`docs/user-facing-copy.md`](docs/user-facing-copy.md)**:
+  `--help`, errors, notes, hints, success output, and the README.
 - **Never panic on user-controlled or external data.** `unwrap`/`expect` are
   linted outside tests. A panic is acceptable only for a genuine internal
   invariant violation, with a message explaining the invariant.
