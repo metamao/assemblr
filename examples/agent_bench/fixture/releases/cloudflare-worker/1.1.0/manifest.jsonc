@@ -1,0 +1,31 @@
+{
+  "$schema": "./manifest.schema.json",
+  "name": "@acme/cloudflare-worker",
+  "version": "1.1.0",
+  "description": "HTTP API on Cloudflare Workers in TypeScript, deployed with Wrangler.",
+  "dependencies": {
+    "@acme/typescript": "^1.0.0"
+  },
+  "params": {
+    "workerName": {
+      "type": "string",
+      "description": "The Worker name in Cloudflare and the project name.",
+      "example": "my-worker"
+    },
+    "compatibilityDate": {
+      "type": "string",
+      "description": "The Workers compatibility date.",
+      "default": "2026-10-15"
+    }
+  },
+  "options": {
+    "@acme/typescript": {
+      "projectName": {
+        "from": "workerName"
+      }
+    }
+  },
+  "amendments": {
+    "package.json.assemblr.tmpl": { "unit": "@acme/base", "base": "1.0.0" }
+  }
+}

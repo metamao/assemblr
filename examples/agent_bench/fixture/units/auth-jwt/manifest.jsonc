@@ -1,0 +1,28 @@
+{
+  "$schema": "./manifest.schema.json",
+  "name": "@acme/auth-jwt",
+  "version": "1.0.0",
+  "description": "JWT authentication middleware for Cloudflare Workers.",
+  "dependencies": {
+    "@acme/cloudflare-worker": "^1.0.0"
+  },
+  "params": {
+    "jwtIssuer": {
+      "type": "string",
+      "description": "The issuer every accepted token must name.",
+      "example": "https://auth.example.com/"
+    },
+    "workerName": {
+      "type": "string",
+      "description": "The Worker name.",
+      "example": "my-worker"
+    }
+  },
+  "options": {
+    "@acme/cloudflare-worker": {
+      "workerName": {
+        "from": "workerName"
+      }
+    }
+  }
+}

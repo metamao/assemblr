@@ -1,0 +1,28 @@
+{
+  "$schema": "./manifest.schema.json",
+  "name": "@acme/node-api",
+  "version": "1.0.0",
+  "description": "HTTP API on Node.js with Fastify, in TypeScript.",
+  "dependencies": {
+    "@acme/typescript": "^1.0.0"
+  },
+  "params": {
+    "projectName": {
+      "type": "string",
+      "description": "The project name.",
+      "example": "my-api"
+    },
+    "port": {
+      "type": "integer",
+      "description": "The port the server listens on.",
+      "default": 3000
+    }
+  },
+  "options": {
+    "@acme/typescript": {
+      "projectName": {
+        "from": "projectName"
+      }
+    }
+  }
+}

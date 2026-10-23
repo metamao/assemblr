@@ -49,3 +49,4 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0030](0030-catalog-index.md) | Catalog index: `registry-index.json`, embedded manifests, and all-or-nothing refresh | Accepted |
 | [0031](0031-catalog-registration.md) | Catalog registration: catalogs in the registry index, versions from the catalog index, and content on demand | Accepted |
 | [0032](0032-layered-amendments.md) | Layered amendments: the base below an amender, marked sibling conflicts, the pending state, and the rebase in `unit update` | Accepted |
+| [0033](0033-agent-bench.md) | The agent bench: coding agents on fixed scenarios, run by hand before a release | Accepted |
