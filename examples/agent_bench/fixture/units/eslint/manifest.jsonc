@@ -1,0 +1,23 @@
+{
+  "$schema": "./manifest.schema.json",
+  "name": "@acme/eslint",
+  "version": "1.0.0",
+  "description": "ESLint flat config for TypeScript projects.",
+  "dependencies": {
+    "@acme/typescript": "^1.0.0"
+  },
+  "params": {
+    "projectName": {
+      "type": "string",
+      "description": "The project name.",
+      "example": "my-app"
+    }
+  },
+  "options": {
+    "@acme/typescript": {
+      "projectName": {
+        "from": "projectName"
+      }
+    }
+  }
+}

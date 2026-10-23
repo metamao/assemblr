@@ -50,3 +50,4 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0031](0031-catalog-registration.md) | Catalog registration: catalogs in the registry index, versions from the catalog index, and content on demand | Accepted, point 4 amended by 0033 |
 | [0032](0032-layered-amendments.md) | Layered amendments: the base below an amender, marked sibling conflicts, the pending state, and the rebase in `unit update` | Accepted |
 | [0033](0033-catalog-entry-commands.md) | Catalog entry commands: `catalog init`, `add`, and `remove`, URL-only references, and commits | Accepted |
+| [0034](0034-agent-bench.md) | The agent bench: coding agents on fixed scenarios, run by hand before a release | Accepted |

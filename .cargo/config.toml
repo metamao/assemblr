@@ -3,6 +3,9 @@
 [alias]
 # Runs a command against a development build in an isolated environment.
 sandbox = "run --quiet --example sandbox --"
+# Gives coding agents tasks against a development build and reports how they
+# did. Costs money and needs Claude Code; never run in CI. See ADR 0034.
+agent-bench = "run --quiet --example agent_bench --"
 
 [env]
 # `cargo run` keeps its registry under `target/` unless ASSEMBLR_DATA_DIR is

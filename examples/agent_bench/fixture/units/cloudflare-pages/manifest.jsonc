@@ -1,0 +1,23 @@
+{
+  "$schema": "./manifest.schema.json",
+  "name": "@acme/cloudflare-pages",
+  "version": "1.0.0",
+  "description": "Cloudflare infrastructure for a web app: Wrangler config for Pages and Workers SSR.",
+  "dependencies": {
+    "@acme/base": "^1.0.0"
+  },
+  "params": {
+    "projectName": {
+      "type": "string",
+      "description": "The project name.",
+      "example": "my-app"
+    }
+  },
+  "options": {
+    "@acme/base": {
+      "projectName": {
+        "from": "projectName"
+      }
+    }
+  }
+}

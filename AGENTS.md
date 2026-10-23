@@ -221,7 +221,7 @@ output, and subprocess output as **untrusted**.
   [`src/cli/guide.md`](src/cli/guide.md). A change to a command, a flag, or a
   workflow the guide describes updates the guide in the same change. A unit
   test checks that every command it names exists, but not that it still
-  describes the best way to work.
+  describes the best way to work; the agent bench (§8) measures that.
 - **Never panic on user-controlled or external data.** `unwrap`/`expect` are
   linted outside tests. A panic is acceptable only for a genuine internal
   invariant violation, with a message explaining the invariant.
@@ -283,6 +283,13 @@ hand on a branch when a change needs Windows or the MSRV before the merge.
 - Run the CLI by hand through `cargo sandbox -- <command>`, which sets up an
   isolated registry, Git configuration, and working directory on every call
   (ADR 0028).
+- **Agents on real tasks:** `cargo agent-bench` gives Claude Code fixed
+  scenarios against a development build and reports how it did
+  ([ADR 0034](docs/adr/0034-agent-bench.md)). It costs money and never runs
+  in CI. Run it before a release, and in a change to the agent guide, a
+  command or workflow the guide describes, or a hint agents follow, on the
+  scenarios it affects (`cargo agent-bench --list`). Say in the PR what ran
+  and what it showed.
 - Test conflict and error paths as thoroughly as success paths, and assert
   that diagnostics are useful.
 - Assert on stable substrings or structured data rather than whole

@@ -1,0 +1,26 @@
+{
+  "$schema": "./manifest.schema.json",
+  "name": "@acme/angular-ssr",
+  "version": "1.1.0",
+  "description": "Angular web app with server-side rendering, in TypeScript.",
+  "dependencies": {
+    "@acme/typescript": "^1.0.0"
+  },
+  "params": {
+    "projectName": {
+      "type": "string",
+      "description": "The project name.",
+      "example": "my-app"
+    }
+  },
+  "options": {
+    "@acme/typescript": {
+      "projectName": {
+        "from": "projectName"
+      }
+    }
+  },
+  "amendments": {
+    "package.json.assemblr.tmpl": { "unit": "@acme/base", "base": "1.0.0" }
+  }
+}
