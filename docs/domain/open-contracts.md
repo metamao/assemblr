@@ -831,18 +831,21 @@ How the status of a statement affects implementation:
 
 ### OC-20
 
-- **Resolution:** **Resolved.** An amendment's base is a file in the `src/` of
-  the unit that provides it, at an exact published version, never that unit's
-  composed output. Amendments from different units combine side by side
-  against the original. A unit cannot independently override a value another
-  unit added or changed through an amendment; such a value is exposed as a
-  parameter of the amending unit instead. Provenance records the target
-  identity and exact base version in the manifest, and the lockfile entry for
-  that version identifies its content. `unit amend` searches the `src/` trees
-  of the unit's direct dependencies at their locked versions, recursively by
-  filename: zero matches fail, several matches fail listing the paths, and an
-  explicit relative path disambiguates. An amendment targets a direct
-  dependency. Amendments based on composed output are outside Alpha.
+- **Resolution:** **Resolved**, revised by the owner on #100 (2026-10-23).
+  An amendment's base is layered: the provider's `src/` file at the exact
+  version the amender is locked to, as the units below the amender compose
+  it, which is the file as it stands in the amender's `build/`. A unit can
+  change what a unit below it added or changed; siblings combine side by
+  side, and a unit above conflicting siblings resolves the conflict in its
+  copy, from a base that marks it. Provenance records the provider's
+  identity and exact base version in the manifest, and the lockfile entries
+  for the provider and the amenders below identify the base's content. `unit
+  amend` searches the `src/` trees of every unit in the lock state,
+  recursively by filename: zero matches fail, several matches fail listing
+  the paths, and an explicit relative path or `--unit` disambiguates. An
+  amendment targets any unit below the amender. The marker shapes, the
+  pending state's writes, and the reconstruction of a published amender's
+  base are provisional (D-41, D-42, D-43).
 - **Context:** [the base](amendments-and-composition.md#the-base),
   [amend](authoring-workflow.md#amend--approved)
 

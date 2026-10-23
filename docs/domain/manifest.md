@@ -29,8 +29,8 @@ These fields make up the accepted conceptual vocabulary:
 | `amendments` | Declares the unit's amendments and their provenance. | [amendments-and-composition.md](amendments-and-composition.md#layout-and-declaration) |
 
 The **meaning** of each field above is approved. An amendment declaration
-names the amended path, the direct dependency that provides it, and the exact
-base version (see
+names the amended path, the unit below that provides it, and the exact base
+version (see
 [amendments-and-composition.md](amendments-and-composition.md#layout-and-declaration)).
 Earlier experimental syntax, such as `extends` or a `merges` field, is not
 canonical.

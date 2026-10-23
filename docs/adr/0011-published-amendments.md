@@ -1,6 +1,6 @@
 # 0011: Published amendments: reading them, validating them at index time, and composing them at the base
 
-- **Status:** Accepted, the composition of a published amendment only at its base lifted by 0023
+- **Status:** Accepted, the composition of a published amendment only at its base lifted by 0023, points 4 to 6 superseded by 0032
 - **Date:** 2026-10-21
 
 ## Context
