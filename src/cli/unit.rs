@@ -154,8 +154,8 @@ fn init(args: &InitArgs) -> ExitCode {
                 None => format!("`cd {}`, then ", args.identity.name()),
             };
             println!(
-                "Next: {enter}add files under src/, declare dependencies in manifest.jsonc, and \
-                 run `assemblr unit build`."
+                "Next: {enter}add files under src/, add dependencies with `assemblr unit add \
+                 <unit>`, and run `assemblr unit build`."
             );
             ExitCode::SUCCESS
         }

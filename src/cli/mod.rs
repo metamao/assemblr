@@ -3,6 +3,7 @@
 mod advice;
 mod catalog;
 mod diagnostic;
+mod guide;
 mod info;
 mod project;
 mod registry;
@@ -31,7 +32,8 @@ use clap::{Parser, Subcommand};
         assemblr unit init @acme/web      create web/ with a manifest\n  \
         assemblr unit build               build it into build/\n  \
         assemblr unit publish             tag the committed version\n\n\
-        Run `assemblr <command> --help` for details."
+        Run `assemblr <command> --help` for details, and `assemblr guide` for a guide\n\
+        for coding agents."
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
@@ -105,6 +107,12 @@ enum Command {
     /// Create, build, and publish units
     #[command(subcommand)]
     Unit(unit::UnitCommand),
+    /// Show coding agents how to use Assemblr
+    ///
+    /// Prints a short guide to the commands of this version, for coding
+    /// agents. An agent's instructions can point here, for example with "run
+    /// `assemblr guide` before working on an Assemblr project".
+    Guide,
 }
 
 /// Parses the arguments and runs the command.
@@ -120,6 +128,7 @@ pub(crate) fn run() -> ExitCode {
         Command::Catalog(command) => catalog::run(command),
         Command::Registry(command) => registry::run(command),
         Command::Unit(command) => unit::run(command),
+        Command::Guide => guide::run(),
     }
 }
 
