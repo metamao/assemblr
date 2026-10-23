@@ -24,6 +24,7 @@ The intended authoring commands are:
 
 ```text
 assemblr unit init @metamao/cloudflare-angular-ssr
+assemblr unit add @metamao/cloudflare-worker
 assemblr unit amend -u @metamao/cloudflare-worker -f package.json
 assemblr unit check
 assemblr unit build
@@ -39,7 +40,7 @@ are described in [registries-and-discovery.md](registries-and-discovery.md).
 ## Typical flow — Conceptual
 
 ```text
-init ──> edit src/, manifest ──> amend (as needed) ──> check ──> build
+init ──> edit src/, add <dependency> ──> amend (as needed) ──> check ──> build
   ──> verify build/ with stack-specific tools ──> commit ──> publish
 
 later:  update <dependency> ──> check ──> build ──> verify ──> publish
@@ -124,6 +125,61 @@ created. A file that is replaced is written beside its destination, as
 names, and renamed into place; a new file is created directly. Running the
 command again with the same identity completes whatever is missing and
 changes nothing else.
+
+## Add — Approved
+
+`unit add` declares a dependency and builds the unit, so that `unit amend`
+works right after it. Decided by the owner on 2026-10-23 (#99): the author
+runs one command instead of editing `manifest.jsonc` by hand and building,
+and `unit amend` keeps requiring a lockfile that records the current
+resolution.
+
+### Add details — Approved
+
+**Command.** `assemblr unit add <unit>[@<requirement>] [--option
+<name>=<value>]...`, run at the repository's top level as `unit build` is.
+It edits `dependencies` in `manifest.jsonc` and then builds exactly as
+`unit build` does, so the lockfile is still written only by `unit build`
+and `unit update`. One unit per call. The result goes to stdout, and the
+lockfile's changes to stderr, as a build reports them.
+
+**Requirement.** As the consumer's `add` records it (see
+[consumer-projects.md](consumer-projects.md#add-and-remove-details--approved-d-17)):
+without one, a caret requirement on the version the resolution picks under
+the lockfile, which is the locked version when the unit is a transitive
+dependency already, so that promoting it changes no locked version; a bare
+version is recorded as a caret requirement on it; any other requirement is
+recorded as written. A unit declared already keeps its requirement unless
+another is given.
+
+**Required parameters.** A required parameter of the added unit that has no
+default and no value in the unit's `options` is **mapped** from a parameter
+of the unit's own with the same name (see
+[parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved)):
+the unit's own parameter when it declares one that can be mapped, and
+otherwise one declared for it in `params` with the dependency's type,
+description, allowed values, and example, and no default. `--option
+<name>=<value>` sets a literal instead, read by the parameter's type as the
+consumer's `add` reads it. The command refuses, changing nothing, when the
+unit's own parameter of that name cannot be mapped, and when the
+dependency's parameter has no example, since the unit could not be built
+with the mapped parameter (see [build details](#build-details--approved));
+both name `--option` as the way out, and the second also declaring the
+parameter with an example by hand, which the command then maps.
+
+**Writing and recovery.** Everything is planned on the manifest's text and
+validated as a build validates the working tree before anything is written:
+a build that would be rejected leaves the manifest, the lockfile, and
+`build/` as they were. The edit keeps the manifest's comments, formatting,
+and line endings, and the edited text is read back and must describe exactly
+the intended manifest, as `unit amend` checks its edit. The manifest is
+replaced first, through the temporary file `.assemblr-manifest.jsonc.new`
+and a rename, and the build is published afterwards; a build that fails to
+write after the manifest was replaced is redone by `unit build`.
+
+**Inside a unit.** `assemblr add` run in a directory that holds
+`manifest.jsonc` says that it is a unit's repository and points to
+`unit add`.
 
 ## Amend — Approved
 

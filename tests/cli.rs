@@ -85,7 +85,7 @@ fn help_offers_only_implemented_commands() {
     assert_eq!(
         commands,
         [
-            "init", "build", "check", "publish", "amend", "update", "help"
+            "init", "add", "build", "check", "publish", "amend", "update", "help"
         ],
         "{help}"
     );

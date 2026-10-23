@@ -29,7 +29,7 @@ pub enum DeclarationChange {
 
 /// Why the declaration was not edited.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum EditFailure {
+pub(crate) enum EditFailure {
     /// The unit is not an explicit selection.
     NotSelected,
     /// The text could not be edited safely.
@@ -173,7 +173,7 @@ pub(super) fn remove(
 /// JSON value the text reads as, and a string when it is not JSON, so that
 /// `port=8080` is a number and the composition reports a value that does
 /// not fit.
-pub(super) fn option_value(raw: &str, parameter: Option<&ParameterType>) -> Value {
+pub(crate) fn option_value(raw: &str, parameter: Option<&ParameterType>) -> Value {
     let json = parse_value(raw).ok();
     match (parameter.map(ParameterType::value_kind), json) {
         (Some(ValueKind::String), Some(Value::String(text))) => Value::String(text),
@@ -185,7 +185,7 @@ pub(super) fn option_value(raw: &str, parameter: Option<&ParameterType>) -> Valu
 /// `text` with each of `options`, a parameter name and its value, set in
 /// the `options` entry of `identity`. Entries and members that are missing
 /// are created after the last one there.
-pub(super) fn set_options(
+pub(crate) fn set_options(
     text: &str,
     identity: &UnitIdentity,
     options: &[(String, Value)],

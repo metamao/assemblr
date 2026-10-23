@@ -23,6 +23,7 @@ mod text_merge;
 mod update;
 mod version;
 
+pub(crate) use composition::mapping_problem;
 pub use composition::{
     Amendment, ComposedFile, Composition, CompositionError, ContributedPath, FileTree,
     OptionRequirement, ParameterValues, Root, RootTargetReason, TEMPLATE_SUFFIX, UnitContent,
