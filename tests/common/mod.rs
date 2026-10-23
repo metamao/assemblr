@@ -85,7 +85,9 @@ impl Fixture {
 /// `home` as the home directory. Git, which the binary runs for some
 /// operations with the author's own configuration, sees `home/.gitconfig` as
 /// that configuration, no system configuration, none of the caller's `GIT_*`
-/// variables, and an identity, as an author's shell would provide one.
+/// variables, and an identity, as an author's shell would provide one. A
+/// coding agent's configuration, which `skill install` writes, is under
+/// `home` too, on every platform.
 pub(crate) fn assemblr(dir: &Path, data: &Path, home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_assemblr"));
     without_git_variables(&mut command);
@@ -94,6 +96,7 @@ pub(crate) fn assemblr(dir: &Path, data: &Path, home: &Path) -> Command {
         .env("ASSEMBLR_DATA_DIR", data)
         .env("HOME", home)
         .env("USERPROFILE", home)
+        .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
         .env("GIT_AUTHOR_NAME", "Author")

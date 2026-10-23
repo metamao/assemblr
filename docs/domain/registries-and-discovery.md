@@ -944,6 +944,22 @@ what is never edited by hand.
   [above](#discovery-and-information--approved)); a unit documents itself with
   its own files.
 
+```text
+assemblr skill install <agent>
+```
+
+Decided by the owner on 2026-10-23 (#111). `skill install` writes the
+agent's user-level skill, which says when Assemblr helps and to run
+`assemblr guide`. The user runs it once per machine.
+
+- `<agent>` names the coding agent. `claude` (Claude Code) is the only one
+  supported; other agents may be added as values.
+- It writes only when the user runs it, and only the skill's file. Running it
+  again updates a skill that Assemblr wrote. A file that Assemblr did not
+  write is kept unless the user asks to replace it.
+- The skill names no command but `assemblr guide`, so it stays true when
+  Assemblr changes.
+
 ## Recommended mechanisms — Recommended (provisional)
 
 The owner has accepted the following as default mechanisms and policies for

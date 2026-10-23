@@ -45,10 +45,10 @@ commands it describes, at a cost of about 3–5 USD per full run.
    caller's login. The agent may use file tools and a fixed list of shell
    commands without asking.
 4. **A condition sets what the agent knows beforehand:** `none`, `hint` (the
-   prompt says that Assemblr is installed), or `pointer` (the user-level
-   `CLAUDE.md` holds the pointer to `assemblr guide`). `pointer` is the
-   default, as the closest to what users get. When `assemblr skill install`
-   exists, a condition will install the skill through it.
+   prompt says that Assemblr is installed), `pointer` (the user-level
+   `CLAUDE.md` holds the pointer to `assemblr guide`), or `skill` (the binary
+   under test ran `assemblr skill install claude`). `skill` is the default,
+   as what users get.
 5. **The report is data for a person, not a gate.** Each run keeps its
    prompt, transcript, and checks under `target/agent-bench/<run id>/`, and
    `summary.md` gives, for each scenario and condition, the runs that passed

@@ -8,6 +8,7 @@ mod info;
 mod project;
 mod registry;
 mod search;
+mod skill;
 mod unit;
 
 use std::process::ExitCode;
@@ -32,8 +33,10 @@ use clap::{Parser, Subcommand};
         assemblr unit init @acme/web      create web/ with a manifest\n  \
         assemblr unit build               build it into build/\n  \
         assemblr unit publish             tag the committed version\n\n\
-        Run `assemblr <command> --help` for details, and `assemblr guide` for a guide\n\
-        for coding agents."
+        Work with a coding agent:\n  \
+        assemblr guide                    how an agent uses Assemblr\n  \
+        assemblr skill install claude     point Claude Code to the guide\n\n\
+        Run `assemblr <command> --help` for details."
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
@@ -113,6 +116,9 @@ enum Command {
     /// agents. An agent's instructions can point here, for example with "run
     /// `assemblr guide` before working on an Assemblr project".
     Guide,
+    /// Install a coding agent's pointer to the guide
+    #[command(subcommand)]
+    Skill(skill::SkillCommand),
 }
 
 /// Parses the arguments and runs the command.
@@ -129,6 +135,7 @@ pub(crate) fn run() -> ExitCode {
         Command::Registry(command) => registry::run(command),
         Command::Unit(command) => unit::run(command),
         Command::Guide => guide::run(),
+        Command::Skill(command) => skill::run(command),
     }
 }
 
