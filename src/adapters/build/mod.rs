@@ -541,6 +541,74 @@ pub(super) fn development_values(
     (development, parameters)
 }
 
+/// The pending copy for each file of `unresolved` that `manifest`, the
+/// unit being built, does not amend: the sources layered, with the
+/// conflict marked, for the unit to resolve. The files it amends are given
+/// back: its copy resolved what it saw, and the rest is the caller's to
+/// report.
+pub(super) fn pending_files(
+    composition: &crate::domain::Composition<'_>,
+    unresolved: Vec<UnresolvedFile>,
+    lock: &UnitLock,
+    manifest: &Manifest,
+    dependencies: &Dependencies,
+    problems: &mut Vec<BuildProblem>,
+) -> (Vec<PendingFile>, Vec<UnresolvedFile>) {
+    let mut pending = Vec::new();
+    let mut kept = Vec::new();
+    for unresolved in unresolved {
+        let Some(locked) = lock.units().get(&unresolved.provider) else {
+            kept.push(unresolved);
+            continue;
+        };
+        if manifest.amendments().contains_key(&unresolved.source) {
+            kept.push(unresolved);
+            continue;
+        }
+        let copy = layer_sources(
+            composition,
+            &unresolved.delivered,
+            lock,
+            Some(manifest.name()),
+            dependencies,
+            problems,
+        );
+        let Some(copy) = copy else {
+            continue;
+        };
+        pending.push(PendingFile {
+            source: unresolved.source.clone(),
+            provider: unresolved.provider.clone(),
+            base: locked.version().clone(),
+            amenders: unresolved.amenders.clone(),
+            conflicts: unresolved
+                .conflicts
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            copy,
+        });
+    }
+    (pending, kept)
+}
+
+/// `manifest` without its amendments: the root of a composition that
+/// gives the bases of the unit's own amendments, which are no part of
+/// them, and that is not disturbed by a copy an interrupted run left
+/// undeclared or by one that still holds conflict markers.
+pub(super) fn without_amendments(manifest: &Manifest) -> Manifest {
+    Manifest::new(
+        manifest.name().clone(),
+        manifest.version().clone(),
+        manifest.description().clone(),
+        manifest.dependencies().clone(),
+        manifest.options().clone(),
+        manifest.params().clone(),
+        BTreeMap::new(),
+    )
+    .unwrap_or_else(|_| manifest.clone())
+}
+
 /// The resolved, verified dependencies of a root: a unit, or a consumer
 /// project when `name` is `None`.
 pub(crate) struct Resolved {
@@ -641,9 +709,16 @@ pub(crate) fn resolve_graph(
         };
         if let Some(published) = &content.lock {
             problems.extend(
-                verify_bases(identity, locked.version(), manifest, published, index)
-                    .into_iter()
-                    .map(BuildProblem::BaseIntegrity),
+                verify_bases(
+                    identity,
+                    locked.version(),
+                    manifest,
+                    published,
+                    index,
+                    |unit, version| dependencies.manifests.get(&(unit.clone(), version.clone())),
+                )
+                .into_iter()
+                .map(|error| BuildProblem::BaseIntegrity(Box::new(error))),
             );
         }
     }
@@ -766,40 +841,15 @@ pub(super) fn validate(
     // the unit's to resolve: the pending state gives it the marked copy
     // of the sources. In a file it amends, its copy resolved what it saw
     // and the rest is reported.
-    let mut pending = Vec::new();
-    for unresolved in rendered.unresolved {
-        let Some(locked) = resolved.lock.units().get(&unresolved.provider) else {
-            problems.push(BuildProblem::Unresolved(unresolved));
-            continue;
-        };
-        if manifest.amendments().contains_key(&unresolved.source) {
-            problems.push(BuildProblem::Unresolved(unresolved));
-            continue;
-        }
-        let copy = layer_sources(
-            &composition,
-            &unresolved.delivered,
-            &resolved.lock,
-            Some(manifest.name()),
-            &resolved.dependencies,
-            problems,
-        );
-        let Some(copy) = copy else {
-            continue;
-        };
-        pending.push(PendingFile {
-            source: unresolved.source.clone(),
-            provider: unresolved.provider.clone(),
-            base: locked.version().clone(),
-            amenders: unresolved.amenders.clone(),
-            conflicts: unresolved
-                .conflicts
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            copy,
-        });
-    }
+    let (pending, kept) = pending_files(
+        &composition,
+        rendered.unresolved,
+        &resolved.lock,
+        manifest,
+        &resolved.dependencies,
+        problems,
+    );
+    problems.extend(kept.into_iter().map(BuildProblem::Unresolved));
     if !problems.is_empty() {
         return validation;
     }
@@ -1322,7 +1372,7 @@ pub enum BuildProblem {
     AmendmentBase(AmendmentBaseError),
     /// A published amender's lockfile identifies a base as other content
     /// than the registry records for that version.
-    BaseIntegrity(BaseIntegrityError),
+    BaseIntegrity(Box<BaseIntegrityError>),
     /// The unit and its dependencies cannot be composed.
     Composition(CompositionError),
     /// Several amendments of one provider file cannot be combined.

@@ -417,38 +417,106 @@ fn update(args: &UpdateArgs) -> ExitCode {
             if changes.is_empty() {
                 result = "Updated manifest.jsonc.".to_owned();
             }
-            if !updated.carried().is_empty() {
-                let carried: Vec<String> = updated
-                    .carried()
-                    .iter()
-                    .map(|(path, carried)| {
-                        format!(
-                            "amendments/{path} from {} {} to {}",
-                            carried.unit(),
-                            carried.from(),
-                            carried.to()
-                        )
-                    })
-                    .collect();
+            let moved: Vec<String> = updated
+                .carried()
+                .iter()
+                .filter(|(_, carried)| carried.from() != carried.to())
+                .map(|(path, carried)| {
+                    format!(
+                        "amendments/{path} from {} {} to {}",
+                        carried.unit(),
+                        carried.from(),
+                        carried.to()
+                    )
+                })
+                .collect();
+            if !moved.is_empty() {
                 result.push_str(&format!(
                     " Carried over, in manifest.jsonc: {}.",
-                    carried.join(", ")
+                    moved.join(", ")
                 ));
-                let rebased: Vec<String> = updated
-                    .carried()
+            }
+            let rebased: Vec<String> = updated
+                .carried()
+                .iter()
+                .filter(|(_, carried)| carried.rebased())
+                .map(|(path, _)| format!("amendments/{path}"))
+                .collect();
+            if !rebased.is_empty() {
+                result.push_str(&format!(
+                    " Rewritten to follow the changes below: {}.",
+                    rebased.join(", ")
+                ));
+            }
+            if !updated.pending().is_empty() {
+                let created: Vec<String> = updated
+                    .pending()
                     .iter()
-                    .filter(|(_, carried)| carried.rebased())
-                    .map(|(path, _)| format!("amendments/{path}"))
+                    .map(|pending| format!("amendments/{}", pending.path()))
                     .collect();
-                if !rebased.is_empty() {
-                    result.push_str(&format!(
-                        " Rewritten to follow the provider's changes: {}.",
-                        rebased.join(", ")
-                    ));
-                }
+                result.push_str(&format!(
+                    " Created, declared in manifest.jsonc: {}.",
+                    created.join(", ")
+                ));
             }
             println!("{result}");
-            ExitCode::SUCCESS
+            if !updated.has_markers() {
+                return ExitCode::SUCCESS;
+            }
+            // The update is applied; what the author resolves next is
+            // reported as a build reports the pending state.
+            for (path, carried) in updated.carried() {
+                if carried.conflicts().is_empty() {
+                    if carried.has_markers() {
+                        eprintln!(
+                            "error: amendments/{path} holds conflict markers that flowed in \
+                             from its base: the units below conflict there"
+                        );
+                    }
+                    continue;
+                }
+                eprintln!(
+                    "error: amendments/{path}: the copy and the update change the same parts of \
+                     the file, each left between markers:"
+                );
+                for conflict in carried.conflicts() {
+                    eprintln!("error:   {conflict}");
+                }
+            }
+            for pending in updated.pending() {
+                let amenders: Vec<String> =
+                    pending.amenders().iter().map(ToString::to_string).collect();
+                eprintln!(
+                    "error: amendments/{}: the amendments of {} of src/{} of {} {} conflict, and \
+                     the copy holds each conflict between markers:",
+                    pending.path(),
+                    amenders.join(" and "),
+                    pending.path(),
+                    pending.provider(),
+                    pending.base()
+                );
+                for conflict in pending.conflicts() {
+                    eprintln!("error:   {conflict}");
+                }
+            }
+            let copies = if updated
+                .carried()
+                .values()
+                .filter(|c| c.has_markers())
+                .count()
+                + updated.pending().len()
+                == 1
+            {
+                "the copy"
+            } else {
+                "the copies"
+            };
+            eprintln!("note: the update was applied; build/ was not changed");
+            eprintln!(
+                "hint: edit {copies} under amendments/ to the content you want, remove every \
+                 conflict marker, and run `assemblr unit build`"
+            );
+            ExitCode::FAILURE
         }
         Err(failure) => fail_with(&failure.to_string(), &update_diagnosis(&failure, &root)),
     }
@@ -540,11 +608,6 @@ fn update_diagnosis(failure: &UpdateFailure, root: &Path) -> Diagnosis {
         UpdateProblem::Reconcile(_) => Some(
             "keep the locked version, or resolve what is reported: remove the amendment's \
              declaration and its copy, update, and amend the file again at the new version"
-                .to_owned(),
-        ),
-        UpdateProblem::RebasedNotJson { .. } => Some(
-            "remove the amendment's declaration and its copy, update, and amend the file again \
-             at the new version"
                 .to_owned(),
         ),
         _ => None,

@@ -69,7 +69,7 @@ pub use text_merge::{
     Chained, Conflict as TextConflict, InsertTie, Segment as TextSegment, TextMerge,
     describe_change, describe_lines, is_text, merge_text, split_lines,
 };
-pub use update::{ReconcileCause, ReconcileError, Reconciled, reconcile_amendments, update_lock};
+pub use update::{ReconcileCause, ReconcileError, update_lock};
 pub use version::{RequirementError, Version, VersionError, VersionRequirement};
 
 pub(crate) use manifest::relation_errors;

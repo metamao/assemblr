@@ -27,8 +27,8 @@ use super::merge::{
     round_trip,
 };
 use crate::domain::{
-    Conflict, ConflictKind, Edit, InsertTie, Lists, Operation, TextSegment, UnitIdentity, Value,
-    combine, derive, describe_change, merge_text, plan,
+    Conflict, ConflictKind, Edit, InsertTie, Lists, Operation, TextMerge, TextSegment,
+    UnitIdentity, Value, combine, derive, describe_change, describe_lines, merge_text, plan,
 };
 
 /// The member that marks a contested JSON value: an object with this one
@@ -456,23 +456,59 @@ fn text_set(
         amenders: chained.sides.clone(),
         after_line: chained.after_line,
     }));
+    let (text, conflicts) = write_marked(&common, &merge, BASE_MARK, Ord::cmp, |side| {
+        side.to_string()
+    });
+    for (header, base_lines, sides) in conflicts {
+        let mut report_sides: Vec<(UnitIdentity, String)> = sides;
+        report_sides.sort_by(|left, right| left.0.cmp(&right.0));
+        marked.push((
+            header,
+            TextConflictReport {
+                base_lines,
+                sides: report_sides,
+            },
+        ));
+    }
+    Ok((text, marked))
+}
+
+/// Each conflict a marked text holds: the line that opens its marker,
+/// the base lines it covers, and what each side that changed them holds
+/// there, briefly, in the merge's order of the sides.
+type MarkedConflicts<C> = Vec<(String, std::ops::Range<usize>, Vec<(C, String)>)>;
+
+/// The merged text with each conflict left between markers: the first
+/// side that changed the lines, the base section under `base_mark`, then
+/// each other side. Two sides are a diff3 conflict as editors show it;
+/// with more, each separator names its side. The marker lines end as the
+/// merged text's lines do.
+fn write_marked<C: Clone + Ord>(
+    common: &str,
+    merge: &TextMerge<'_, C>,
+    base_mark: &str,
+    order: impl Fn(&C, &C) -> std::cmp::Ordering,
+    label: impl Fn(&C) -> String,
+) -> (String, MarkedConflicts<C>) {
     let eol = if common.contains("\r\n") {
         "\r\n"
     } else {
         "\n"
     };
     let mut text = String::new();
+    let mut marked = Vec::new();
     for segment in merge.segments() {
         match segment {
             TextSegment::Text(lines) => lines.iter().for_each(|line| text.push_str(line)),
             TextSegment::Conflict(conflict) => {
-                let changed: Vec<(&UnitIdentity, &[&str])> = conflict
+                let mut changed: Vec<(&C, &[&str])> = conflict
                     .sides
                     .iter()
                     .zip(&conflict.changed)
                     .filter(|(_, changed)| **changed)
                     .map(|((side, lines), _)| (side, lines.as_slice()))
                     .collect();
+                changed.sort_by(|left, right| order(left.0, right.0));
                 let mut section = |header: String, lines: &[&str]| {
                     text.push_str(&header);
                     text.push_str(eol);
@@ -484,37 +520,221 @@ fn text_set(
                 let Some(((first, first_lines), rest)) = changed.split_first() else {
                     continue;
                 };
-                let header = format!("{OPEN_MARK}{first}");
+                let header = format!("{OPEN_MARK}{}", label(first));
                 section(header.clone(), first_lines);
-                section(BASE_MARK.to_owned(), &conflict.base);
-                // Two sides are a diff3 conflict as editors show it; with
-                // more, each separator names its side.
+                section(base_mark.to_owned(), &conflict.base);
                 for (side, lines) in rest {
                     let separator = if rest.len() == 1 {
                         SEPARATOR.to_owned()
                     } else {
-                        format!("{SEPARATOR} {side}")
+                        format!("{SEPARATOR} {}", label(side))
                     };
                     section(separator, lines);
                 }
                 let last = rest.last().map(|(side, _)| *side).unwrap_or(first);
-                text.push_str(&format!("{CLOSE_MARK}{last}{eol}"));
-                let mut report_sides: Vec<(UnitIdentity, String)> = changed
+                text.push_str(&format!("{CLOSE_MARK}{}{eol}", label(last)));
+                let sides = changed
                     .iter()
                     .map(|(side, lines)| ((*side).clone(), describe_change(&conflict.base, lines)))
                     .collect();
-                report_sides.sort_by(|left, right| left.0.cmp(&right.0));
-                marked.push((
-                    header,
-                    TextConflictReport {
-                        base_lines: conflict.base_lines.clone(),
-                        sides: report_sides,
-                    },
-                ));
+                marked.push((header, conflict.base_lines.clone(), sides));
             }
         }
     }
-    Ok((text, marked))
+    (text, marked)
+}
+
+/// The two sides of a copy's rebase by `unit update`: the copy as it is,
+/// and the base after the update. The base's side orders first, so that
+/// insertions both make at one position keep the base's lines before the
+/// copy's, as composition does when it moves a copy onto a newer base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Rebase {
+    Incoming,
+    Current,
+}
+
+impl Rebase {
+    /// The side's name in a marker.
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Incoming => "incoming (the base after the update)",
+            Self::Current => "current (your copy)",
+        }
+    }
+
+    /// The side's key in a JSON marker.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Incoming => "incoming",
+            Self::Current => "current",
+        }
+    }
+}
+
+impl std::fmt::Display for Rebase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Incoming => "the update",
+            Self::Current => "the copy",
+        })
+    }
+}
+
+/// The base section of a rebase marker.
+const REBASE_BASE_MARK: &str = "||||||| base (before the update)";
+
+/// A copy rebased onto its base after an update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Rebased {
+    /// The copy with the update's changes merged in, each conflict between
+    /// markers.
+    pub(crate) text: String,
+    /// Each conflict left marked, as the merge reports it.
+    pub(crate) conflicts: Vec<String>,
+}
+
+/// Rebases `current`, a copy of the JSON or JSONC file `base`, onto
+/// `incoming`, the base after an update: the changes the update makes
+/// against the base are edited into the copy, whose own changes and layout
+/// stay. A value both sides change differently is left in the copy as a
+/// marker object naming each side's value, and reported.
+pub(crate) fn rebase_json(
+    base: &str,
+    current: &str,
+    incoming: &str,
+) -> Result<Rebased, MergeFailure> {
+    let read = |text: &str| {
+        parse_value(text).map_err(|error| MergeFailure::Unreadable {
+            amender: None,
+            error,
+        })
+    };
+    let (base_value, current_value, incoming_value) =
+        (read(base)?, read(current)?, read(incoming)?);
+    let sets = BTreeMap::from([
+        (
+            Rebase::Incoming,
+            derive(&base_value, &incoming_value).operations,
+        ),
+        (
+            Rebase::Current,
+            derive(&base_value, &current_value).operations,
+        ),
+    ]);
+    // Lists stay whole, as a consumer's reconciliation keeps them: only the
+    // update's operations are planned, onto the copy's value.
+    let only_incoming = |combined: Vec<crate::domain::Combined<Rebase>>| {
+        combined
+            .into_iter()
+            .filter(|entry| entry.amenders() == [Rebase::Incoming])
+            .collect::<Vec<_>>()
+    };
+    let conflicts = match combine(&sets, Lists::Whole) {
+        Ok(combined) => match plan(&current_value, only_incoming(combined)) {
+            Ok(planned) => {
+                let text = apply(current, &planned.edits).map_err(MergeFailure::Edit)?;
+                projection(&text, &planned.result)?;
+                return Ok(Rebased {
+                    text,
+                    conflicts: Vec::new(),
+                });
+            }
+            Err(conflicts) => conflicts,
+        },
+        Err(conflicts) => conflicts,
+    };
+    let paths: Vec<Vec<String>> = conflicts
+        .iter()
+        .map(|conflict| conflict.path().to_vec())
+        .collect();
+    let touches = |operation: &Operation| {
+        paths
+            .iter()
+            .any(|path| operation.path().starts_with(path) || path.starts_with(operation.path()))
+    };
+    let kept: BTreeMap<Rebase, Vec<Operation>> = sets
+        .iter()
+        .map(|(side, operations)| {
+            let kept = operations
+                .iter()
+                .filter(|operation| !touches(operation))
+                .cloned()
+                .collect();
+            (*side, kept)
+        })
+        .collect();
+    let planned = combine(&kept, Lists::Whole)
+        .map(only_incoming)
+        .and_then(|combined| plan(&current_value, combined))
+        .map_err(|conflicts| {
+            // Nothing outside the marked paths can conflict: the operations
+            // that touch them were left out.
+            let listed: Vec<String> = conflicts.iter().map(ToString::to_string).collect();
+            MergeFailure::Projection {
+                detail: format!(
+                    "the changes outside the marked conflicts still conflict: {}",
+                    listed.join("; ")
+                ),
+            }
+        })?;
+    let text = apply(current, &planned.edits).map_err(MergeFailure::Edit)?;
+    projection(&text, &planned.result)?;
+    let mut value = planned.result;
+    let mut edits = Vec::new();
+    let mut reported = Vec::new();
+    for conflict in conflicts {
+        let path = conflict.path().to_vec();
+        let sides: Vec<(String, Value)> = [
+            (Rebase::Current, &current_value),
+            (Rebase::Incoming, &incoming_value),
+        ]
+        .into_iter()
+        .filter(|(_, held)| held.at(&path) != base_value.at(&path))
+        .map(|(side, held)| {
+            (
+                side.key().to_owned(),
+                held.at(&path).cloned().unwrap_or(Value::Null),
+            )
+        })
+        .collect();
+        let marker = Value::Object(vec![(JSON_MARK.to_owned(), Value::Object(sides))]);
+        edits.extend(place(&mut value, &path, marker));
+        reported.push(conflict.to_string());
+    }
+    let text = apply(&text, &edits).map_err(MergeFailure::Edit)?;
+    projection(&text, &value)?;
+    Ok(Rebased {
+        text,
+        conflicts: reported,
+    })
+}
+
+/// Rebases `current`, a copy of the text file `base`, onto `incoming`, the
+/// base after an update, by line. Lines both sides change differently are
+/// left in the copy between `current` and `incoming` markers, and reported.
+pub(crate) fn rebase_text(base: &str, current: &str, incoming: &str) -> Rebased {
+    let sides = [(Rebase::Incoming, incoming), (Rebase::Current, current)];
+    let merge = merge_text(base, &sides, InsertTie::Chain);
+    // The copy's side opens the marker, as editors show a diff3 conflict.
+    let (text, marked) = write_marked(
+        current,
+        &merge,
+        REBASE_BASE_MARK,
+        |left, right| right.cmp(left),
+        |side| side.marker().to_owned(),
+    );
+    let conflicts = marked
+        .into_iter()
+        .map(|(_, base_lines, sides)| {
+            let held: Vec<String> = sides
+                .iter()
+                .map(|(side, change)| format!("{side} {change}"))
+                .collect();
+            format!("{}: {}", describe_lines(&base_lines), held.join("; "))
+        })
+        .collect();
+    Rebased { text, conflicts }
 }
 
 #[cfg(test)]
@@ -660,5 +880,63 @@ mod tests {
         assert!(has_markers(b"a\n<<<<<<< @acme/a\nb\n"));
         assert!(has_markers(b"  \"<<<<<<< conflict\": {}\r\n"));
         assert!(!has_markers(b"Title\n=======\n||||||| base\n"));
+    }
+
+    #[test]
+    fn a_copy_is_rebased_onto_its_new_base_and_contested_values_are_marked() {
+        // JSON: the update adds a script and bumps a dependency the copy
+        // also bumped; the copy's own addition and layout stay.
+        let base = BASE;
+        let current = "{\n  \"name\": \"demo\",\n  \"scripts\": {\n    \"lint\": \"eslint\",\n    \"verify\": \"mine\"\n  }\n}\n";
+        let incoming = "{\n  \"name\": \"demo\",\n  \"scripts\": {\n    \"lint\": \"eslint --fix\",\n    \"test\": \"vitest\"\n  }\n}\n";
+        let rebased = rebase_json(base, current, incoming).unwrap();
+        assert!(rebased.conflicts.is_empty());
+        assert_eq!(
+            rebased.text,
+            "{\n  \"name\": \"demo\",\n  \"scripts\": {\n    \"lint\": \"eslint --fix\",\n    \"test\": \"vitest\",\n    \"verify\": \"mine\"\n  }\n}\n"
+        );
+        // A value both change differently is marked, naming each side.
+        let contested = "{\n  \"name\": \"demo\",\n  \"scripts\": {\n    \"lint\": \"biome\",\n    \"verify\": \"mine\"\n  }\n}\n";
+        let rebased = rebase_json(base, contested, incoming).unwrap();
+        assert_eq!(
+            rebased.conflicts,
+            [
+                "/scripts/lint: the update changes \"eslint\" to \"eslint --fix\"; the copy changes \"eslint\" to \"biome\""
+            ]
+        );
+        assert!(has_markers(rebased.text.as_bytes()));
+        let value = parse_value(&rebased.text).unwrap();
+        let path = vec!["scripts".to_owned(), "lint".to_owned()];
+        assert_eq!(
+            value.at(&path).unwrap().to_string(),
+            "{\"<<<<<<< conflict\":{\"current\":\"biome\",\"incoming\":\"eslint --fix\"}}"
+        );
+        assert_eq!(
+            value
+                .at(&["scripts".to_owned(), "test".to_owned()])
+                .unwrap()
+                .to_string(),
+            "\"vitest\""
+        );
+
+        // Text: the update's change elsewhere flows through; the lines both
+        // change are left between markers, the copy's side first.
+        let base = "# Title\n\nOne.\n\nTwo.\n";
+        let current = "# Title\n\nOne, mine.\n\nTwo.\n";
+        let incoming = "# New title\n\nOne.\n\nTwo.\n";
+        let rebased = rebase_text(base, current, incoming);
+        assert!(rebased.conflicts.is_empty());
+        assert_eq!(rebased.text, "# New title\n\nOne, mine.\n\nTwo.\n");
+        let incoming = "# Title\n\nOne, theirs.\n\nTwo.\n";
+        let rebased = rebase_text(base, current, incoming);
+        assert_eq!(
+            rebased.conflicts,
+            ["line 3: the copy sets \"One, mine.\"; the update sets \"One, theirs.\""]
+        );
+        assert_eq!(
+            rebased.text,
+            "# Title\n\n<<<<<<< current (your copy)\nOne, mine.\n||||||| base (before the update)\nOne.\n=======\nOne, theirs.\n>>>>>>> incoming (the base after the update)\n\nTwo.\n"
+        );
+        assert!(has_markers(rebased.text.as_bytes()));
     }
 }

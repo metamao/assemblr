@@ -26,15 +26,15 @@ use std::path::{Path, PathBuf};
 use super::exclusive::BuildLock;
 use super::{
     BuildLockError, BuildProblem, MANIFEST, ManifestFileError, development_values, layer_sources,
-    read_working_manifest_text, resolve_graph,
+    read_working_manifest_text, resolve_graph, without_amendments,
 };
 use crate::adapters::git::{FILE_LIMIT, GitError, GitRepository, ReadSrcError, UnitDirectory};
 use crate::adapters::lockfile::{self, LockfileError};
 use crate::adapters::manifest::{EditError, declare_amendment, read_manifest};
 use crate::adapters::registry::{Registry, StorageError};
 use crate::domain::{
-    AmendmentDeclaration, LockChange, LockError, Manifest, RelativePath, RelativePathError,
-    ResolutionError, Root, UnitContent, UnitIdentity, Version, compose, delivered_path,
+    AmendmentDeclaration, LockChange, LockError, RelativePath, RelativePathError, ResolutionError,
+    Root, UnitContent, UnitIdentity, Version, compose, delivered_path,
 };
 
 /// Where the edited manifest is written before it replaces `manifest.jsonc`.
@@ -243,16 +243,7 @@ pub fn amend_unit(
     // with conflict markers the author has not resolved yet.
     let (development, _) = development_values(&manifest);
     let units = resolved.units();
-    let bare = Manifest::new(
-        manifest.name().clone(),
-        manifest.version().clone(),
-        manifest.description().clone(),
-        manifest.dependencies().clone(),
-        manifest.options().clone(),
-        manifest.params().clone(),
-        BTreeMap::new(),
-    )
-    .unwrap_or_else(|_| manifest.clone());
+    let bare = without_amendments(&manifest);
     let no_copies = crate::domain::FileTree::new();
     let composition = compose(
         resolved.resolution.graph(),

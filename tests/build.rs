@@ -2420,7 +2420,7 @@ fn an_amendment_whose_base_file_is_unchanged_carries_over() {
 }
 
 #[test]
-fn an_amendment_that_collides_with_the_provider_or_whose_file_vanished_refuses_the_update() {
+fn an_amendment_whose_file_vanished_refuses_the_update_and_a_collision_is_marked() {
     let fixture = Fixture::new("update-refuse");
     let (node, app) = app_with_edited_amendment(&fixture);
     let unchanged = |app: &Repo| {
@@ -2433,21 +2433,12 @@ fn an_amendment_that_collides_with_the_provider_or_whose_file_vanished_refuses_t
     let before = unchanged(&app);
 
     publish_node(&fixture, &node, "1.0.0", "1.1.0", |node| {
-        node.write("src/config/README.md", "node config 1.1.0\n");
+        node.remove("src/config/README.md");
     });
     let err = stderr(&fails(update(&fixture, &app, &[])));
-    // The provider and the amendment change the one line of the file.
     assert!(
         err.contains(
-            "amendments/config/README.md is based on @acme/node 1.0.0, and @acme/node 1.1.0, \
-             which the update would select, changes lines of src/config/README.md that the \
-             amendment changes too (lines of 1.0.0):"
-        ),
-        "{err}"
-    );
-    assert!(
-        err.contains(
-            "line 1: the provider sets \"node config 1.1.0\"; the amendment sets \"amended config\""
+            "@acme/node 1.1.0, which the update would select, no longer has src/config/README.md"
         ),
         "{err}"
     );
@@ -2459,18 +2450,6 @@ fn an_amendment_that_collides_with_the_provider_or_whose_file_vanished_refuses_t
     );
     assert_eq!(unchanged(&app), before);
     assert!(!app.path.join(".git/assemblr-update.json").exists());
-
-    publish_node(&fixture, &node, "1.1.0", "1.2.0", |node| {
-        node.remove("src/config/README.md");
-    });
-    let err = stderr(&fails(update(&fixture, &app, &[])));
-    assert!(
-        err.contains(
-            "@acme/node 1.2.0, which the update would select, no longer has src/config/README.md"
-        ),
-        "{err}"
-    );
-    assert_eq!(unchanged(&app), before);
 
     // A declaration edited by hand: the real base is unknown.
     app.write(
@@ -2492,6 +2471,50 @@ fn an_amendment_that_collides_with_the_provider_or_whose_file_vanished_refuses_t
 
     // The locked dependent still builds.
     succeeds(fixture.build(&app));
+
+    // The provider and the amendment change the one line of the file: the
+    // update is applied, and the copy holds both between markers until
+    // the author resolves them.
+    publish_node(&fixture, &node, "1.1.0", "1.2.0", |node| {
+        node.write("src/config/README.md", "node config 1.2.0\n");
+    });
+    let output = fails(update(&fixture, &app, &[]));
+    assert!(
+        stdout(&output).contains(
+            "Updated assemblr-lock.json: @acme/node 1.0.0 -> 1.2.0. Carried over, in \
+             manifest.jsonc: amendments/config/README.md from @acme/node 1.0.0 to 1.2.0. \
+             Rewritten to follow the changes below: amendments/config/README.md."
+        ),
+        "{}",
+        stdout(&output)
+    );
+    let err = stderr(&output);
+    for expected in [
+        "error: amendments/config/README.md: the copy and the update change the same parts of \
+         the file, each left between markers:",
+        "error:   line 1: the copy sets \"amended config\"; the update sets \"node config 1.2.0\"",
+        "note: the update was applied; build/ was not changed",
+        "hint: edit the copy under amendments/ to the content you want, remove every conflict \
+         marker, and run `assemblr unit build`",
+    ] {
+        assert!(err.contains(expected), "{expected:?} in {err}");
+    }
+    assert_eq!(
+        app.read("amendments/config/README.md"),
+        "<<<<<<< current (your copy)\namended config\n||||||| base (before the update)\nnode \
+         config\n=======\nnode config 1.2.0\n>>>>>>> incoming (the base after the update)\n"
+    );
+    assert!(app.read("manifest.jsonc").contains("\"base\": \"1.2.0\""));
+    assert!(app.read("assemblr-lock.json").contains("\"1.2.0\""));
+    assert!(!app.path.join(".git/assemblr-update.json").exists());
+    let err = stderr(&fails(fixture.build(&app)));
+    assert!(
+        err.contains("amendments/config/README.md still holds conflict markers"),
+        "{err}"
+    );
+    app.write("amendments/config/README.md", "amended config 1.2.0\n");
+    succeeds(fixture.build(&app));
+    assert_eq!(app.build_file("config/README.md"), "amended config 1.2.0\n");
 }
 
 #[test]
@@ -2589,7 +2612,7 @@ fn an_amendment_is_rebased_onto_the_provider_s_new_version_when_other_lines_chan
     assert!(
         out.contains(
             "Carried over, in manifest.jsonc: amendments/config/README.md from @acme/node 1.0.1 \
-             to 1.1.0. Rewritten to follow the provider's changes: amendments/config/README.md."
+             to 1.1.0. Rewritten to follow the changes below: amendments/config/README.md."
         ),
         "{out}"
     );
