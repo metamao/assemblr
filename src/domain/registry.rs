@@ -95,8 +95,7 @@ impl RegisteredUnit {
 }
 
 /// A registered catalog: where it is registered from, the catalog commit its
-/// inventory was read at, and the repository of each unit it declares, with
-/// relative references already resolved.
+/// inventory was read at, and the repository of each unit it declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredCatalog {
     source: SourceReference,

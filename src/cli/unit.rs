@@ -963,9 +963,9 @@ fn report_published(published: &Published) {
         IndexOutcome::Managed { catalogs } => {
             let catalogs: Vec<String> = catalogs.iter().map(ToString::to_string).collect();
             println!(
-                "The local registry has {} through {}, whose index lists its versions, so the \
-                 version becomes discoverable once `assemblr catalog refresh` adds it there, \
-                 the catalog is pushed, and `assemblr registry sync` reads it.",
+                "The local registry has {} through {}, whose index lists its versions: once \
+                 the tag is pushed, run `assemblr catalog refresh` in the catalog and push it, \
+                 then `assemblr registry sync`.",
                 published.unit(),
                 catalogs.join(", ")
             );

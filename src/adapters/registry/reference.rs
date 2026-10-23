@@ -64,39 +64,15 @@ pub(super) fn remote_reference(text: &str) -> Result<SourceReference, ReferenceE
     Ok(SourceReference::new(text))
 }
 
-/// The reference a catalog's `declared` entry stands for: a remote reference
-/// as given, or a local path, which is resolved against the catalog's root
-/// `catalog` when it is relative, never against the working directory.
-pub(crate) fn catalog_reference(
-    declared: &str,
-    catalog: &Path,
-) -> Result<SourceReference, ReferenceError> {
+/// The repository a catalog's `declared` entry stands for: a remote
+/// reference, as [`remote_reference`] accepts it. A catalog is shared
+/// between machines, and a local path names nothing on another one, so a
+/// local path is refused, whether the catalog itself is local or remote.
+pub(crate) fn catalog_reference(declared: &str) -> Result<SourceReference, ReferenceError> {
     if is_remote(declared) {
-        return remote_reference(declared);
-    }
-    let path = Path::new(declared);
-    if path.is_relative() {
-        local_reference(&catalog.join(path))
+        remote_reference(declared)
     } else {
-        local_reference(path)
-    }
-}
-
-/// The repository the registered catalog `catalog` declares as `declared`:
-/// relative to the catalog's directory when the catalog is local, and a
-/// remote reference when it is remote.
-pub(crate) fn declared_reference(
-    declared: &str,
-    catalog: &SourceReference,
-) -> Result<SourceReference, ReferenceError> {
-    if is_remote_reference(catalog) {
-        if is_remote(declared) {
-            remote_reference(declared)
-        } else {
-            Err(ReferenceError::LocalInRemote(declared.to_owned()))
-        }
-    } else {
-        catalog_reference(declared, Path::new(catalog.as_str()))
+        Err(ReferenceError::LocalInCatalog(declared.to_owned()))
     }
 }
 
@@ -183,9 +159,9 @@ pub enum ReferenceError {
     Transport(String),
     /// The remote reference carries user information, such as a token.
     Credentials(String),
-    /// A remote catalog declares a local path, which has no meaning on
-    /// another machine.
-    LocalInRemote(String),
+    /// A catalog declares a local path, which has no meaning on another
+    /// machine.
+    LocalInCatalog(String),
     /// The working directory could not be read to make the path absolute.
     WorkingDirectory(io::Error),
     /// The absolute path is not UTF-8.
@@ -217,10 +193,10 @@ impl fmt::Display for ReferenceError {
                 "{reference} contains credentials, which would be stored in the registry; \
                  remove them and let Git's credential helper or SSH supply them"
             ),
-            Self::LocalInRemote(reference) => write!(
+            Self::LocalInCatalog(reference) => write!(
                 f,
-                "{reference} is a local path, which a remote catalog cannot declare; use an \
-                 `https://` or SSH URL"
+                "{reference:?} is a local path, which a catalog cannot declare; use the \
+                 repository's `https://` or `ssh://` URL, `git@host:path`, or a `file://` URL"
             ),
             Self::WorkingDirectory(error) => {
                 write!(f, "could not read the working directory: {error}")

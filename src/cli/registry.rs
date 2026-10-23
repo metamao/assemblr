@@ -15,25 +15,10 @@ use assemblr::domain::{
 use clap::Subcommand;
 use serde_json::{Value, json};
 
-use super::catalog;
 use super::diagnostic::{Diagnosis, count, fail, fail_with};
 
 #[derive(Debug, Subcommand)]
 pub(super) enum RegistryCommand {
-    /// Create a catalog of unit repositories
-    ///
-    /// Creates a Git repository with a `registry.jsonc` that lists no units
-    /// yet. List units in it, then run `assemblr catalog refresh`.
-    #[command(after_long_help = "Examples:\n  \
-        assemblr registry create @acme/web\n  \
-        assemblr registry create @acme/web catalogs/web")]
-    Create {
-        /// The catalog, like `@acme/web`
-        #[arg(value_name = "CATALOG", value_parser = catalog::parse_catalog)]
-        identity: CatalogIdentity,
-        /// The directory to create it in [default: the catalog's name]
-        directory: Option<PathBuf>,
-    },
     /// Register a unit's or a catalog's Git repository
     ///
     /// Indexes the versions the repository has published, so that projects
@@ -85,10 +70,6 @@ pub(super) enum RegistryCommand {
 
 pub(super) fn run(command: RegistryCommand) -> ExitCode {
     match command {
-        RegistryCommand::Create {
-            identity,
-            directory,
-        } => catalog::create(&identity, directory.as_deref()),
         RegistryCommand::Add { path } => with_registry(|registry| add(registry, &path)),
         RegistryCommand::List { json } => with_registry(|registry| list(registry, json)),
         RegistryCommand::Remove { identity, catalog } => with_registry(|registry| {
@@ -102,8 +83,7 @@ pub(super) fn run(command: RegistryCommand) -> ExitCode {
     }
 }
 
-/// Runs `action` on the user's registry, which `registry create` does not
-/// need.
+/// Runs `action` on the user's registry.
 fn with_registry(action: impl FnOnce(&Registry) -> ExitCode) -> ExitCode {
     match Registry::locate() {
         Ok(registry) => action(&registry),

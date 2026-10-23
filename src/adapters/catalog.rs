@@ -3,11 +3,14 @@
 //! `docs/domain/registries-and-discovery.md` and
 //! `docs/adr/0030-catalog-index.md`).
 //!
-//! `registry create` writes a new catalog's `registry.jsonc`. `catalog refresh`
+//! `catalog init` writes a new catalog's `registry.jsonc`. `catalog refresh`
 //! reads every declared repository, validates its published versions as
 //! registration does, and replaces `registry-index.json` only when every
-//! source is valid. Both work in the catalog's working tree, for its
-//! maintainer to commit; neither commits.
+//! source is valid. `catalog add` and `catalog remove` edit
+//! `registry.jsonc` and refresh in one step, so that neither file is
+//! written unless the other can be. All of them work in the catalog's
+//! working tree; committing the two files is a separate step, which the
+//! CLI takes unless told not to (see `docs/adr/0033-catalog-entry-commands.md`).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -21,14 +24,14 @@ use super::git::{
     GitError, GitRepository, HeadManifestError, MANIFEST_LIMIT, ReadFileError, init_repository,
 };
 use super::jsonc::{self, Json, SyntaxError};
+use super::jsonc_edit::apply;
 use super::manifest::read_manifest;
 use super::registry::{
-    Problem, ReferenceError, Registry, TagProblem, catalog_reference, declared_reference,
-    observe_tags,
+    Problem, ReferenceError, Registry, TagProblem, catalog_reference, observe_tags,
 };
 use crate::domain::{
-    CatalogIdentity, Excluded, IdentityError, Manifest, ObjectId, Provenance, RegisteredCatalog,
-    RegistryIndex, SourceReference, UnitIdentity, Version, declared_identity,
+    CatalogIdentity, Edit, Excluded, IdentityError, Manifest, ObjectId, ObservedTag, Provenance,
+    RegisteredCatalog, RegistryIndex, SourceReference, UnitIdentity, Version, declared_identity,
 };
 
 /// The catalog's declaration, at its top level.
@@ -37,6 +40,10 @@ pub const CATALOG_MANIFEST: &str = "registry.jsonc";
 pub const CATALOG_INDEX: &str = "registry-index.json";
 /// Where a new index is written before it replaces the old one.
 const INDEX_NEW: &str = ".registry-index.json.new";
+/// Where an edited declaration is written before it replaces the old one.
+const MANIFEST_NEW: &str = ".registry.jsonc.new";
+/// The member of `registry.jsonc` that declares the units.
+const UNITS: &str = "units";
 /// The version of the index's format.
 const INDEX_FORMAT: u64 = 1;
 /// The largest `registry.jsonc` read, in bytes.
@@ -178,7 +185,7 @@ pub fn init_catalog(
     Ok(directory)
 }
 
-/// Why `registry create` failed.
+/// Why `catalog init` failed.
 #[derive(Debug)]
 pub enum CatalogInitFailure {
     /// The directory holds files already.
@@ -248,12 +255,78 @@ impl Refreshed {
 /// declare another identity, and any other source-level problem fail the
 /// refresh, every problem is reported, and the index is left as it was.
 pub fn refresh_catalog(root: &Path, registry: &Registry) -> Result<Refreshed, RefreshFailure> {
+    let (_, manifest) = read_declaration(root)?;
+    let (text, mut refreshed) = build_index(root, &manifest, registry)?;
+    refreshed.changed = write_if_changed(root, CATALOG_INDEX, INDEX_NEW, &text)?;
+    Ok(refreshed)
+}
+
+/// Reads `registry.jsonc` from the working tree at `root`: its text and
+/// what it declares.
+fn read_declaration(root: &Path) -> Result<(String, CatalogManifest), RefreshFailure> {
     let manifest_path = root.join(CATALOG_MANIFEST);
     let text = read_limited(&manifest_path)?;
     let manifest = read_catalog_manifest(&text).map_err(|error| RefreshFailure::Manifest {
         path: manifest_path,
         error,
     })?;
+    Ok((text, manifest))
+}
+
+/// A unit repository as a catalog reads it: fetched when remote, its
+/// version tags observed, and the identity they, or the manifest at its
+/// `HEAD` when no tag is valid, declare.
+struct ReadUnit {
+    identity: UnitIdentity,
+    repository: GitRepository,
+    tags: Vec<ObservedTag<TagProblem>>,
+}
+
+/// Reads the unit repository `source`, or returns every problem that keeps
+/// it from being one.
+fn read_unit(registry: &Registry, source: &SourceReference) -> Result<ReadUnit, Vec<Problem>> {
+    let unreadable = |error| Problem::Unreadable {
+        source: source.clone(),
+        error,
+    };
+    if let Err(error) = registry.fetch_source(source) {
+        return Err(vec![Problem::Unfetchable {
+            source: source.clone(),
+            error,
+        }]);
+    }
+    let repository = registry
+        .open_source(source)
+        .map_err(|error| vec![unreadable(error)])?;
+    let tags = observe_tags(&repository, None).map_err(|error| vec![unreadable(error)])?;
+    let identity = match declared_identity(source, &tags) {
+        Ok(Some(found)) => found,
+        Ok(None) => match repository.head_manifest() {
+            Ok(manifest) => manifest.name().clone(),
+            Err(HeadManifestError::Git(error)) => return Err(vec![unreadable(error)]),
+            Err(error) => {
+                return Err(vec![Problem::NoIdentity {
+                    source: source.clone(),
+                    error,
+                }]);
+            }
+        },
+        Err(errors) => return Err(errors.into_iter().map(Problem::Invalid).collect()),
+    };
+    Ok(ReadUnit {
+        identity,
+        repository,
+        tags,
+    })
+}
+
+/// The index `manifest` describes, as the text `registry-index.json` holds,
+/// with what it lists. Nothing is written; `changed` is left `false`.
+fn build_index(
+    root: &Path,
+    manifest: &CatalogManifest,
+    registry: &Registry,
+) -> Result<(String, Refreshed), RefreshFailure> {
     let mut problems = Vec::new();
     let mut index = RegistryIndex::new();
     let mut entries = BTreeMap::new();
@@ -263,7 +336,7 @@ pub fn refresh_catalog(root: &Path, registry: &Registry) -> Result<Refreshed, Re
             unit: identity.clone(),
             problem,
         };
-        let source = match catalog_reference(declared, root) {
+        let source = match catalog_reference(declared) {
             Ok(source) => source,
             Err(error) => {
                 problems.push(RefreshProblem::Reference {
@@ -273,64 +346,27 @@ pub fn refresh_catalog(root: &Path, registry: &Registry) -> Result<Refreshed, Re
                 continue;
             }
         };
-        if let Err(error) = registry.fetch_source(&source) {
-            problems.push(unit_problem(Problem::Unfetchable { source, error }));
-            continue;
-        }
-        let unreadable = |error| Problem::Unreadable {
-            source: source.clone(),
-            error,
-        };
-        let repository = match registry.open_source(&source) {
-            Ok(repository) => repository,
-            Err(error) => {
-                problems.push(unit_problem(unreadable(error)));
+        let read = match read_unit(registry, &source) {
+            Ok(read) => read,
+            Err(found) => {
+                problems.extend(found.into_iter().map(unit_problem));
                 continue;
             }
         };
-        let tags = match observe_tags(&repository, None) {
-            Ok(tags) => tags,
-            Err(error) => {
-                problems.push(unit_problem(unreadable(error)));
-                continue;
-            }
-        };
-        let found = match declared_identity(&source, &tags) {
-            Ok(Some(found)) => found,
-            Ok(None) => match repository.head_manifest() {
-                Ok(manifest) => manifest.name().clone(),
-                Err(HeadManifestError::Git(error)) => {
-                    problems.push(unit_problem(unreadable(error)));
-                    continue;
-                }
-                Err(error) => {
-                    problems.push(unit_problem(Problem::NoIdentity { source, error }));
-                    continue;
-                }
-            },
-            Err(errors) => {
-                problems.extend(
-                    errors
-                        .into_iter()
-                        .map(|error| unit_problem(Problem::Invalid(error))),
-                );
-                continue;
-            }
-        };
-        if &found != identity {
+        if &read.identity != identity {
             problems.push(RefreshProblem::IdentityMismatch {
                 unit: identity.clone(),
-                found,
+                found: read.identity,
                 source,
             });
             continue;
         }
-        match index.add(source.clone(), identity.clone(), tags) {
+        match index.add(source.clone(), identity.clone(), read.tags) {
             Ok(change) => {
                 let (next, mut dropped) = change.into_parts();
                 index = next;
                 excluded.append(&mut dropped);
-                entries.insert(identity.clone(), (declared.clone(), repository));
+                entries.insert(identity.clone(), (declared.clone(), read.repository));
             }
             Err(errors) => problems.extend(
                 errors
@@ -385,14 +421,224 @@ pub fn refresh_catalog(root: &Path, registry: &Registry) -> Result<Refreshed, Re
             error: io::Error::other(error),
         })?;
     text.push('\n');
-    let changed = write_if_changed(root, &text)?;
-    Ok(Refreshed {
-        catalog: manifest.name().clone(),
-        versions,
-        excluded,
-        changed,
-    })
+    Ok((
+        text,
+        Refreshed {
+            catalog: manifest.name().clone(),
+            versions,
+            excluded,
+            changed: false,
+        },
+    ))
 }
+
+/// What `catalog add` did.
+#[derive(Debug)]
+pub enum CatalogAdded {
+    /// The unit was declared from the reference, and the index refreshed.
+    Added {
+        /// The unit, as its repository declares it.
+        unit: UnitIdentity,
+        /// The refreshed index.
+        refreshed: Refreshed,
+    },
+    /// The catalog declared the unit from this reference already. Nothing
+    /// was written.
+    AlreadyDeclared {
+        /// The unit.
+        unit: UnitIdentity,
+    },
+}
+
+/// Declares the unit repository `reference` in the catalog whose top level
+/// is `root`, and refreshes its index.
+///
+/// The unit's identity is read from the repository, as registration reads
+/// it, so it is never typed twice. `reference` must be one a catalog may
+/// declare, a remote one. The entry is added to `registry.jsonc` in the
+/// position its identity sorts to, keeping the file's comments and layout,
+/// and the whole index is then refreshed as [`refresh_catalog`] refreshes
+/// it. Neither file is written unless the refresh succeeds.
+pub fn add_to_catalog(
+    root: &Path,
+    reference: &str,
+    registry: &Registry,
+) -> Result<CatalogAdded, CatalogChangeFailure> {
+    let (text, manifest) = read_declaration(root)?;
+    let source = catalog_reference(reference).map_err(CatalogChangeFailure::Reference)?;
+    let read =
+        read_unit(registry, &source).map_err(|problems| CatalogChangeFailure::Unreadable {
+            source: source.clone(),
+            problems,
+        })?;
+    let unit = read.identity;
+    if let Some(declared) = manifest.units().get(&unit) {
+        if declared == reference {
+            return Ok(CatalogAdded::AlreadyDeclared { unit });
+        }
+        return Err(CatalogChangeFailure::DeclaredElsewhere {
+            unit,
+            declared: declared.clone(),
+        });
+    }
+    let after = manifest
+        .units()
+        .range(..unit.clone())
+        .next_back()
+        .map(|(identity, _)| identity.to_string());
+    let edit = Edit::Insert {
+        parent: vec![UNITS.to_owned()],
+        key: unit.to_string(),
+        value: crate::domain::Value::String(reference.to_owned()),
+        after,
+    };
+    let mut expected = manifest.units().clone();
+    expected.insert(unit.clone(), reference.to_owned());
+    let edited = edit_declaration(&text, &edit, &expected)?;
+    let refreshed = write_change(root, &edited, registry)?;
+    Ok(CatalogAdded::Added { unit, refreshed })
+}
+
+/// Removes the unit `unit` from the catalog whose top level is `root`, and
+/// refreshes its index, as [`add_to_catalog`] adds one. Neither file is
+/// written unless the refresh succeeds. Returns the reference the unit was
+/// declared from and the refreshed index.
+pub fn remove_from_catalog(
+    root: &Path,
+    unit: &UnitIdentity,
+    registry: &Registry,
+) -> Result<(String, Refreshed), CatalogChangeFailure> {
+    let (text, manifest) = read_declaration(root)?;
+    let Some(declared) = manifest.units().get(unit).cloned() else {
+        return Err(CatalogChangeFailure::NotDeclared {
+            unit: unit.clone(),
+            catalog: manifest.name().clone(),
+        });
+    };
+    let edit = Edit::Delete {
+        path: vec![UNITS.to_owned(), unit.to_string()],
+    };
+    let mut expected = manifest.units().clone();
+    expected.remove(unit);
+    let edited = edit_declaration(&text, &edit, &expected)?;
+    let refreshed = write_change(root, &edited, registry)?;
+    Ok((declared, refreshed))
+}
+
+/// `text` with `edit` applied, checked by reading it back: it must declare
+/// exactly `expected`, so a layout the editor misjudges is a refusal, never
+/// a different catalog.
+fn edit_declaration(
+    text: &str,
+    edit: &Edit,
+    expected: &BTreeMap<UnitIdentity, String>,
+) -> Result<String, CatalogChangeFailure> {
+    let cannot = |detail: String| CatalogChangeFailure::Edit(detail);
+    let edited =
+        apply(text, std::slice::from_ref(edit)).map_err(|error| cannot(error.to_string()))?;
+    let read = read_catalog_manifest(&edited).map_err(|error| cannot(error.to_string()))?;
+    if read.units() != expected {
+        return Err(cannot(format!(
+            "the edited {CATALOG_MANIFEST} does not declare what was intended"
+        )));
+    }
+    Ok(edited)
+}
+
+/// Refreshes the index for the declaration `edited`, then writes the index
+/// and the declaration, the declaration last.
+fn write_change(
+    root: &Path,
+    edited: &str,
+    registry: &Registry,
+) -> Result<Refreshed, CatalogChangeFailure> {
+    let manifest = read_catalog_manifest(edited)
+        .map_err(|error| CatalogChangeFailure::Edit(error.to_string()))?;
+    let (index, mut refreshed) = build_index(root, &manifest, registry)?;
+    refreshed.changed = write_if_changed(root, CATALOG_INDEX, INDEX_NEW, &index)?;
+    write_if_changed(root, CATALOG_MANIFEST, MANIFEST_NEW, edited).map_err(|failure| {
+        CatalogChangeFailure::Declaration {
+            failure,
+            index_written: refreshed.changed,
+        }
+    })?;
+    Ok(refreshed)
+}
+
+/// Why `catalog add` or `catalog remove` changed nothing, or, for
+/// [`Declaration`](Self::Declaration), changed only the index.
+#[derive(Debug)]
+pub enum CatalogChangeFailure {
+    /// The catalog could not be read, or the refresh failed. Nothing was
+    /// written.
+    Refresh(RefreshFailure),
+    /// The reference is not one a catalog may declare.
+    Reference(ReferenceError),
+    /// The repository could not be read as a unit's.
+    Unreadable {
+        /// The repository.
+        source: SourceReference,
+        /// Every problem found.
+        problems: Vec<Problem>,
+    },
+    /// The catalog declares the unit from another reference.
+    DeclaredElsewhere {
+        /// The unit.
+        unit: UnitIdentity,
+        /// The reference it declares.
+        declared: String,
+    },
+    /// The catalog does not declare the unit.
+    NotDeclared {
+        /// The unit.
+        unit: UnitIdentity,
+        /// The catalog.
+        catalog: CatalogIdentity,
+    },
+    /// `registry.jsonc` could not be edited safely.
+    Edit(String),
+    /// `registry.jsonc` could not be written, after the index was, when
+    /// `index_written`.
+    Declaration {
+        /// Why.
+        failure: RefreshFailure,
+        /// Whether `registry-index.json` was replaced already.
+        index_written: bool,
+    },
+}
+
+impl From<RefreshFailure> for CatalogChangeFailure {
+    fn from(failure: RefreshFailure) -> Self {
+        Self::Refresh(failure)
+    }
+}
+
+impl fmt::Display for CatalogChangeFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Refresh(failure) => failure.fmt(f),
+            Self::Reference(error) => error.fmt(f),
+            Self::Unreadable { source, problems } => {
+                write!(f, "{source} cannot be added:")?;
+                for problem in problems {
+                    write!(f, "\n{problem}")?;
+                }
+                Ok(())
+            }
+            Self::DeclaredElsewhere { unit, declared } => write!(
+                f,
+                "the catalog declares {unit} from {declared} already; a unit has one repository"
+            ),
+            Self::NotDeclared { unit, catalog } => {
+                write!(f, "the catalog {catalog} does not declare {unit}")
+            }
+            Self::Edit(detail) => write!(f, "could not edit {CATALOG_MANIFEST}: {detail}"),
+            Self::Declaration { failure, .. } => failure.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for CatalogChangeFailure {}
 
 /// The manifest published at `provenance`'s commit, as JSON: comments and
 /// trailing commas removed, and members in sorted order, so the index does
@@ -441,17 +687,22 @@ fn read_limited(path: &Path) -> Result<String, RefreshFailure> {
     Ok(text)
 }
 
-/// Replaces the index with `text` unless it holds it already: written
-/// beside it, flushed, and renamed over it.
-fn write_if_changed(root: &Path, text: &str) -> Result<bool, RefreshFailure> {
-    let path = root.join(CATALOG_INDEX);
+/// Replaces the file `name` at `root` with `text` unless it holds it
+/// already: written beside it as `staging`, flushed, and renamed over it.
+fn write_if_changed(
+    root: &Path,
+    name: &str,
+    staging: &str,
+    text: &str,
+) -> Result<bool, RefreshFailure> {
+    let path = root.join(name);
     match fs::read(&path) {
         Ok(current) if current == text.as_bytes() => return Ok(false),
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(RefreshFailure::Read { path, error }),
     }
-    let staging = root.join(INDEX_NEW);
+    let staging = root.join(staging);
     let write = |error| RefreshFailure::Write {
         path: path.clone(),
         error,
@@ -658,8 +909,7 @@ impl ListedUnit {
     }
 }
 
-/// Reads the catalog committed at `HEAD` of `repository`, which is
-/// registered, or being registered, from `source`.
+/// Reads the catalog committed at `HEAD` of `repository`.
 ///
 /// Both `registry.jsonc` and `registry-index.json` are read from the
 /// commit, never from a working tree. The index must be the one
@@ -669,19 +919,17 @@ impl ListedUnit {
 /// are not read.
 pub(crate) fn read_published_catalog(
     repository: &GitRepository,
-    source: &SourceReference,
 ) -> Result<PublishedCatalog, CatalogProblem> {
     let commit = repository
         .head_commit()
         .map_err(CatalogProblem::Unreadable)?
         .ok_or(CatalogProblem::NoCommit)?;
-    read_catalog_at(repository, source, commit)
+    read_catalog_at(repository, commit)
 }
 
 /// Reads the catalog at `commit`, as [`read_published_catalog`] does.
 pub(crate) fn read_catalog_at(
     repository: &GitRepository,
-    source: &SourceReference,
     commit: ObjectId,
 ) -> Result<PublishedCatalog, CatalogProblem> {
     let read = |name: &str, limit| -> Result<Option<String>, CatalogProblem> {
@@ -725,11 +973,10 @@ pub(crate) fn read_catalog_at(
                 "it lists {identity} from {indexed}, but registry.jsonc declares {declared}"
             )));
         }
-        let reference =
-            declared_reference(declared, source).map_err(|error| CatalogProblem::Reference {
-                unit: identity.clone(),
-                error,
-            })?;
+        let reference = catalog_reference(declared).map_err(|error| CatalogProblem::Reference {
+            unit: identity.clone(),
+            error,
+        })?;
         let mut checked = BTreeMap::new();
         for (version, (provenance, listed)) in versions {
             let invalid = |detail: String| {
