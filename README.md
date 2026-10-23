@@ -1,13 +1,15 @@
 # Assemblr
 
-Assemblr is a Rust CLI for composing and maintaining opinionated, reusable
-software **units**: versioned, author-owned implementations of software
-capabilities and integrations, such as `@metamao/cloudflare-worker`.
+Assemblr builds software projects from **units**: versioned, reusable parts
+of a project that their authors keep in Git repositories, such as
+`@metamao/cloudflare-worker`. A project selects units and Assemblr composes
+their files; when a unit publishes a new version, Assemblr updates the
+project without overwriting your own changes.
 
-Units are composed with their dependencies. They modify dependency files
-through ordinary full-file copies (*amendments*), are validated by Assemblr,
-and are published as immutable, versioned Git tags. Assemblr is
-technology-agnostic and built for both humans and coding agents.
+A unit can change a dependency's file through an **amendment**, an ordinary
+copy of the file that Assemblr merges. Published versions are Git tags and
+never change. Assemblr works with any technology and is built for people and
+coding agents alike.
 
 ## Status
 
@@ -76,6 +78,38 @@ The binaries are unsigned and only the two targets exist. For development,
 current default branch from source (it needs Rust and Git access to the
 repository).
 
+## Usage
+
+**Start a project from units.**
+
+```sh
+assemblr registry add ../web         # register a unit's Git repository
+assemblr init                        # create assemblr.jsonc here
+assemblr add @acme/web               # select the unit and compose the project
+assemblr add @acme/api --option port=8080   # set a parameter while adding
+assemblr update                      # move to the newest versions allowed
+```
+
+`assemblr info @acme/web` shows a unit's versions and parameters. When an
+update and your own edits change the same lines, the file is left with
+conflict markers: resolve them and run `assemblr compose --continue`, or undo
+it with `assemblr compose --abort`.
+
+**Create a unit.**
+
+```sh
+assemblr unit init @acme/web         # create web/ with a manifest and a Git repository
+cd web                               # add files under src/, dependencies in manifest.jsonc
+assemblr unit build                  # build it and its dependencies into build/
+assemblr unit amend package.json     # copy a dependency's file to change it
+assemblr unit check                  # check it before publishing
+git add -A && git commit -m "First version"
+assemblr unit publish                # tag the committed version
+```
+
+Every command explains itself with `--help`, including examples. The
+concepts and the guarantees are in [`docs/domain/`](docs/domain/README.md).
+
 ## Documentation
 
 | Where | What |
@@ -83,6 +117,7 @@ repository).
 | [`docs/domain/`](docs/domain/README.md) | What Assemblr means and promises: the canonical product contracts |
 | [`docs/domain/open-contracts.md`](docs/domain/open-contracts.md) | Product questions that are not yet decided |
 | [`AGENTS.md`](AGENTS.md) | How Assemblr is engineered: rules for contributors and coding agents |
+| [`docs/user-facing-copy.md`](docs/user-facing-copy.md) | How Assemblr's help, messages, and README are written |
 | [`docs/adr/`](docs/adr/README.md) | Architectural decision records |
 
 ## Development

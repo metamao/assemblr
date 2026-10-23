@@ -25,7 +25,7 @@ fn help_describes_the_tool() {
     let stdout = stdout(&output);
     assert!(stdout.contains("Usage: assemblr"), "{stdout}");
     assert!(
-        stdout.contains("Compose and maintain opinionated, reusable software units"),
+        stdout.contains("Compose and maintain projects from reusable, versioned units"),
         "{stdout}"
     );
 }
@@ -93,14 +93,14 @@ fn help_offers_only_implemented_commands() {
     let output = assemblr(&["unit", "amend", "--help"]);
     let help = self::stdout(&output);
     assert!(help.contains("<FILE>"), "{help}");
-    assert!(help.contains("--unit <IDENTITY>"), "{help}");
+    assert!(help.contains("--unit <UNIT>"), "{help}");
 
     let output = assemblr(&["unit", "update", "--help"]);
     let help = self::stdout(&output);
-    assert!(help.contains("[IDENTITY]..."), "{help}");
+    assert!(help.contains("[UNIT]..."), "{help}");
 
     let output = assemblr(&["unit", "init", "--help"]);
     let help = self::stdout(&output);
-    assert!(help.contains("<IDENTITY> [DIRECTORY]"), "{help}");
+    assert!(help.contains("<UNIT> [DIRECTORY]"), "{help}");
     assert!(help.contains("--description <TEXT>"), "{help}");
 }

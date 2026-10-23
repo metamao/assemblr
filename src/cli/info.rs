@@ -8,49 +8,43 @@
 use std::process::ExitCode;
 
 use assemblr::adapters::{InfoFailure, Registry, UnitInfo};
-use assemblr::domain::{OptionValue, ParameterDefinition, ParameterType, ParameterValue, Version};
+use assemblr::domain::{
+    OptionValue, ParameterDefinition, ParameterType, ParameterValue, UnitIdentity, Version,
+};
 use clap::Args;
 use serde_json::{Map, Value, json};
 
-use super::project::split_unit;
+use super::diagnostic::fail;
+use super::project::unit_argument;
 
 #[derive(Debug, Args)]
 pub(super) struct InfoArgs {
-    /// The unit, `@owner/name`, optionally followed by `@` and an exact
-    /// version, as in `@owner/name@1.2.0`. Without one, the newest stable
-    /// version is described.
-    unit: String,
-    /// Print JSON instead of text.
+    /// The unit, like `@acme/web` or `@acme/web@1.2.0` [default version:
+    /// the newest stable one]
+    #[arg(value_name = "UNIT", value_parser = unit_version)]
+    unit: (UnitIdentity, Option<Version>),
+    /// Print JSON instead of text
     #[arg(long)]
     json: bool,
 }
 
+/// Parses `@owner/name`, optionally followed by `@` and an exact version.
+fn unit_version(argument: &str) -> Result<(UnitIdentity, Option<Version>), String> {
+    let parsed = unit_argument(argument)?;
+    let version = parsed
+        .version()
+        .map(|version| Version::parse(version).map_err(|error| error.to_string()))
+        .transpose()?;
+    Ok((parsed.identity().clone(), version))
+}
+
 pub(super) fn run(args: &InfoArgs) -> ExitCode {
-    let (identity, version) = match split_unit(&args.unit) {
-        Ok((identity, version)) => (identity, version),
-        Err(message) => {
-            return fail(
-                &message,
-                Some("write the unit as @owner/name, or @owner/name@<version>"),
-            );
-        }
-    };
-    let version = match version.as_deref().map(Version::parse).transpose() {
-        Ok(version) => version,
-        Err(error) => {
-            return fail(
-                &error.to_string(),
-                Some(
-                    "`assemblr info` takes an exact version; `assemblr registry list` shows the indexed ones",
-                ),
-            );
-        }
-    };
+    let (identity, version) = &args.unit;
     let registry = match Registry::locate() {
         Ok(registry) => registry,
         Err(error) => return fail(&error.to_string(), None),
     };
-    match registry.info(&identity, version.as_ref()) {
+    match registry.info(identity, version.as_ref()) {
         Ok(info) => {
             if args.json {
                 match serde_json::to_string_pretty(&info_json(&info)) {
@@ -259,12 +253,4 @@ fn info_json(info: &UnitInfo) -> Value {
         "options": options,
         "amendments": amendments,
     })
-}
-
-fn fail(message: &str, hint: Option<&str>) -> ExitCode {
-    eprintln!("error: {}", message.replace('\n', "\nerror: "));
-    if let Some(hint) = hint {
-        eprintln!("hint: {hint}");
-    }
-    ExitCode::FAILURE
 }

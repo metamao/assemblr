@@ -76,10 +76,10 @@ pub enum ReadManifestError {
 impl fmt::Display for ReadManifestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Syntax(error) => write!(f, "the manifest is not valid JSONC: {error}"),
+            Self::Syntax(error) => write!(f, "not valid JSONC: {error}"),
             Self::Invalid(issues) => {
                 let plural = if issues.len() == 1 { "" } else { "s" };
-                write!(f, "the manifest has {} problem{plural}:", issues.len())?;
+                write!(f, "{} problem{plural}:", issues.len())?;
                 for issue in issues {
                     write!(f, "\n  {issue}")?;
                 }
@@ -227,8 +227,9 @@ impl fmt::Display for JsonKind {
 /// What is wrong with a manifest field.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IssueKind {
-    /// The field is not part of the manifest format.
-    UnknownField,
+    /// The field is not part of the manifest format. Holds the fields the
+    /// object accepts.
+    UnknownField(&'static [&'static str]),
     /// A required field is absent.
     MissingField,
     /// The key appears more than once in the same object. The first
@@ -273,7 +274,19 @@ pub enum IssueKind {
 impl fmt::Display for IssueKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownField => f.write_str("unknown field"),
+            Self::UnknownField(known) => {
+                f.write_str("unknown field; the fields here are ")?;
+                for (position, name) in known.iter().enumerate() {
+                    let separator = match (position, known.len() - position) {
+                        (0, _) => "",
+                        (1, 1) => " and ",
+                        (_, 1) => ", and ",
+                        _ => ", ",
+                    };
+                    write!(f, "{separator}`{name}`")?;
+                }
+                Ok(())
+            }
             Self::MissingField => f.write_str("missing required field"),
             Self::DuplicateKey => f.write_str("duplicate key"),
             Self::WrongType { expected, found } => {
@@ -724,11 +737,11 @@ impl Reader {
         &mut self,
         path: &FieldPath,
         json: &'j Json,
-        known: &[&str],
+        known: &'static [&'static str],
     ) -> Option<Members<'j>> {
         let members = self.object(path, json)?;
         for key in members.keys().filter(|key| !known.contains(key)) {
-            self.report(path.key(key), IssueKind::UnknownField);
+            self.report(path.key(key), IssueKind::UnknownField(known));
         }
         Some(members)
     }
@@ -1207,7 +1220,7 @@ mod tests {
         ));
         assert!(matches!(
             found[1],
-            ("amendments[\"extra.txt\"].path", IssueKind::UnknownField)
+            ("amendments[\"extra.txt\"].path", IssueKind::UnknownField(_))
         ));
         assert!(matches!(
             found[2],
@@ -1286,9 +1299,27 @@ mod tests {
         assert_eq!(
             issues(&text),
             [
-                ("fragments".to_owned(), IssueKind::UnknownField),
-                ("params.a.required".to_owned(), IssueKind::UnknownField),
+                (
+                    "fragments".to_owned(),
+                    IssueKind::UnknownField(super::MANIFEST_FIELDS)
+                ),
+                (
+                    "params.a.required".to_owned(),
+                    IssueKind::UnknownField(super::PARAMETER_FIELDS)
+                ),
             ]
+        );
+    }
+
+    #[test]
+    fn an_unknown_field_lists_the_fields_allowed_there() {
+        assert_eq!(
+            IssueKind::UnknownField(&["a", "b"]).to_string(),
+            "unknown field; the fields here are `a` and `b`"
+        );
+        assert_eq!(
+            IssueKind::UnknownField(&["a", "b", "c"]).to_string(),
+            "unknown field; the fields here are `a`, `b`, and `c`"
         );
     }
 
@@ -1736,10 +1767,7 @@ mod tests {
         ))
         .unwrap_err();
         let message = error.to_string();
-        assert!(
-            message.starts_with("the manifest has 1 problem:"),
-            "{message}"
-        );
+        assert!(message.starts_with("1 problem:"), "{message}");
         assert!(
             message.contains(
                 "params.port.default: expected a string, an integer, or a boolean, found a number that is not a 64-bit integer"

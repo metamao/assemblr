@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use super::git::{Discovered, GitError, discover_repository, init_repository};
 use super::manifest::{ReadManifestError, read_manifest};
 use super::schema::{MANIFEST_SCHEMA, MANIFEST_SCHEMA_REFERENCE, manifest_schema};
-use crate::domain::{Description, UnitIdentity, Version};
+use crate::domain::{Description, RelativePath, UnitIdentity, Version};
 
 /// The unit's manifest, at the repository's top level.
 const MANIFEST: &str = "manifest.jsonc";
@@ -39,13 +39,24 @@ const SCHEMA_NEW: &str = ".assemblr-manifest.schema.json.new";
 const GITIGNORE_NEW: &str = ".assemblr-gitignore.new";
 
 /// Initializes the unit `identity` in `directory`, which is created when it
-/// does not exist. `description` is the manifest's description; without
-/// one, a placeholder names the unit.
+/// does not exist. Without a directory, the unit gets a new one named after
+/// it in the current directory, `web` for `@acme/web`: that directory must
+/// not exist, be empty, or already hold a manifest, so that a unit never
+/// lands among unrelated files by default. `description` is the manifest's
+/// description; without one, a placeholder names the unit.
 pub fn init_unit(
-    directory: &Path,
+    directory: Option<&Path>,
     identity: &UnitIdentity,
     description: Option<&str>,
 ) -> Result<Initialized, InitFailure> {
+    let derived;
+    let directory = match directory {
+        Some(directory) => directory,
+        None => {
+            derived = new_unit_directory(identity)?;
+            &derived
+        }
+    };
     let description = match description {
         Some(text) => Description::new(text).map_err(|_| InitFailure::BlankDescription)?,
         None => Description::new(&format!("The {identity} unit."))
@@ -409,6 +420,28 @@ pub enum FileOutcome {
     Kept,
 }
 
+/// The directory a unit gets when none is given: its name, in the current
+/// directory, refused when it holds other files and no manifest.
+fn new_unit_directory(identity: &UnitIdentity) -> Result<PathBuf, InitFailure> {
+    let name = identity.name();
+    // A name Windows reserves, such as `con`, cannot be a directory there.
+    if RelativePath::parse(name).is_err() {
+        return Err(InitFailure::ReservedName(name.to_owned()));
+    }
+    let directory = PathBuf::from(name);
+    match fs::read_dir(&directory) {
+        Ok(mut entries) => {
+            if entries.next().is_some() && !directory.join(MANIFEST).exists() {
+                return Err(InitFailure::NotEmpty(directory));
+            }
+            Ok(directory)
+        }
+        // Missing, a file of that name, or one that cannot be read: the
+        // checks of any directory report the last two.
+        Err(_) => Ok(directory),
+    }
+}
+
 /// Why `unit init` failed.
 #[derive(Debug)]
 pub enum InitFailure {
@@ -423,6 +456,12 @@ pub enum InitFailure {
     },
     /// The path exists and is not a directory.
     NotADirectory(PathBuf),
+    /// No directory was given, and the one named after the unit holds
+    /// other files and no manifest.
+    NotEmpty(PathBuf),
+    /// No directory was given, and the unit's name cannot be a directory's
+    /// on every platform.
+    ReservedName(String),
     /// The directory is inside a unit's repository, below its top level.
     Inside {
         /// The directory.
@@ -503,6 +542,15 @@ impl fmt::Display for InitFailure {
             Self::NotADirectory(path) => {
                 write!(f, "{} exists and is not a directory", path.display())
             }
+            Self::NotEmpty(path) => write!(
+                f,
+                "{} already exists and holds other files; a new unit gets a new directory",
+                path.display()
+            ),
+            Self::ReservedName(name) => write!(
+                f,
+                "`{name}` cannot be a directory name on Windows, so the unit needs a directory"
+            ),
             Self::Inside {
                 directory,
                 top_level,

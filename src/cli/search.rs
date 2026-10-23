@@ -12,14 +12,15 @@ use assemblr::domain::SearchQuery;
 use clap::Args;
 use serde_json::{Value, json};
 
+use super::diagnostic::fail;
+
 #[derive(Debug, Args)]
 pub(super) struct SearchArgs {
-    /// The terms to find, such as `cloudflare worker`. Each must occur,
-    /// ignoring case, in the unit's identity or in the description of its
-    /// newest stable version.
-    #[arg(required = true)]
+    /// The terms to find, like `cloudflare worker`; each must occur in the
+    /// unit's name or in its newest stable version's description
+    #[arg(value_name = "TERM", required = true)]
     terms: Vec<String>,
-    /// Print JSON instead of text.
+    /// Print JSON instead of text
     #[arg(long)]
     json: bool,
 }
@@ -30,7 +31,7 @@ pub(super) fn run(args: &SearchArgs) -> ExitCode {
         Err(error) => {
             return fail(
                 &error.to_string(),
-                Some("give at least one term; `assemblr registry list` lists every unit"),
+                Some("give at least one term, like `assemblr search cloudflare`"),
             );
         }
     };
@@ -44,8 +45,8 @@ pub(super) fn run(args: &SearchArgs) -> ExitCode {
     };
     for failure in search.undescribed() {
         eprintln!(
-            "warning: {failure}; it was matched on its identity only, so a match on its \
-             description may be missing"
+            "warning: {failure}; it was matched by name only, so it may be missing from the \
+             results"
         );
     }
     if args.json {
@@ -67,7 +68,7 @@ pub(super) fn run(args: &SearchArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The identity, version, and description of a unit, or why it has none.
+/// The name, version, and description of a unit, or why it has none.
 fn line(found: &Found) -> String {
     match found.info() {
         Some(info) => format!(
@@ -102,12 +103,4 @@ fn search_json(search: &Search) -> Value {
         })
         .collect();
     json!({ "units": units })
-}
-
-fn fail(message: &str, hint: Option<&str>) -> ExitCode {
-    eprintln!("error: {}", message.replace('\n', "\nerror: "));
-    if let Some(hint) = hint {
-        eprintln!("hint: {hint}");
-    }
-    ExitCode::FAILURE
 }

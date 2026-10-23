@@ -174,7 +174,7 @@ fn an_unreadable_repository_is_reported_and_does_not_hide_other_units() {
         err.contains("warning: the repository of @acme/gone"),
         "{err}"
     );
-    assert!(err.contains("matched on its identity only"), "{err}");
+    assert!(err.contains("matched by name only"), "{err}");
 
     let by_identity = succeeds(fixture.assemblr(&["search", "gone"]));
     assert_eq!(

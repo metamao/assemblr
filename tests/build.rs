@@ -178,7 +178,7 @@ fn a_unit_is_built_with_its_published_dependencies() {
     let output = succeeds(fixture.build(&app));
     assert_eq!(
         stdout(&output).trim(),
-        "Built @acme/app 0.1.0 into build/: 2 file(s), with 1 dependency."
+        "Built @acme/app 0.1.0 into build/: 2 files, with 1 dependency."
     );
     assert!(
         stderr(&output).contains("note: created assemblr-lock.json: @acme/node 1.1.0 (new)"),
@@ -380,7 +380,7 @@ fn a_rejected_build_reports_every_problem_and_changes_nothing() {
         "@acme/app declares required parameters without defaults or examples: `appName`",
         "an `example` on the parameter supplies one",
         "path collision: node.txt from @acme/app, node.txt from @acme/node",
-        "hint: the build was rejected; build/ and assemblr-lock.json were not changed",
+        "note: build/ and assemblr-lock.json were not changed",
         "remove one of the dependencies from the manifest",
     ] {
         assert!(stderr.contains(expected), "{expected:?} in {stderr}");
@@ -426,7 +426,7 @@ fn dependency_parameters_set_through_options_build() {
     );
     let stderr = stderr(&fails(fixture.build(&app)));
     assert!(
-        stderr.contains("required parameter `port` of @acme/node 1.0.0 has no value"),
+        stderr.contains("@acme/node 1.0.0 needs a value for `port`"),
         "{stderr}"
     );
     assert!(!stderr.contains("development values"), "{stderr}");
@@ -989,7 +989,7 @@ fn templates_render_with_their_unit_s_values_and_other_files_are_delivered_as_th
     let output = succeeds(fixture.build(&app));
     assert_eq!(
         stdout(&output).trim(),
-        "Built @acme/app 0.1.0 into build/: 6 file(s), with 1 dependency."
+        "Built @acme/app 0.1.0 into build/: 6 files, with 1 dependency."
     );
     assert_eq!(
         app.build_files(),
@@ -1063,9 +1063,7 @@ fn rendering_problems_reject_the_build_and_change_nothing() {
         "{stderr}"
     );
     assert!(
-        stderr.contains(
-            "hint: the build was rejected; build/ and assemblr-lock.json were not changed"
-        ),
+        stderr.contains("note: build/ and assemblr-lock.json were not changed"),
         "{stderr}"
     );
     assert_eq!((app.build_files(), app.read("assemblr-lock.json")), before);
@@ -1293,7 +1291,7 @@ fn an_amendment_is_created_declared_and_built() {
     );
     app.write("amendments/bin/run", "#!/bin/sh\necho amended\n");
     let output = succeeds(fixture.build(&app));
-    assert!(stdout(&output).contains("5 file(s)"), "{}", stdout(&output));
+    assert!(stdout(&output).contains("5 files"), "{}", stdout(&output));
     assert_eq!(
         app.build_files(),
         pairs(&[
@@ -1328,7 +1326,7 @@ fn amend_finds_files_by_name_or_path_and_reports_ambiguity() {
         ),
         "{err}"
     );
-    assert!(err.contains("hint: nothing was changed"), "{err}");
+    assert!(err.contains("note: nothing was changed"), "{err}");
     assert!(!app.path.join("amendments").exists());
 
     // A path, with or without the template suffix, is exact.
@@ -1356,12 +1354,10 @@ fn amend_finds_files_by_name_or_path_and_reports_ambiguity() {
         err.contains("@acme/other is not a direct dependency"),
         "{err}"
     );
-    let err = stderr(&fails(amend(
-        &fixture,
-        &app,
-        &["README.md", "--unit", "acme"],
-    )));
-    assert!(err.contains("--unit:"), "{err}");
+    let output = amend(&fixture, &app, &["README.md", "--unit", "acme"]);
+    assert_eq!(output.status.code(), Some(2));
+    let err = stderr(&output);
+    assert!(err.contains("'--unit <UNIT>'"), "{err}");
     let err = stderr(&fails(amend(&fixture, &app, &["../etc/passwd"])));
     assert!(
         err.contains("\"../etc/passwd\" is not a file name or a path in `src/`"),
@@ -1376,7 +1372,7 @@ fn amend_requires_a_lockfile_that_records_the_resolution() {
     let err = stderr(&fails(amend(&fixture, &app, &["node.txt"])));
     assert!(err.contains("there is no assemblr-lock.json"), "{err}");
     assert!(
-        err.contains("hint: nothing was changed; run `assemblr unit build` first"),
+        err.contains("note: nothing was changed\nhint: run `assemblr unit build` first"),
         "{err}"
     );
 
@@ -1586,7 +1582,7 @@ fn a_build_never_moves_an_amended_unit_away_from_its_base() {
         "{err}"
     );
     assert!(
-        err.contains("hint: the build was rejected; build/ and assemblr-lock.json were not changed; a build never changes the locked version of an amended unit"),
+        err.contains("note: build/ and assemblr-lock.json were not changed"),
         "{err}"
     );
     // Not also reported as a plain base mismatch.
@@ -1660,7 +1656,7 @@ fn every_amendment_problem_rejects_the_build_and_changes_nothing() {
         "amendments/missing.txt amends a file that @acme/node 1.0.0 does not provide: it has no \
          src/missing.txt",
         "amendments/stray.txt is not declared in the manifest",
-        "hint: the build was rejected; build/ and assemblr-lock.json were not changed",
+        "note: build/ and assemblr-lock.json were not changed",
     ] {
         assert!(err.contains(expected), "{expected:?} in {err}");
     }
@@ -1789,7 +1785,7 @@ fn a_dependent_builds_with_the_amendments_a_transitive_dependency_publishes() {
         r#", "options": {"@acme/app": {"title": "Consumer"}}"#,
     );
     let output = succeeds(fixture.build(&consumer));
-    assert!(stdout(&output).contains("6 file(s)"), "{}", stdout(&output));
+    assert!(stdout(&output).contains("6 files"), "{}", stdout(&output));
     assert_eq!(
         consumer.build_files(),
         pairs(&[
@@ -1862,7 +1858,7 @@ fn a_dependent_builds_with_the_amendments_a_transitive_dependency_publishes() {
         "line 2: @acme/app sets \"echo amended\"; @acme/node sets \"echo node v3\"",
         "its format has no merge (it is applied across versions only to a file that is unchanged)",
         "the amendment of @acme/app was taken from @acme/node 1.0.0",
-        "hint: the build was rejected; build/ and assemblr-lock.json were not changed",
+        "note: build/ and assemblr-lock.json were not changed",
         "`\"@acme/node\": \"=1.0.0\"` in the manifest's `dependencies`",
     ] {
         assert!(err.contains(expected), "{expected:?} in {err}");
@@ -2008,7 +2004,8 @@ fn two_published_amenders_of_one_text_file_conflict_or_combine_by_line() {
     );
     // The hint says what to change.
     assert!(
-        err.contains("hint: the build was rejected") && err.contains("change different lines"),
+        err.contains("note: build/ and assemblr-lock.json were not changed")
+            && err.contains("hint: no amender takes precedence"),
         "{err}"
     );
 
@@ -2122,8 +2119,8 @@ fn a_base_the_amender_s_lockfile_misidentifies_is_an_integrity_conflict() {
             "but the registry records commit {} (tree {tree})",
             node.rev("v1.0.0")
         ),
-        "hint: the build was rejected; build/ and assemblr-lock.json were not changed; \
-         published versions never change",
+        "note: build/ and assemblr-lock.json were not changed\nhint: published versions never \
+         change",
     ] {
         assert!(err.contains(expected), "{expected:?} in {err}");
     }
@@ -2256,7 +2253,7 @@ fn update_names_units_direct_or_transitive_and_refuses_what_is_not_a_dependency(
         "{err}"
     );
     assert!(
-        err.contains("hint: nothing was changed; run `assemblr unit build` first"),
+        err.contains("note: nothing was changed\nhint: run `assemblr unit build` first"),
         "{err}"
     );
     succeeds(fixture.build(&app));
@@ -2286,7 +2283,7 @@ fn update_names_units_direct_or_transitive_and_refuses_what_is_not_a_dependency(
     let err = stderr(&fails(update(&fixture, &app, &[])));
     assert!(err.contains("assemblr-lock.json"), "{err}");
     assert!(
-        err.contains("hint: nothing was changed; fix assemblr-lock.json; deleting assemblr-lock.json is not a repair"),
+        err.contains("note: nothing was changed\nhint: fix assemblr-lock.json; deleting assemblr-lock.json is not a repair"),
         "{err}"
     );
     assert_eq!(app.read("assemblr-lock.json"), "{");
@@ -2298,10 +2295,11 @@ fn update_names_units_direct_or_transitive_and_refuses_what_is_not_a_dependency(
         err.contains("@acme/zzz is not a dependency of this unit"),
         "{err}"
     );
-    assert!(err.contains("hint: nothing was changed"), "{err}");
+    assert!(err.contains("note: nothing was changed"), "{err}");
     assert_eq!(app.read("assemblr-lock.json"), before);
-    let err = stderr(&fails(update(&fixture, &app, &["not an identity"])));
-    assert!(err.contains("not an identity"), "{err}");
+    let output = update(&fixture, &app, &["not an identity"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("invalid unit \"not an identity\""));
     assert_eq!(app.read("assemblr-lock.json"), before);
 
     // Everything.
@@ -2420,7 +2418,7 @@ fn an_amendment_that_collides_with_the_provider_or_whose_file_vanished_refuses_t
     );
     assert!(
         err.contains(
-            "hint: nothing was changed; keep the locked version, or resolve what is reported"
+            "note: nothing was changed\nhint: keep the locked version, or resolve what is reported"
         ),
         "{err}"
     );
@@ -2623,7 +2621,7 @@ fn an_interrupted_update_is_completed_at_each_write_boundary_and_never_overwrite
         "{err}"
     );
     assert!(
-        err.contains("hint: the build was rejected; build/ and assemblr-lock.json were not changed; run `assemblr unit update` to complete the interrupted update"),
+        err.contains("hint: run `assemblr unit update` to complete the interrupted update"),
         "{err}"
     );
     let err = stderr(&fails(amend(&fixture, &app, &["app.yaml"])));
@@ -2686,7 +2684,7 @@ fn an_interrupted_update_is_completed_at_each_write_boundary_and_never_overwrite
         "{err}"
     );
     assert!(
-        err.contains("hint: nothing was changed now; the record of the interrupted update is kept"),
+        err.contains("note: nothing was changed now; the record of the interrupted update is kept"),
         "{err}"
     );
     assert_eq!(app.read("manifest.jsonc"), edited);

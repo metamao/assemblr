@@ -241,7 +241,7 @@ fn check_runs_the_build_s_validations_and_writes_nothing() {
     let err = stderr(&fails(fixture.check(&app)));
     assert!(err.contains("there is no assemblr-lock.json"), "{err}");
     assert!(
-        err.contains("hint: nothing was changed; run `assemblr unit build`"),
+        err.contains("note: nothing was changed\nhint: run `assemblr unit build`"),
         "{err}"
     );
     assert_eq!(app.tree(), before);
@@ -252,7 +252,7 @@ fn check_runs_the_build_s_validations_and_writes_nothing() {
     let output = succeeds(fixture.check(&app));
     assert_eq!(
         stdout(&output).trim(),
-        "Checked @acme/app 0.1.0: no problems; a build delivers 2 file(s), with 1 dependency."
+        "Checked @acme/app 0.1.0: no problems; a build delivers 2 files, with 1 dependency."
     );
     assert_eq!(app.tree(), before);
 
@@ -471,7 +471,7 @@ fn publish_refuses_and_changes_nothing() {
         "{err}"
     );
     assert!(
-        err.contains("hint: the publication was rejected; no tag was created"),
+        err.contains("note: no tag was created and nothing was changed"),
         "{err}"
     );
     unchanged(&app, &before);
@@ -757,7 +757,7 @@ fn an_unregistered_unit_publishes_without_touching_the_registry() {
     // Registering afterwards indexes it.
     let output = fixture.register(&app);
     assert!(
-        stdout(&output).contains("with published versions 0.1.0"),
+        stdout(&output).contains("with version 0.1.0"),
         "{}",
         stdout(&output)
     );

@@ -74,7 +74,11 @@ fn init_creates_the_scaffold_and_a_repository_in_a_new_directory() {
         first.ends_with(", manifest.jsonc, manifest.schema.json, .gitignore."),
         "{first}"
     );
-    assert!(stdout(&output).contains("Next: add files under src/"));
+    assert!(
+        stdout(&output).contains("Next: `cd units/app`, then add files under src/"),
+        "{}",
+        stdout(&output)
+    );
     assert_eq!(
         entries(&unit),
         [".gitignore", "manifest.jsonc", "manifest.schema.json"]
@@ -102,12 +106,12 @@ fn init_creates_the_scaffold_and_a_repository_in_a_new_directory() {
 }
 
 #[test]
-fn init_takes_a_description_and_defaults_to_the_current_directory() {
+fn init_takes_a_description() {
     let fixture = Fixture::new("description");
     let unit = fixture.dir.join("app");
     fs::create_dir(&unit).unwrap();
 
-    succeeds(fixture.init(&unit, &["@acme/app", "--description", "An \"app\"."]));
+    succeeds(fixture.init(&unit, &["@acme/app", ".", "--description", "An \"app\"."]));
     let manifest = read(&unit.join("manifest.jsonc"));
     assert!(
         manifest.contains(r#""description": "An \"app\".""#),
@@ -127,6 +131,84 @@ fn init_takes_a_description_and_defaults_to_the_current_directory() {
 }
 
 #[test]
+fn init_without_a_directory_creates_one_named_after_the_unit() {
+    let fixture = Fixture::new("derived");
+    let work = fixture.dir.join("work");
+    fs::create_dir(&work).unwrap();
+
+    let output = succeeds(fixture.init(&work, &["@acme/web"]));
+    let unit = work.join("web");
+    assert!(
+        stdout(&output).contains(&format!("Initialized @acme/web in {}", unit.display())),
+        "{}",
+        stdout(&output)
+    );
+    assert!(
+        stdout(&output).contains("Next: `cd web`, then add files"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(
+        entries(&unit),
+        [".gitignore", "manifest.jsonc", "manifest.schema.json"]
+    );
+    // The current directory gets nothing but the new one.
+    assert_eq!(entries(&work), ["web"]);
+
+    // Run again from the same place, it completes the scaffold it made.
+    fs::remove_file(unit.join("manifest.schema.json")).unwrap();
+    let output = succeeds(fixture.init(&work, &["@acme/web"]));
+    assert!(
+        stdout(&output).contains("created manifest.schema.json"),
+        "{}",
+        stdout(&output)
+    );
+
+    // Run again inside the unit, the derived directory would be nested in
+    // it: the hint names `.`.
+    let err = stderr(&fails(fixture.init(&unit, &["@acme/web"])));
+    assert!(err.contains("is inside the unit repository at"), "{err}");
+    assert!(
+        err.contains("run `assemblr unit init @acme/web .`"),
+        "{err}"
+    );
+    assert!(!unit.join("web").exists());
+
+    // A directory of that name with other files is never used by default.
+    let api = work.join("api");
+    fs::create_dir(&api).unwrap();
+    fs::write(api.join("notes.txt"), "mine").unwrap();
+    let err = stderr(&fails(fixture.init(&work, &["@acme/api"])));
+    assert!(
+        err.contains("already exists and holds other files"),
+        "{err}"
+    );
+    assert!(err.contains("note: nothing was changed"), "{err}");
+    assert!(err.contains("`assemblr unit init @acme/api api`"), "{err}");
+    assert_eq!(entries(&api), ["notes.txt"]);
+    // Named explicitly, it is.
+    succeeds(fixture.init(&work, &["@acme/api", "api"]));
+    assert!(api.join("manifest.jsonc").is_file());
+
+    // An empty directory of that name is used.
+    fs::create_dir(work.join("empty")).unwrap();
+    succeeds(fixture.init(&work, &["@acme/empty"]));
+    assert!(work.join("empty/manifest.jsonc").is_file());
+
+    // A name Windows reserves cannot be a directory on every platform.
+    let err = stderr(&fails(fixture.init(&work, &["@acme/con"])));
+    assert!(
+        err.contains("cannot be a directory name on Windows"),
+        "{err}"
+    );
+    assert!(
+        err.contains("`assemblr unit init @acme/con <DIRECTORY>`"),
+        "{err}"
+    );
+    assert!(!work.join("con").exists());
+}
+
+#[test]
 fn init_adopts_the_top_level_of_an_existing_repository() {
     let fixture = Fixture::new("adopt");
     let unit = fixture.dir.join("existing");
@@ -137,7 +219,7 @@ fn init_adopts_the_top_level_of_an_existing_repository() {
     git(&unit, &["commit", "-q", "-m", "readme"]);
     fs::write(unit.join(".gitignore"), "*.log").unwrap();
 
-    let output = succeeds(fixture.init(&unit, &["@acme/existing"]));
+    let output = succeeds(fixture.init(&unit, &["@acme/existing", "."]));
     assert!(
         stdout(&output).contains(
             "created manifest.jsonc, manifest.schema.json; replaced .gitignore (/build/ added); \
@@ -154,7 +236,7 @@ fn init_adopts_the_top_level_of_an_existing_repository() {
     let latin = fixture.dir.join("latin");
     fs::create_dir(&latin).unwrap();
     fs::write(latin.join(".gitignore"), b"caf\xe9.log").unwrap();
-    succeeds(fixture.init(&latin, &["@acme/latin"]));
+    succeeds(fixture.init(&latin, &["@acme/latin", "."]));
     assert_eq!(
         fs::read(latin.join(".gitignore")).unwrap(),
         b"caf\xe9.log\n/build/\n"
@@ -192,7 +274,7 @@ fn init_again_completes_the_scaffold_and_changes_nothing_else() {
     fs::remove_file(unit.join("manifest.schema.json")).unwrap();
     fs::write(unit.join(".gitignore"), "build\r\n*.log\r\n").unwrap();
 
-    let output = succeeds(fixture.init(&unit, &["@acme/app"]));
+    let output = succeeds(fixture.init(&unit, &["@acme/app", "."]));
     assert_eq!(
         stdout(&output).lines().next().unwrap(),
         format!(
@@ -207,7 +289,7 @@ fn init_again_completes_the_scaffold_and_changes_nothing_else() {
     // A schema from another version of Assemblr is refreshed; nothing else
     // changes, and running it once more changes nothing at all.
     fs::write(unit.join("manifest.schema.json"), "{}").unwrap();
-    let output = succeeds(fixture.init(&unit, &["@acme/app"]));
+    let output = succeeds(fixture.init(&unit, &["@acme/app", "."]));
     assert!(
         stdout(&output).contains("replaced manifest.schema.json (refreshed)"),
         "{}",
@@ -215,7 +297,7 @@ fn init_again_completes_the_scaffold_and_changes_nothing_else() {
     );
     let schema = read(&unit.join("manifest.schema.json"));
     assert!(schema.contains("Assemblr unit manifest"));
-    let output = succeeds(fixture.init(&unit, &["@acme/app"]));
+    let output = succeeds(fixture.init(&unit, &["@acme/app", "."]));
     assert!(
         stdout(&output).contains(
             "already in place: the Git repository, manifest.jsonc, manifest.schema.json, \
@@ -239,7 +321,7 @@ fn init_refuses_without_changing_anything() {
     let output = fixture.init(&fixture.dir, &["acme/app", "bad"]);
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(
-        stderr(&output).contains("invalid unit identity"),
+        stderr(&output).contains("invalid unit \"acme/app\""),
         "{}",
         stderr(&output)
     );
@@ -262,7 +344,7 @@ fn init_refuses_without_changing_anything() {
     let bare = fixture.dir.join("bare");
     fs::create_dir(&bare).unwrap();
     git(&bare, &["init", "-q", "--bare"]);
-    let err = stderr(&fails(fixture.init(&bare, &["@acme/bare"])));
+    let err = stderr(&fails(fixture.init(&bare, &["@acme/bare", "."])));
     assert!(err.contains("is in a bare Git repository"), "{err}");
     assert!(!bare.join("manifest.jsonc").exists());
 
@@ -270,15 +352,15 @@ fn init_refuses_without_changing_anything() {
     let other = fixture.dir.join("other");
     succeeds(fixture.init(&fixture.dir, &["@acme/other", "other"]));
     let before = read(&other.join("manifest.jsonc"));
-    let err = stderr(&fails(fixture.init(&other, &["@acme/app"])));
+    let err = stderr(&fails(fixture.init(&other, &["@acme/app", "."])));
     assert!(err.contains("already declares @acme/other"), "{err}");
     assert!(
-        err.contains("run `assemblr unit init @acme/other`"),
+        err.contains("run `assemblr unit init @acme/other .`"),
         "{err}"
     );
     assert_eq!(read(&other.join("manifest.jsonc")), before);
     fs::write(other.join("manifest.jsonc"), "{").unwrap();
-    let err = stderr(&fails(fixture.init(&other, &["@acme/other"])));
+    let err = stderr(&fails(fixture.init(&other, &["@acme/other", "."])));
     assert!(
         err.contains("is not a valid manifest, so it was left as it is"),
         "{err}"
@@ -291,7 +373,7 @@ fn init_refuses_without_changing_anything() {
     assert!(err.contains("exists and is not a directory"), "{err}");
     let odd = fixture.dir.join("odd");
     fs::create_dir_all(odd.join(".gitignore")).unwrap();
-    let err = stderr(&fails(fixture.init(&odd, &["@acme/odd"])));
+    let err = stderr(&fails(fixture.init(&odd, &["@acme/odd", "."])));
     assert!(err.contains(".gitignore is not a regular file"), "{err}");
     assert!(!odd.join("manifest.jsonc").exists());
     assert!(!odd.join(".git").exists());
@@ -351,7 +433,7 @@ fn the_loop_runs_from_init_to_a_dependent_s_build_through_a_second_registry() {
     let registry = |args: &[&str]| fixture.assemblr_with(&other_data, &fixture.dir, args);
     succeeds(registry(&["registry", "add", node.to_str().unwrap()]));
     let output = succeeds(registry(&["registry", "add", app.to_str().unwrap()]));
-    assert!(stdout(&output).contains("with published versions 0.1.0"));
+    assert!(stdout(&output).contains("with version 0.1.0"));
     let site = fixture.dir.join("site");
     succeeds(fixture.assemblr_with(
         &other_data,

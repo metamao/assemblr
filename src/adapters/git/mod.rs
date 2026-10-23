@@ -92,10 +92,13 @@ impl GitRepository {
         };
         match repository.output(&["rev-parse", "--git-dir"]) {
             Ok(_) => Ok(repository),
+            // Git's own message repeats the path and adds nothing.
             Err(GitError {
-                kind: GitErrorKind::Failed { stderr, .. },
+                kind: GitErrorKind::Failed { .. },
                 ..
-            }) => Err(repository.error(GitErrorKind::NotARepository(stderr))),
+            }) => Err(repository.error(GitErrorKind::NotARepository(
+                "Git finds no repository there".to_owned(),
+            ))),
             Err(error) => Err(error),
         }
     }
