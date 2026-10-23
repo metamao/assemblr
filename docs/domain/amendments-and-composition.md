@@ -262,10 +262,10 @@ composition:
   owner for the alpha: the result holds the provider's items first, then each
   amender's new items in order of identity, without duplicates. Lists of
   objects are still compared whole. Which changes count as joinable is
-  **Provisional (D-37)**: an amender's copy must be the provider's list
+  **Provisional (D-38)**: an amender's copy must be the provider's list
   followed by new scalars, or a new list several amenders create; any other
   change is compared whole. Consumer reconciliation keeps comparing lists
-  whole (D-37).
+  whole (D-38).
 - **Insertion order.** When the order of several contributions could affect
   meaning, a conflict is reported rather than an order invented. **OC-12**
   stays open; see the implementation notes for JSON objects.

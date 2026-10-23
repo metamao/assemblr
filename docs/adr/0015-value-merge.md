@@ -41,7 +41,7 @@ D) is evidence for the approach, not code that was adopted.
    member keys. A list is compared whole: the owner excluded identity
    inference, so two amenders changing one list differently conflict and
    identical changes merge. Later, the owner had appends to a list of
-   scalars joined in a composition of units (D-37): `combine` takes
+   scalars joined in a composition of units (D-38): `combine` takes
    `Lists::Union` there and `Lists::Whole` in reconciliation. A copy that adds a non-empty object yields an
    `Ensure` plus one `Add` per member, so two amenders creating the same
    object share it, as the contract's flat model requires; a value one
