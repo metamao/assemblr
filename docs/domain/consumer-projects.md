@@ -368,6 +368,75 @@ project's lock, after the files and before the lock; the journal records it
 with its previous text, so that an interrupted run is reverted together with
 the files, the declaration included.
 
+### Status — Provisional (D-46)
+
+Decided for `assemblr status` under AGENTS.md §1.1 (decision log D-46),
+item 35 of the agent-experience plan the owner approved (#118). The owner
+has not approved the details.
+
+**Command.** `assemblr status [--files] [--json]` runs at the project's top
+level, offline, and changes nothing: it takes no lock and writes no file.
+In a unit's repository it is refused, pointing to `assemblr unit check`.
+
+**State.** One of: never composed (no lockfile); composed; a composition
+waiting for its conflicts (the pending-resolution state), with each file it
+marked and whether the file still holds markers, a removed file counting
+as resolved as `--continue` takes it; or an interrupted composition, which
+the next `compose` completes or reverts. A waiting composition is reported
+from the lock it keeps, so the versions are the ones `--continue` will
+lock. For a composed project, status also says whether composing now would
+change a file or the lock: the composition is planned exactly as `compose`
+plans it, from the declaration and the lock, so a declaration edit that
+changes nothing is not reported as one.
+
+**Units.** Every locked unit and every selection not locked yet, in
+identity order, with its locked version, the declaration's requirement for
+a selection, and the units whose versions require it. A locked unit that is
+neither selected nor required is no longer selected: the next composition
+retires it. Each locked unit also shows the version `assemblr update` would
+lock when it is another one, and the newest stable version the registry
+lists when it is newer than both, which the requirements do not allow. The
+versions are those of the local registry: `assemblr registry sync` fetches
+newer ones first.
+
+**Files.** For a composed project, the managed files that differ from what
+the last composition wrote, in path order: `modified`, `mode` (only the
+executable bit), `deleted`, or `replaced` (something other than a regular
+file is there). CRLF line endings on the composed content are not an edit,
+as in reconciliation. A file whose base is not stored is compared by the
+identity its listing records. Each file listed shows the unit whose `src/`
+provides it and the units that amend it; `--files` lists every file of the
+planned composition that way. While a composition waits or was
+interrupted, edits are not reported, since the project's files are part of
+it.
+
+**Problems and exit.** What keeps the project's own state from being read
+is an error with a non-zero exit: a directory that is not a project, an
+unreadable declaration or lockfile, a lockfile that is a unit's, or a
+journal this version cannot read. What keeps a composition from being
+planned, such as a selection the registry does not list, or the stored base
+from verifying, is a warning with the same hint `compose` gives, and the
+rest of the status is still reported, with exit code 0.
+
+**JSON.** `--json` prints one object derived from the same data as the
+text, with these members:
+
+- `state`: `"uncomposed"`, `"composed"`, `"pending"`, or `"interrupted"`;
+- `up_to_date`: whether composing would change nothing, for a composed
+  project whose composition can be planned, and `null` otherwise;
+- `units`: objects with `unit`, `version`, `requirement`, `required_by`
+  (an array of units), `update`, and `newest`, each version or requirement
+  a string or `null`;
+- `pending`: objects with `path` and `marked`, empty unless a composition
+  waits;
+- `edited`: objects with `path` and `edit`;
+- `files`: objects with `path`, `unit`, and `amended_by` (an array), or
+  `null` when the composition cannot be planned;
+- `problems`: the warnings, as strings.
+
+The format carries no version number yet, as for the other `--json`
+outputs.
+
 ## Explicit and transitive dependencies — Approved
 
 Assemblr distinguishes what the consumer **explicitly wants** from what the
