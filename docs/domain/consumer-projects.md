@@ -23,7 +23,11 @@ assemblr init my-prod-app
 - `assemblr init` is explicit, and it is required before a project consumes
   units.
 - `init` creates only the minimal Assemblr project configuration: the project
-  configuration file, `assemblr.jsonc`.
+  configuration file, `assemblr.jsonc`, and, when nothing is at that path
+  yet, an `AGENTS.md` that points coding agents to `assemblr guide`. Owner
+  decision of 2026-10-23 ([#115](https://github.com/metamao/assemblr/issues/115)). A unit that delivers its own
+  `AGENTS.md` makes it a conflict for the consumer to resolve, as any file
+  Assemblr did not compose (OC-44).
 - `init` does **not** generate application code, resolve, retrieve, or
   materialize units, run package managers or other external programs,
   initialize technology-specific frameworks, or modify existing application
@@ -54,8 +58,11 @@ writes `assemblr.jsonc` with empty `dependencies` and `options`:
 }
 ```
 
-It creates nothing else and runs nothing: no Git repository, no files, no
-lock. An existing declaration is never overwritten: a readable one means
+Besides `AGENTS.md` (see above), it creates nothing else and runs nothing:
+no Git repository, no other files, no lock. An `AGENTS.md` already there,
+or anything else at that path, is kept as it is, and the result says so.
+`AGENTS.md` is written first and removed again if the declaration cannot
+be, so a failed `init` leaves nothing. An existing declaration is never overwritten: a readable one means
 the project is initialized already and the command changes nothing; one
 Assemblr cannot read is an error. A directory holding `manifest.jsonc` is a
 unit's repository, not a consumer project, and is refused.

@@ -153,13 +153,31 @@ fn init(args: &InitArgs) -> ExitCode {
                 Some(directory) => format!("`cd {}`, then ", directory.display()),
                 None => format!("`cd {}`, then ", args.identity.name()),
             };
+            let fill = scaffold_to_fill(initialized.readme(), initialized.agents());
             println!(
                 "Next: {enter}add files under src/, add dependencies with `assemblr unit add \
-                 <unit>`, and run `assemblr unit build`."
+                 <unit>`, and run `assemblr unit build`.{fill}"
             );
             ExitCode::SUCCESS
         }
         Err(failure) => fail_with(&failure.to_string(), &init_diagnosis(&failure, args)),
+    }
+}
+
+/// The sentence asking the author to fill in the `README.md` and
+/// `AGENTS.md` just created, if any.
+pub(super) fn scaffold_to_fill(readme: FileOutcome, agents: FileOutcome) -> &'static str {
+    match (
+        readme == FileOutcome::Created,
+        agents == FileOutcome::Created,
+    ) {
+        (true, true) => {
+            " Then fill in README.md and AGENTS.md with what only you know: what it is for and \
+             how to work on it."
+        }
+        (true, false) => " Then fill in README.md with what only you know: what it is for.",
+        (false, true) => " Then fill in AGENTS.md with what only you know: how to work on it.",
+        (false, false) => "",
     }
 }
 
@@ -195,6 +213,8 @@ fn describe_initialized(initialized: &Initialized) -> String {
             initialized.gitignore(),
             ".gitignore (/build/ added)",
         ),
+        ("README.md", initialized.readme(), "README.md"),
+        ("AGENTS.md", initialized.agents(), "AGENTS.md"),
     ] {
         match outcome {
             FileOutcome::Created => created.push(name),

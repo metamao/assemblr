@@ -8,7 +8,7 @@ Projects:
 - Commit `.assemblr/` with the project; its own `.gitignore` excludes what must not be committed.
 
 Units:
-- To make configuration or code reusable across projects, make it a unit. `assemblr unit init @owner/name` creates a new `./name` repository; use `assemblr unit init @owner/name .` only inside an existing repository you are converting. Put the files under `src/`.
+- To make configuration or code reusable across projects, make it a unit. `assemblr unit init @owner/name` creates a new `./name` repository; use `assemblr unit init @owner/name .` only inside an existing repository you are converting. Put the files under `src/`, and fill in the README.md and AGENTS.md it writes.
 - Add each dependency with `assemblr unit add @owner/unit`: it declares it, maps its required parameters, and builds.
 - To change a file that a unit below provides, run `assemblr unit amend <file>` and edit the copy it writes under `amendments/`.
 - Then run `assemblr unit build` and `assemblr unit check`. If a command leaves conflict markers in a copy under `amendments/`, resolve them and build again.

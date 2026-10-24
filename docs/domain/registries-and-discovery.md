@@ -723,8 +723,11 @@ assemblr catalog refresh [--no-commit]
 
 - `catalog init` makes a Git repository in `<directory>`, by default the
   catalog's name in the current directory, which must be new or empty, and
-  writes a `registry.jsonc` with the catalog identity and no units. It
-  commits nothing.
+  writes a `registry.jsonc` with the catalog identity and no units, and a
+  `README.md` and an `AGENTS.md` for the maintainer to fill in, the latter
+  pointing coding agents to `assemblr guide` (owner decision of 2026-10-23,
+  [#115](https://github.com/metamao/assemblr/issues/115)). It commits nothing, and the other catalog commands' commits
+  leave those two files to the maintainer.
 - `registry.jsonc` holds `name`, `units`, and optionally `$schema`. Any other
   field, a duplicate key, or a reference that is not a string is an invalid
   catalog manifest.

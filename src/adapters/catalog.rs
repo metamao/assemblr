@@ -29,6 +29,7 @@ use super::manifest::read_manifest;
 use super::registry::{
     Problem, ReferenceError, Registry, TagProblem, catalog_reference, observe_tags,
 };
+use super::scaffold::{catalog_agents, catalog_readme};
 use crate::domain::{
     CatalogIdentity, Edit, Excluded, IdentityError, Manifest, ObjectId, ObservedTag, Provenance,
     RegisteredCatalog, RegistryIndex, SourceReference, UnitIdentity, Version, declared_identity,
@@ -148,7 +149,8 @@ impl std::error::Error for CatalogManifestError {}
 /// Creates the catalog `identity` in `directory`, or, without one, in a new
 /// directory named after it, `web` for `@acme/web`. The directory must not
 /// exist or be empty. It becomes a Git repository with an empty
-/// `registry.jsonc`. Nothing is committed.
+/// `registry.jsonc`, and a `README.md` and an `AGENTS.md` for the maintainer
+/// to fill in. Nothing is committed.
 pub fn init_catalog(
     directory: Option<&Path>,
     identity: &CatalogIdentity,
@@ -174,14 +176,23 @@ pub fn init_catalog(
         }
     }
     init_repository(&directory).map_err(CatalogInitFailure::Git)?;
-    let path = directory.join(CATALOG_MANIFEST);
-    let text = format!("{{\n  \"name\": \"{identity}\",\n  \"units\": {{}}\n}}\n");
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .and_then(|mut file| file.write_all(text.as_bytes()))
-        .map_err(|error| CatalogInitFailure::Io { path, error })?;
+    let files = [
+        (
+            CATALOG_MANIFEST,
+            format!("{{\n  \"name\": \"{identity}\",\n  \"units\": {{}}\n}}\n"),
+        ),
+        ("README.md", catalog_readme(identity)),
+        ("AGENTS.md", catalog_agents(identity)),
+    ];
+    for (name, text) in files {
+        let path = directory.join(name);
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(text.as_bytes()))
+            .map_err(|error| CatalogInitFailure::Io { path, error })?;
+    }
     Ok(directory)
 }
 

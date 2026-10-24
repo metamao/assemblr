@@ -204,13 +204,17 @@ fn registry(fixture: &Fixture) -> (Repo, Repo) {
     (node, web)
 }
 
+/// How many files `init` leaves in a new project: `assemblr.jsonc` and
+/// `AGENTS.md`.
+const INITIALIZED: usize = 2;
+
 #[test]
-fn init_creates_the_declaration_and_nothing_else() {
+fn init_creates_the_declaration_and_agents_md_and_nothing_else() {
     let fixture = Fixture::new("init");
     let output = succeeds(fixture.assemblr(&fixture.dir, &["init", "apps/shop"]));
     let project = fixture.dir.join("apps").join("shop");
     assert!(
-        stdout(&output).contains("created the directory and assemblr.jsonc"),
+        stdout(&output).contains("created the directory, assemblr.jsonc, and AGENTS.md"),
         "{}",
         stdout(&output)
     );
@@ -218,6 +222,8 @@ fn init_creates_the_declaration_and_nothing_else() {
         read(&project.join("assemblr.jsonc")),
         "{\n  \"dependencies\": {},\n  \"options\": {}\n}\n"
     );
+    let agents = read(&project.join("AGENTS.md"));
+    assert!(agents.contains("run `assemblr guide`"), "{agents}");
 
     // A command run below the project points at it.
     fs::create_dir_all(project.join("src/pages")).unwrap();
@@ -239,8 +245,20 @@ fn init_creates_the_declaration_and_nothing_else() {
         "{err}"
     );
     fs::remove_dir_all(project.join("src")).unwrap();
-    assert_eq!(tree(&project).len(), 1);
+    assert_eq!(tree(&project).len(), INITIALIZED);
     assert!(!project.join(".git").exists());
+
+    // An AGENTS.md of the project's own is kept as it is.
+    let other = fixture.dir.join("other");
+    fs::create_dir(&other).unwrap();
+    fs::write(other.join("AGENTS.md"), "Our rules.\n").unwrap();
+    let output = succeeds(fixture.assemblr(&other, &["init"]));
+    assert!(
+        stdout(&output).contains("created assemblr.jsonc; AGENTS.md was already there"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(read(&other.join("AGENTS.md")), "Our rules.\n");
 
     // Again: nothing changes, and an edited declaration is never overwritten.
     fs::write(
@@ -415,7 +433,7 @@ fn the_consumer_s_options_render_its_selections_and_the_result_is_order_independ
     );
     let err = stderr(&fails(fixture.compose(&bad)));
     assert!(err.contains("@acme/node"), "{err}");
-    assert_eq!(tree(&bad).len(), 1);
+    assert_eq!(tree(&bad).len(), INITIALIZED);
 }
 
 #[test]
@@ -429,7 +447,7 @@ fn a_rejected_composition_leaves_the_project_unmodified() {
         "{err}"
     );
     assert!(err.contains("register the unit's repository"), "{err}");
-    assert_eq!(tree(&project).len(), 1);
+    assert_eq!(tree(&project).len(), INITIALIZED);
     assert!(!project.join(".assemblr").exists());
 
     // Something that cannot hold conflict markers on the way to a
@@ -489,7 +507,7 @@ fn reserved_paths_cannot_be_delivered() {
         err.contains("path(s) Assemblr reserves for its own files:\nerror:   .assemblr/x\nerror:   assemblr.jsonc"),
         "{err}"
     );
-    assert_eq!(tree(&project).len(), 1);
+    assert_eq!(tree(&project).len(), INITIALIZED);
 }
 
 /// What follows `hint:` in a failed command's output.
@@ -544,7 +562,7 @@ fn a_collision_across_versions_is_not_sent_to_options_but_to_the_version_that_ca
     let hint = hint_of(&err);
     assert!(hint.contains("@acme/node@=1.0.0"), "{hint}");
     assert!(!hint.contains("options"), "{hint}");
-    assert_eq!(tree(&project).len(), 1);
+    assert_eq!(tree(&project).len(), INITIALIZED);
 }
 
 #[test]

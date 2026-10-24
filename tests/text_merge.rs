@@ -451,6 +451,9 @@ fn a_consumer_composes_the_same_guidance_file_and_a_conflict_is_left_for_the_con
     );
     let project = fixture.dir.join("shop");
     succeeds(fixture.assemblr(&fixture.dir, &["init", "shop"]));
+    // The units deliver their own AGENTS.md; the one `init` writes, which
+    // would be a conflict to resolve first, is covered in tests/compose.rs.
+    fs::remove_file(project.join("AGENTS.md")).unwrap();
     git(&project, &["init", "-q"]);
     fs::write(
         project.join("assemblr.jsonc"),
@@ -491,6 +494,9 @@ fn a_consumer_composes_the_same_guidance_file_and_a_conflict_is_left_for_the_con
     );
     let project = clash.dir.join("shop");
     succeeds(clash.assemblr(&clash.dir, &["init", "shop"]));
+    // The units deliver their own AGENTS.md; the one `init` writes, which
+    // would be a conflict to resolve first, is covered in tests/compose.rs.
+    fs::remove_file(project.join("AGENTS.md")).unwrap();
     fs::write(
         project.join("assemblr.jsonc"),
         "{\n  \"dependencies\": {\"@acme/neon\": \"^1\", \"@acme/docker\": \"^1\"},\n  \"options\": {}\n}\n",
@@ -740,6 +746,9 @@ fn a_consumer_is_warned_about_chained_insertions_only_when_the_file_is_written()
     );
     let project = fixture.dir.join("shop");
     succeeds(fixture.assemblr(&fixture.dir, &["init", "shop"]));
+    // The units deliver their own AGENTS.md; the one `init` writes, which
+    // would be a conflict to resolve first, is covered in tests/compose.rs.
+    fs::remove_file(project.join("AGENTS.md")).unwrap();
     git(&project, &["init", "-q"]);
     fs::write(
         project.join("assemblr.jsonc"),

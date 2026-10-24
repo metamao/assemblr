@@ -18,6 +18,7 @@ mod merge;
 mod project;
 mod registry;
 mod render;
+mod scaffold;
 mod schema;
 mod skill;
 

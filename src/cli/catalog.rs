@@ -112,9 +112,14 @@ fn with_registry(action: impl FnOnce(&Registry) -> ExitCode) -> ExitCode {
 fn init(identity: &CatalogIdentity, directory: Option<&Path>) -> ExitCode {
     match init_catalog(directory, identity) {
         Ok(directory) => {
-            println!("Created the catalog {identity} in {}.", directory.display());
             println!(
-                "Next: `cd {}`, then run `assemblr catalog add <REPOSITORY>` for each unit.",
+                "Created the catalog {identity} in {}: registry.jsonc, README.md, and AGENTS.md.",
+                directory.display()
+            );
+            println!(
+                "Next: `cd {}`, then run `assemblr catalog add <REPOSITORY>` for each unit. Fill \
+                 in README.md and AGENTS.md with what only you know: what the catalog collects \
+                 and who maintains it.",
                 directory.display()
             );
             ExitCode::SUCCESS

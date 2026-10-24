@@ -85,21 +85,21 @@ repository).
 ```sh
 assemblr registry add ../web         # register a unit's Git repository
 assemblr registry add git@github.com:acme/api.git   # or a remote one, by URL
-assemblr init                        # create assemblr.jsonc here
+assemblr init                        # create assemblr.jsonc and AGENTS.md here
 assemblr add @acme/web               # select the unit and compose the project
 assemblr add @acme/api --option port=8080   # set a parameter while adding
 assemblr update                      # move to the newest versions allowed
 ```
 
 `assemblr info @acme/web` shows a unit's versions and parameters. When an
-update and your own edits change the same lines, the file is left with
-conflict markers: resolve them and run `assemblr compose --continue`, or undo
+update and your own edits change the same lines, or a unit delivers a file
+you already had, the file is left with conflict markers: resolve them and run `assemblr compose --continue`, or undo
 it with `assemblr compose --abort`.
 
 **Create a unit.**
 
 ```sh
-assemblr unit init @acme/web         # create web/ with a manifest and a Git repository
+assemblr unit init @acme/web         # create web/ with a manifest, README, AGENTS.md, and a Git repository
 cd web                               # add files under src/
 assemblr unit add @acme/base         # declare a dependency and build into build/
 assemblr unit amend package.json     # copy a dependency's file to change it
@@ -113,7 +113,7 @@ git push --follow-tags               # share the commit and its tag
 unit repositories, so one `registry add` registers them all.
 
 ```sh
-assemblr catalog init @acme/web      # create web/ with an empty registry.jsonc
+assemblr catalog init @acme/web      # create web/ with an empty registry.jsonc, README, and AGENTS.md
 cd web
 assemblr catalog add git@github.com:acme/node.git   # declare, index, and commit
 git push
