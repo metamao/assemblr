@@ -232,7 +232,9 @@ symbolic link, naming every such path (**OC-44**); a delivered file that only th
 Git rules ignore and that the base would store for the first time (see
 below); a delivered path Assemblr reserves for
 itself: `assemblr.jsonc`, `assemblr-lock.json`, and anything under
-`.assemblr/` (part of **OC-48**); a stored base that does not verify
+`.assemblr/` (part of **OC-48**), or that has a `.git` segment, in any
+case, at any depth, so that a unit never writes into a Git directory
+([#114](https://github.com/metamao/assemblr/pull/114)); a stored base that does not verify
 against the lock; a lockfile that is a unit's, without reconciliation
 state; a directory holding `manifest.jsonc`.
 
@@ -531,7 +533,9 @@ Rules:
   [pending-resolution state](#pending-resolution-details--approved-d-18-sibling-conflicts-provisional-d-44),
   whatever its role. Owner decision of 2026-10-23
   ([#113](https://github.com/metamao/assemblr/issues/113), **OC-44**). A
-  file that already holds the composed content is kept as it is.
+  file that already holds the composed content, or that content with CRLF
+  line endings, is kept as it is. A marked file keeps the project's
+  executable bit, which only the consumer set.
 
 Open:
 
@@ -743,8 +747,8 @@ merge could not combine, a file of a format with no merge, or the values of a
 JSON or JSONC file that collide; or a file the composition creates where the
 project already holds a text file Assemblr did not write (**OC-44**, owner
 decision of 2026-10-23, [#113](https://github.com/metamao/assemblr/issues/113)).
-That one holds both files whole, under an empty base labeled `base (none:
-Assemblr did not write this file)`, since there is nothing to merge them
+That one holds both files whole, under an empty base labeled `base (none: no
+composition wrote this file)`, since there is nothing to merge them
 against; `--abort` restores the consumer's file. The base, the project's
 file, and the composition's file must be UTF-8 text. A composition with any
 other conflict (file modes, a file one side deleted and the other changed,

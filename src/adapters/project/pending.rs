@@ -91,7 +91,8 @@ pub(super) fn marked_change(
 /// The change that leaves the project's own file at a path the
 /// composition creates, `held`, marked against the composition's file: both
 /// whole, with an empty base, since Assemblr wrote nothing there (owner
-/// decision on OC-44). `None` when either is not UTF-8 text.
+/// decision on OC-44), and with the project's executable bit, which only
+/// the consumer set. `None` when either is not UTF-8 text.
 pub(super) fn marked_existing(
     held: &[u8],
     held_executable: bool,
@@ -99,12 +100,12 @@ pub(super) fn marked_existing(
 ) -> Option<Change> {
     let bytes = mark(
         b"",
-        "none: Assemblr did not write this file",
+        "none: no composition wrote this file",
         held,
         incoming.contents(),
     )?;
     Some(Change::Modify {
-        file: UnitFile::new(bytes, incoming.is_executable()),
+        file: UnitFile::new(bytes, held_executable),
         previous: held.to_vec(),
         previous_executable: held_executable,
         merged: false,

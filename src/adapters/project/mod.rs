@@ -587,16 +587,9 @@ fn compose_with(
     let crossed: Vec<String> = rendered.crossed.into_iter().map(|(_, line)| line).collect();
     let mut notes = Vec::new();
 
-    // The paths Assemblr keeps for itself.
     let reserved: Vec<RelativePath> = files
         .keys()
-        .filter(|path| {
-            let text = path.as_str();
-            text == DECLARATION
-                || text == LOCKFILE
-                || text == STATE_DIR
-                || text.starts_with(&format!("{STATE_DIR}/"))
-        })
+        .filter(|path| is_reserved(path))
         .cloned()
         .collect();
     if !reserved.is_empty() {
@@ -804,9 +797,11 @@ fn compose_with(
     // A created path where the project already holds a file of its own,
     // which Assemblr did not write, is a conflict for the consumer to
     // resolve like any other (owner decision on OC-44): both files, whole,
-    // between markers. A file that already holds the composed content is
-    // kept as it is. What cannot be marked, a binary file or something
-    // other than a file, is refused as existing content below.
+    // between markers, with the project's executable bit, which the
+    // consumer set. A file that already holds the composed content, or that
+    // content with CRLF line endings, is kept as it is, mode included. What
+    // cannot be marked, a binary file or something other than a file, is
+    // refused as existing content below.
     created.retain(|path| {
         let Some(incoming) = files.get(path) else {
             return true;
@@ -819,20 +814,10 @@ fn compose_with(
                 return false;
             }
         };
-        if bytes == incoming.contents() {
-            if executable == incoming.is_executable() {
-                changes.remove(path);
-            } else {
-                changes.insert(
-                    path.clone(),
-                    Change::Modify {
-                        file: incoming.clone(),
-                        previous: bytes,
-                        previous_executable: executable,
-                        merged: false,
-                    },
-                );
-            }
+        if bytes == incoming.contents()
+            || without_crlf(&bytes).as_deref() == Some(incoming.contents())
+        {
+            changes.remove(path);
             notes.push(format!(
                 "{path} already held the composed content, so it was kept as it is"
             ));
@@ -1686,6 +1671,20 @@ fn existing_paths<'a>(
         }
     }
     Ok(existing.into_iter().collect())
+}
+
+/// Whether `path` is one Assemblr keeps for itself, or lies in Git's own
+/// directory at any depth, which a composition must never write into: a
+/// `.git` there is the project's or a nested repository's.
+fn is_reserved(path: &RelativePath) -> bool {
+    let text = path.as_str();
+    text == DECLARATION
+        || text == LOCKFILE
+        || text == STATE_DIR
+        || text.starts_with(&format!("{STATE_DIR}/"))
+        || path
+            .segments()
+            .any(|segment| segment.eq_ignore_ascii_case(".git"))
 }
 
 /// The project's own file at `path`, a path the composition creates: its

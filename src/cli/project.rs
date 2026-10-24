@@ -559,8 +559,9 @@ fn report_pending(composed: &Composed) {
     }
     if !composed.consumer_conflicts().is_empty() {
         println!(
-            "A conflict with your changes shows your content, the last composition's, and the \
-             new one, between <<<<<<< current, ||||||| base, =======, and >>>>>>> incoming lines."
+            "A conflict with your changes shows your content, the last composition's (empty for \
+             a file Assemblr did not write), and the new one, between <<<<<<< current, ||||||| \
+             base, =======, and >>>>>>> incoming lines."
         );
     }
     if !composed.unit_conflicts().is_empty() {

@@ -1063,7 +1063,7 @@ fn an_interrupted_composition_is_reverted_by_the_next_one() {
         "{run}"
     );
     assert!(
-        run.contains("||||||| base (none: Assemblr did not write this file)\n=======\n"),
+        run.contains("||||||| base (none: no composition wrote this file)\n=======\n"),
         "{run}"
     );
 
@@ -1886,7 +1886,7 @@ fn a_file_assemblr_did_not_write_is_a_conflict_the_consumer_resolves() {
     assert_eq!(
         read(&project.join("README.md")),
         "<<<<<<< current (your file)\n# Shop\n\
-         ||||||| base (none: Assemblr did not write this file)\n\
+         ||||||| base (none: no composition wrote this file)\n\
          =======\nnode\n\
          >>>>>>> incoming (the declared composition)\n"
     );
@@ -1912,6 +1912,78 @@ fn a_file_assemblr_did_not_write_is_a_conflict_the_consumer_resolves() {
         stdout(&output)
     );
     assert_eq!(read(&project.join("README.md")), "# Shop\nnode\n");
+}
+
+#[test]
+fn a_file_with_the_composed_content_in_crlf_is_kept() {
+    let fixture = Fixture::new("existing-crlf");
+    registry(&fixture);
+    let project = initialized(&fixture, "shop");
+    fs::write(project.join("README.md"), "node\r\n").unwrap();
+
+    let output = succeeds(add(&fixture, &project, "@acme/node"));
+
+    assert!(
+        stderr(&output).contains("README.md already held the composed content"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(read(&project.join("README.md")), "node\r\n");
+    succeeds(fixture.compose(&project));
+    assert_eq!(read(&project.join("README.md")), "node\r\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_marked_file_keeps_the_project_s_executable_bit() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new("existing-mode");
+    registry(&fixture);
+    let project = initialized(&fixture, "shop");
+    fs::create_dir(project.join("bin")).unwrap();
+    fs::write(project.join("bin/run"), "#!/bin/sh\necho mine\n").unwrap();
+    fs::set_permissions(project.join("bin/run"), fs::Permissions::from_mode(0o644)).unwrap();
+    let mode = |project: &Path| {
+        fs::metadata(project.join("bin/run"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o111
+    };
+
+    fails(add(&fixture, &project, "@acme/node"));
+    assert_eq!(
+        mode(&project),
+        0,
+        "the unit's bit does not replace the project's"
+    );
+    fs::write(project.join("bin/run"), "#!/bin/sh\necho both\n").unwrap();
+    succeeds(fixture.assemblr(&project, &["compose", "--continue"]));
+    succeeds(fixture.compose(&project));
+    assert_eq!(mode(&project), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_at_or_above_a_created_path_is_refused() {
+    let fixture = Fixture::new("existing-link");
+    registry(&fixture);
+    let outside = fixture.dir.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("README.md"), "kept\n").unwrap();
+    let project = initialized(&fixture, "shop");
+    std::os::unix::fs::symlink(outside.join("README.md"), project.join("README.md")).unwrap();
+    std::os::unix::fs::symlink(&outside, project.join("config")).unwrap();
+    let before = tree(&project);
+
+    let err = stderr(&fails(add(&fixture, &project, "@acme/node")));
+
+    assert!(err.contains("cannot mark as a conflict:"), "{err}");
+    assert!(err.contains("error:   README.md"), "{err}");
+    assert!(err.contains("error:   config"), "{err}");
+    assert_eq!(tree(&project), before);
+    assert_eq!(read(&outside.join("README.md")), "kept\n");
+    assert!(!outside.join("app.json").exists());
 }
 
 #[test]

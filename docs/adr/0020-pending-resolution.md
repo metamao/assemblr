@@ -44,8 +44,8 @@ represented, entered, finalized, and left, on top of the journal of ADR
    already holds a regular file, reached through real directories, that
    Assemblr did not write is marked too, when both files are UTF-8 text
    without NUL (owner decision on OC-44). A file whose bytes are the
-   composition's is kept and noted, with a mode change when only the mode
-   differs. Anything else at such a path stays the existing-content
+   composition's, or are them with CRLF line endings, is kept and noted,
+   mode included. Anything else at such a path stays the existing-content
    refusal, before anything is applied.
 3. **The marked file** holds the project's content, the base's, and the
    composition's, each as it is, between `<<<<<<< current (your file)`,
@@ -54,8 +54,10 @@ represented, entered, finalized, and left, on top of the journal of ADR
    The file's mode follows reconciliation: the composition's change to the
    executable bit wins, else the project's stands. *Amended (#113):* for a
    file Assemblr did not write, the base section is empty and labeled
-   `base (none: Assemblr did not write this file)`, and the mode is the
-   composition's.
+   `base (none: no composition wrote this file)`, and the mode is the
+   project's, which only the consumer set; the base records the
+   composition's, so a later composition keeps the consumer's bit as its
+   change.
 4. **Gate.** A composition that finds a pending journal whose composition
    the lock does not record refuses, naming the files and the two ways out.
    Anything else found in the journal is recovered as before. `add`,
