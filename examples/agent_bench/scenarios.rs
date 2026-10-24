@@ -334,7 +334,16 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
                  @acme/auth-jwt), para usarlas desde otras máquinas.",
         start: "home/work",
         extra_dirs: &[],
-        setup: |root| fixture::units(&root.agent()?),
+        setup: |root| {
+            let agent = root.agent()?;
+            fixture::units(&agent)?;
+            // `catalog add` takes a repository URL, which units pushed to a
+            // Git host have.
+            fixture::remotes(
+                &agent,
+                &["base", "typescript", "cloudflare-worker", "auth-jwt"],
+            )
+        },
         verify: |root, report| {
             let agent = root.agent()?;
             let registry = find(&agent.work(), &|path| {
