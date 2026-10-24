@@ -657,8 +657,22 @@ fn diagnosis(failure: &ComposeFailure, root: &Path) -> Diagnosis {
         }
         ComposeFailure::Rejected { problems, .. } => problems,
     };
-    let advice = distinct(problems.iter().filter_map(|problem| {
-        match problem {
+    let advice = distinct(
+        problems
+            .iter()
+            .filter_map(|problem| problem_advice(problem, root)),
+    );
+    let mut diagnosis = Diagnosis::note("nothing was changed");
+    if !advice.is_empty() {
+        diagnosis = diagnosis.advise(advice.join("; "));
+    }
+    diagnosis
+}
+
+/// What to do about `problem`, met in the project at `root`, when there is
+/// advice to give.
+pub(super) fn problem_advice(problem: &ComposeProblem, root: &Path) -> Option<String> {
+    match problem {
         ComposeProblem::UnitRepository(_) => Some(
             "unit commands run here, and a dependency is added with `assemblr unit add <UNIT>`; \
              a project is created in another directory with `assemblr init`"
@@ -769,12 +783,6 @@ fn diagnosis(failure: &ComposeFailure, root: &Path) -> Diagnosis {
         ComposeProblem::Build(problem) => build_advice(problem),
         _ => None,
     }
-    }));
-    let mut diagnosis = Diagnosis::note("nothing was changed");
-    if !advice.is_empty() {
-        diagnosis = diagnosis.advise(advice.join("; "));
-    }
-    diagnosis
 }
 
 /// The nearest directory above `root` that holds a project's declaration.

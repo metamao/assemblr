@@ -3047,3 +3047,247 @@ fn a_journal_from_a_newer_version_is_refused_by_every_command_and_nothing_change
     assert!(err.contains("it has format 4"), "{err}");
     assert_eq!(tree(&project), waiting);
 }
+
+fn status(fixture: &Fixture, project: &Path, args: &[&str]) -> Output {
+    let mut all = vec!["status"];
+    all.extend_from_slice(args);
+    fixture.assemblr(project, &all)
+}
+
+fn status_json(fixture: &Fixture, project: &Path) -> Value {
+    serde_json::from_str(&stdout(&succeeds(status(fixture, project, &["--json"])))).unwrap()
+}
+
+/// `status` reads a project at every step of its life without changing it:
+/// what it would compose, its units and what is published beyond them, the
+/// files edited since, and which units deliver each file.
+#[test]
+fn status_reports_a_project_without_changing_it() {
+    let fixture = Fixture::new("status");
+    let (node, _) = registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/web", "^1")], "");
+
+    let before = tree(&project);
+    let out = stdout(&succeeds(status(&fixture, &project, &[])));
+    assert!(out.contains("The project was never composed."), "{out}");
+    assert!(out.contains("  @acme/web (^1): not composed yet"), "{out}");
+    assert!(out.contains("Next: run `assemblr compose`"), "{out}");
+    let json = status_json(&fixture, &project);
+    assert_eq!(json["state"], "uncomposed");
+    assert_eq!(json["up_to_date"], Value::Null);
+    assert_eq!(json["units"][0]["unit"], "@acme/web");
+    assert_eq!(json["units"][0]["version"], Value::Null);
+    assert_eq!(tree(&project), before);
+
+    succeeds(fixture.compose(&project));
+    let composed = tree(&project);
+    let out = stdout(&succeeds(status(&fixture, &project, &["--files"])));
+    assert!(
+        out.contains("Composed from 2 units; `assemblr compose` has nothing to do."),
+        "{out}"
+    );
+    assert!(
+        out.contains("  @acme/node 1.0.0 (required by @acme/web)\n"),
+        "{out}"
+    );
+    assert!(out.contains("  @acme/web 1.0.0 (^1)\n"), "{out}");
+    assert!(
+        out.contains("  config/app.json: from @acme/node, amended by @acme/web"),
+        "{out}"
+    );
+    assert!(out.contains("  web.txt: from @acme/web"), "{out}");
+    assert!(!out.contains("Edited"), "{out}");
+    assert!(!out.contains("Next:"), "{out}");
+    let json = status_json(&fixture, &project);
+    assert_eq!(json["state"], "composed");
+    assert_eq!(json["up_to_date"], true);
+    assert_eq!(json["units"][0]["required_by"][0], "@acme/web");
+    assert_eq!(json["units"][1]["requirement"], "^1");
+    let files = json["files"].as_array().unwrap();
+    let app = files
+        .iter()
+        .find(|file| file["path"] == "config/app.json")
+        .unwrap();
+    assert_eq!(app["unit"], "@acme/node");
+    assert_eq!(app["amended_by"][0], "@acme/web");
+    assert_eq!(tree(&project), composed);
+
+    // Edits since the composition: CRLF line endings on the composed
+    // content are not one.
+    fs::write(project.join("README.md"), "mine\n").unwrap();
+    fs::remove_file(project.join("web.txt")).unwrap();
+    fs::write(
+        project.join("config/app.json"),
+        read(&project.join("config/app.json")).replace('\n', "\r\n"),
+    )
+    .unwrap();
+    let out = stdout(&succeeds(status(&fixture, &project, &[])));
+    assert!(out.contains("Edited since the last composition:"), "{out}");
+    assert!(
+        out.contains("  README.md: modified, from @acme/node"),
+        "{out}"
+    );
+    assert!(out.contains("  web.txt: deleted, from @acme/web"), "{out}");
+    assert!(!out.contains("config/app.json"), "{out}");
+    let json = status_json(&fixture, &project);
+    assert_eq!(
+        json["edited"],
+        serde_json::json!([
+            {"path": "README.md", "edit": "modified"},
+            {"path": "web.txt", "edit": "deleted"},
+        ])
+    );
+    // Edits are not a reason to compose.
+    assert_eq!(json["up_to_date"], true);
+
+    // A version the requirements do not allow is told apart from an update.
+    publish_node(&fixture, &node, "1.1.0", "node v2\n", "#!/bin/sh\n");
+    let out = stdout(&succeeds(status(&fixture, &project, &[])));
+    assert!(
+        out.contains(
+            "  @acme/node 1.0.0 (required by @acme/web): 1.1.0 published, outside the \
+             requirements"
+        ),
+        "{out}"
+    );
+    let json = status_json(&fixture, &project);
+    assert_eq!(json["units"][0]["update"], Value::Null);
+    assert_eq!(json["units"][0]["newest"], "1.1.0");
+
+    // A declaration edited without changing the composition is not a
+    // reason to compose; one that changes it is.
+    declare(&project, &[("@acme/web", "^1")], r#""@acme/web": {}"#);
+    let out = stdout(&succeeds(status(&fixture, &project, &[])));
+    assert!(
+        out.contains("`assemblr compose` has nothing to do"),
+        "{out}"
+    );
+    declare(&project, &[("@acme/node", "^1")], "");
+    let out = stdout(&succeeds(status(&fixture, &project, &[])));
+    assert!(
+        out.contains("assemblr.jsonc changed since, so `assemblr compose` would change"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  @acme/node 1.0.0 (^1): update to 1.1.0 available"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  @acme/web 1.0.0 (no longer selected)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("Next: run `assemblr compose` to apply assemblr.jsonc"),
+        "{out}"
+    );
+    let before = tree(&project);
+    assert_eq!(status_json(&fixture, &project)["up_to_date"], false);
+    assert_eq!(tree(&project), before);
+}
+
+/// A composition waiting for its conflicts is reported from the lock it
+/// keeps, with each marked file and whether it still holds markers.
+#[test]
+fn status_reports_a_pending_composition_and_what_is_left_to_resolve() {
+    let fixture = Fixture::new("status-pending");
+    let project = text_conflict(&fixture);
+    fails(fixture.compose(&project));
+    let waiting = tree(&project);
+
+    let out = stdout(&succeeds(status(&fixture, &project, &[])));
+    assert!(
+        out.contains("A composition is waiting for you to resolve conflicts in 1 file:"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  README.md: holds conflict markers, from @acme/node"),
+        "{out}"
+    );
+    // The versions are the ones the waiting composition locks.
+    assert!(out.contains("  @acme/node 1.1.0 (^1.1)"), "{out}");
+    assert!(out.contains("compose --continue"), "{out}");
+    assert!(out.contains("compose --abort"), "{out}");
+    let json = status_json(&fixture, &project);
+    assert_eq!(json["state"], "pending");
+    assert_eq!(
+        json["pending"],
+        serde_json::json!([{"path": "README.md", "marked": true}])
+    );
+    assert_eq!(json["edited"], serde_json::json!([]));
+    assert_eq!(tree(&project), waiting);
+
+    fs::write(project.join("README.md"), "mine and node v2\n").unwrap();
+    let out = stdout(&succeeds(status(&fixture, &project, &[])));
+    assert!(out.contains("  README.md: resolved"), "{out}");
+    assert!(
+        out.contains("Next: run `assemblr compose --continue` to finish the composition"),
+        "{out}"
+    );
+    succeeds(fixture.assemblr(&project, &["compose", "--continue"]));
+    let out = stdout(&succeeds(status(&fixture, &project, &[])));
+    assert!(out.contains("Composed from 1 unit;"), "{out}");
+    assert!(out.contains("  README.md: modified"), "{out}");
+}
+
+#[test]
+fn status_reports_an_interrupted_composition() {
+    let fixture = Fixture::new("status-interrupted");
+    registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/node", "^1")], "");
+    succeeds(fixture.compose(&project));
+    // The journal of a composition interrupted before its lock.
+    let base = lockfile(&project)["project"]["base"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::remove_file(project.join("assemblr-lock.json")).unwrap();
+    fs::write(
+        project.join(".assemblr/journal.json"),
+        format!("{{\"format\": 1, \"base\": \"{base}\", \"files\": [], \"directories\": []}}\n"),
+    )
+    .unwrap();
+
+    let out = stdout(&succeeds(status(&fixture, &project, &[])));
+    assert!(out.contains("A composition was interrupted."), "{out}");
+    assert!(out.contains("Next: run `assemblr compose`"), "{out}");
+    assert_eq!(status_json(&fixture, &project)["state"], "interrupted");
+}
+
+#[test]
+fn status_refuses_a_directory_that_is_not_a_project() {
+    let fixture = Fixture::new("status-refused");
+    let (node, _) = registry(&fixture);
+
+    let err = stderr(&fails(status(&fixture, &node.path, &[])));
+    assert!(err.contains("assemblr unit check"), "{err}");
+    let empty = fixture.dir.join("empty");
+    fs::create_dir(&empty).unwrap();
+    let err = stderr(&fails(status(&fixture, &empty, &[])));
+    assert!(err.contains("no assemblr.jsonc"), "{err}");
+    assert!(err.contains("assemblr init"), "{err}");
+}
+
+/// What keeps a composition from being planned is reported, and the rest
+/// of the status still is.
+#[test]
+fn status_reports_what_keeps_a_composition_from_being_planned() {
+    let fixture = Fixture::new("status-unplanned");
+    registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/node", "^1")], "");
+    succeeds(fixture.compose(&project));
+    declare(&project, &[("@acme/node", "^1"), ("@acme/db", "^1")], "");
+
+    let output = succeeds(status(&fixture, &project, &[]));
+    let (out, err) = (stdout(&output), stderr(&output));
+    assert!(out.contains("Composed from 1 unit.\n"), "{out}");
+    assert!(out.contains("  @acme/db (^1): not composed yet"), "{out}");
+    assert!(
+        err.contains("warning:") && err.contains("@acme/db"),
+        "{err}"
+    );
+    assert!(err.contains("hint: register the unit"), "{err}");
+    let json = status_json(&fixture, &project);
+    assert_eq!(json["up_to_date"], Value::Null);
+    assert_eq!(json["files"], Value::Null);
+    assert!(json["problems"][0].as_str().unwrap().contains("@acme/db"));
+}

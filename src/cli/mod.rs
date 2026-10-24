@@ -9,6 +9,7 @@ mod project;
 mod registry;
 mod search;
 mod skill;
+mod status;
 mod unit;
 
 use std::process::ExitCode;
@@ -85,6 +86,16 @@ enum Command {
         assemblr update\n  \
         assemblr update @acme/web")]
     Update(project::UpdateArgs),
+    /// Show where the project's composition stands
+    ///
+    /// Shows whether a composition is waiting for conflicts or has
+    /// anything to do, the units and the updates published for them, and
+    /// the files edited since the last composition, with the units that
+    /// deliver them. Changes nothing, and reads the local registry offline.
+    #[command(after_long_help = "Examples:\n  \
+        assemblr status\n  \
+        assemblr status --files --json")]
+    Status(status::StatusArgs),
     /// Show a registered unit's versions, parameters, and more
     ///
     /// Reads the local registry, offline. Shows the unit's description,
@@ -129,6 +140,7 @@ pub(crate) fn run() -> ExitCode {
         Command::Add(args) => project::add(&args),
         Command::Remove(args) => project::remove(&args),
         Command::Update(args) => project::update(&args),
+        Command::Status(args) => status::run(&args),
         Command::Info(args) => info::run(&args),
         Command::Search(args) => search::run(&args),
         Command::Catalog(command) => catalog::run(command),
