@@ -62,7 +62,7 @@ Besides `AGENTS.md` (see above), it creates nothing else and runs nothing:
 no Git repository, no other files, no lock. An `AGENTS.md` already there,
 or anything else at that path, is kept as it is, and the result says so.
 `AGENTS.md` is written first and removed again if the declaration cannot
-be, so a failed `init` leaves nothing. An existing declaration is never overwritten: a readable one means
+be written. An existing declaration is never overwritten: a readable one means
 the project is initialized already and the command changes nothing; one
 Assemblr cannot read is an error. A directory holding `manifest.jsonc` is a
 unit's repository, not a consumer project, and is refused.

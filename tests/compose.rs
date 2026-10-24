@@ -260,6 +260,22 @@ fn init_creates_the_declaration_and_agents_md_and_nothing_else() {
     );
     assert_eq!(read(&other.join("AGENTS.md")), "Our rules.\n");
 
+    // A dangling link there is kept and not followed.
+    #[cfg(unix)]
+    {
+        let linked = fixture.dir.join("linked");
+        fs::create_dir(&linked).unwrap();
+        let target = fixture.dir.join("elsewhere.md");
+        std::os::unix::fs::symlink(&target, linked.join("AGENTS.md")).unwrap();
+        let output = succeeds(fixture.assemblr(&linked, &["init"]));
+        assert!(
+            stdout(&output).contains("AGENTS.md was already there"),
+            "{}",
+            stdout(&output)
+        );
+        assert!(!target.exists());
+    }
+
     // Again: nothing changes, and an edited declaration is never overwritten.
     fs::write(
         project.join("assemblr.jsonc"),

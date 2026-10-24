@@ -81,8 +81,8 @@ pub(crate) fn catalog_agents(identity: &CatalogIdentity) -> String {
     format!(
         "# AGENTS.md\n\
          \n\
-         This repository is the Assemblr catalog `{identity}`. Change it only with `assemblr \
-         catalog` commands, never by editing `registry-index.json`. Before changing it, run \
+         This repository is the Assemblr catalog `{identity}`. Assemblr writes \
+         `registry-index.json`; never edit it by hand. Before changing the catalog, run \
          `assemblr guide` and follow it.\n\
          \n\
          ## This catalog\n\
@@ -107,7 +107,7 @@ mod tests {
     }
 
     #[test]
-    fn every_agents_file_points_to_the_guide() {
+    fn every_agents_file_names_only_the_guide() {
         let unit = UnitIdentity::parse("@acme/web").unwrap();
         let catalog = CatalogIdentity::parse("@acme/catalog").unwrap();
         for text in [
@@ -115,7 +115,7 @@ mod tests {
             unit_agents(&unit),
             catalog_agents(&catalog),
         ] {
-            assert!(commands(&text).contains(&"assemblr guide"), "{text}");
+            assert_eq!(commands(&text), ["assemblr guide"], "{text}");
         }
     }
 }

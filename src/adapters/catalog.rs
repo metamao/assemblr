@@ -186,12 +186,25 @@ pub fn init_catalog(
     ];
     for (name, text) in files {
         let path = directory.join(name);
-        OpenOptions::new()
+        let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
-            .and_then(|mut file| file.write_all(text.as_bytes()))
-            .map_err(|error| CatalogInitFailure::Io { path, error })?;
+            .map_err(|error| CatalogInitFailure::Partial {
+                path: path.clone(),
+                directory: directory.clone(),
+                error,
+            })?;
+        if let Err(error) = file.write_all(text.as_bytes()) {
+            // A file this call created is not left half written.
+            drop(file);
+            let _ = fs::remove_file(&path);
+            return Err(CatalogInitFailure::Partial {
+                path,
+                directory,
+                error,
+            });
+        }
     }
     Ok(directory)
 }
@@ -210,13 +223,25 @@ pub enum CatalogInitFailure {
     },
     /// The Git repository could not be created.
     Git(GitError),
+    /// A file could not be written after the repository was created, so
+    /// the directory holds the repository and the files written before it.
+    Partial {
+        /// The file.
+        path: PathBuf,
+        /// The catalog's directory.
+        directory: PathBuf,
+        /// Why.
+        error: io::Error,
+    },
 }
 
 impl fmt::Display for CatalogInitFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotEmpty(directory) => write!(f, "{} is not empty", directory.display()),
-            Self::Io { path, error } => write!(f, "could not create {}: {error}", path.display()),
+            Self::Io { path, error } | Self::Partial { path, error, .. } => {
+                write!(f, "could not create {}: {error}", path.display())
+            }
             Self::Git(error) => error.fmt(f),
         }
     }

@@ -264,6 +264,11 @@ fn init_adopts_the_top_level_of_an_existing_repository() {
         stdout(&output)
     );
     assert_eq!(read(&unit.join(".gitignore")), "*.log\n/build/\n");
+    assert_eq!(
+        read(&unit.join("README.md")),
+        "readme",
+        "the author's README is kept"
+    );
     assert_eq!(git(&unit, &["log", "--oneline"]).lines().count(), 1);
 
     // Bytes that are not UTF-8, such as a Latin-1 pattern, are kept as
@@ -494,4 +499,43 @@ fn the_loop_runs_from_init_to_a_dependent_s_build_through_a_second_registry() {
     );
     assert_eq!(read(&site.join("build/node.txt")), "port 8080, amended\n");
     assert_eq!(read(&site.join("build/app.txt")), "app");
+}
+
+#[test]
+fn init_keeps_the_author_s_agents_md_and_does_not_follow_links() {
+    let fixture = Fixture::new("own_files");
+    let unit = fixture.dir.join("own");
+    fs::create_dir(&unit).unwrap();
+    fs::write(unit.join("AGENTS.md"), "Our rules.\n").unwrap();
+
+    let output = succeeds(fixture.init(&unit, &["@acme/own", "."]));
+    assert!(
+        stdout(&output).contains("Then fill in README.md with what only you know"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(read(&unit.join("AGENTS.md")), "Our rules.\n");
+    assert!(read(&unit.join("README.md")).starts_with("# @acme/own\n"));
+
+    // A link at either path, even a dangling one, is kept and not followed.
+    #[cfg(unix)]
+    {
+        let linked = fixture.dir.join("linked");
+        fs::create_dir(&linked).unwrap();
+        let target = fixture.dir.join("elsewhere.md");
+        std::os::unix::fs::symlink(&target, linked.join("README.md")).unwrap();
+        let output = succeeds(fixture.init(&linked, &["@acme/linked", "."]));
+        assert!(
+            stdout(&output).contains("Then fill in AGENTS.md with what only you know"),
+            "{}",
+            stdout(&output)
+        );
+        assert!(!target.exists());
+        assert!(
+            fs::symlink_metadata(linked.join("README.md"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
 }

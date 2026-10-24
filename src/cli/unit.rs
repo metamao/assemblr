@@ -268,6 +268,8 @@ fn init_diagnosis(failure: &InitFailure, args: &InitArgs) -> Diagnosis {
                 ("manifest.jsonc", done.manifest()),
                 ("manifest.schema.json", done.schema()),
                 (".gitignore", done.gitignore()),
+                ("README.md", done.readme()),
+                ("AGENTS.md", done.agents()),
             ] {
                 if outcome != FileOutcome::Kept {
                     state.push(name);

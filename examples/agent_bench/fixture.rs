@@ -92,11 +92,14 @@ pub(crate) fn repository(machine: &Machine<'_>, name: &str, dir: &Path) -> Resul
 }
 
 /// The catalog `@acme/catalog` in `catalog/`, listing every unit by a
-/// `file://` URL, with its index refreshed and committed.
+/// `file://` URL, with its index refreshed and committed, and the README.md
+/// and AGENTS.md that `catalog init` writes committed as they are.
 pub(crate) fn catalog(machine: &Machine<'_>) -> Result<PathBuf, String> {
     let root = &machine.root.path;
     machine.assemblr(root, &["catalog", "init", "@acme/catalog", "catalog"])?;
     let dir = root.join("catalog");
+    machine.git(&dir, &["add", "README.md", "AGENTS.md"])?;
+    machine.git(&dir, &["commit", "-qm", "Describe the catalog"])?;
     for name in UNITS {
         let source = root.join("units").join(name);
         machine.assemblr(

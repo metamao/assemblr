@@ -351,8 +351,14 @@ fn manifest_text(identity: &UnitIdentity, description: &Description) -> String {
 /// Creates `path` new, with `contents`, flushed.
 fn create_new(path: &Path, contents: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(contents)?;
-    file.sync_all()
+    if let Err(error) = file.write_all(contents).and_then(|()| file.sync_all()) {
+        // A file this call created is not left half written: a rerun
+        // would keep it as the author's.
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Replaces `path` with `contents` through the new file `staged` and a

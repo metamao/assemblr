@@ -16,7 +16,7 @@ Units:
 
 Catalogs:
 - A catalog is a Git repository whose `registry.jsonc` lists unit repositories, so that another machine registers them all at once with `assemblr registry add <path or URL>`.
-- `assemblr catalog init @owner/name` creates one. In its directory, `assemblr catalog add <URL>` adds a unit by its repository URL (never a local path) and `assemblr catalog remove @owner/unit` removes one; both update `registry-index.json` and commit. Then `git push`.
+- `assemblr catalog init @owner/name` creates one. In its directory, `assemblr catalog add <URL>` adds a unit by its repository URL (never a local path) and `assemblr catalog remove @owner/unit` removes one; both update `registry-index.json` and commit. Fill in the README.md and AGENTS.md that `catalog init` writes and commit them, then `git push`.
 - After publishing a unit version and pushing its tag, run `assemblr catalog refresh` in each catalog that lists the unit (it commits), then `git push`: until then, machines that use the catalog do not see the version.
 
 Always:

@@ -118,8 +118,8 @@ fn init(identity: &CatalogIdentity, directory: Option<&Path>) -> ExitCode {
             );
             println!(
                 "Next: `cd {}`, then run `assemblr catalog add <REPOSITORY>` for each unit. Fill \
-                 in README.md and AGENTS.md with what only you know: what the catalog collects \
-                 and who maintains it.",
+                 in README.md and AGENTS.md with what only you know, what the catalog collects \
+                 and who maintains it, and commit them.",
                 directory.display()
             );
             ExitCode::SUCCESS
@@ -132,6 +132,11 @@ fn init(identity: &CatalogIdentity, directory: Option<&Path>) -> ExitCode {
                     Diagnosis::hint("Assemblr needs Git installed and on the PATH")
                 }
                 CatalogInitFailure::Io { .. } => Diagnosis::default(),
+                CatalogInitFailure::Partial { directory, .. } => Diagnosis::note(format!(
+                    "{} holds the new Git repository and the files written before this one",
+                    directory.display()
+                ))
+                .advise("fix the problem, remove the directory, and run the same command again"),
             };
             fail_with(&failure.to_string(), &diagnosis)
         }
