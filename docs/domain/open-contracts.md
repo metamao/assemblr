@@ -724,13 +724,17 @@ How the status of a statement affects implementation:
 - **Approved (normative):** Composition reconciles every contributed file
   alike, never silently overwrites the consumer's content, and `init` modifies
   no existing application files.
-- **Open detail:** How a composition treats a path that already holds content
-  Assemblr did not materialize, so that no reconciliation base exists for it:
-  for example, whether it is a conflict resolved in the pending-resolution
-  state or an error reported before anything is applied. **Provisional
-  (D-10)** for the first `compose`: such a path is refused before anything is
-  applied, naming every path; the same holds for a new file of a reconciled
-  composition (**Provisional (D-13)**).
+- **Approved (normative):** A path the composition creates that already
+  holds a file Assemblr did not write, so that no reconciliation base exists
+  for it, is a conflict resolved in the pending-resolution state, whatever
+  its role, in the first `compose` and in a reconciliation alike. Owner
+  decision of 2026-10-23
+  ([#113](https://github.com/metamao/assemblr/issues/113)), which replaces
+  D-10 and D-13 for such a file.
+- **Open detail:** What a composition does with such a path when what it
+  holds cannot carry conflict markers: content that is not UTF-8 text, a
+  directory, or a symbolic link. **Provisional (D-10)**: it is refused before
+  anything is applied, naming every path.
 - **Origin:** Consumer
 - **Context:** [file
   contributions](consumer-projects.md#file-contributions--approved)

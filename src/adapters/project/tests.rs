@@ -12,7 +12,7 @@ use super::pending::{abort_compose, continue_with};
 use super::store::Store;
 use super::{
     Application, Change, ComposeFailure, ComposeProblem, ComposeRecovery, DeclarationWrite, Step,
-    WriteStep, apply, recover,
+    WriteStep, apply, is_reserved, recover,
 };
 use crate::adapters::lockfile::serialize_lockfile;
 use crate::domain::BlobId;
@@ -996,4 +996,26 @@ fn discarding_a_base_keeps_every_object_another_base_names_and_the_kept_base() {
     );
     let only = SnapshotFile::new(b"only aborted", false);
     assert!(store.read_blob(only.blob()).is_err());
+}
+
+#[test]
+fn assemblr_s_files_and_git_s_directory_are_reserved_at_any_depth() {
+    for text in [
+        "assemblr.jsonc",
+        "assemblr-lock.json",
+        ".assemblr/base.json",
+        ".git/config",
+        ".GIT/hooks/pre-commit",
+        "vendor/lib/.git/config",
+    ] {
+        assert!(is_reserved(&path(text)), "{text}");
+    }
+    for text in [
+        "src/assemblr.jsonc",
+        ".github/workflows/ci.yml",
+        ".gitignore",
+        "docs/.git-notes",
+    ] {
+        assert!(!is_reserved(&path(text)), "{text}");
+    }
 }

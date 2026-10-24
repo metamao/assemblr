@@ -587,16 +587,9 @@ fn compose_with(
     let crossed: Vec<String> = rendered.crossed.into_iter().map(|(_, line)| line).collect();
     let mut notes = Vec::new();
 
-    // The paths Assemblr keeps for itself.
     let reserved: Vec<RelativePath> = files
         .keys()
-        .filter(|path| {
-            let text = path.as_str();
-            text == DECLARATION
-                || text == LOCKFILE
-                || text == STATE_DIR
-                || text.starts_with(&format!("{STATE_DIR}/"))
-        })
+        .filter(|path| is_reserved(path))
         .cloned()
         .collect();
     if !reserved.is_empty() {
@@ -786,7 +779,7 @@ fn compose_with(
     // does, where the reconciliation has nothing to write. A conflict the
     // consumer resolved before, which the composition keeps, is not
     // theirs to resolve again.
-    let consumer_conflicts = marked.clone();
+    let mut consumer_conflicts = marked.clone();
     unit_conflicts.retain(|(path, _)| {
         let written = matches!(
             changes.get(path),
@@ -801,7 +794,47 @@ fn compose_with(
         written || held
     });
 
-    // Nothing of a created file may exist yet.
+    // A created path where the project already holds a file of its own,
+    // which Assemblr did not write, is a conflict for the consumer to
+    // resolve like any other (owner decision on OC-44): both files, whole,
+    // between markers, with the project's executable bit, which the
+    // consumer set. A file that already holds the composed content, or that
+    // content with CRLF line endings, is kept as it is, mode included. What
+    // cannot be marked, a binary file or something other than a file, is
+    // refused as existing content below.
+    created.retain(|path| {
+        let Some(incoming) = files.get(path) else {
+            return true;
+        };
+        let (bytes, executable) = match existing_file(root, path, incoming.is_executable()) {
+            Ok(Some(held)) => held,
+            Ok(None) => return true,
+            Err(problem) => {
+                problems.push(problem);
+                return false;
+            }
+        };
+        if bytes == incoming.contents()
+            || without_crlf(&bytes).as_deref() == Some(incoming.contents())
+        {
+            changes.remove(path);
+            notes.push(format!(
+                "{path} already held the composed content, so it was kept as it is"
+            ));
+            return false;
+        }
+        match pending::marked_existing(&bytes, executable, incoming) {
+            Some(change) => {
+                changes.insert(path.clone(), change);
+                marked.insert(path.clone());
+                consumer_conflicts.insert(path.clone());
+                false
+            }
+            None => true,
+        }
+    });
+
+    // Nothing else of a created file may exist yet.
     let (existing, mut directories) = (existing_paths(root, created.iter()), Vec::new());
     match existing {
         Ok(found) if found.is_empty() => {}
@@ -1640,6 +1673,54 @@ fn existing_paths<'a>(
     Ok(existing.into_iter().collect())
 }
 
+/// Whether `path` is one Assemblr keeps for itself, or lies in Git's own
+/// directory at any depth, which a composition must never write into: a
+/// `.git` there is the project's or a nested repository's.
+fn is_reserved(path: &RelativePath) -> bool {
+    let text = path.as_str();
+    text == DECLARATION
+        || text == LOCKFILE
+        || text == STATE_DIR
+        || text.starts_with(&format!("{STATE_DIR}/"))
+        || path
+            .segments()
+            .any(|segment| segment.eq_ignore_ascii_case(".git"))
+}
+
+/// The project's own file at `path`, a path the composition creates: its
+/// bytes and executable bit, when the path holds a regular file reached
+/// through real directories. `None` when nothing is there, or when what is
+/// there is not such a file, which [`existing_paths`] reports.
+fn existing_file(
+    root: &Path,
+    path: &RelativePath,
+    incoming_executable: bool,
+) -> Result<Option<(Vec<u8>, bool)>, ComposeProblem> {
+    let io_problem = |path: PathBuf, error| ComposeProblem::Io { path, error };
+    let mut target = root.to_owned();
+    let segments: Vec<&str> = path.segments().collect();
+    for (index, segment) in segments.iter().enumerate() {
+        target.push(segment);
+        let metadata = match fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(io_problem(target, error)),
+        };
+        if index + 1 < segments.len() {
+            if !metadata.is_dir() {
+                return Ok(None);
+            }
+        } else if metadata.is_file() {
+            let bytes = fs::read(&target).map_err(|error| io_problem(target.clone(), error))?;
+            return Ok(Some((
+                bytes,
+                executable_bit(&metadata, incoming_executable),
+            )));
+        }
+    }
+    Ok(None)
+}
+
 /// Creates `target` new with `file`'s bytes and executable bit, flushed.
 fn write_file(target: &Path, file: &UnitFile) -> io::Result<()> {
     let mut options = OpenOptions::new();
@@ -2170,7 +2251,8 @@ pub enum ComposeProblem {
     /// Delivered paths Assemblr reserves for its own files.
     Reserved(Vec<RelativePath>),
     /// Delivered paths, or directories on the way to them, that already
-    /// exist.
+    /// hold something that cannot be marked as a conflict: a binary file, a
+    /// directory, or a link.
     Existing(Vec<RelativePath>),
     /// The project's ignore rules could not be read.
     Ignore(IgnoreError),
@@ -2337,8 +2419,8 @@ impl fmt::Display for ComposeProblem {
             Self::Existing(paths) => {
                 write!(
                     f,
-                    "the composition would write {} path(s) that already hold content Assemblr did \
-                     not materialize:",
+                    "the composition would write {} path(s) that already hold something Assemblr did \
+                     not write and cannot mark as a conflict:",
                     paths.len()
                 )?;
                 for path in paths {

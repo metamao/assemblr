@@ -1,6 +1,6 @@
 # 0020: The pending-resolution state: marked files, a journal that waits, and `compose --continue` and `--abort`
 
-- **Status:** Accepted, the whole-file markers of point 3 narrowed to structured files by 0022, points 5 and 6 amended by #72, points 1, 2, 5, and 6 amended by #101
+- **Status:** Accepted, the whole-file markers of point 3 narrowed to structured files by 0022, points 5 and 6 amended by #72, points 1, 2, 5, and 6 amended by #101, points 2 and 3 amended by #113
 - **Date:** 2026-10-21
 
 ## Context
@@ -40,12 +40,24 @@ represented, entered, finalized, and left, on top of the journal of ADR
    it; it is pending when the reconciliation writes it, or when the
    project's copy is kept because it already holds those markers (a clone
    of a waiting project). Nothing else about entering changes.
+   *Amended (#113):* a path the composition creates where the project
+   already holds a regular file, reached through real directories, that
+   Assemblr did not write is marked too, when both files are UTF-8 text
+   without NUL (owner decision on OC-44). A file whose bytes are the
+   composition's, or are them with CRLF line endings, is kept and noted,
+   mode included. Anything else at such a path stays the existing-content
+   refusal, before anything is applied.
 3. **The marked file** holds the project's content, the base's, and the
    composition's, each as it is, between `<<<<<<< current (your file)`,
    `||||||| base (the last composition)`, `=======`, and `>>>>>>> incoming
    (the declared composition)`. Marker lines end as the project's file does.
    The file's mode follows reconciliation: the composition's change to the
-   executable bit wins, else the project's stands.
+   executable bit wins, else the project's stands. *Amended (#113):* for a
+   file Assemblr did not write, the base section is empty and labeled
+   `base (none: no composition wrote this file)`, and the mode is the
+   project's, which only the consumer set; the base records the
+   composition's, so a later composition keeps the consumer's bit as its
+   change.
 4. **Gate.** A composition that finds a pending journal whose composition
    the lock does not record refuses, naming the files and the two ways out.
    Anything else found in the journal is recovered as before. `add`,

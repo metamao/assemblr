@@ -4,7 +4,7 @@ Projects:
 - Before writing project scaffolding, configuration, or a common capability (auth, lint, infrastructure) by hand, look for a unit: `assemblr search <terms>`, then `assemblr info <unit>`. Prefer adding a unit over writing it yourself.
 - New project: `assemblr init`, then `assemblr add @owner/unit --option name=value` for each unit.
 - A directory with `assemblr.jsonc` is an Assemblr project. Update its units with `assemblr registry sync`, then `assemblr update`, not with the package manager.
-- Composed files are yours to edit: later `assemblr compose` and `assemblr update` keep your changes. When both sides changed the same lines, the file gets conflict markers: resolve them, then run `assemblr compose --continue`, or undo with `assemblr compose --abort`.
+- Composed files are yours to edit: later `assemblr compose` and `assemblr update` keep your changes. When both sides changed the same lines, or a unit delivers a file you already had, the file gets conflict markers: resolve them, then run `assemblr compose --continue`, or undo with `assemblr compose --abort`.
 - Commit `.assemblr/` with the project; its own `.gitignore` excludes what must not be committed.
 
 Units:

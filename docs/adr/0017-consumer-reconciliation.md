@@ -1,6 +1,6 @@
 # 0017: Consumer reconciliation: the per-path three-way decision, the value merge onto the project's text, the journal of changes, and recovery
 
-- **Status:** Accepted, point 8 revised by 0018, the refusal of text conflicts replaced by 0020, text merged by line by 0022
+- **Status:** Accepted, point 8 revised by 0018, the refusal of text conflicts replaced by 0020, text merged by line by 0022, existing content marked by 0020 as amended by #113
 - **Date:** 2026-10-21
 
 ## Context

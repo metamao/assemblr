@@ -193,7 +193,9 @@ contributions is an error; the owner reopened it on #101 for a conflict
 between sibling amendments, which is a pending-resolution state, see
 [pending-resolution details](#pending-resolution-details--approved-d-18-sibling-conflicts-provisional-d-44)), OC-48 (bytes, executable bits, symbolic links,
 reserved paths, and which ignore rules decide, D-16), and OC-37 (the journal
-and recovery); what they decide for OC-44 stays provisional. They cover a project composed for the first time; a project
+and recovery). For OC-44 the owner decided on 2026-10-23
+([#113](https://github.com/metamao/assemblr/issues/113)) that a file Assemblr
+did not write is a pending conflict, which replaces D-10's refusal of it. They cover a project composed for the first time; a project
 composed before is reconciled as [reconciliation
 details](#reconciliation-details--provisional-d-13-to-d-15) describes.
 
@@ -223,14 +225,16 @@ one between sibling amendments, which is a composition error and not a
 pending-resolution state (**OC-47**; a conflict between siblings is left in
 the project for the consumer to resolve, **Provisional (D-44)**, see
 [pending-resolution details](#pending-resolution-details--approved-d-18-sibling-conflicts-provisional-d-44));
-a delivered path that already holds content Assemblr did not
-materialize, or whose directory on the way is a file or a symbolic link,
-naming every such path (**OC-44** stays open; composing over existing
-content is not supported yet); a delivered file that only the consumer's own
+a delivered path that already holds something Assemblr did not write and
+that cannot hold conflict markers (a file that is not UTF-8 text, a
+directory, or a symbolic link), or whose directory on the way is a file or a
+symbolic link, naming every such path (**OC-44**); a delivered file that only the consumer's own
 Git rules ignore and that the base would store for the first time (see
 below); a delivered path Assemblr reserves for
 itself: `assemblr.jsonc`, `assemblr-lock.json`, and anything under
-`.assemblr/` (part of **OC-48**); a stored base that does not verify
+`.assemblr/` (part of **OC-48**), or that has a `.git` segment, in any
+case, at any depth, so that a unit never writes into a Git directory
+([#114](https://github.com/metamao/assemblr/pull/114)); a stored base that does not verify
 against the lock; a lockfile that is a unit's, without reconciliation
 state; a directory holding `manifest.jsonc`.
 
@@ -523,12 +527,22 @@ Rules:
   directories make the composition fail with a **path collision** error,
   reported before anything is applied (see
   [units.md](units.md#src-unit-files)).
+- A file the composition creates at a path that already holds a file
+  Assemblr did not write, for example in an existing project, is a conflict
+  the consumer resolves in the
+  [pending-resolution state](#pending-resolution-details--approved-d-18-sibling-conflicts-provisional-d-44),
+  whatever its role. Owner decision of 2026-10-23
+  ([#113](https://github.com/metamao/assemblr/issues/113), **OC-44**). A
+  file that already holds the composed content, or that content with CRLF
+  line endings, is kept as it is. A marked file keeps the project's
+  executable bit, which only the consumer set.
 
 Open:
 
-- How a composition treats a path that already holds content Assemblr did not
-  materialize, for example in an existing project. **OC-44.** The first
-  `compose` refuses it (**Provisional (D-10)**); see
+- What a composition does with a path that already holds something that
+  cannot hold conflict markers, such as binary content, a directory, or a
+  symbolic link. **OC-44.** `compose` refuses it before anything is applied
+  (**Provisional (D-10)**); see
   [composition details](#composition-details--provisional-d-10-to-d-12).
 - File-system semantics of contributed files, including executable bits,
   symbolic links, binary content, line endings, paths that differ only in
@@ -591,8 +605,9 @@ each as a mode and a content identity.
   One the consumer edited is a conflict.
 - A file the consumer deleted stays deleted when the composition does not
   change it, which is reported; one the composition changes is a conflict.
-- A new file of the composition is created; content already at its path is
-  refused as existing content (OC-44).
+- A new file of the composition is created. A file Assemblr did not write
+  already at its path is a pending conflict, and anything else there is
+  refused, as for the first `compose` (OC-44).
 - A file both sides changed is merged when its base is stored and it is JSON,
   JSONC, or text:
   - A JSON or JSONC file is merged by value: the changes each side made
@@ -729,7 +744,12 @@ mutually exclusive, run at the project's top level.
 **What can be left in a file.** A conflict between text that both the
 consumer and the composition changed: lines of a text file that the line
 merge could not combine, a file of a format with no merge, or the values of a
-JSON or JSONC file that collide. The base, the project's
+JSON or JSONC file that collide; or a file the composition creates where the
+project already holds a text file Assemblr did not write (**OC-44**, owner
+decision of 2026-10-23, [#113](https://github.com/metamao/assemblr/issues/113)).
+That one holds both files whole, under an empty base labeled `base (none: no
+composition wrote this file)`, since there is nothing to merge them
+against; `--abort` restores the consumer's file. The base, the project's
 file, and the composition's file must be UTF-8 text. A composition with any
 other conflict (file modes, a file one side deleted and the other changed,
 a file the composition removes and the consumer edited, a path that is not a
