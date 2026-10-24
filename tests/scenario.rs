@@ -249,6 +249,9 @@ const DECLARATION: &str = r#"{
 fn project(fixture: &Fixture, name: &str) -> PathBuf {
     fixture.run(&fixture.dir, &["init", name]);
     let project = fixture.dir.join(name);
+    // The units deliver their own AGENTS.md; the one `init` writes, which
+    // would be a conflict to resolve first, is covered in tests/compose.rs.
+    fs::remove_file(project.join("AGENTS.md")).unwrap();
     write(&project.join("assemblr.jsonc"), DECLARATION);
     project
 }

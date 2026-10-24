@@ -29,6 +29,7 @@ use super::manifest::read_manifest;
 use super::registry::{
     Problem, ReferenceError, Registry, TagProblem, catalog_reference, observe_tags,
 };
+use super::scaffold::{catalog_agents, catalog_readme};
 use crate::domain::{
     CatalogIdentity, Edit, Excluded, IdentityError, Manifest, ObjectId, ObservedTag, Provenance,
     RegisteredCatalog, RegistryIndex, SourceReference, UnitIdentity, Version, declared_identity,
@@ -148,7 +149,8 @@ impl std::error::Error for CatalogManifestError {}
 /// Creates the catalog `identity` in `directory`, or, without one, in a new
 /// directory named after it, `web` for `@acme/web`. The directory must not
 /// exist or be empty. It becomes a Git repository with an empty
-/// `registry.jsonc`. Nothing is committed.
+/// `registry.jsonc`, and a `README.md` and an `AGENTS.md` for the maintainer
+/// to fill in. Nothing is committed.
 pub fn init_catalog(
     directory: Option<&Path>,
     identity: &CatalogIdentity,
@@ -174,14 +176,36 @@ pub fn init_catalog(
         }
     }
     init_repository(&directory).map_err(CatalogInitFailure::Git)?;
-    let path = directory.join(CATALOG_MANIFEST);
-    let text = format!("{{\n  \"name\": \"{identity}\",\n  \"units\": {{}}\n}}\n");
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .and_then(|mut file| file.write_all(text.as_bytes()))
-        .map_err(|error| CatalogInitFailure::Io { path, error })?;
+    let files = [
+        (
+            CATALOG_MANIFEST,
+            format!("{{\n  \"name\": \"{identity}\",\n  \"units\": {{}}\n}}\n"),
+        ),
+        ("README.md", catalog_readme(identity)),
+        ("AGENTS.md", catalog_agents(identity)),
+    ];
+    for (name, text) in files {
+        let path = directory.join(name);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| CatalogInitFailure::Partial {
+                path: path.clone(),
+                directory: directory.clone(),
+                error,
+            })?;
+        if let Err(error) = file.write_all(text.as_bytes()) {
+            // A file this call created is not left half written.
+            drop(file);
+            let _ = fs::remove_file(&path);
+            return Err(CatalogInitFailure::Partial {
+                path,
+                directory,
+                error,
+            });
+        }
+    }
     Ok(directory)
 }
 
@@ -199,13 +223,25 @@ pub enum CatalogInitFailure {
     },
     /// The Git repository could not be created.
     Git(GitError),
+    /// A file could not be written after the repository was created, so
+    /// the directory holds the repository and the files written before it.
+    Partial {
+        /// The file.
+        path: PathBuf,
+        /// The catalog's directory.
+        directory: PathBuf,
+        /// Why.
+        error: io::Error,
+    },
 }
 
 impl fmt::Display for CatalogInitFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotEmpty(directory) => write!(f, "{} is not empty", directory.display()),
-            Self::Io { path, error } => write!(f, "could not create {}: {error}", path.display()),
+            Self::Io { path, error } | Self::Partial { path, error, .. } => {
+                write!(f, "could not create {}: {error}", path.display())
+            }
             Self::Git(error) => error.fmt(f),
         }
     }

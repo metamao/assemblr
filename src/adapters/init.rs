@@ -2,8 +2,9 @@
 //! `docs/domain/authoring-workflow.md` and `docs/adr/0014-unit-init.md`).
 //!
 //! The scaffold is the directory's Git repository, `manifest.jsonc`,
-//! `manifest.schema.json`, and `.gitignore` with `/build/`. Nothing else is
-//! created: no `src/`, no `amendments/`, no commit. Everything is decided
+//! `manifest.schema.json`, `.gitignore` with `/build/`, and a `README.md`
+//! and an `AGENTS.md` for the author to fill in. Nothing else is created: no
+//! `src/`, no `amendments/`, no commit. Everything is decided
 //! before anything is written: the directory's place in Git is discovered,
 //! and each file is read, so that an existing manifest is never overwritten
 //! and running the command again only completes what is missing. A manifest
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use super::git::{Discovered, GitError, discover_repository, init_repository};
 use super::manifest::{ReadManifestError, read_manifest};
+use super::scaffold::{unit_agents, unit_readme};
 use super::schema::{MANIFEST_SCHEMA, MANIFEST_SCHEMA_REFERENCE, manifest_schema};
 use crate::domain::{Description, RelativePath, UnitIdentity, Version};
 
@@ -27,6 +29,10 @@ use crate::domain::{Description, RelativePath, UnitIdentity, Version};
 const MANIFEST: &str = "manifest.jsonc";
 /// Git's ignore file, at the repository's top level.
 const GITIGNORE: &str = ".gitignore";
+/// The unit's description for people, at the repository's top level.
+const README: &str = "README.md";
+/// The unit's instructions for coding agents, at the repository's top level.
+const AGENTS: &str = "AGENTS.md";
 /// The line that keeps `build/` out of Git.
 const IGNORE_BUILD: &str = "/build/";
 /// The version a new unit starts at.
@@ -152,6 +158,16 @@ pub fn init_unit(
             Planned::Replace(text)
         }
     };
+    // The author's own files, created only when missing and never read:
+    // whatever is there is theirs.
+    let readme = match occupied(&directory.join(README))? {
+        false => Planned::Create(unit_readme(identity, &description).into_bytes()),
+        true => Planned::Keep,
+    };
+    let agents = match occupied(&directory.join(AGENTS))? {
+        false => Planned::Create(unit_agents(identity).into_bytes()),
+        true => Planned::Keep,
+    };
     for name in [SCHEMA_NEW, GITIGNORE_NEW] {
         if fs::symlink_metadata(directory.join(name)).is_ok() {
             return Err(InitFailure::StagingOccupied(directory.join(name)));
@@ -169,6 +185,8 @@ pub fn init_unit(
         manifest: FileOutcome::Kept,
         schema: FileOutcome::Kept,
         gitignore: FileOutcome::Kept,
+        readme: FileOutcome::Kept,
+        agents: FileOutcome::Kept,
     };
     let failed = |done: &Initialized, step: Step, error: io::Error| InitFailure::Write {
         step,
@@ -186,10 +204,12 @@ pub fn init_unit(
             done: Box::new(done.clone()),
         })?;
     }
-    let steps: [(&str, Planned, Option<&str>); 3] = [
+    let steps: [(&str, Planned, Option<&str>); 5] = [
         (MANIFEST, manifest, None),
         (MANIFEST_SCHEMA, schema, Some(SCHEMA_NEW)),
         (GITIGNORE, gitignore, Some(GITIGNORE_NEW)),
+        (README, readme, None),
+        (AGENTS, agents, None),
     ];
     for (name, planned, staging) in steps {
         let path = directory.join(name);
@@ -201,7 +221,9 @@ pub fn init_unit(
         match name {
             MANIFEST => done.manifest = outcome,
             MANIFEST_SCHEMA => done.schema = outcome,
-            _ => done.gitignore = outcome,
+            GITIGNORE => done.gitignore = outcome,
+            README => done.readme = outcome,
+            _ => done.agents = outcome,
         }
     }
     Ok(done)
@@ -281,6 +303,18 @@ fn read_file(path: &Path) -> Result<Option<Vec<u8>>, InitFailure> {
     Ok(Some(bytes))
 }
 
+/// Whether anything, a link included, is at `path`.
+fn occupied(path: &Path) -> Result<bool, InitFailure> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(InitFailure::Io {
+            path: path.to_owned(),
+            error,
+        }),
+    }
+}
+
 /// Whether a `.gitignore` already keeps `build/` at the top level out of
 /// Git: a line `/build/`, `build/`, `/build`, or `build`.
 fn ignores_build(bytes: &[u8]) -> bool {
@@ -317,8 +351,14 @@ fn manifest_text(identity: &UnitIdentity, description: &Description) -> String {
 /// Creates `path` new, with `contents`, flushed.
 fn create_new(path: &Path, contents: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(contents)?;
-    file.sync_all()
+    if let Err(error) = file.write_all(contents).and_then(|()| file.sync_all()) {
+        // A file this call created is not left half written: a rerun
+        // would keep it as the author's.
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Replaces `path` with `contents` through the new file `staged` and a
@@ -352,6 +392,8 @@ pub struct Initialized {
     manifest: FileOutcome,
     schema: FileOutcome,
     gitignore: FileOutcome,
+    readme: FileOutcome,
+    agents: FileOutcome,
 }
 
 impl Initialized {
@@ -390,6 +432,16 @@ impl Initialized {
     /// appended, or kept because it already ignores `build/`.
     pub fn gitignore(&self) -> FileOutcome {
         self.gitignore
+    }
+
+    /// What happened to `README.md`: created, or kept as it was.
+    pub fn readme(&self) -> FileOutcome {
+        self.readme
+    }
+
+    /// What happened to `AGENTS.md`: created, or kept as it was.
+    pub fn agents(&self) -> FileOutcome {
+        self.agents
     }
 }
 

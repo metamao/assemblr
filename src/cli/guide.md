@@ -8,7 +8,7 @@ Projects:
 - Commit `.assemblr/` with the project; its own `.gitignore` excludes what must not be committed.
 
 Units:
-- To make configuration or code reusable across projects, make it a unit. `assemblr unit init @owner/name` creates a new `./name` repository; use `assemblr unit init @owner/name .` only inside an existing repository you are converting. Put the files under `src/`.
+- To make configuration or code reusable across projects, make it a unit. `assemblr unit init @owner/name` creates a new `./name` repository; use `assemblr unit init @owner/name .` only inside an existing repository you are converting. Put the files under `src/`, and fill in the README.md and AGENTS.md it writes.
 - Add each dependency with `assemblr unit add @owner/unit`: it declares it, maps its required parameters, and builds.
 - To change a file that a unit below provides, run `assemblr unit amend <file>` and edit the copy it writes under `amendments/`.
 - Then run `assemblr unit build` and `assemblr unit check`. If a command leaves conflict markers in a copy under `amendments/`, resolve them and build again.
@@ -16,7 +16,7 @@ Units:
 
 Catalogs:
 - A catalog is a Git repository whose `registry.jsonc` lists unit repositories, so that another machine registers them all at once with `assemblr registry add <path or URL>`.
-- `assemblr catalog init @owner/name` creates one. In its directory, `assemblr catalog add <URL>` adds a unit by its repository URL (never a local path) and `assemblr catalog remove @owner/unit` removes one; both update `registry-index.json` and commit. Then `git push`.
+- `assemblr catalog init @owner/name` creates one. In its directory, `assemblr catalog add <URL>` adds a unit by its repository URL (never a local path) and `assemblr catalog remove @owner/unit` removes one; both update `registry-index.json` and commit. Fill in the README.md and AGENTS.md that `catalog init` writes and commit them, then `git push`.
 - After publishing a unit version and pushing its tag, run `assemblr catalog refresh` in each catalog that lists the unit (it commits), then `git push`: until then, machines that use the catalog do not see the version.
 
 Always:

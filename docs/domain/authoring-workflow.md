@@ -119,7 +119,14 @@ differs; no other command reads or compares it, since Assemblr's validation
 is authoritative, and running `unit init` again after an upgrade refreshes
 it, which the schema's own description says. `.gitignore` is created with
 `/build/`, or `/build/` is appended when no line of it already ignores
-`build/`, keeping the file's line endings. No `src/` or `amendments/` is
+`build/`, keeping the file's line endings. A `README.md` and an `AGENTS.md`
+are created when nothing is at their paths, and never read or changed
+otherwise: the README with the unit's identity, its description, and
+sections for the author to fill in, and `AGENTS.md` pointing coding agents
+to `assemblr guide`, with a section of the same kind; the result asks the
+author to fill them in. They sit at the repository's top level, outside
+`src/`, so no project receives them. Owner decision of 2026-10-23
+([#115](https://github.com/metamao/assemblr/issues/115)). No `src/` or `amendments/` is
 created. A file that is replaced is written beside its destination, as
 `.assemblr-manifest.schema.json.new` or `.assemblr-gitignore.new`, reserved
 names, and renamed into place; a new file is created directly. Running the

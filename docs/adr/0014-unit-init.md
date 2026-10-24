@@ -1,6 +1,6 @@
 # 0014: `unit init`: repository discovery and initialization, the scaffold's writes, and the embedded manifest schema
 
-- **Status:** Accepted
+- **Status:** Accepted, point 3 amended by #115
 - **Date:** 2026-10-21
 
 ## Context
@@ -53,6 +53,11 @@ JSON Schema is produced and tested.
    from the current state. The manifest text is produced by formatting and
    read back through `read_manifest` under `debug_assert!`, so the scaffold
    can never write a manifest Assemblr rejects.
+   *Amended (#115):* after `.gitignore`, `README.md` and `AGENTS.md` are
+   created with `create_new` when nothing, not even a link, is at their
+   paths, and are never read: they are the author's from the start. Their
+   texts are in `src/adapters/scaffold.rs`, with the project's and a
+   catalog's.
 4. **The schema is a fixed document.** `src/adapters/manifest.schema.json`
    is embedded with `include_str!` and written byte for byte. It is JSON
    Schema draft 7, which every mainstream editor's JSON language service

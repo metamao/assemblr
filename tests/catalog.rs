@@ -19,6 +19,10 @@ use serde_json::Value;
 
 use common::{Fixture, fails, git, stderr, stdout, succeeds};
 
+/// What `catalog init` writes for the maintainer to fill in and commit,
+/// which the catalog's own commits leave alone.
+const UNTRACKED_SCAFFOLD: &str = "?? AGENTS.md\n?? README.md";
+
 impl Fixture {
     fn assemblr(&self, dir: &Path, args: &[&str]) -> Output {
         self.command(dir, args).output().unwrap()
@@ -120,6 +124,17 @@ fn create_makes_a_git_repository_with_an_empty_catalog() {
     assert!(catalog.join(".git").is_dir());
     let manifest = fs::read_to_string(catalog.join("registry.jsonc")).unwrap();
     assert!(manifest.contains(r#""name": "@acme/web""#), "{manifest}");
+    // A README and an AGENTS.md to fill in, the latter pointing to the
+    // guide.
+    assert!(
+        stdout(&created).contains("Fill in README.md and AGENTS.md"),
+        "{}",
+        stdout(&created)
+    );
+    let readme = fs::read_to_string(catalog.join("README.md")).unwrap();
+    assert!(readme.starts_with("# @acme/web\n"), "{readme}");
+    let agents = fs::read_to_string(catalog.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("run `assemblr guide`"), "{agents}");
 
     // An empty catalog refreshes to an empty index.
     let refreshed = succeeds(fixture.assemblr(&catalog, &["catalog", "refresh"]));
@@ -165,7 +180,10 @@ fn refresh_indexes_units_deterministically_and_commits() {
         "{out}"
     );
     assert!(out.contains("Next: run `git push`"), "{out}");
-    assert_eq!(git(&catalog, &["status", "--porcelain"]), "");
+    assert_eq!(
+        git(&catalog, &["status", "--porcelain"]),
+        UNTRACKED_SCAFFOLD
+    );
     assert_eq!(
         git(&catalog, &["log", "-1", "--format=%s"]).trim(),
         "Refresh the catalog index"
@@ -579,7 +597,10 @@ fn add_and_remove_edit_refresh_and_commit_the_catalog() {
     );
     assert!(added.contains("Next: run `git push`"), "{added}");
     assert_eq!(commits(), "Add @acme/node to the catalog");
-    assert_eq!(git(&catalog, &["status", "--porcelain"]), "");
+    assert_eq!(
+        git(&catalog, &["status", "--porcelain"]),
+        UNTRACKED_SCAFFOLD
+    );
     let versions = &index(&catalog)["units"]["@acme/node"]["versions"];
     assert_eq!(versions.as_object().unwrap().len(), 2);
 
@@ -690,7 +711,10 @@ fn a_catalog_commit_leaves_other_changes_alone() {
     succeeds(fixture.assemblr(&catalog, &["catalog", "add", &node]));
     let committed = git(&catalog, &["show", "--name-only", "--format=", "HEAD"]);
     assert_eq!(committed, "registry-index.json\nregistry.jsonc");
-    assert_eq!(git(&catalog, &["status", "--porcelain"]), "A  README.md");
+    assert_eq!(
+        git(&catalog, &["status", "--porcelain"]),
+        "A  README.md\n?? AGENTS.md"
+    );
 }
 
 #[test]

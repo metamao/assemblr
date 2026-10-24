@@ -71,7 +71,8 @@ fn init_creates_the_scaffold_and_a_repository_in_a_new_directory() {
         "{first}"
     );
     assert!(
-        first.ends_with(", manifest.jsonc, manifest.schema.json, .gitignore."),
+        first
+            .ends_with(", manifest.jsonc, manifest.schema.json, .gitignore, README.md, AGENTS.md."),
         "{first}"
     );
     assert!(
@@ -87,8 +88,30 @@ fn init_creates_the_scaffold_and_a_repository_in_a_new_directory() {
     );
     assert_eq!(
         entries(&unit),
-        [".gitignore", "manifest.jsonc", "manifest.schema.json"]
+        [
+            ".gitignore",
+            "AGENTS.md",
+            "README.md",
+            "manifest.jsonc",
+            "manifest.schema.json"
+        ]
     );
+    // The README and AGENTS.md are the author's to fill in; AGENTS.md
+    // points coding agents to the guide.
+    assert!(
+        stdout(&output).contains("Then fill in README.md and AGENTS.md with what only you know"),
+        "{}",
+        stdout(&output)
+    );
+    let readme = read(&unit.join("README.md"));
+    assert!(
+        readme.starts_with("# @acme/app\n\nThe @acme/app unit.\n"),
+        "{readme}"
+    );
+    assert!(readme.contains("assemblr add @acme/app"), "{readme}");
+    let agents = read(&unit.join("AGENTS.md"));
+    assert!(agents.contains("the Assemblr unit `@acme/app`"), "{agents}");
+    assert!(agents.contains("run `assemblr guide`"), "{agents}");
     assert_eq!(
         read(&unit.join("manifest.jsonc")),
         "{\n  \"$schema\": \"./manifest.schema.json\",\n  \"name\": \"@acme/app\",\n  \
@@ -156,7 +179,13 @@ fn init_without_a_directory_creates_one_named_after_the_unit() {
     );
     assert_eq!(
         entries(&unit),
-        [".gitignore", "manifest.jsonc", "manifest.schema.json"]
+        [
+            ".gitignore",
+            "AGENTS.md",
+            "README.md",
+            "manifest.jsonc",
+            "manifest.schema.json"
+        ]
     );
     // The current directory gets nothing but the new one.
     assert_eq!(entries(&work), ["web"]);
@@ -228,13 +257,18 @@ fn init_adopts_the_top_level_of_an_existing_repository() {
     let output = succeeds(fixture.init(&unit, &["@acme/existing", "."]));
     assert!(
         stdout(&output).contains(
-            "created manifest.jsonc, manifest.schema.json; replaced .gitignore (/build/ added); \
-             kept the Git repository."
+            "created manifest.jsonc, manifest.schema.json, AGENTS.md; replaced .gitignore \
+             (/build/ added); kept the Git repository, README.md."
         ),
         "{}",
         stdout(&output)
     );
     assert_eq!(read(&unit.join(".gitignore")), "*.log\n/build/\n");
+    assert_eq!(
+        read(&unit.join("README.md")),
+        "readme",
+        "the author's README is kept"
+    );
     assert_eq!(git(&unit, &["log", "--oneline"]).lines().count(), 1);
 
     // Bytes that are not UTF-8, such as a Latin-1 pattern, are kept as
@@ -285,7 +319,7 @@ fn init_again_completes_the_scaffold_and_changes_nothing_else() {
         stdout(&output).lines().next().unwrap(),
         format!(
             "Completed the scaffold of @acme/app in {}: created manifest.schema.json; already \
-             in place: the Git repository, manifest.jsonc, .gitignore.",
+             in place: the Git repository, manifest.jsonc, .gitignore, README.md, AGENTS.md.",
             unit.display()
         )
     );
@@ -307,7 +341,7 @@ fn init_again_completes_the_scaffold_and_changes_nothing_else() {
     assert!(
         stdout(&output).contains(
             "already in place: the Git repository, manifest.jsonc, manifest.schema.json, \
-             .gitignore."
+             .gitignore, README.md, AGENTS.md."
         ),
         "{}",
         stdout(&output)
@@ -315,7 +349,13 @@ fn init_again_completes_the_scaffold_and_changes_nothing_else() {
     assert_eq!(read(&unit.join("manifest.schema.json")), schema);
     assert_eq!(
         entries(&unit),
-        [".gitignore", "manifest.jsonc", "manifest.schema.json"]
+        [
+            ".gitignore",
+            "AGENTS.md",
+            "README.md",
+            "manifest.jsonc",
+            "manifest.schema.json"
+        ]
     );
 }
 
@@ -459,4 +499,43 @@ fn the_loop_runs_from_init_to_a_dependent_s_build_through_a_second_registry() {
     );
     assert_eq!(read(&site.join("build/node.txt")), "port 8080, amended\n");
     assert_eq!(read(&site.join("build/app.txt")), "app");
+}
+
+#[test]
+fn init_keeps_the_author_s_agents_md_and_does_not_follow_links() {
+    let fixture = Fixture::new("own_files");
+    let unit = fixture.dir.join("own");
+    fs::create_dir(&unit).unwrap();
+    fs::write(unit.join("AGENTS.md"), "Our rules.\n").unwrap();
+
+    let output = succeeds(fixture.init(&unit, &["@acme/own", "."]));
+    assert!(
+        stdout(&output).contains("Then fill in README.md with what only you know"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(read(&unit.join("AGENTS.md")), "Our rules.\n");
+    assert!(read(&unit.join("README.md")).starts_with("# @acme/own\n"));
+
+    // A link at either path, even a dangling one, is kept and not followed.
+    #[cfg(unix)]
+    {
+        let linked = fixture.dir.join("linked");
+        fs::create_dir(&linked).unwrap();
+        let target = fixture.dir.join("elsewhere.md");
+        std::os::unix::fs::symlink(&target, linked.join("README.md")).unwrap();
+        let output = succeeds(fixture.init(&linked, &["@acme/linked", "."]));
+        assert!(
+            stdout(&output).contains("Then fill in AGENTS.md with what only you know"),
+            "{}",
+            stdout(&output)
+        );
+        assert!(!target.exists());
+        assert!(
+            fs::symlink_metadata(linked.join("README.md"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
 }

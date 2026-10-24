@@ -28,14 +28,23 @@ pub(super) fn init(args: &InitArgs) -> ExitCode {
     let directory = args.directory.clone().unwrap_or_else(|| PathBuf::from("."));
     match init_project(&directory) {
         Ok(initialized) if initialized.created() => {
+            let created = match (
+                initialized.directory_created(),
+                initialized.agents_created(),
+            ) {
+                (true, true) => "the directory, assemblr.jsonc, and AGENTS.md",
+                (true, false) => "the directory and assemblr.jsonc",
+                (false, true) => "assemblr.jsonc and AGENTS.md",
+                (false, false) => "assemblr.jsonc",
+            };
+            let kept = if initialized.agents_created() {
+                ""
+            } else {
+                "; AGENTS.md was already there, so it was kept"
+            };
             println!(
-                "Initialized a project in {}: created {}assemblr.jsonc.",
+                "Initialized a project in {}: created {created}{kept}.",
                 initialized.directory().display(),
-                if initialized.directory_created() {
-                    "the directory and "
-                } else {
-                    ""
-                }
             );
             println!(
                 "Next: add a unit with `assemblr add @owner/name`; `assemblr registry list` shows \

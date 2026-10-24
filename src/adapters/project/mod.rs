@@ -41,6 +41,7 @@ use super::lockfile::{self, LOCKFILE, Lockfile, LockfileError, serialize_lockfil
 use super::manifest::{ReadManifestError, read_project};
 use super::merge::{ReconcileFailure, reconcile_json};
 use super::registry::Registry;
+use super::scaffold::PROJECT_AGENTS;
 use crate::domain::{
     Action, BaseIdentity, BlobId, Conflict, Contributor, Current, Disagreement, LockChange,
     MergeFormat, Mergeability, Project, ReconciliationState, RegistryIndex, RelativePath, Root,
@@ -57,8 +58,15 @@ const LOCK_STAGING: &str = ".assemblr-lock.json.new";
 /// The text `init` writes.
 const INITIAL_DECLARATION: &str = "{\n  \"dependencies\": {},\n  \"options\": {}\n}\n";
 
+/// The project's instructions for coding agents, which `init` writes when
+/// missing.
+const AGENTS: &str = "AGENTS.md";
+
 /// Initializes a consumer project in `directory`, which is created when it
-/// does not exist.
+/// does not exist. Besides the declaration, it writes `AGENTS.md`, pointing
+/// a coding agent to `assemblr guide`, when nothing is at that path yet;
+/// it is written first, so that a project that exists always had its
+/// chance at one.
 pub fn init_project(directory: &Path) -> Result<ProjectInitialized, InitProjectFailure> {
     let directory = std::path::absolute(directory).map_err(|error| InitProjectFailure::Io {
         path: directory.to_owned(),
@@ -92,6 +100,7 @@ pub fn init_project(directory: &Path) -> Result<ProjectInitialized, InitProjectF
                     directory,
                     created: false,
                     directory_created: false,
+                    agents_created: false,
                 }),
                 Err(error) => Err(InitProjectFailure::InvalidDeclaration {
                     path: declaration,
@@ -114,16 +123,43 @@ pub fn init_project(directory: &Path) -> Result<ProjectInitialized, InitProjectF
             error,
         })?;
     }
-    write_new(&declaration, INITIAL_DECLARATION.as_bytes()).map_err(|error| {
-        InitProjectFailure::Io {
-            path: declaration.clone(),
-            error,
+    let agents = directory.join(AGENTS);
+    let agents_created = match fs::symlink_metadata(&agents) {
+        Ok(_) => false,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if let Err(error) = write_new(&agents, PROJECT_AGENTS.as_bytes()) {
+                // Only a file this call created is removed.
+                if error.kind() != io::ErrorKind::AlreadyExists {
+                    let _ = fs::remove_file(&agents);
+                }
+                return Err(InitProjectFailure::Io {
+                    path: agents,
+                    error,
+                });
+            }
+            true
         }
-    })?;
+        Err(error) => {
+            return Err(InitProjectFailure::Io {
+                path: agents,
+                error,
+            });
+        }
+    };
+    if let Err(error) = write_new(&declaration, INITIAL_DECLARATION.as_bytes()) {
+        if agents_created {
+            let _ = fs::remove_file(&agents);
+        }
+        return Err(InitProjectFailure::Io {
+            path: declaration,
+            error,
+        });
+    }
     Ok(ProjectInitialized {
         directory,
         created: true,
         directory_created: !exists,
+        agents_created,
     })
 }
 
@@ -133,6 +169,7 @@ pub struct ProjectInitialized {
     directory: PathBuf,
     created: bool,
     directory_created: bool,
+    agents_created: bool,
 }
 
 impl ProjectInitialized {
@@ -149,6 +186,11 @@ impl ProjectInitialized {
     /// Whether the directory was created.
     pub fn directory_created(&self) -> bool {
         self.directory_created
+    }
+
+    /// Whether `AGENTS.md` was created; `false` when something was there.
+    pub fn agents_created(&self) -> bool {
+        self.agents_created
     }
 }
 
