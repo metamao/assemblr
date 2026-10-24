@@ -42,6 +42,28 @@ pub(crate) fn units(machine: &Machine<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// Gives each of `units`, already published, a remote: a bare clone in
+/// `remotes/<unit>.git`, set as its `origin` by a `file://` URL, as a unit
+/// pushed to a Git host has.
+pub(crate) fn remotes(machine: &Machine<'_>, units: &[&str]) -> Result<(), String> {
+    let root = &machine.root.path;
+    for name in units {
+        let dir = root.join("units").join(name);
+        let remote = root.join("remotes").join(format!("{name}.git"));
+        machine.git(root, &["clone", "-q", "--bare", arg(&dir)?, arg(&remote)?])?;
+        machine.git(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("file://{}", arg(&remote)?),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 /// Publishes the next version of `unit` from `fixture/releases/`.
 pub(crate) fn release(machine: &Machine<'_>, unit: &str, version: &str) -> Result<(), String> {
     let dir = machine.root.path.join("units").join(unit);
