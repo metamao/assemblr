@@ -297,6 +297,11 @@ How the status of a statement affects implementation:
   `assemblr search <term>... [--json]` lists the registered units whose
   identity or newest stable description contains every term, offline
   (**Provisional (D-32)**, under OC-29).
+  `assemblr status [--files] [--json]` reports, read-only and offline,
+  where a consumer project's composition stands, its units with the updates
+  published for them, the files edited since the last composition, and the
+  units that deliver each file (**Provisional (D-46)**; see
+  [status](consumer-projects.md#status--provisional-d-46)).
   `catalog init <catalog> [<directory>]` creates a catalog's repository
   and `registry.jsonc`, and `catalog refresh` regenerates its index
   (**Provisional (D-36)**); `catalog add <reference>` and `catalog remove

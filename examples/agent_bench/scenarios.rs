@@ -189,6 +189,64 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
         },
     },
     Scenario {
+        name: "s7",
+        summary: "finish an update that an earlier session left waiting on a conflict",
+        prompt: "Estaba actualizando el proyecto y se quedó a medias; termínalo.",
+        start: "home/work/orders-api",
+        extra_dirs: &[],
+        setup: |root| {
+            let agent = root.agent()?;
+            fixture::units(&agent)?;
+            let project = orders_api(&agent)?;
+            let wrangler = project.join("wrangler.toml");
+            write(
+                &wrangler,
+                &format!(
+                    "{}compatibility_flags = [\"streams_enable_constructors\"]\n",
+                    read(&wrangler)
+                ),
+            )?;
+            write(
+                &project.join("src/routes.ts"),
+                "export const routes = [\"/orders\"];\n",
+            )?;
+            fixture::commit(&agent, &project, "Enable streams constructors; add routes")?;
+            fixture::release(&agent, "cloudflare-worker", "1.2.0")?;
+            // The earlier session: the update stops, waiting on the conflict
+            // in wrangler.toml.
+            if agent.assemblr(&project, &["update"]).is_ok() {
+                return Err("the update did not stop on a conflict".to_owned());
+            }
+            Ok(())
+        },
+        verify: |root, report| {
+            let agent = root.agent()?;
+            let project = agent.work().join("orders-api");
+            report.check(
+                "locked_1_2_0",
+                locked_version(&project, "@acme/cloudflare-worker").as_deref() == Some("1.2.0"),
+            );
+            report.check("no_markers", !has_markers(&project));
+            report.check("compose_noop", nothing_to_compose(&agent, &project));
+            let wrangler = read(&project.join("wrangler.toml"));
+            report.check(
+                "user_flag_kept",
+                wrangler.contains("streams_enable_constructors"),
+            );
+            report.check("incoming_flag_kept", wrangler.contains("nodejs_compat"));
+            report.check(
+                "one_flags_key",
+                wrangler
+                    .lines()
+                    .filter(|line| line.trim_start().starts_with("compatibility_flags"))
+                    .count()
+                    == 1,
+            );
+            report.check("user_file_kept", project.join("src/routes.ts").is_file());
+            Ok(())
+        },
+    },
+    Scenario {
         name: "s11",
         summary: "start a new project from a template project",
         prompt: "Crea un proyecto nuevo llamado tienda a partir de mi template web-starter, que \

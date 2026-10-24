@@ -21,6 +21,7 @@ pub(crate) mod declaration;
 mod ignore;
 mod lines;
 mod pending;
+mod status;
 mod store;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,10 +33,14 @@ use std::path::{Path, PathBuf};
 pub use declaration::DeclarationChange;
 use ignore::IgnoreError;
 pub use pending::{Continued, abort_compose, continue_compose};
+pub use status::{
+    CompositionState, FileEdit, MarkedFile, ProjectStatus, UnitStatus, project_status,
+};
+
 pub use store::StoreError;
 use store::{Journal, JournalEntry, Pending, STATE_DIR, Store, write_new};
 
-use super::build::{BuildProblem, render_files, resolve_graph};
+use super::build::{BuildProblem, Resolved, render_files, resolve_graph};
 use super::git::MANIFEST_LIMIT;
 use super::lockfile::{self, LOCKFILE, Lockfile, LockfileError, serialize_lockfile};
 use super::manifest::{ReadManifestError, read_project};
@@ -544,89 +549,26 @@ fn compose_with(
             }
         }
     };
-    let mut found = Vec::new();
-    let Some(resolved) = resolve_graph(
-        None,
-        project.dependencies(),
-        &resolution_lock,
-        &index,
-        &mut found,
-    ) else {
-        problems.extend(
-            found
-                .into_iter()
-                .map(|problem| ComposeProblem::Build(Box::new(problem))),
-        );
-        return Err(rejected_all(problems));
-    };
-    // What changed is told against the whole previous lock, and a kept
-    // version must still be published with the content it was locked to,
-    // whatever lock the resolver was given.
-    let lock_changes = match update_lock(&previous_lock, resolved.resolution.graph(), &index) {
-        Ok((_, changes)) => changes,
-        Err(errors) => {
-            found.extend(errors.into_iter().map(BuildProblem::Lock));
-            problems.extend(
-                found
-                    .into_iter()
-                    .map(|problem| ComposeProblem::Build(Box::new(problem))),
-            );
+    let planned = match plan(&project, &resolution_lock, &previous_lock, &index) {
+        Ok(planned) => planned,
+        Err(found) => {
+            problems.extend(found);
             return Err(rejected_all(problems));
         }
     };
-    let units = resolved.units();
-    let composition = match compose(
-        resolved.resolution.graph(),
-        Root::Project,
-        &units,
-        project.options(),
-    ) {
-        Ok(composition) => composition,
-        Err(errors) => {
-            found.extend(errors.into_iter().map(BuildProblem::Composition));
-            problems.extend(
-                found
-                    .into_iter()
-                    .map(|problem| ComposeProblem::Build(Box::new(problem))),
-            );
-            return Err(rejected_all(problems));
-        }
-    };
-    let rendered = render_files(
-        &composition,
-        &resolved.lock,
-        None,
-        &resolved.dependencies,
-        &mut found,
-    );
-    problems.extend(
-        found
-            .into_iter()
-            .map(|problem| ComposeProblem::Build(Box::new(problem))),
-    );
-    let Some(rendered) = rendered.filter(|_| problems.is_empty()) else {
-        return Err(rejected_all(problems));
-    };
-    let mut files: BTreeMap<RelativePath, UnitFile> = rendered.files.into_iter().collect();
-    // A conflict between sibling amenders that no unit above both resolves
-    // is the consumer's to resolve (owner decision on #101): the file, each
-    // conflict between markers, is the composition's, so the markers reach
-    // the project like any incoming change and the composition waits.
-    let mut unit_conflicts: Vec<(RelativePath, String)> = Vec::new();
-    for unresolved in rendered.unresolved {
-        let report = unresolved.to_string();
-        files.insert(
-            unresolved.delivered.clone(),
-            UnitFile::new(unresolved.bytes, unresolved.executable),
-        );
-        unit_conflicts.push((unresolved.delivered, report));
-    }
+    let Planned {
+        resolved,
+        lock_changes,
+        files,
+        mut unit_conflicts,
+        notes: file_notes,
+        crossed,
+        ..
+    } = planned;
     // What the merge reports about a file, its author's to act on, is told
     // to the consumer when this composition writes the file; the others
     // are kept for `--verbose`, with the amendments applied across
     // provider versions.
-    let file_notes = rendered.notes;
-    let crossed: Vec<String> = rendered.crossed.into_iter().map(|(_, line)| line).collect();
     let mut notes = Vec::new();
 
     let reserved: Vec<RelativePath> = files
@@ -637,17 +579,7 @@ fn compose_with(
     if !reserved.is_empty() {
         problems.push(ComposeProblem::Reserved(reserved));
     }
-    let snapshot = Snapshot::new(
-        files
-            .iter()
-            .map(|(path, file)| {
-                (
-                    path.clone(),
-                    SnapshotFile::new(file.contents(), file.is_executable()),
-                )
-            })
-            .collect(),
-    );
+    let snapshot = snapshot_of(&files);
     let identity = snapshot.identity();
 
     // A project composed before: nothing to do when the composition is the
@@ -1074,6 +1006,161 @@ fn compose_with(
         consumer_conflicts,
         unit_conflicts,
     })
+}
+
+/// A composition planned from a declaration, before it is reconciled
+/// with the project.
+struct Planned {
+    resolved: Resolved,
+    /// What changed against the whole previous lock.
+    lock_changes: BTreeMap<UnitIdentity, LockChange>,
+    /// The files to deliver, a file left with sibling conflicts included.
+    files: BTreeMap<RelativePath, UnitFile>,
+    /// The files with a conflict between siblings, with its report.
+    unit_conflicts: Vec<(RelativePath, String)>,
+    /// What the merge reports about each file, its author's to act on.
+    notes: Vec<(RelativePath, String)>,
+    /// The amendments applied across provider versions.
+    crossed: Vec<String>,
+    /// Which units deliver each file.
+    origins: BTreeMap<RelativePath, Origin>,
+}
+
+/// Resolves `project` under `resolution_lock` against `index`, composes,
+/// and renders it. What changed is told against the whole of
+/// `previous_lock`, and a kept version must still be published with the
+/// content it was locked to, whatever lock the resolver was given. Every
+/// problem found is returned.
+fn plan(
+    project: &Project,
+    resolution_lock: &UnitLock,
+    previous_lock: &UnitLock,
+    index: &RegistryIndex,
+) -> Result<Planned, Vec<ComposeProblem>> {
+    let build = |found: Vec<BuildProblem>| -> Vec<ComposeProblem> {
+        found
+            .into_iter()
+            .map(|problem| ComposeProblem::Build(Box::new(problem)))
+            .collect()
+    };
+    let mut found = Vec::new();
+    let Some(resolved) = resolve_graph(
+        None,
+        project.dependencies(),
+        resolution_lock,
+        index,
+        &mut found,
+    ) else {
+        return Err(build(found));
+    };
+    let lock_changes = match update_lock(previous_lock, resolved.resolution.graph(), index) {
+        Ok((_, changes)) => changes,
+        Err(errors) => {
+            found.extend(errors.into_iter().map(BuildProblem::Lock));
+            return Err(build(found));
+        }
+    };
+    let (rendered, origins) = {
+        let units = resolved.units();
+        let composition = match compose(
+            resolved.resolution.graph(),
+            Root::Project,
+            &units,
+            project.options(),
+        ) {
+            Ok(composition) => composition,
+            Err(errors) => {
+                found.extend(errors.into_iter().map(BuildProblem::Composition));
+                return Err(build(found));
+            }
+        };
+        let origins = composition
+            .files()
+            .iter()
+            .map(|(path, file)| {
+                let amenders = file
+                    .amendments()
+                    .iter()
+                    .map(|amendment| amendment.amender().clone())
+                    .collect();
+                (path.clone(), Origin::new(file.unit().clone(), amenders))
+            })
+            .collect();
+        let rendered = render_files(
+            &composition,
+            &resolved.lock,
+            None,
+            &resolved.dependencies,
+            &mut found,
+        );
+        (rendered, origins)
+    };
+    let Some(rendered) = rendered.filter(|_| found.is_empty()) else {
+        return Err(build(found));
+    };
+    let mut files: BTreeMap<RelativePath, UnitFile> = rendered.files.into_iter().collect();
+    // A conflict between sibling amenders that no unit above both resolves
+    // is the consumer's to resolve (owner decision on #101): the file, each
+    // conflict between markers, is the composition's, so the markers reach
+    // the project like any incoming change and the composition waits.
+    let mut unit_conflicts: Vec<(RelativePath, String)> = Vec::new();
+    for unresolved in rendered.unresolved {
+        let report = unresolved.to_string();
+        files.insert(
+            unresolved.delivered.clone(),
+            UnitFile::new(unresolved.bytes, unresolved.executable),
+        );
+        unit_conflicts.push((unresolved.delivered, report));
+    }
+    Ok(Planned {
+        resolved,
+        lock_changes,
+        files,
+        unit_conflicts,
+        notes: rendered.notes,
+        crossed: rendered.crossed.into_iter().map(|(_, line)| line).collect(),
+        origins,
+    })
+}
+
+/// The snapshot of the composed `files`, whose identity is the base the
+/// composition materializes.
+fn snapshot_of(files: &BTreeMap<RelativePath, UnitFile>) -> Snapshot {
+    Snapshot::new(
+        files
+            .iter()
+            .map(|(path, file)| {
+                (
+                    path.clone(),
+                    SnapshotFile::new(file.contents(), file.is_executable()),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// The units that deliver a composed file: the one whose `src/` provides
+/// it, and the ones that amend it, in a fixed order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    unit: UnitIdentity,
+    amenders: Vec<UnitIdentity>,
+}
+
+impl Origin {
+    fn new(unit: UnitIdentity, amenders: Vec<UnitIdentity>) -> Self {
+        Self { unit, amenders }
+    }
+
+    /// The unit whose `src/` provides the file.
+    pub fn unit(&self) -> &UnitIdentity {
+        &self.unit
+    }
+
+    /// The units that amend it: the composition's requirer order.
+    pub fn amenders(&self) -> &[UnitIdentity] {
+        &self.amenders
+    }
 }
 
 /// A file of the project, as read for reconciliation.

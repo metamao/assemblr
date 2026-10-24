@@ -54,10 +54,11 @@ pub use manifest::{
 };
 pub use merge::{MergeFailure, MergeNote, Merged, ReconcileFailure, TextConflictReport};
 pub use project::{
-    ComposeFailure, ComposeProblem, ComposeRecovery, Composed, Continued, DECLARATION,
-    DeclarationChange, FileChange, FileConflict, FileConflictKind, InitProjectFailure,
-    ProjectInitialized, StoreError, WriteStep, abort_compose, add_unit, compose_project,
-    continue_compose, init_project, remove_unit, update_units,
+    ComposeFailure, ComposeProblem, ComposeRecovery, Composed, CompositionState, Continued,
+    DECLARATION, DeclarationChange, FileChange, FileConflict, FileConflictKind, FileEdit,
+    InitProjectFailure, MarkedFile, Origin, ProjectInitialized, ProjectStatus, StoreError,
+    UnitStatus, WriteStep, abort_compose, add_unit, compose_project, continue_compose,
+    init_project, project_status, remove_unit, update_units,
 };
 pub use registry::{
     Added, Found, Indexed, InfoFailure, Problem, ReferenceError, Registry, RegistryFailure,

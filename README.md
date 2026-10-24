@@ -89,6 +89,7 @@ assemblr init                        # create assemblr.jsonc and AGENTS.md here
 assemblr add @acme/web               # select the unit and compose the project
 assemblr add @acme/api --option port=8080   # set a parameter while adding
 assemblr update                      # move to the newest versions allowed
+assemblr status                      # see what is pending, edited, or published
 ```
 
 `assemblr info @acme/web` shows a unit's versions and parameters. When an

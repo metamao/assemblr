@@ -746,6 +746,35 @@ pub(crate) fn resolve_graph(
     })
 }
 
+/// The versions a resolution of `requirements` against `index` selects
+/// with no lock to prefer: the newest each requirement allows, as an
+/// update of every unit would lock them. Only the manifests are read, not
+/// the units' content.
+pub(crate) fn newest_allowed(
+    requirements: &crate::domain::Dependencies,
+    index: &crate::domain::RegistryIndex,
+) -> Result<BTreeMap<UnitIdentity, Version>, Vec<BuildProblem>> {
+    let dependencies = Dependencies::read_for(index, None, requirements)?;
+    let resolution = resolve(
+        None,
+        requirements,
+        &dependencies.available,
+        &BTreeMap::new(),
+    )
+    .map_err(|errors| {
+        errors
+            .into_iter()
+            .map(BuildProblem::Resolution)
+            .collect::<Vec<_>>()
+    })?;
+    Ok(resolution
+        .graph()
+        .units()
+        .iter()
+        .map(|(identity, unit)| (identity.clone(), unit.version().clone()))
+        .collect())
+}
+
 /// Runs every validation that gates a build on `inputs` (see
 /// `docs/domain/authoring-workflow.md`): development values, resolution
 /// under the lock against `index`, the lock's integrity, the amendment

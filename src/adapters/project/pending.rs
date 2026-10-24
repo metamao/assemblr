@@ -214,6 +214,17 @@ fn has_markers(bytes: &[u8]) -> bool {
         })
 }
 
+/// Whether `path`, a file a pending composition marked, still waits for
+/// the consumer: it holds conflict markers, or it is no longer a regular
+/// file. A removed file is resolved, as `--continue` takes it.
+pub(super) fn still_marked(root: &Path, path: &RelativePath) -> Result<bool, ComposeProblem> {
+    Ok(match read_resolution(root, path)? {
+        Resolution::Absent => false,
+        Resolution::Text(bytes) => has_markers(&bytes),
+        Resolution::Other => true,
+    })
+}
+
 /// Whether the lock records the journal's composition: it is written
 /// after every file, so the composition is then complete but for the
 /// journal's removal.
