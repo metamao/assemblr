@@ -384,18 +384,23 @@ marked and whether the file still holds markers, a removed file counting
 as resolved as `--continue` takes it; or an interrupted composition, which
 the next `compose` completes or reverts. A waiting composition is reported
 from the lock it keeps, so the versions are the ones `--continue` will
-lock. For a composed project, status also says whether composing now would
+lock; a declaration edited since the composition was planned, which
+`--continue` refuses, is reported with the way back. For a composed project
+whose stored base verifies, status also says whether composing now would
 change a file or the lock: the composition is planned exactly as `compose`
 plans it, from the declaration and the lock, so a declaration edit that
 changes nothing is not reported as one.
 
 **Units.** Every locked unit and every selection not locked yet, in
 identity order, with its locked version, the declaration's requirement for
-a selection, and the units whose versions require it. A locked unit that is
-neither selected nor required is no longer selected: the next composition
-retires it. Each locked unit also shows the version `assemblr update` would
-lock when it is another one, and the newest stable version the registry
-lists when it is newer than both, which the requirements do not allow. The
+a selection, and the units whose versions require it, which only a planned
+composition tells. A locked unit that is neither selected nor required is
+no longer selected: the next composition retires it. Each locked unit also
+shows the version `assemblr update` would lock when it is another one, and,
+when that update resolves, the newest stable version the registry lists
+when it is newer than both: one the project's requirement or the units that
+require it do not allow. Only for the project's own requirement does the
+text suggest the `add` that allows it. The
 versions are those of the local registry: `assemblr registry sync` fetches
 newer ones first.
 
@@ -423,10 +428,11 @@ text, with these members:
 
 - `state`: `"uncomposed"`, `"composed"`, `"pending"`, or `"interrupted"`;
 - `up_to_date`: whether composing would change nothing, for a composed
-  project whose composition can be planned, and `null` otherwise;
+  project whose base verifies and whose composition can be planned, and
+  `null` otherwise;
 - `units`: objects with `unit`, `version`, `requirement`, `required_by`
-  (an array of units), `update`, and `newest`, each version or requirement
-  a string or `null`;
+  (an array of units, or `null` when the composition cannot be planned),
+  `update`, and `newest`, each version or requirement a string or `null`;
 - `pending`: objects with `path` and `marked`, empty unless a composition
   waits;
 - `edited`: objects with `path` and `edit`;

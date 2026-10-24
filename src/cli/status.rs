@@ -109,7 +109,7 @@ fn report(status: &ProjectStatus, all_files: bool) {
                 None => println!("Composed from {units}."),
             }
         }
-        CompositionState::Pending(files) => {
+        CompositionState::Pending { files, .. } => {
             println!(
                 "A composition is waiting for you to resolve conflicts in {}:",
                 count(files.len(), "file", "files")
@@ -157,15 +157,26 @@ fn unit_line(unit: &UnitStatus) -> String {
     if let Some(version) = unit.version() {
         line.push_str(&format!(" {version}"));
     }
-    let required_by = (!unit.required_by().is_empty())
-        .then(|| format!("required by {}", join(unit.required_by())));
+    // Who requires a unit is known only from a planned composition; without
+    // one, a unit that is not selected is not said to be retired.
+    let required_by = unit
+        .required_by()
+        .filter(|units| !units.is_empty())
+        .map(|units| format!("required by {}", join(units)));
     let why = match (unit.requirement(), required_by) {
-        (Some(requirement), Some(required_by)) => format!("{requirement}; also {required_by}"),
-        (Some(requirement), None) => requirement.to_string(),
-        (None, Some(required_by)) => required_by,
-        (None, None) => "no longer selected".to_owned(),
+        (Some(requirement), Some(required_by)) => {
+            Some(format!("{requirement}; also {required_by}"))
+        }
+        (Some(requirement), None) => Some(requirement.to_string()),
+        (None, Some(required_by)) => Some(required_by),
+        (None, None) => unit
+            .required_by()
+            .is_some()
+            .then(|| "no longer selected".to_owned()),
     };
-    line.push_str(&format!(" ({why})"));
+    if let Some(why) = why {
+        line.push_str(&format!(" ({why})"));
+    }
     let mut beyond = Vec::new();
     if unit.version().is_none() {
         beyond.push("not composed yet".to_owned());
@@ -174,14 +185,17 @@ fn unit_line(unit: &UnitStatus) -> String {
         beyond.push(format!("update to {update} available"));
     }
     match (unit.newest(), unit.requirement()) {
-        // `add` replaces the requirement of a unit selected already.
-        (Some(newest), Some(requirement)) => beyond.push(format!(
-            "{newest} published, outside {requirement}; `assemblr add {}@^{newest}` allows it",
-            unit.identity()
-        )),
-        (Some(newest), None) => {
-            beyond.push(format!("{newest} published, outside the requirements"));
+        // `add` replaces the requirement of a unit selected already, which
+        // is what holds it back when that requirement rejects the version.
+        (Some(newest), Some(requirement)) if !requirement.matches(newest) => {
+            beyond.push(format!(
+                "{newest} published, outside {requirement}; `assemblr add {}@^{newest}` allows it",
+                unit.identity()
+            ));
         }
+        (Some(newest), _) => beyond.push(format!(
+            "{newest} published, outside what the units that require it allow"
+        )),
         (None, _) => {}
     }
     if !beyond.is_empty() {
@@ -215,13 +229,23 @@ fn join(units: &[UnitIdentity]) -> String {
 /// The one thing to do next, when there is one, most urgent first.
 fn next_step(status: &ProjectStatus) -> Option<String> {
     match status.state() {
-        CompositionState::Pending(files) => Some(if files.iter().any(|file| file.marked()) {
-            "resolve the conflict markers in the files marked above, then run `assemblr compose \
+        CompositionState::Pending {
+            declaration_changed: true,
+            ..
+        } => Some(
+            "put assemblr.jsonc back as the composition left it, then run `assemblr compose \
+             --continue`; `assemblr compose --abort` gives up the composition instead"
+                .to_owned(),
+        ),
+        CompositionState::Pending { files, .. } => {
+            Some(if files.iter().any(|file| file.marked()) {
+                "resolve the conflict markers in the files marked above, then run `assemblr compose \
              --continue`; `assemblr compose --abort` gives up the composition instead"
                 .to_owned()
-        } else {
-            "run `assemblr compose --continue` to finish the composition".to_owned()
-        }),
+            } else {
+                "run `assemblr compose --continue` to finish the composition".to_owned()
+            })
+        }
         CompositionState::Interrupted => Some(
             "run `assemblr compose`: it finishes or reverts the interrupted composition, then \
              composes"
@@ -245,7 +269,7 @@ fn status_json(status: &ProjectStatus) -> Value {
     let state = match status.state() {
         CompositionState::Uncomposed => "uncomposed",
         CompositionState::Composed => "composed",
-        CompositionState::Pending(_) => "pending",
+        CompositionState::Pending { .. } => "pending",
         CompositionState::Interrupted => "interrupted",
     };
     let names =
@@ -258,14 +282,14 @@ fn status_json(status: &ProjectStatus) -> Value {
                 "unit": unit.identity().to_string(),
                 "version": unit.version().map(ToString::to_string),
                 "requirement": unit.requirement().map(ToString::to_string),
-                "required_by": names(unit.required_by()),
+                "required_by": unit.required_by().map(names),
                 "update": unit.update().map(ToString::to_string),
                 "newest": unit.newest().map(ToString::to_string),
             })
         })
         .collect();
     let pending: Vec<Value> = match status.state() {
-        CompositionState::Pending(files) => files
+        CompositionState::Pending { files, .. } => files
             .iter()
             .map(|file| json!({ "path": file.path().as_str(), "marked": file.marked() }))
             .collect(),

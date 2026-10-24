@@ -22,7 +22,8 @@ use crate::adapters::build::{BuildProblem, newest_allowed};
 use crate::adapters::manifest::read_project;
 use crate::adapters::registry::Registry;
 use crate::domain::{
-    Current, ReconciliationState, RelativePath, Snapshot, UnitIdentity, Version, VersionRequirement,
+    BlobId, Current, ReconciliationState, RelativePath, Snapshot, UnitIdentity, Version,
+    VersionRequirement,
 };
 
 /// Reports on the consumer project at `root` against `registry`'s index.
@@ -97,7 +98,22 @@ pub fn project_status(root: &Path, registry: &Registry) -> Result<ProjectStatus,
                         }));
                     }
                 };
-                (CompositionState::Pending(files), effective)
+                // `--continue` refuses a declaration edited since the
+                // composition was planned.
+                let declaration_changed = pending
+                    .declaration
+                    .as_ref()
+                    .is_some_and(|planned| BlobId::of(declaration.as_bytes()) != *planned);
+                if declaration_changed {
+                    problems.push(ComposeProblem::DeclarationChanged);
+                }
+                (
+                    CompositionState::Pending {
+                        files,
+                        declaration_changed,
+                    },
+                    effective,
+                )
             }
         },
     };
@@ -137,38 +153,40 @@ pub fn project_status(root: &Path, registry: &Registry) -> Result<ProjectStatus,
     let updates = match (&project, &index, &planned) {
         (Some(project), Some(index), Some(_)) => {
             match newest_allowed(project.dependencies(), index) {
-                Ok(versions) => versions,
+                Ok(versions) => Some(versions),
                 Err(found) => {
                     problems.extend(
                         found
                             .into_iter()
                             .map(|problem| ComposeProblem::Build(Box::new(problem))),
                     );
-                    BTreeMap::new()
+                    None
                 }
             }
         }
-        _ => BTreeMap::new(),
+        _ => None,
     };
 
+    // The base is verified first, as `compose` does: one that does not
+    // verify leaves nothing to compare, and `compose` refuses to run.
+    let (edited, verified) = match (&state, &effective) {
+        (CompositionState::Composed, Some((_, reconciliation))) => {
+            match edits(root, &store, reconciliation) {
+                Ok(edited) => (edited, true),
+                Err(problem) => {
+                    problems.push(problem);
+                    (Vec::new(), false)
+                }
+            }
+        }
+        _ => (Vec::new(), false),
+    };
     let up_to_date = match (&state, &effective, &planned) {
-        (CompositionState::Composed, Some((_, reconciliation)), Some(planned)) => Some(
+        (CompositionState::Composed, Some((_, reconciliation)), Some(planned)) if verified => Some(
             snapshot_of(&planned.files).identity() == *reconciliation.base()
                 && planned.resolved.lock == lock,
         ),
         _ => None,
-    };
-    let edited = match (&state, &effective) {
-        (CompositionState::Composed, Some((_, reconciliation))) => {
-            match edits(root, &store, reconciliation) {
-                Ok(edited) => edited,
-                Err(problem) => {
-                    problems.push(problem);
-                    Vec::new()
-                }
-            }
-        }
-        _ => Vec::new(),
     };
 
     // The units: every locked one, and every selection not locked yet.
@@ -176,7 +194,7 @@ pub fn project_status(root: &Path, registry: &Registry) -> Result<ProjectStatus,
         .as_ref()
         .map(|project| project.dependencies().clone())
         .unwrap_or_default();
-    let required_by = planned.as_ref().map(dependents).unwrap_or_default();
+    let required_by = planned.as_ref().map(dependents);
     let identities: BTreeSet<&UnitIdentity> =
         lock.units().keys().chain(requirements.keys()).collect();
     let units = identities
@@ -186,23 +204,28 @@ pub fn project_status(root: &Path, registry: &Registry) -> Result<ProjectStatus,
                 .units()
                 .get(identity)
                 .map(|locked| locked.version().clone());
-            let update = updates
-                .get(identity)
+            let allowed = updates.as_ref().and_then(|updates| updates.get(identity));
+            let update = allowed
                 .filter(|_| version.is_some())
                 .filter(|allowed| Some(*allowed) != version.as_ref())
                 .cloned();
+            // A newer version is told only against what an update would
+            // lock, so only when the update could be resolved.
             let newest = index
                 .as_ref()
+                .filter(|_| updates.is_some())
                 .and_then(|index| newest_stable(index, identity))
                 .filter(|newest| {
                     version.as_ref().is_none_or(|version| newest > version)
-                        && updates.get(identity).is_none_or(|allowed| newest > allowed)
+                        && allowed.is_none_or(|allowed| newest > allowed)
                 });
             UnitStatus {
                 identity: identity.clone(),
                 version,
                 requirement: requirements.get(identity).cloned(),
-                required_by: required_by.get(identity).cloned().unwrap_or_default(),
+                required_by: required_by
+                    .as_ref()
+                    .map(|required_by| required_by.get(identity).cloned().unwrap_or_default()),
                 update,
                 newest,
             }
@@ -328,8 +351,13 @@ pub enum CompositionState {
     /// The last composition completed.
     Composed,
     /// A composition is written except for its lock, which waits for the
-    /// consumer to resolve the conflicts marked in these files.
-    Pending(Vec<MarkedFile>),
+    /// consumer to resolve the conflicts marked in `files`.
+    Pending {
+        files: Vec<MarkedFile>,
+        /// Whether `assemblr.jsonc` changed since the composition was
+        /// planned, which keeps `compose --continue` from finishing it.
+        declaration_changed: bool,
+    },
     /// A composition was interrupted; the next one completes or reverts it.
     Interrupted,
 }
@@ -385,7 +413,7 @@ pub struct UnitStatus {
     identity: UnitIdentity,
     version: Option<Version>,
     requirement: Option<VersionRequirement>,
-    required_by: Vec<UnitIdentity>,
+    required_by: Option<Vec<UnitIdentity>>,
     update: Option<Version>,
     newest: Option<Version>,
 }
@@ -406,9 +434,10 @@ impl UnitStatus {
         self.requirement.as_ref()
     }
 
-    /// The units whose locked versions require it, in identity order.
-    pub fn required_by(&self) -> &[UnitIdentity] {
-        &self.required_by
+    /// The units whose locked versions require it, in identity order, or
+    /// `None` when the composition cannot be planned, which tells them.
+    pub fn required_by(&self) -> Option<&[UnitIdentity]> {
+        self.required_by.as_deref()
     }
 
     /// The version `assemblr update` would lock, when it is another one.
@@ -417,8 +446,9 @@ impl UnitStatus {
     }
 
     /// The newest stable version the registry lists, when it is newer than
-    /// both the locked version and the update: one the requirements do not
-    /// allow.
+    /// both the locked version and the update: one the requirements, the
+    /// project's or the units', do not allow. `None` also when the update
+    /// cannot be resolved.
     pub fn newest(&self) -> Option<&Version> {
         self.newest.as_ref()
     }

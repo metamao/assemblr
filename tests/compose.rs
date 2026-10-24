@@ -3145,14 +3145,27 @@ fn status_reports_a_project_without_changing_it() {
     let out = stdout(&succeeds(status(&fixture, &project, &[])));
     assert!(
         out.contains(
-            "  @acme/node 1.0.0 (required by @acme/web): 1.1.0 published, outside the \
-             requirements"
+            "  @acme/node 1.0.0 (required by @acme/web): 1.1.0 published, outside what the \
+             units that require it allow"
         ),
         "{out}"
     );
     let json = status_json(&fixture, &project);
     assert_eq!(json["units"][0]["update"], Value::Null);
     assert_eq!(json["units"][0]["newest"], "1.1.0");
+
+    // A selection whose own requirement allows the version is held back by
+    // the unit that requires it, which `add` cannot change.
+    declare(&project, &[("@acme/web", "^1"), ("@acme/node", "^1")], "");
+    let out = stdout(&succeeds(status(&fixture, &project, &[])));
+    assert!(
+        out.contains(
+            "  @acme/node 1.0.0 (^1; also required by @acme/web): 1.1.0 published, outside \
+             what the units that require it allow"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("assemblr add"), "{out}");
 
     // A declaration edited without changing the composition is not a
     // reason to compose; one that changes it is.
@@ -3217,6 +3230,22 @@ fn status_reports_a_pending_composition_and_what_is_left_to_resolve() {
     assert_eq!(tree(&project), waiting);
 
     fs::write(project.join("README.md"), "mine and node v2\n").unwrap();
+    // `--continue` refuses a declaration edited since, so status does not
+    // send the consumer there.
+    let planned = declaration(&project);
+    fs::write(project.join("assemblr.jsonc"), format!("{planned}\n")).unwrap();
+    let output = succeeds(status(&fixture, &project, &[]));
+    assert!(
+        stdout(&output).contains("Next: put assemblr.jsonc back as the composition left it"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains("warning: assemblr.jsonc changed"),
+        "{}",
+        stderr(&output)
+    );
+    fs::write(project.join("assemblr.jsonc"), planned).unwrap();
     let out = stdout(&succeeds(status(&fixture, &project, &[])));
     assert!(out.contains("  README.md: resolved"), "{out}");
     assert!(
@@ -3289,5 +3318,38 @@ fn status_reports_what_keeps_a_composition_from_being_planned() {
     let json = status_json(&fixture, &project);
     assert_eq!(json["up_to_date"], Value::Null);
     assert_eq!(json["files"], Value::Null);
+    assert_eq!(json["units"][1]["required_by"], Value::Null);
+    assert_eq!(json["units"][1]["newest"], Value::Null);
     assert!(json["problems"][0].as_str().unwrap().contains("@acme/db"));
+
+    // Without a declaration to read, no unit is said to be retired.
+    fs::write(project.join("assemblr.jsonc"), "{").unwrap();
+    let output = succeeds(status(&fixture, &project, &[]));
+    let out = stdout(&output);
+    assert!(out.contains("  @acme/node 1.0.0\n"), "{out}");
+    assert!(!out.contains("no longer selected"), "{out}");
+    assert!(stderr(&output).contains("warning:"), "{}", stderr(&output));
+}
+
+/// A stored base that does not verify makes `compose` refuse, so status
+/// does not say it has nothing to do.
+#[test]
+fn status_does_not_call_a_project_with_a_missing_base_up_to_date() {
+    let fixture = Fixture::new("status-base");
+    registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/node", "^1")], "");
+    succeeds(fixture.compose(&project));
+    fs::remove_dir_all(project.join(".assemblr/objects")).unwrap();
+
+    let output = succeeds(status(&fixture, &project, &[]));
+    let out = stdout(&output);
+    assert!(out.contains("Composed from 1 unit.\n"), "{out}");
+    assert!(!out.contains("nothing to do"), "{out}");
+    assert!(
+        stderr(&output).contains("restore .assemblr/ from version control"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(status_json(&fixture, &project)["up_to_date"], Value::Null);
+    fails(fixture.compose(&project));
 }
