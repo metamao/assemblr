@@ -756,6 +756,7 @@ mod tests {
             requirements(range),
             BTreeMap::new(),
             BTreeMap::new(),
+            BTreeMap::new(),
             BTreeMap::from([(
                 "node.txt".parse().unwrap(),
                 AmendmentDeclaration::new(identity("@acme/node"), version(base)),
@@ -870,6 +871,7 @@ mod tests {
             version("0.1.0"),
             Description::new("An app.").unwrap(),
             requirements("^1"),
+            BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
             amendments,

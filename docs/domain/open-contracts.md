@@ -194,16 +194,20 @@ How the status of a statement affects implementation:
   byte for byte; the suffix is a rendering switch, not a file class, and an
   amendment copy keeps the provider's path, so it inherits the outcome. The
   grammar is `{{ name }}` references, `{{ own.name }}`, and the escape `{{
-  "{{" }}`, a subset of Jinja's; every other construct opening with `{{`,
-  `{%`, or `{#` is an error, never passed through. Strings render raw,
-  integers in decimal, and booleans as `true` or `false`, with no quoting or
-  format-specific escaping; inserted text is never rendered again; text
+  "{{" }}`, a subset of Jinja's, and a reference may go through one of the
+  filters `tojson` and `e`, with Jinja's output (owner decision of
+  2026-10-25, [#120](https://github.com/metamao/assemblr/issues/120)); every
+  other construct opening with `{{`, `{%`, or `{#` is an error, never passed
+  through. Without a filter, strings render raw, integers in decimal, and
+  booleans as `true` or `false`, with no quoting or format-specific
+  escaping; inserted text is never rendered again; text
   outside references is copied byte for byte. A template must be UTF-8.
   Rendering errors are collected across files, ordered by delivered path and
   position, with file, line, and column, and they gate `unit build`. Originals
   and amendments are rendered against compatible base contexts.
-- **Open detail:** Whether constructs beyond references, such as conditional
-  content or filters, are ever supported, and with which engine; if
+- **Open detail:** Whether constructs beyond references and the two
+  filters, such as conditional content or other filters, are ever
+  supported, and with which engine; if
   conditional content is added, it must not silently discard changes.
 - **Origin:** Owner
 - **Context:** [rendering](parameters-and-options.md#rendering--approved),
@@ -735,7 +739,9 @@ How the status of a statement affects implementation:
   its role, in the first `compose` and in a reconciliation alike. Owner
   decision of 2026-10-23
   ([#113](https://github.com/metamao/assemblr/issues/113)), which replaces
-  D-10 and D-13 for such a file.
+  D-10 and D-13 for such a file. The `AGENTS.md` that `init` wrote, still
+  unchanged, is Assemblr's and is replaced by a unit's instead (owner
+  decision of 2026-10-25, [#120](https://github.com/metamao/assemblr/issues/120)).
 - **Open detail:** What a composition does with such a path when what it
   holds cannot carry conflict markers: content that is not UTF-8 text, a
   directory, or a symbolic link. **Provisional (D-10)**: it is refused before
@@ -800,6 +806,22 @@ How the status of a statement affects implementation:
   conflicts is not offered for units; revisit with evidence.
 - **Origin:** Foundation
 - **Context:** [update](authoring-workflow.md#update--approved)
+
+### OC-54
+
+- **Approved (normative):** A unit may declare a parameter as **inherited**
+  from a direct dependency, `"name": { "from": "<dependency>" }` in
+  `params`, instead of copying the dependency's definition: it takes the
+  definition of the dependency's parameter of the same name and passes its
+  value on to it. Decided by the owner on
+  [#120](https://github.com/metamao/assemblr/issues/120) (2026-10-25).
+- **Open detail:** **Provisional (D-49):** the definition is the one of the
+  dependency's version composed, followed through dependencies that inherit
+  it in turn; `options` may not also set that parameter of the dependency;
+  `info` names the dependency rather than a definition; `unit add` declares
+  a required parameter it cannot map as inherited instead of copying it.
+- **Origin:** #120
+- **Context:** [declaration](parameters-and-options.md#declaration--approved)
 
 ## Resolved contracts
 

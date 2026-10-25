@@ -91,6 +91,14 @@ pub(crate) fn catalog_agents(identity: &CatalogIdentity) -> String {
     )
 }
 
+/// Whether `bytes` are an `AGENTS.md` that some version of `assemblr init`
+/// wrote, which a composition may replace. Only one text exists so far;
+/// when `PROJECT_AGENTS` changes, the earlier text must still be accepted
+/// here, or projects initialized before the change lose that guarantee.
+pub(crate) fn is_project_agents(bytes: &[u8]) -> bool {
+    bytes == PROJECT_AGENTS.as_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{PROJECT_AGENTS, catalog_agents, unit_agents};

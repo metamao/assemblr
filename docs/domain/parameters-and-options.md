@@ -37,10 +37,24 @@ Each parameter has:
 - a **type**;
 - a **human-readable description**, which is required;
 - an optional **default**;
-- **allowed values**, optional, for constrained strings.
+- **allowed values**, optional, for constrained strings;
+- a **pattern**, optional, for strings: a regular expression every value
+  must match, with JSON Schema's meaning (owner decision of 2026-10-25,
+  [#120](https://github.com/metamao/assemblr/issues/120)).
 
-Values supplied for a parameter, and its default, are validated against its
-type and allowed values.
+Values supplied for a parameter, its default, and its example are validated
+against its type, its allowed values, and its pattern.
+
+A parameter may instead be **inherited** from a direct dependency,
+`"name": { "from": "<dependency>" }`: it has the definition of that
+dependency's parameter of the same name, and its value is passed on to that
+parameter as a mapping would pass it, so a unit re-exposes a dependency's
+parameter without copying its type, description, allowed values, pattern,
+default, or example (owner decision of 2026-10-25,
+[#120](https://github.com/metamao/assemblr/issues/120); **OC-54**). The
+definition is the one of the dependency's version composed, followed through
+a dependency that inherits it in turn, and `options` may not also set that
+parameter of the dependency (**Provisional (D-49)**).
 
 The name `own` is **reserved** for the amending author's template context
 (see
@@ -124,9 +138,12 @@ as open are not.
   an undefined reference.
 - **Syntax.** A reference is `{{ name }}`, naming a parameter of the unit,
   with ASCII whitespace allowed inside the braces. `{{ own.name }}` names
-  the amending author's context. The escape `{{ "{{" }}` produces a literal
-  `{{`. That is the whole grammar: there is no control flow, no filter, no
-  expression, no include, and no other literal. Any other construct that
+  the amending author's context. A reference may go through one
+  **filter**, `{{ name | tojson }}` or `{{ name | e }}` (see below). The
+  escape `{{ "{{" }}` produces a literal `{{`. That is the whole grammar:
+  there is no control flow, no other filter, no chain of filters, no
+  expression, no include, and no other literal. A filter that does not
+  exist is a rendering error that names the two that do. Any other construct that
   opens with `{{`, `{%`, or `{#`, and any opener that is never closed, is a
   **rendering error**; nothing is passed through. A `}}` on its own is
   ordinary text. The grammar is a subset of Jinja's, so a richer engine
@@ -136,10 +153,22 @@ as open are not.
   renders as empty text.
 - **Values render as text**: a string, including an enumerated string, as
   its characters, unchanged; an integer in decimal; a boolean as `true` or
-  `false`. Rendering does **no** quoting and no format-specific escaping,
-  for JSON, YAML, HTML, shell, or any other format. The template author
-  writes the quotes, and a value containing quotes, newlines, or `{{` is
-  inserted as it is. Inserted text is never rendered again.
+  `false`. Without a filter, rendering does **no** quoting and no
+  format-specific escaping: the template author writes the quotes, and a
+  value containing quotes, newlines, or `{{` is inserted as it is. Inserted
+  text is never rendered again.
+- **Filters** write a string for the format of the file it goes into, with
+  exactly the output of Jinja's filters of the same names, so the grammar
+  stays a subset of Jinja's. `tojson` writes a JSON string literal, quotes
+  included, with every character outside printable ASCII and each of `<`,
+  `>`, `&`, and `'` as a `\u` escape: valid in JSON, JavaScript,
+  TypeScript, and YAML. `e` escapes `&`, `<`, `>`, `"`, and `'` as HTML
+  and XML character references. An integer renders in decimal and a
+  boolean as `true` or `false` through either filter. There is no escaping
+  for shells or other formats. Owner decision of 2026-10-25
+  ([#120](https://github.com/metamao/assemblr/issues/120)). One filter per
+  reference, and a boolean's `true` through `e` where Jinja writes `True`,
+  are **Provisional (D-47)**.
 - Outside its references a template is copied **byte for byte**: line
   endings, and a trailing newline or its absence, are preserved.
 - A template must be **UTF-8 text**; one that is not is a rendering error.
@@ -154,8 +183,9 @@ as open are not.
 
 Open:
 
-- Whether constructs beyond references, such as conditional content or
-  filters, are ever supported, and with which engine. If conditional content
+- Whether constructs beyond references and the two filters, such as
+  conditional content or other filters, are ever supported, and with which
+  engine. If conditional content
   is ever added, it must not **silently discard intended changes**: research
   found that changes hidden by disabled template conditions can disappear
   silently (see
@@ -195,8 +225,8 @@ Here the unit requires its `@metamao/node` dependency to be configured with
   any other identity, is an error.
 - Options may only configure parameters that the dependency **exposes** in its
   `params`. Configuring an undeclared parameter is an error.
-- Option values are validated against the dependency parameter's type and
-  allowed values.
+- Option values are validated against the dependency parameter's type,
+  allowed values, and pattern.
 - Two **identical** explicit requirements on the same dependency parameter are
   compatible.
 - **Incompatible** explicit requirements produce an **options conflict**, which
@@ -222,7 +252,8 @@ its direct dependencies**. It does so through:
 
 Rules:
 
-- A mapping may reference only parameters the unit declares in its `params`.
+- A mapping may reference only parameters the unit declares in its `params`,
+  defined or inherited.
   Assemblr validates that each referenced parameter exists, and that its type
   and allowed values are compatible with the dependency parameter it
   configures.

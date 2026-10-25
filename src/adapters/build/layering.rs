@@ -939,10 +939,16 @@ impl<'c, 'a> Worlds<'c, 'a> {
                 .map(parameters_referenced)
                 .unwrap_or_default(),
         );
+        // An inherited parameter takes its definition from the composed
+        // version of the unit it names, at either version of the provider.
+        let composed = |identity: &UnitIdentity| {
+            let locked = self.lock.units().get(identity)?;
+            self.dependencies.manifest(identity, locked.version())
+        };
         let at = |version: &Version| {
             self.dependencies
                 .manifest(provider, version)
-                .map(|manifest| manifest.params())
+                .map(|manifest| manifest.resolved_params(composed).0)
         };
         let (then, now) = (at(base)?, resolved.and_then(at)?);
         for name in referenced {
@@ -951,11 +957,11 @@ impl<'c, 'a> Worlds<'c, 'a> {
                     .get(&name)
                     .map(|definition| definition.parameter_type().value_kind())
             };
-            if kind(now).is_none() || kind(then) != kind(now) {
+            if kind(&now).is_none() || kind(&then) != kind(&now) {
                 return Some(CrossVersionReason::Parameter {
                     name: name.clone(),
-                    base: kind(then),
-                    resolved: kind(now),
+                    base: kind(&then),
+                    resolved: kind(&now),
                 });
             }
         }

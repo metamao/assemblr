@@ -37,7 +37,8 @@ pub use lock::{
     UnitLock, amendment_bases, published_amendments, relock, verify_bases,
 };
 pub use manifest::{
-    AmendmentDeclaration, Manifest, ManifestError, OptionValue, OptionValues, UnitOptionValues,
+    AmendmentDeclaration, InheritanceError, Manifest, ManifestError, OptionValue, OptionValues,
+    UnitOptionValues,
 };
 pub use merge::{
     Combined, Conflict, ConflictKind, Derived, Edit, Lists, MergeFormat, Operation, Plan, Value,
@@ -46,7 +47,7 @@ pub use merge::{
 pub use parameter::{
     AllowedValues, AllowedValuesError, BlankDescription, Description, OWN, ParameterDefinition,
     ParameterName, ParameterNameError, ParameterNameErrorReason, ParameterType, ParameterValue,
-    ParameterValueError, ValueKind,
+    ParameterValueError, PatternError, PatternProblem, ValueKind, ValuePattern,
 };
 pub use path::{RelativePath, RelativePathError, RelativePathErrorReason};
 pub use project::{Project, ReconciliationState};
@@ -72,4 +73,4 @@ pub use text_merge::{
 pub use update::{ReconcileCause, ReconcileError, update_lock};
 pub use version::{RequirementError, Version, VersionError, VersionRequirement};
 
-pub(crate) use manifest::relation_errors;
+pub(crate) use manifest::{inheritance_errors, relation_errors};

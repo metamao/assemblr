@@ -241,7 +241,7 @@ pub fn amend_unit(
     // amendments are no part of it, and are left out of the composition:
     // one of them may be a copy an interrupted run left undeclared, or one
     // with conflict markers the author has not resolved yet.
-    let (development, _) = development_values(&manifest);
+    let (development, _) = development_values(&manifest, Some(&resolved));
     let units = resolved.units();
     let bare = without_amendments(&manifest);
     let no_copies = crate::domain::FileTree::new();

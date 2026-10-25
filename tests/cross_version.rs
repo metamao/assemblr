@@ -202,8 +202,8 @@ fn api_package() -> String {
 fn project(fixture: &Fixture, name: &str, declaration: &str) -> PathBuf {
     succeed(&fixture.assemblr(&fixture.dir, &["init", name]));
     let project = fixture.dir.join(name);
-    // The units deliver their own AGENTS.md; the one `init` writes, which
-    // would be a conflict to resolve first, is covered in tests/compose.rs.
+    // The units deliver their own AGENTS.md; how it replaces the one `init`
+    // writes is covered in tests/compose.rs.
     fs::remove_file(project.join("AGENTS.md")).unwrap();
     git(&project, &["init", "-q"]);
     fs::write(project.join("assemblr.jsonc"), declaration).unwrap();

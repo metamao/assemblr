@@ -11,9 +11,9 @@ use super::jsonc::{self, Json, SyntaxError};
 use crate::domain::{
     self, AllowedValues, AllowedValuesError, AmendmentDeclaration, BlankDescription, Description,
     IdentityError, Manifest, ManifestError, OptionValue, OptionValues, ParameterDefinition,
-    ParameterName, ParameterNameError, ParameterType, ParameterValue, ParameterValueError, Project,
-    RelativePath, RelativePathError, RequirementError, UnitIdentity, UnitOptionValues, Version,
-    VersionError, VersionRequirement,
+    ParameterName, ParameterNameError, ParameterType, ParameterValue, ParameterValueError,
+    PatternError, PatternProblem, Project, RelativePath, RelativePathError, RequirementError,
+    UnitIdentity, UnitOptionValues, ValuePattern, Version, VersionError, VersionRequirement,
 };
 
 pub(crate) const MANIFEST_FIELDS: &[&str] = &[
@@ -27,8 +27,16 @@ pub(crate) const MANIFEST_FIELDS: &[&str] = &[
     "amendments",
 ];
 const PROJECT_FIELDS: &[&str] = &["$schema", "dependencies", "options"];
-const PARAMETER_FIELDS: &[&str] = &["type", "description", "default", "allowed", "example"];
+const PARAMETER_FIELDS: &[&str] = &[
+    "type",
+    "description",
+    "default",
+    "allowed",
+    "pattern",
+    "example",
+];
 const MAPPING_FIELDS: &[&str] = &["from"];
+const INHERITED_FIELDS: &[&str] = &["from"];
 const AMENDMENT_FIELDS: &[&str] = &["unit", "base"];
 const SCALAR: &[JsonKind] = &[JsonKind::String, JsonKind::Integer, JsonKind::Boolean];
 
@@ -260,6 +268,10 @@ pub enum IssueKind {
     AllowedValuesRequireString,
     /// The `allowed` list is invalid.
     InvalidAllowedValues(AllowedValuesError),
+    /// `pattern` is declared for a parameter that is not a string.
+    PatternRequiresString,
+    /// The `pattern` is not a valid regular expression.
+    InvalidPattern(PatternError),
     /// The default does not satisfy the parameter's type.
     InvalidDefault(ParameterValueError),
     /// The example does not satisfy the parameter's type.
@@ -316,6 +328,10 @@ impl fmt::Display for IssueKind {
                 f.write_str("allowed values are only supported for parameters of type \"string\"")
             }
             Self::InvalidAllowedValues(error) => error.fmt(f),
+            Self::PatternRequiresString => {
+                f.write_str("a pattern is only supported for parameters of type \"string\"")
+            }
+            Self::InvalidPattern(error) => error.fmt(f),
             Self::InvalidDefault(error) => write!(f, "invalid default: {error}"),
             Self::InvalidExample(error) => write!(f, "invalid example: {error}"),
             Self::MappingInConsumer => f.write_str(
@@ -605,9 +621,9 @@ impl Reader {
         let options = fields.get("options").map_or_else(BTreeMap::new, |json| {
             self.options(&root.key("options"), json, true)
         });
-        let params = fields
-            .get("params")
-            .map_or_else(BTreeMap::new, |json| self.params(&root.key("params"), json));
+        let (params, inherited) = fields.get("params").map_or_else(Default::default, |json| {
+            self.params(&root.key("params"), json)
+        });
         let amendments = fields.get("amendments").map_or_else(BTreeMap::new, |json| {
             self.amendments(&root.key("amendments"), json)
         });
@@ -619,7 +635,7 @@ impl Reader {
         for (target, values) in &options {
             for (parameter, value) in values {
                 if let OptionValue::From(source) = value {
-                    if !params.contains_key(source) {
+                    if !params.contains_key(source) && !inherited.contains_key(source) {
                         self.inconsistent(ManifestError::UndeclaredMappingSource {
                             target: target.clone(),
                             parameter: parameter.clone(),
@@ -633,9 +649,14 @@ impl Reader {
         {
             self.inconsistent(error);
         }
+        for error in domain::inheritance_errors(&dependencies.declared, &options, &inherited) {
+            self.inconsistent(error);
+        }
 
-        // `relation_errors` has already reported every inconsistency that
-        // `Manifest::new` could find, so its errors carry nothing new.
+        // `relation_errors` and `inheritance_errors` have already reported
+        // every inconsistency that `Manifest::new` could find, so its errors
+        // carry nothing new. A name is one key of `params`, so it is never
+        // both defined and inherited.
         Manifest::new(
             name?,
             version?,
@@ -643,6 +664,7 @@ impl Reader {
             dependencies.requirements,
             options,
             params,
+            inherited,
             amendments,
         )
         .ok()
@@ -696,6 +718,15 @@ impl Reader {
                 .key(&target.to_string())
                 .key(parameter.as_str())
                 .key("from"),
+            ManifestError::UndeclaredInheritance { parameter, .. }
+            | ManifestError::DeclaredTwice(parameter) => FieldPath::default()
+                .key("params")
+                .key(parameter.as_str())
+                .key("from"),
+            ManifestError::InheritedOption { parameter, unit } => FieldPath::default()
+                .key("options")
+                .key(&unit.to_string())
+                .key(parameter.as_str()),
         };
         self.report(path, IssueKind::Inconsistent(error));
     }
@@ -877,24 +908,41 @@ impl Reader {
             .map(OptionValue::From)
     }
 
+    /// The parameters a unit defines, and those it inherits: an object
+    /// with a `from` member is an inherited declaration, which has no other
+    /// member.
     fn params(
         &mut self,
         path: &FieldPath,
         json: &Json,
-    ) -> BTreeMap<ParameterName, ParameterDefinition> {
+    ) -> (
+        BTreeMap<ParameterName, ParameterDefinition>,
+        BTreeMap<ParameterName, UnitIdentity>,
+    ) {
+        let (mut params, mut inherited) = (BTreeMap::new(), BTreeMap::new());
         let Some(members) = self.object(path, json) else {
-            return BTreeMap::new();
+            return (params, inherited);
         };
-        let mut params = BTreeMap::new();
         for (key, value) in members {
             let path = path.key(key);
             let name = self.parameter_name_key(&path, key);
+            if matches!(value, Json::Object(entries) if entries.iter().any(|(key, _)| key == "from"))
+            {
+                let from = self
+                    .fields(&path, value, INHERITED_FIELDS)
+                    .and_then(|fields| self.required(&path, &fields, "from"))
+                    .and_then(|json| self.identity(&path.key("from"), json));
+                if let (Some(name), Some(from)) = (name, from) {
+                    inherited.insert(name, from);
+                }
+                continue;
+            }
             let definition = self.parameter(&path, value);
             if let (Some(name), Some(definition)) = (name, definition) {
                 params.insert(name, definition);
             }
         }
-        params
+        (params, inherited)
     }
 
     fn parameter(&mut self, path: &FieldPath, json: &Json) -> Option<ParameterDefinition> {
@@ -933,10 +981,43 @@ impl Reader {
             self.report(path.key("example"), IssueKind::InvalidExample(error));
             return None;
         }
+        let pattern = match fields.get("pattern") {
+            None => None,
+            Some(json) => {
+                let path = path.key("pattern");
+                let source = self.string(&path, json)?;
+                match ValuePattern::new(source) {
+                    Ok(pattern) => Some((path, pattern)),
+                    Err(error) => {
+                        self.report(path, IssueKind::InvalidPattern(error));
+                        return None;
+                    }
+                }
+            }
+        };
         let definition = ParameterDefinition::new(parameter_type, description?, default).ok()?;
-        match example {
-            Some(example) => definition.with_example(example).ok(),
-            None => Some(definition),
+        let definition = match example {
+            Some(example) => definition.with_example(example).ok()?,
+            None => definition,
+        };
+        let Some((pattern_path, pattern)) = pattern else {
+            return Some(definition);
+        };
+        match definition.with_pattern(pattern) {
+            Ok(definition) => Some(definition),
+            Err(problem) => {
+                let (at, kind) = match problem {
+                    PatternProblem::NotAString => (pattern_path, IssueKind::PatternRequiresString),
+                    PatternProblem::Default(error) => {
+                        (path.key("default"), IssueKind::InvalidDefault(error))
+                    }
+                    PatternProblem::Example(error) => {
+                        (path.key("example"), IssueKind::InvalidExample(error))
+                    }
+                };
+                self.report(at, kind);
+                None
+            }
         }
     }
 
@@ -1418,6 +1499,118 @@ mod tests {
         assert_eq!(
             issues[3].1.to_string(),
             "expected a string, an integer, or a boolean, found an array"
+        );
+    }
+
+    #[test]
+    fn a_pattern_is_a_valid_expression_on_a_string_that_its_values_match() {
+        let text = with(
+            r#""params": {
+                 "slug": {"type": "string", "description": "A.", "pattern": "^[a-z-]+$", "example": "my-app"},
+                 "badPattern": {"type": "string", "description": "A.", "pattern": "[a-"},
+                 "unicodeClass": {"type": "string", "description": "A.", "pattern": "\\p{L}"},
+                 "onInteger": {"type": "integer", "description": "A.", "pattern": "^1"},
+                 "badDefault": {"type": "string", "description": "A.", "pattern": "^a", "default": "b"},
+                 "badExample": {"type": "string", "description": "A.", "pattern": "^a", "example": "b"}
+               }"#,
+        );
+        let issues = issues(&text);
+        let found: Vec<(&str, String)> = issues
+            .iter()
+            .map(|(path, kind)| (path.as_str(), kind.to_string()))
+            .collect();
+        assert_eq!(found.len(), 5, "{found:#?}");
+        assert_eq!(
+            found[0],
+            (
+                "params.badDefault.default",
+                "invalid default: \"b\" does not match the pattern `^a`".to_owned()
+            )
+        );
+        assert_eq!(
+            found[1],
+            (
+                "params.badExample.example",
+                "invalid example: \"b\" does not match the pattern `^a`".to_owned()
+            )
+        );
+        assert_eq!(found[2].0, "params.badPattern.pattern");
+        assert!(found[2].1.starts_with("invalid pattern: "), "{found:#?}");
+        assert_eq!(
+            found[3],
+            (
+                "params.onInteger.pattern",
+                "a pattern is only supported for parameters of type \"string\"".to_owned()
+            )
+        );
+        assert_eq!(found[4].0, "params.unicodeClass.pattern");
+
+        let manifest = read_manifest(&with(
+            r#""params": {"slug": {"type": "string", "description": "A.", "pattern": "^[a-z-]+$", "example": "my-app"}}"#,
+        ))
+        .unwrap();
+        let slug = &manifest.params()[&ParameterName::parse("slug").unwrap()];
+        assert_eq!(slug.pattern().unwrap().as_str(), "^[a-z-]+$");
+    }
+
+    #[test]
+    fn an_inherited_parameter_names_a_direct_dependency_and_nothing_else() {
+        let manifest = read_manifest(&with(
+            r#""dependencies": {"@metamao/base": "^1"},
+               "params": {"title": {"from": "@metamao/base"}},
+               "options": {"@metamao/other": {}}"#,
+        ));
+        // `options` may not target an undeclared unit; the rest is valid.
+        assert!(manifest.is_err());
+        let manifest = read_manifest(&with(
+            r#""dependencies": {"@metamao/base": "^1", "@metamao/other": "^1"},
+               "params": {"title": {"from": "@metamao/base"}},
+               "options": {"@metamao/other": {"label": {"from": "title"}}}"#,
+        ))
+        .unwrap();
+        assert!(manifest.params().is_empty());
+        assert_eq!(
+            manifest.inherited()[&ParameterName::parse("title").unwrap()],
+            identity("@metamao/base")
+        );
+
+        let text = with(
+            r#""dependencies": {"@metamao/base": "^1"},
+               "params": {
+                 "title": {"from": "@metamao/base", "type": "string"},
+                 "notADependency": {"from": "@metamao/other"},
+                 "badIdentity": {"from": "base"},
+                 "alsoSet": {"from": "@metamao/base"}
+               },
+               "options": {"@metamao/base": {"alsoSet": "x"}}"#,
+        );
+        let issues = issues(&text);
+        let found: Vec<(&str, String)> = issues
+            .iter()
+            .map(|(path, kind)| (path.as_str(), kind.to_string()))
+            .collect();
+        assert_eq!(found.len(), 4, "{found:#?}");
+        assert_eq!(found[0].0, "options[\"@metamao/base\"].alsoSet");
+        assert!(
+            found[0]
+                .1
+                .contains("already passes its value to @metamao/base"),
+            "{found:#?}"
+        );
+        assert_eq!(found[1].0, "params.badIdentity.from");
+        assert_eq!(found[2].0, "params.notADependency.from");
+        assert!(
+            found[2]
+                .1
+                .contains("inherited only from a direct dependency"),
+            "{found:#?}"
+        );
+        assert_eq!(
+            found[3],
+            (
+                "params.title.type",
+                "unknown field; the fields here are `from`".to_owned()
+            )
         );
     }
 

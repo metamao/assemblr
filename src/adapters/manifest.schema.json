@@ -52,7 +52,12 @@
       "type": "object",
       "description": "The unit's public configuration parameters, by name.",
       "propertyNames": { "$ref": "#/definitions/parameterName" },
-      "additionalProperties": { "$ref": "#/definitions/parameter" }
+      "additionalProperties": {
+        "oneOf": [
+          { "$ref": "#/definitions/parameter" },
+          { "$ref": "#/definitions/inheritedParameter" }
+        ]
+      }
     },
     "amendments": {
       "type": "object",
@@ -114,23 +119,54 @@
           "minItems": 1,
           "uniqueItems": true,
           "description": "The values a string parameter accepts, which makes it an enumerated string. Only with `\"type\": \"string\"`."
+        },
+        "pattern": {
+          "type": "string",
+          "description": "A regular expression every value must match somewhere, as in JSON Schema: anchor it with ^ and $. \\d, \\w, and \\s are ASCII classes, and Unicode classes such as \\p{L} are not supported. Checked for the default, the example, and every value a unit or a project supplies. Only with `\"type\": \"string\"`."
         }
       },
       "allOf": [
         {
           "if": { "properties": { "type": { "const": "string" } } },
-          "then": { "properties": { "default": { "type": "string" }, "example": { "type": "string" } } },
-          "else": { "properties": { "allowed": false } }
+          "then": {
+            "properties": {
+              "default": { "type": "string" },
+              "example": { "type": "string" }
+            }
+          },
+          "else": { "properties": { "allowed": false, "pattern": false } }
         },
         {
           "if": { "properties": { "type": { "const": "integer" } } },
-          "then": { "properties": { "default": { "type": "integer" }, "example": { "type": "integer" } } }
+          "then": {
+            "properties": {
+              "default": { "type": "integer" },
+              "example": { "type": "integer" }
+            }
+          }
         },
         {
           "if": { "properties": { "type": { "const": "boolean" } } },
-          "then": { "properties": { "default": { "type": "boolean" }, "example": { "type": "boolean" } } }
+          "then": {
+            "properties": {
+              "default": { "type": "boolean" },
+              "example": { "type": "boolean" }
+            }
+          }
         }
       ]
+    },
+    "inheritedParameter": {
+      "type": "object",
+      "description": "A parameter that takes its definition from the dependency's parameter of the same name, and passes its value on to it.",
+      "required": ["from"],
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "$ref": "#/definitions/identity",
+          "description": "The direct dependency whose parameter defines this one."
+        }
+      }
     },
     "mapping": {
       "type": "object",

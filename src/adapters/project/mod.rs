@@ -46,7 +46,7 @@ use super::lockfile::{self, LOCKFILE, Lockfile, LockfileError, serialize_lockfil
 use super::manifest::{ReadManifestError, read_project};
 use super::merge::{ReconcileFailure, reconcile_json};
 use super::registry::Registry;
-use super::scaffold::PROJECT_AGENTS;
+use super::scaffold::{PROJECT_AGENTS, is_project_agents};
 use crate::domain::{
     Action, BaseIdentity, BlobId, Conflict, Contributor, Current, Disagreement, LockChange,
     MergeFormat, Mergeability, Project, ReconciliationState, RegistryIndex, RelativePath, Root,
@@ -794,6 +794,27 @@ fn compose_with(
             changes.remove(path);
             notes.push(format!(
                 "{path} already held the composed content, so it was kept as it is"
+            ));
+            return false;
+        }
+        // The `AGENTS.md` that `init` wrote, untouched, is Assemblr's own
+        // and not the consumer's: a unit's takes its place (owner decision
+        // on #120).
+        if path.as_str() == AGENTS
+            && (is_project_agents(&bytes)
+                || without_crlf(&bytes).is_some_and(|bytes| is_project_agents(&bytes)))
+        {
+            changes.insert(
+                path.clone(),
+                Change::Modify {
+                    file: incoming.clone(),
+                    previous: bytes,
+                    previous_executable: executable,
+                    merged: false,
+                },
+            );
+            notes.push(format!(
+                "{path} was still the one `assemblr init` wrote, so the composition's replaced it"
             ));
             return false;
         }
@@ -2060,8 +2081,8 @@ fn parameter_types(
         .dependencies
         .manifest(identity, locked.version())
         .map(|manifest| {
-            manifest
-                .params()
+            resolved
+                .params(manifest)
                 .iter()
                 .map(|(name, definition)| {
                     (

@@ -248,16 +248,17 @@ fn update_with(
     let (Some(before), Some(after)) = (before, after) else {
         return Err(UpdateFailure::Rejected(problems));
     };
-    let (development, _) = development_values(&manifest);
     let bare = without_amendments(&manifest);
     let no_copies = FileTree::new();
     let (units_before, units_after) = (before.units(), after.units());
+    // Each world gives inherited parameters the definition, and so the
+    // example, of its own versions.
     let compose_world = |world: &Resolved, units| {
         compose(
             world.resolution.graph(),
             Root::Unit(UnitContent::new(&bare, &src, &no_copies)),
             units,
-            &development,
+            &development_values(&manifest, Some(world)).0,
         )
     };
     let composed_after = compose_world(&after, &units_after);

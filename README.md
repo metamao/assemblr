@@ -133,6 +133,11 @@ agent, or a cloud session without the skill, add a line to the project's
 `AGENTS.md`: "Run `assemblr guide` before changing this project's setup, and
 follow it."
 
+**Formatters.** When Assemblr edits `assemblr.jsonc` or `manifest.jsonc`, it
+follows the file's style, trailing commas included, so a file Prettier
+formatted stays formatted. `assemblr-lock.json` and `.assemblr/` are written
+by Assemblr alone, like `package-lock.json`: list them in `.prettierignore`.
+
 Every command explains itself with `--help`, including examples. The
 concepts and the guarantees are in [`docs/domain/`](docs/domain/README.md).
 

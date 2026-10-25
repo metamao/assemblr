@@ -277,6 +277,61 @@ impl fmt::Display for AllowedValuesError {
 
 impl std::error::Error for AllowedValuesError {}
 
+/// A regular expression that every value of a string parameter must
+/// match, as JSON Schema's `pattern`: a match anywhere in the value counts,
+/// so a pattern anchors itself with `^` and `$`. The syntax is that of the
+/// `regex-lite` crate, which matches in linear time and, as JSON Schema's
+/// ECMAScript expressions do, treats `\d`, `\w`, and `\s` as ASCII classes;
+/// Unicode classes such as `\p{L}` are rejected rather than read
+/// differently.
+#[derive(Debug, Clone)]
+pub struct ValuePattern {
+    source: String,
+    regex: regex_lite::Regex,
+}
+
+impl ValuePattern {
+    /// Compiles `source`, rejecting what is not a valid expression.
+    pub fn new(source: &str) -> Result<Self, PatternError> {
+        regex_lite::Regex::new(source)
+            .map(|regex| Self {
+                source: source.to_owned(),
+                regex,
+            })
+            .map_err(|error| PatternError(error.to_string()))
+    }
+
+    /// The pattern as written.
+    pub fn as_str(&self) -> &str {
+        &self.source
+    }
+
+    /// Whether `value` matches.
+    pub fn matches(&self, value: &str) -> bool {
+        self.regex.is_match(value)
+    }
+}
+
+impl PartialEq for ValuePattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+    }
+}
+
+impl Eq for ValuePattern {}
+
+/// A pattern that is not a valid regular expression, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternError(String);
+
+impl fmt::Display for PatternError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid pattern: {}", self.0.trim_end())
+    }
+}
+
+impl std::error::Error for PatternError {}
+
 /// The kind of a parameter value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueKind {
@@ -347,6 +402,13 @@ pub enum ParameterValueError {
         /// The values the parameter accepts.
         allowed: AllowedValues,
     },
+    /// The string does not match the parameter's pattern.
+    NoMatch {
+        /// The supplied string.
+        value: String,
+        /// The pattern, as written.
+        pattern: String,
+    },
 }
 
 impl fmt::Display for ParameterValueError {
@@ -357,6 +419,9 @@ impl fmt::Display for ParameterValueError {
             }
             Self::NotAllowed { value, allowed } => {
                 write!(f, "{value:?} is not one of the allowed values: {allowed}")
+            }
+            Self::NoMatch { value, pattern } => {
+                write!(f, "{value:?} does not match the pattern `{pattern}`")
             }
         }
     }
@@ -374,6 +439,7 @@ pub struct ParameterDefinition {
     description: Description,
     default: Option<ParameterValue>,
     example: Option<ParameterValue>,
+    pattern: Option<ValuePattern>,
 }
 
 impl ParameterDefinition {
@@ -392,7 +458,30 @@ impl ParameterDefinition {
             description,
             default,
             example: None,
+            pattern: None,
         })
+    }
+
+    /// The same definition with a pattern its values must match, rejecting
+    /// it for a parameter that is not a string, and when the default or
+    /// the example does not match it.
+    pub fn with_pattern(mut self, pattern: ValuePattern) -> Result<Self, PatternProblem> {
+        if self.parameter_type.value_kind() != ValueKind::String {
+            return Err(PatternProblem::NotAString);
+        }
+        self.pattern = Some(pattern);
+        if let Some(default) = &self.default {
+            self.check(default).map_err(PatternProblem::Default)?;
+        }
+        if let Some(example) = &self.example {
+            self.check(example).map_err(PatternProblem::Example)?;
+        }
+        Ok(self)
+    }
+
+    /// The pattern its values must match, if it has one.
+    pub fn pattern(&self) -> Option<&ValuePattern> {
+        self.pattern.as_ref()
     }
 
     /// The same definition with an authoring-time example, rejecting one that
@@ -403,7 +492,7 @@ impl ParameterDefinition {
     /// build, check, and publication use when the parameter is required and
     /// has no default.
     pub fn with_example(mut self, example: ParameterValue) -> Result<Self, ParameterValueError> {
-        self.parameter_type.check(&example)?;
+        self.check(&example)?;
         self.example = Some(example);
         Ok(self)
     }
@@ -434,18 +523,50 @@ impl ParameterDefinition {
         self.default.is_none()
     }
 
-    /// Checks a supplied value against this parameter's type.
+    /// Checks a supplied value against this parameter's type and pattern.
     pub fn check(&self, value: &ParameterValue) -> Result<(), ParameterValueError> {
-        self.parameter_type.check(value)
+        self.parameter_type.check(value)?;
+        if let (Some(pattern), ParameterValue::String(text)) = (&self.pattern, value) {
+            if !pattern.matches(text) {
+                return Err(ParameterValueError::NoMatch {
+                    value: text.clone(),
+                    pattern: pattern.as_str().to_owned(),
+                });
+            }
+        }
+        Ok(())
     }
 }
+
+/// Why a pattern cannot be added to a parameter definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatternProblem {
+    /// The parameter is not a string.
+    NotAString,
+    /// The default does not match.
+    Default(ParameterValueError),
+    /// The example does not match.
+    Example(ParameterValueError),
+}
+
+impl fmt::Display for PatternProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotAString => f.write_str("a pattern applies only to a string parameter"),
+            Self::Default(error) => write!(f, "invalid default: {error}"),
+            Self::Example(error) => write!(f, "invalid example: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for PatternProblem {}
 
 #[cfg(test)]
 mod tests {
     use super::{
         AllowedValues, AllowedValuesError, BlankDescription, Description, ParameterDefinition,
         ParameterName, ParameterNameErrorReason, ParameterType, ParameterValue,
-        ParameterValueError, ValueKind,
+        ParameterValueError, PatternProblem, ValueKind, ValuePattern,
     };
 
     fn allowed(values: &[&str]) -> AllowedValues {
@@ -564,6 +685,61 @@ mod tests {
                 expected: ValueKind::String,
                 found: ValueKind::Boolean,
             })
+        ));
+    }
+
+    #[test]
+    fn a_pattern_matches_anywhere_unless_anchored_and_checks_every_value() {
+        let definition = ParameterDefinition::new(ParameterType::String, description(), None)
+            .unwrap()
+            .with_example(ParameterValue::String("my-app".to_owned()))
+            .unwrap()
+            .with_pattern(ValuePattern::new("^[a-z][a-z0-9-]*$").unwrap())
+            .unwrap();
+        assert_eq!(
+            definition.check(&ParameterValue::String("ok-2".to_owned())),
+            Ok(())
+        );
+        assert_eq!(
+            definition
+                .check(&ParameterValue::String("Bob's App".to_owned()))
+                .unwrap_err()
+                .to_string(),
+            "\"Bob's App\" does not match the pattern `^[a-z][a-z0-9-]*$`"
+        );
+        // Unanchored, as in JSON Schema.
+        let loose = ParameterDefinition::new(ParameterType::String, description(), None)
+            .unwrap()
+            .with_pattern(ValuePattern::new("[0-9]").unwrap())
+            .unwrap();
+        assert_eq!(
+            loose.check(&ParameterValue::String("v1".to_owned())),
+            Ok(())
+        );
+        // `\d` is ASCII, as in ECMAScript.
+        let digits = ValuePattern::new(r"^\d+$").unwrap();
+        assert!(digits.matches("42"));
+        assert!(!digits.matches("٤٢"));
+        assert!(ValuePattern::new(r"\p{L}").is_err());
+        // Look-around and back-references are refused, not misread.
+        assert!(ValuePattern::new("^(?=a)").is_err());
+        assert!(ValuePattern::new(r"(a)\1").is_err());
+        // Only on strings, and the default must match.
+        assert_eq!(
+            ParameterDefinition::new(ParameterType::Integer, description(), None)
+                .unwrap()
+                .with_pattern(ValuePattern::new("1").unwrap()),
+            Err(PatternProblem::NotAString)
+        );
+        assert!(matches!(
+            ParameterDefinition::new(
+                ParameterType::String,
+                description(),
+                Some(ParameterValue::String("B".to_owned()))
+            )
+            .unwrap()
+            .with_pattern(ValuePattern::new("^[a-z]").unwrap()),
+            Err(PatternProblem::Default(ParameterValueError::NoMatch { .. }))
         ));
     }
 

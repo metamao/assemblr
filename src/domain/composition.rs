@@ -70,7 +70,9 @@ use std::fmt;
 use unicode_normalization::UnicodeNormalization;
 
 use super::identity::UnitIdentity;
-use super::manifest::{AmendmentDeclaration, Manifest, OptionValue, OptionValues};
+use super::manifest::{
+    AmendmentDeclaration, InheritanceError, Manifest, OptionValue, OptionValues,
+};
 use super::merge::MergeFormat;
 use super::parameter::{
     ParameterDefinition, ParameterName, ParameterType, ParameterValue, ParameterValueError,
@@ -480,6 +482,16 @@ pub enum CompositionError {
         /// Why they are incompatible.
         reason: String,
     },
+    /// A parameter the unit inherits has no definition in the composed
+    /// version of the dependency it names.
+    InheritedParameter {
+        /// The unit that inherits it.
+        unit: UnitIdentity,
+        /// Its resolved version.
+        version: Version,
+        /// The parameter, and the unit that should declare it.
+        error: InheritanceError,
+    },
     /// A required parameter receives no value.
     MissingValue {
         /// The unit whose parameter has no value.
@@ -676,6 +688,11 @@ impl fmt::Display for CompositionError {
                 "{unit} {version} maps its parameter `{source}` to `{parameter}` of {target}, \
                  but {reason}"
             ),
+            Self::InheritedParameter {
+                unit,
+                version,
+                error,
+            } => write!(f, "in {unit} {version}, {error}"),
             Self::MissingValue {
                 unit,
                 version,
@@ -1118,14 +1135,44 @@ fn parameter_values(
     // Parameters a mapping would set, whose source has no value: the source
     // is the one reported.
     let mut awaiting: BTreeSet<(UnitIdentity, ParameterName)> = BTreeSet::new();
+    // Each member's parameters, the inherited ones with the definition
+    // they take from the composed versions.
+    let mut params: BTreeMap<&UnitIdentity, BTreeMap<ParameterName, ParameterDefinition>> =
+        BTreeMap::new();
+    for (identity, member) in members {
+        let (resolved, errors) = member
+            .manifest
+            .resolved_params(|unit| members.get(unit).map(|member| member.manifest));
+        // A chain that breaks further down is reported once, by the
+        // member whose own `from` names the unit that lacks it.
+        for error in errors
+            .into_iter()
+            .filter(|error| member.manifest.inherited().get(&error.parameter) == Some(&error.unit))
+        {
+            invalid.push((
+                (identity.to_owned().clone(), error.parameter.clone()),
+                CompositionError::InheritedParameter {
+                    unit: identity.to_owned().clone(),
+                    version: member.manifest.version().clone(),
+                    error,
+                },
+            ));
+        }
+        params.insert(identity, resolved);
+    }
     for identity in dependents_first(members) {
         let member = &members[identity];
         let version = member.manifest.version();
+        let own = &params[identity];
         let mut effective = ParameterValues::new();
         // Requirements on parameters the unit does not declare.
-        let declared: Vec<ParameterName> = member.manifest.params().keys().cloned().collect();
+        let declared: Vec<ParameterName> = own.keys().cloned().collect();
+        // An inherited parameter without a definition is reported as such.
         for ((unit, parameter), requirements) in &requested {
-            if unit != identity || member.manifest.params().contains_key(parameter) {
+            if unit != identity
+                || own.contains_key(parameter)
+                || member.manifest.inherited().contains_key(parameter)
+            {
                 continue;
             }
             let mut requirements = requirements.clone();
@@ -1143,7 +1190,7 @@ fn parameter_values(
                 ));
             }
         }
-        for (parameter, definition) in member.manifest.params() {
+        for (parameter, definition) in own {
             let key = (identity.clone(), parameter.clone());
             let mut requirements = requested.get(&key).cloned().unwrap_or_default();
             requirements.sort_by(|left, right| left.requirer.cmp(&right.requirer));
@@ -1200,19 +1247,36 @@ fn parameter_values(
         }
 
         // What this unit requires of its dependencies, now that its own
-        // values are decided.
-        for (target, options) in member.manifest.options() {
-            let target_member = members.get(target);
-            for (parameter, option) in options {
+        // values are decided. An inherited parameter is mapped to the
+        // dependency's parameter it takes its definition from.
+        let inherited = member
+            .manifest
+            .inherited()
+            .iter()
+            .map(|(parameter, target)| (target, parameter, OptionValue::From(parameter.clone())));
+        let required: Vec<(&UnitIdentity, &ParameterName, OptionValue)> = member
+            .manifest
+            .options()
+            .iter()
+            .flat_map(|(target, options)| {
+                options
+                    .iter()
+                    .map(move |(parameter, option)| (target, parameter, option.clone()))
+            })
+            .chain(inherited)
+            .collect();
+        for (target, parameter, option) in &required {
+            let (target, parameter) = (*target, *parameter);
+            {
                 let key = (target.clone(), parameter.clone());
                 let value = match option {
                     OptionValue::Literal(value) => value.clone(),
                     OptionValue::From(source) => {
-                        let Some(source_definition) = member.manifest.params().get(source) else {
+                        let Some(source_definition) = own.get(source) else {
                             continue;
                         };
-                        let Some(target_definition) = target_member
-                            .and_then(|target| target.manifest.params().get(parameter))
+                        let Some(target_definition) =
+                            params.get(target).and_then(|target| target.get(parameter))
                         else {
                             // The dependency does not declare it: reported
                             // once, with the dependency's other undeclared
@@ -1742,6 +1806,8 @@ mod tests {
         /// Mapped options: dependency, its parameter, and the unit's own.
         mappings: Vec<(&'static str, &'static str, &'static str)>,
         params: Vec<(&'static str, ParameterDefinition)>,
+        /// Inherited parameters: name and the dependency it comes from.
+        inherited: Vec<(&'static str, &'static str)>,
         files: Vec<(&'static str, Vec<u8>, bool)>,
         /// Declared amendments: path, provider, and base version.
         amendments: Vec<(&'static str, &'static str, &'static str)>,
@@ -1758,6 +1824,7 @@ mod tests {
                 options: Vec::new(),
                 mappings: Vec::new(),
                 params: Vec::new(),
+                inherited: Vec::new(),
                 files: Vec::new(),
                 amendments: Vec::new(),
                 copies: Vec::new(),
@@ -1818,6 +1885,12 @@ mod tests {
             self
         }
 
+        /// Declares `parameter` as inherited from `from`.
+        fn inherits(mut self, parameter: &'static str, from: &'static str) -> Self {
+            self.inherited.push((parameter, from));
+            self
+        }
+
         /// Adds a file whose contents name the unit and the path.
         fn file(self, file: &'static str) -> Self {
             let contents = format!("{} {file}", self.name).into_bytes();
@@ -1852,6 +1925,10 @@ mod tests {
                 self.params
                     .iter()
                     .map(|(parameter, definition)| (name(parameter), definition.clone()))
+                    .collect(),
+                self.inherited
+                    .iter()
+                    .map(|(parameter, from)| (name(parameter), identity(from)))
                     .collect(),
                 self.amendments
                     .iter()
@@ -3745,6 +3822,9 @@ mod tests {
                 CompositionError::MappingIncompatible {
                     unit, parameter, ..
                 } => format!("mapping {unit} {parameter}"),
+                CompositionError::InheritedParameter { unit, error, .. } => {
+                    format!("inherited {unit} {}", error.parameter)
+                }
                 CompositionError::OptionsConflict {
                     unit, parameter, ..
                 } => format!("conflict {unit} {parameter}"),
@@ -4071,5 +4151,128 @@ mod tests {
         )
         .unwrap();
         assert_eq!(forward.values, backward.values);
+    }
+
+    /// A chain of inheritance: the base defines `title`, the middle unit
+    /// inherits it, and the top unit inherits it from the middle one.
+    fn inheriting() -> Vec<Spec> {
+        vec![
+            Spec::new("@metamao/base", "1.0.0")
+                .param("title", required(enumerated(&["Shop", "Blog"]))),
+            Spec::new("@metamao/middle", "1.0.0")
+                .depends("@metamao/base", "^1")
+                .inherits("title", "@metamao/base"),
+            Spec::new("@metamao/top", "1.0.0")
+                .depends("@metamao/middle", "^1")
+                .inherits("title", "@metamao/middle"),
+        ]
+    }
+
+    #[test]
+    fn an_inherited_parameter_takes_the_definition_and_passes_the_value_down() {
+        let composed = run(
+            &project(&[("@metamao/top", "^1")]),
+            &inheriting(),
+            &[("@metamao/top", "title", text("Shop"))],
+        )
+        .unwrap();
+        for unit in ["@metamao/top", "@metamao/middle", "@metamao/base"] {
+            assert_eq!(
+                values_of(&composed, unit),
+                [("title".to_owned(), text("Shop"))],
+                "{unit}"
+            );
+        }
+        // The definition is the base's: required, and enumerated.
+        let errors = run(&project(&[("@metamao/top", "^1")]), &inheriting(), &[]).unwrap_err();
+        assert!(
+            matches!(errors.as_slice(), [CompositionError::MissingValue { unit, .. }] if *unit == identity("@metamao/top")),
+            "{errors:?}"
+        );
+        let errors = run(
+            &project(&[("@metamao/top", "^1")]),
+            &inheriting(),
+            &[("@metamao/top", "title", text("Wiki"))],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(errors.as_slice(), [CompositionError::InvalidValue { unit, .. }] if *unit == identity("@metamao/top")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn an_inherited_parameter_the_dependency_does_not_declare_is_reported_once() {
+        let units = vec![
+            Spec::new("@metamao/base", "1.0.0"),
+            Spec::new("@metamao/top", "1.0.0")
+                .depends("@metamao/base", "^1")
+                .inherits("title", "@metamao/base"),
+        ];
+        let errors = run(
+            &project(&[("@metamao/top", "^1")]),
+            &units,
+            &[("@metamao/top", "title", text("Shop"))],
+        )
+        .unwrap_err();
+        // Not also an undeclared parameter of either unit.
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            matches!(&errors[0], CompositionError::InheritedParameter { unit, error, .. }
+                if *unit == identity("@metamao/top") && error.unit == identity("@metamao/base")),
+            "{errors:?}"
+        );
+        assert_eq!(
+            errors[0].to_string(),
+            "in @metamao/top 1.0.0, the parameter `title` is inherited from @metamao/base, which \
+             does not declare it"
+        );
+    }
+
+    #[test]
+    fn a_broken_chain_is_reported_by_the_unit_that_names_the_unit_without_it() {
+        let units = vec![
+            Spec::new("@metamao/base", "1.0.0"),
+            Spec::new("@metamao/middle", "1.0.0")
+                .depends("@metamao/base", "^1")
+                .inherits("title", "@metamao/base"),
+            Spec::new("@metamao/top", "1.0.0")
+                .depends("@metamao/middle", "^1")
+                .inherits("title", "@metamao/middle"),
+        ];
+        let errors = run(&project(&[("@metamao/top", "^1")]), &units, &[]).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0]
+                .to_string()
+                .starts_with("in @metamao/middle 1.0.0,"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_built_unit_maps_from_an_inherited_parameter_like_its_own() {
+        let mut units = inheriting();
+        let top = units.pop().unwrap();
+        let other =
+            Spec::new("@metamao/other", "1.0.0").param("label", required(ParameterType::String));
+        units.push(other);
+        let built = top
+            .depends("@metamao/other", "^1")
+            .map("@metamao/other", "label", "title");
+        let composed = run(
+            &For::Build(built),
+            &units,
+            &[("@metamao/top", "title", text("Blog"))],
+        )
+        .unwrap();
+        assert_eq!(
+            values_of(&composed, "@metamao/other"),
+            [("label".to_owned(), text("Blog"))]
+        );
+        assert_eq!(
+            values_of(&composed, "@metamao/base"),
+            [("title".to_owned(), text("Blog"))]
+        );
     }
 }

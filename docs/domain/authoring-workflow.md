@@ -60,8 +60,11 @@ scaffold on that Git-based foundation, consistently for every unit. It:
 - provides a **local, offline JSON Schema** for manifest completion and
   diagnostics, and references it from the manifest through `$schema`;
 - creates `.gitignore` containing `/build/`;
-- avoids unnecessary mandatory scaffolding, for example empty `src/` or
-  `amendments/` directories.
+- creates an empty `src/` directory, since most units need one and an
+  author who does not can delete it (owner decision of 2026-10-25, in the
+  session for [#120](https://github.com/metamao/assemblr/issues/120));
+- avoids other unnecessary scaffolding, for example an `amendments/`
+  directory or a placeholder file in `src/`.
 
 Assemblr's own validation remains authoritative over the schema.
 
@@ -126,7 +129,10 @@ sections for the author to fill in, and `AGENTS.md` pointing coding agents
 to `assemblr guide`, with a section of the same kind; the result asks the
 author to fill them in. They sit at the repository's top level, outside
 `src/`, so no project receives them. Owner decision of 2026-10-23
-([#115](https://github.com/metamao/assemblr/issues/115)). No `src/` or `amendments/` is
+([#115](https://github.com/metamao/assemblr/issues/115)). An empty `src/` is
+created when nothing is at that path, and nothing is put in it, since every
+file there is delivered to consumers; Git does not track an empty directory,
+so a clone has no `src/` until a file is added. No `amendments/` is
 created. A file that is replaced is written beside its destination, as
 `.assemblr-manifest.schema.json.new` or `.assemblr-gitignore.new`, reserved
 names, and renamed into place; a new file is created directly. Running the
@@ -164,8 +170,12 @@ default and no value in the unit's `options` is **mapped** from a parameter
 of the unit's own with the same name (see
 [parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved)):
 the unit's own parameter when it declares one that can be mapped, and
-otherwise one declared for it in `params` with the dependency's type,
-description, allowed values, and example, and no default. `--option
+otherwise one declared for it in `params` as inherited from the added unit,
+`{ "from": "<unit>" }`, which takes the dependency's definition and needs no
+entry in `options` (owner decision of 2026-10-25 on
+[#120](https://github.com/metamao/assemblr/issues/120), **Provisional
+(D-49)**; see
+[declaration](parameters-and-options.md#declaration--approved)). `--option
 <name>=<value>` sets a literal instead, read by the parameter's type as the
 consumer's `add` reads it. The command refuses, changing nothing, when the
 unit's own parameter of that name cannot be mapped, and when the

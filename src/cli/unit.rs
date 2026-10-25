@@ -14,13 +14,13 @@ use assemblr::adapters::{
     AddFailure, AddProblem, AddedParameter, AmendFailure, AmendProblem, AmendState, BuildFailure,
     BuildProblem, Built, CheckFailure, CheckProblem, DeclarationChange, FileOutcome, GitOutcome,
     IndexOutcome, InitFailure, Initialized, LockfileOutcome, ManifestFileError, Pending,
-    PublishFailure, PublishProblem, PublishState, Published, RecoveryError, Registry, TagProblem,
-    UpdateFailure, UpdateProblem, UpdateState, Updated, add_dependency, amend_unit, build_unit,
-    check_unit, init_unit, publish_unit, update_unit,
+    PublishFailure, PublishProblem, PublishState, Published, RecoveryError, Registry,
+    RenderErrorKind, TagProblem, TemplateError, UpdateFailure, UpdateProblem, UpdateState, Updated,
+    add_dependency, amend_unit, build_unit, check_unit, init_unit, publish_unit, update_unit,
 };
 use assemblr::domain::{
-    ContributionError, Excluded, IntegrityChange, LockChange, LockError, RegistryError,
-    RelativePath, ResolutionError, UnitIdentity,
+    ContributionError, Excluded, IntegrityChange, LockChange, LockError, ParameterName,
+    RegistryError, RelativePath, ResolutionError, UnitIdentity,
 };
 use clap::{Args, Subcommand};
 
@@ -215,6 +215,7 @@ fn describe_initialized(initialized: &Initialized) -> String {
         ),
         ("README.md", initialized.readme(), "README.md"),
         ("AGENTS.md", initialized.agents(), "AGENTS.md"),
+        ("src/", initialized.src(), "src/"),
     ] {
         match outcome {
             FileOutcome::Created => created.push(name),
@@ -270,6 +271,7 @@ fn init_diagnosis(failure: &InitFailure, args: &InitArgs) -> Diagnosis {
                 (".gitignore", done.gitignore()),
                 ("README.md", done.readme()),
                 ("AGENTS.md", done.agents()),
+                ("src/", done.src()),
             ] {
                 if outcome != FileOutcome::Kept {
                     state.push(name);
@@ -700,20 +702,14 @@ fn describe_parameters(parameters: &[AddedParameter]) -> Vec<String> {
     if !literal.is_empty() {
         phrases.push(format!("set {}", literal.join(", ")));
     }
-    let declared = names(|parameter| match parameter {
-        AddedParameter::Declared(name) => Some(name),
+    let inherited = names(|parameter| match parameter {
+        AddedParameter::Inherited(name) => Some(name),
         _ => None,
     });
-    if !declared.is_empty() {
+    if !inherited.is_empty() {
         phrases.push(format!(
-            "declared {} in params and mapped {} to {}",
-            declared.join(", "),
-            if declared.len() == 1 { "it" } else { "them" },
-            if declared.len() == 1 {
-                "the dependency's parameter"
-            } else {
-                "the dependency's parameters"
-            }
+            "declared {} in params as inherited from it",
+            inherited.join(", ")
         ));
     }
     let existing = names(|parameter| match parameter {
@@ -810,6 +806,13 @@ fn add_diagnosis(failure: &AddFailure, root: &Path) -> Diagnosis {
             _ => None,
         }
     }));
+    let mut advice = advice;
+    advice.extend(undeclared_advice(problems.iter().filter_map(
+        |problem| match problem {
+            AddProblem::Build(problem) => Some(problem),
+            _ => None,
+        },
+    )));
     let diagnosis = Diagnosis::note("nothing was changed");
     if advice.is_empty() {
         diagnosis
@@ -1119,7 +1122,8 @@ fn diagnosis(failure: &BuildFailure, root: &Path) -> Diagnosis {
         BuildFailure::Pending(pending) => return pending_diagnosis(pending, ""),
         BuildFailure::PendingWrite { written, .. } => return pending_write_diagnosis(written, ""),
     };
-    let advice = distinct(problems.iter().filter_map(|problem| advice(problem, root)));
+    let mut advice = distinct(problems.iter().filter_map(|problem| advice(problem, root)));
+    advice.extend(undeclared_advice(problems.iter()));
     let diagnosis = Diagnosis::note("build/ and assemblr-lock.json were not changed");
     if advice.is_empty() {
         diagnosis
@@ -1177,6 +1181,49 @@ fn pending_write_diagnosis(written: &[RelativePath], prefix: &str) -> Diagnosis 
 const DELETING_THE_LOCKFILE: &str = "deleting assemblr-lock.json is not a repair: it discards \
      every locked version, and the next build resolves every dependency again, possibly to \
      other versions";
+
+/// How to declare the parameters that templates name and their unit does
+/// not declare, in one piece of advice per unit. The unit is named, since a
+/// dependency published without `unit publish` can hold such a template too,
+/// and then its own manifest is the one to change.
+fn undeclared_advice<'a>(problems: impl Iterator<Item = &'a BuildProblem>) -> Vec<String> {
+    let mut units: Vec<(&UnitIdentity, Vec<&ParameterName>)> = Vec::new();
+    for problem in problems {
+        if let BuildProblem::Template {
+            unit,
+            amended_by: None,
+            error: TemplateError::Render(error),
+            ..
+        } = problem
+        {
+            if let RenderErrorKind::Undefined { name, .. } = error.kind() {
+                let at = match units.iter().position(|(listed, _)| *listed == unit) {
+                    Some(at) => at,
+                    None => {
+                        units.push((unit, Vec::new()));
+                        units.len() - 1
+                    }
+                };
+                if !units[at].1.contains(&name) {
+                    units[at].1.push(name);
+                }
+            }
+        }
+    }
+    units
+        .into_iter()
+        .filter_map(|(unit, names)| {
+            let first = names.first()?;
+            let listed: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
+            Some(format!(
+                "declare {} under `params` in the manifest.jsonc of {unit}, each like \
+                 `\"{first}\": {{ \"type\": \"string\", \"description\": \"...\", \"example\": \
+                 \"...\" }}`, and run the command again",
+                listed.join(", ")
+            ))
+        })
+        .collect()
+}
 
 /// Advice for the first problem that has one.
 fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {

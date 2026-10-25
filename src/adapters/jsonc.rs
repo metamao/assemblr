@@ -88,6 +88,19 @@ impl std::error::Error for SyntaxError {}
 /// character closes the enclosing array or object. A comma after `[`, `{`,
 /// `:`, or another comma is left for the JSON parser to reject.
 pub(crate) fn to_strict_json(text: &str) -> Result<String, SyntaxError> {
+    blank_comments_and_trailing_commas(text).map(|(strict, _)| strict)
+}
+
+/// Whether `text` has a trailing comma anywhere, which is the style a
+/// formatter such as Prettier writes JSONC in. Text that is not valid JSONC
+/// has none.
+pub(crate) fn has_trailing_comma(text: &str) -> bool {
+    blank_comments_and_trailing_commas(text).is_ok_and(|(_, trailing)| trailing > 0)
+}
+
+/// [`to_strict_json`], with the number of trailing commas blanked.
+fn blank_comments_and_trailing_commas(text: &str) -> Result<(String, usize), SyntaxError> {
+    let mut trailing = 0;
     let mut out = String::with_capacity(text.len());
     let mut chars = text.char_indices().peekable();
     let mut last_significant: Option<char> = None;
@@ -153,6 +166,7 @@ pub(crate) fn to_strict_json(text: &str) -> Result<String, SyntaxError> {
             '}' | ']' => {
                 if let Some(comma) = pending_comma.take() {
                     out.replace_range(comma..=comma, " ");
+                    trailing += 1;
                 }
                 out.push(c);
                 last_significant = Some(c);
@@ -165,7 +179,7 @@ pub(crate) fn to_strict_json(text: &str) -> Result<String, SyntaxError> {
             }
         }
     }
-    Ok(out)
+    Ok((out, trailing))
 }
 
 /// A member of a JSON object, located in the text it was scanned from.
@@ -388,7 +402,7 @@ impl<'de> Visitor<'de> for JsonVisitor {
 
 #[cfg(test)]
 mod tests {
-    use super::{Json, members, parse, root_object, to_strict_json};
+    use super::{Json, has_trailing_comma, members, parse, root_object, to_strict_json};
 
     fn object(members: &[(&str, Json)]) -> Json {
         Json::Object(
@@ -432,6 +446,15 @@ mod tests {
         ] {
             assert!(parse(text).is_ok(), "{text}");
         }
+    }
+
+    #[test]
+    fn a_trailing_comma_is_told_from_one_in_a_comment_or_a_string() {
+        assert!(has_trailing_comma("{\n  \"a\": 1,\n}"));
+        assert!(has_trailing_comma("{\"a\": [1,], \"b\": 2}"));
+        assert!(!has_trailing_comma("{\"a\": 1, \"b\": 2}"));
+        assert!(!has_trailing_comma("{\"a\": 1 // x, y,\n}"));
+        assert!(!has_trailing_comma("{\"a\": \"1,}\"}"));
     }
 
     #[test]
