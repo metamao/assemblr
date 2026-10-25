@@ -547,7 +547,7 @@ fn templates_written_first_name_every_parameter_to_declare() {
     let output = fails(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
     assert!(
         stderr(&output).contains(
-            "hint: declare `title`, `slug` under `params` in manifest.jsonc, each like \
+            "hint: declare `title`, `slug` under `params` in the manifest.jsonc of @acme/app, each like \
              `\"title\": { \"type\": \"string\", \"description\": \"...\", \"example\": \"...\" }`"
         ),
         "{}",
@@ -556,7 +556,9 @@ fn templates_written_first_name_every_parameter_to_declare() {
     assert_eq!(app.read("manifest.jsonc"), before);
     let output = fails(fixture.assemblr(&app.path, &["unit", "build"]));
     assert!(
-        stderr(&output).contains("hint: declare `title`, `slug` under `params`"),
+        stderr(&output).contains(
+            "hint: declare `title`, `slug` under `params` in the manifest.jsonc of @acme/app"
+        ),
         "{}",
         stderr(&output)
     );

@@ -1186,34 +1186,50 @@ const DELETING_THE_LOCKFILE: &str = "deleting assemblr-lock.json is not a repair
      every locked version, and the next build resolves every dependency again, possibly to \
      other versions";
 
-/// Advice for the first problem that has one.
-/// How to declare the parameters that the unit's own templates name and
-/// its manifest does not declare, all of them in one piece of advice.
-fn undeclared_advice<'a>(problems: impl Iterator<Item = &'a BuildProblem>) -> Option<String> {
-    let mut names: Vec<&ParameterName> = Vec::new();
+/// How to declare the parameters that templates name and their unit does
+/// not declare, in one piece of advice per unit. The unit is named, since a
+/// dependency published without `unit publish` can hold such a template too,
+/// and then its own manifest is the one to change.
+fn undeclared_advice<'a>(problems: impl Iterator<Item = &'a BuildProblem>) -> Vec<String> {
+    let mut units: Vec<(&UnitIdentity, Vec<&ParameterName>)> = Vec::new();
     for problem in problems {
         if let BuildProblem::Template {
+            unit,
             amended_by: None,
             error: TemplateError::Render(error),
             ..
         } = problem
         {
             if let RenderErrorKind::Undefined { name, .. } = error.kind() {
-                if !names.contains(&name) {
-                    names.push(name);
+                let at = match units.iter().position(|(listed, _)| *listed == unit) {
+                    Some(at) => at,
+                    None => {
+                        units.push((unit, Vec::new()));
+                        units.len() - 1
+                    }
+                };
+                if !units[at].1.contains(&name) {
+                    units[at].1.push(name);
                 }
             }
         }
     }
-    let first = names.first()?;
-    let listed: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
-    Some(format!(
-        "declare {} under `params` in manifest.jsonc, each like `\"{first}\": {{ \"type\": \
-         \"string\", \"description\": \"...\", \"example\": \"...\" }}`, and run the command again",
-        listed.join(", ")
-    ))
+    units
+        .into_iter()
+        .filter_map(|(unit, names)| {
+            let first = names.first()?;
+            let listed: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
+            Some(format!(
+                "declare {} under `params` in the manifest.jsonc of {unit}, each like \
+                 `\"{first}\": {{ \"type\": \"string\", \"description\": \"...\", \"example\": \
+                 \"...\" }}`, and run the command again",
+                listed.join(", ")
+            ))
+        })
+        .collect()
 }
 
+/// Advice for the first problem that has one.
 fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
     Some(match problem {
         BuildProblem::Manifest(ManifestFileError::Missing { .. }) => format!(
