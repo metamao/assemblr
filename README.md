@@ -3,88 +3,111 @@
 **Build projects from reusable, versioned units, and keep them up to date.**
 
 Assemblr is a command-line tool that puts a project together from **units**.
-A unit is a reusable part of a project, such as a Node.js setup, a lint
-configuration, or a Cloudflare deployment. Each unit lives in its own Git
-repository and has its own versions.
+A unit is a reusable part of a project. It can be a Dockerfile for Rust
+services, a GitHub Actions or GitLab CI pipeline, or a Terraform module
+layout. It can also be a Python package setup, Kubernetes manifests, an
+Android build configuration, or your team's lint rules. Each unit lives in its own Git repository and has its own
+versions.
+
+**Assemblr works with any technology.** A unit is just files, so any
+language, framework, cloud, or tool works. Assemblr never needs to know
+what is inside.
 
 You pick the units a project needs, and Assemblr writes their files into it.
 When a unit publishes a new version, `assemblr update` brings the change in
-and keeps the edits you made yourself. Unlike a project template, which you
-copy once and then maintain alone, a unit keeps improving every project that
-uses it.
+and keeps the edits you made yourself. A project template is copied once and
+then maintained alone. A unit keeps improving every project that uses it.
 
-> **Status: private alpha.** The full workflow works today: compose, update,
-> author, publish, and share. File formats may still change between alpha
-> releases.
+> **Status: private alpha.** The full workflow works today: create, share,
+> compose, and update. File formats may still change between alpha releases.
 
-## Highlights
+## Why Assemblr
 
-- **Start from proven parts.** Add a unit in one command instead of copying
-  setup code from an older project.
-- **Updates that keep your changes.** Assemblr merges a unit's new version
-  with your own edits. When both change the same lines, you get ordinary
-  conflict markers to resolve, as in a Git merge.
-- **Stack and customize.** A unit can depend on other units and change their
-  files through **amendments**, so `@acme/web` can build on `@acme/node`.
-- **Any technology.** Units are plain files. Assemblr does not care whether
-  they hold TypeScript, Rust, Terraform, or CI workflows.
+- **Fix once, update everywhere.** Bump a base image, patch a CI pipeline,
+  or tighten a lint rule in one unit. Every project picks it up with
+  `assemblr update`.
+- **Your edits stay yours.** Assemblr merges a unit's new version with your
+  own changes. When it cannot merge safely, it leaves conflict markers for
+  you to resolve, as in a Git merge. It never overwrites your work silently.
+- **Less AI slop.** A coding agent that adds a reviewed unit does not
+  regenerate setup code from scratch, with new small mistakes each time. It
+  spends its effort on the code that is unique to your project.
+- **Golden paths without forks.** A unit can build on other units and amend
+  their files, so a team can extend a shared base without copying it.
+- **Start a new project in minutes** with the stack you already trust, and
+  mix units from different authors.
 - **Git is the only backend.** Units are Git repositories, versions are Git
-  tags, and a **catalog** shares a list of units. There is no server to run.
+  tags, and catalogs are Git repositories that list units. There is no
+  server to run.
 - **Safe and predictable.** Assemblr never runs code from a unit. It plans
   every change before it writes a file, published versions never change, and
   the same inputs always give the same result.
 - **Built for coding agents.** `assemblr guide` teaches an agent the
-  workflow, and commands that report state offer `--json`.
+  workflow, and the commands that report state offer `--json`.
 
 ## See it in action
 
-Two units, published by the same team:
+Your team keeps the Dockerfile for its Rust services in one unit,
+`@acme/rust-service`. The `orders-api` project uses it, and someone added an
+`EXPOSE 8080` line to the project's Dockerfile by hand.
 
-- `@acme/node` delivers `package.json` and `.editorconfig`.
-- `@acme/web` depends on `@acme/node`, adds `server.js`, and amends
-  `package.json` to add a `start` script.
-
-A project selects `@acme/web`, then adds its own `lint` script by hand. Later,
-`@acme/node` 1.2.0 switches to ES modules. One command updates the project:
+The unit then publishes version 1.1.0, which moves to Rust 1.90 and a smaller
+distroless runtime image. In `orders-api`, one command brings that in:
 
 ```console
 $ assemblr update
-Updated: @acme/node 1.1.0 -> 1.2.0.
-note: updated assemblr-lock.json: @acme/node 1.1.0 -> 1.2.0
-Composed 2 units into 3 files: 1 merged.
-  merged package.json
+Updated: @acme/rust-service 1.0.0 -> 1.1.0.
+note: updated assemblr-lock.json: @acme/rust-service 1.0.0 -> 1.1.0
+Composed 2 units into 4 files: 1 merged.
+  merged Dockerfile
 ```
 
-The result combines all three sources:
+Here is what changed in the Dockerfile. Both image updates arrived, and the
+`EXPOSE 8080` line is still there:
 
-```jsonc
-{
-  "name": "shop",
-  "private": true,
-  "type": "module",              // from the new @acme/node 1.2.0
-  "scripts": {
-    "start": "node server.js",   // from the @acme/web amendment
-    "test": "node --test",
-    "lint": "eslint ."           // your own edit, kept
-  }
-}
+```diff
+-FROM rust:1.89-slim-bookworm AS build
++FROM rust:1.90-slim-bookworm AS build
+ WORKDIR /src
+ COPY . .
+ RUN cargo build --release --locked
+
+-FROM debian:bookworm-slim
++FROM gcr.io/distroless/cc-debian12
+ COPY --from=build /src/target/release/orders-api /usr/local/bin/app
+ EXPOSE 8080
+ USER 65534
+ CMD ["app"]
 ```
+
+Every other service that uses the unit gets the same update the same way.
 
 ## How it works
 
 | Concept | What it is |
 | --- | --- |
 | **Unit** | A Git repository with a `manifest.jsonc` and the files to deliver under `src/`. Its name looks like `@owner/name`. |
-| **Version** | A published state of a unit, stored as a Git tag such as `v1.2.0`. It never changes once published. |
+| **Version** | A published state of a unit, stored as a Git tag such as `v1.1.0`. It never changes once published. |
 | **Project** | Any directory with an `assemblr.jsonc` that lists the units it uses and their options. |
-| **Registry** | The list of units this machine knows. You add units to it with `assemblr registry add`. |
+| **Registry** | The list of units this machine knows, kept on this machine. |
 | **Catalog** | A Git repository that lists units, so one command registers all of them. |
-| **Amendment** | A unit's change to a file that one of its dependencies delivers. |
-| **Option** | A value a project sets for a unit's parameter, such as `appName=shop`. |
+| **Amendment** | A unit's change to a file that one of the units it builds on delivers. |
+| **Option** | A value a project sets for a unit's parameter, such as `name=orders-api`. |
 
-Assemblr records what it delivered in `assemblr-lock.json` and `.assemblr/`.
-That record is how it tells your edits apart from a unit's changes. Commit
-both with the project.
+**There is no hosted registry or package manager.** Assemblr only knows the
+units in your local registry, and you decide what goes in it. Assemblr gives
+you the tools to fill it and keep it current:
+
+- `assemblr registry add <URL or path>` registers a unit's repository, or a
+  catalog with all of its units.
+- `assemblr registry sync` picks up the versions published since then.
+- `assemblr search <words>` and `assemblr info <unit>` show what you can use.
+- `assemblr catalog` lets a team publish one list of units that everyone
+  registers with a single command.
+
+Assemblr records what it delivered to a project in `assemblr-lock.json` and
+`.assemblr/`. That record is how it tells your edits apart from a unit's
+changes, so commit both with the project.
 
 ## Installation
 
@@ -179,35 +202,155 @@ is published yet. You need access to this private repository.
 
 To upgrade, run `git pull` in the clone and repeat step 2.
 
-## Use units in a project
+## Create a unit
 
 The examples use the placeholder owner `acme`. Replace the names and URLs with
 your own.
 
-1. **Register the units** you want to use. The easiest way is a catalog,
-   which registers all of its units at once:
+1. **Create it.** This makes a `rust-service/` directory with a manifest, a
+   `src/` directory, a `README.md`, an `AGENTS.md`, and a Git repository:
+
+   ```sh
+   assemblr unit init @acme/rust-service
+   cd rust-service
+   ```
+
+2. **Add your files** under `src/`. Each file is delivered to projects at the
+   same path, so `src/Dockerfile` becomes the project's `Dockerfile`.
+
+   To fill in a value per project, add the `.assemblr.tmpl` suffix, as in
+   `src/Dockerfile.assemblr.tmpl`, and write `{{ name }}` where the value
+   goes. Declare the parameter in `manifest.jsonc`:
+
+   ```jsonc
+   "params": {
+     "name": { "type": "string", "description": "The binary name.", "example": "my-service" }
+   }
+   ```
+
+3. **Build on other units** (optional). Add a unit from your registry as a
+   dependency, such as `@acme/rust-base`, then copy one of its files to
+   change it:
+
+   ```sh
+   assemblr unit add @acme/rust-base
+   assemblr unit amend Cargo.toml
+   ```
+
+   Edit the copy under `amendments/`. Assemblr merges your change into future
+   versions of `@acme/rust-base`.
+
+4. **Build and check it.** `build/` shows exactly what a project would
+   receive:
+
+   ```sh
+   assemblr unit build
+   assemblr unit check
+   ```
+
+5. **Publish it.** Set `version` in `manifest.jsonc`, such as `1.0.0`, then
+   commit and publish. Publishing creates the version's Git tag:
+
+   ```sh
+   git add -A && git commit -m "First version"
+   assemblr unit publish
+   ```
+
+   A published version never changes. To release a fix, raise the version
+   and publish again.
+
+## Share your units
+
+A unit is shared through its Git repository. Anyone who can read the
+repository can use the unit, with the Git access they already have.
+
+1. **Push the unit with its tags.** Create an empty repository on your Git
+   host first, then connect it and push:
+
+   ```sh
+   git remote add origin https://github.com/acme/rust-service.git
+   git push --follow-tags origin HEAD
+   ```
+
+   After each later `assemblr unit publish`, run the same `git push`. Push
+   the units it builds on the same way.
+
+2. **Hand out the URL.** Others register the unit on their machine:
+
+   ```sh
+   assemblr registry add https://github.com/acme/rust-service.git
+   ```
+
+   Registering a unit does not register the units it builds on. They must be
+   registered too, which is what a catalog solves.
+
+### Share many units with a catalog
+
+A catalog is a Git repository that lists units. Anyone with access registers
+all of them with one command, and picks up new versions with
+`assemblr registry sync`.
+
+1. **Create the catalog:**
+
+   ```sh
+   assemblr catalog init @acme/catalog
+   cd catalog
+   ```
+
+2. **Add each unit** by its repository URL. Each command updates the catalog
+   and commits:
+
+   ```sh
+   assemblr catalog add https://github.com/acme/rust-base.git
+   assemblr catalog add https://github.com/acme/rust-service.git
+   ```
+
+3. **Describe and push it.** Fill in the `README.md` and `AGENTS.md` it
+   created, and commit them. Create an empty repository on your Git host,
+   then connect and push:
+
+   ```sh
+   git add -A && git commit -m "Describe the catalog"
+   git remote add origin https://github.com/acme/catalog.git
+   git push -u origin HEAD
+   ```
+
+**After a unit publishes a new version,** run `assemblr catalog refresh` in
+the catalog, then `git push`. Everyone who registered the catalog then gets
+the version with `assemblr registry sync`.
+
+## Use units in a project
+
+1. **Register the units** you want to use in your local registry. A catalog
+   registers all of its units at once:
 
    ```sh
    assemblr registry add https://github.com/acme/catalog.git
    ```
 
-   You can also register a single unit by its repository URL or a local path
-   such as `../web`. Register the units it depends on as well: registering a
-   unit does not register its dependencies. `assemblr search <words>` and
-   `assemblr info @acme/web` then show what is available.
+   Then `assemblr search rust` and `assemblr info @acme/rust-service` show
+   what is available and which options a unit needs.
 
-2. **Create the project.** In a new or existing directory, run:
+2. **Create the project in a new, empty directory:**
 
    ```sh
+   mkdir orders-api && cd orders-api
+   git init
    assemblr init
    ```
 
-   It creates `assemblr.jsonc` and an `AGENTS.md` for coding agents.
+   `assemblr init` creates `assemblr.jsonc` and an `AGENTS.md` for coding
+   agents in the current directory. To adopt Assemblr in an existing
+   project, run it at the project's root instead. If a unit later delivers a
+   text file you already have, that file gets conflict markers for you to
+   resolve. Any other file in the way stops the composition before anything
+   is written, and the error names it.
 
-3. **Add a unit.** Assemblr writes its files into the project:
+3. **Add a unit.** Assemblr writes its files, and those of the units it
+   builds on, into the project:
 
    ```sh
-   assemblr add @acme/web --option appName=shop
+   assemblr add @acme/rust-service --option name=orders-api
    ```
 
    If the unit needs a value you did not give, the error says which one and
@@ -225,105 +368,11 @@ your own.
    ```
 
 **If a unit's change collides with yours,** the file gets conflict markers,
-as in a Git merge. That happens when an update and your edits change the
-same lines, or when a unit delivers a file you already had. Edit the file to
-resolve the markers, then run `assemblr compose --continue`. To undo the
+as in a Git merge. In a text file, changes in different places are both
+kept, and only changes to the same lines collide. In a YAML, TOML, XML, or
+INI file you edited, any change from the unit is a conflict. Edit the file
+to resolve the markers, then run `assemblr compose --continue`. To undo the
 whole composition instead, run `assemblr compose --abort`.
-
-## Create a unit
-
-1. **Create it.** This makes a `web/` directory with a manifest, a `src/`
-   directory, a `README.md`, an `AGENTS.md`, and a Git repository:
-
-   ```sh
-   assemblr unit init @acme/web
-   cd web
-   ```
-
-2. **Add your files** under `src/`. Each file is delivered to projects at the
-   same path. To insert an option's value, name the file with the
-   `.assemblr.tmpl` suffix and write `{{ appName }}` where the value goes.
-   Declare the parameter in `manifest.jsonc`:
-
-   ```jsonc
-   "params": {
-     "appName": { "type": "string", "description": "The package name.", "example": "my-app" }
-   }
-   ```
-
-3. **Build on other units** (optional). Add a dependency, then copy one of
-   its files to change it:
-
-   ```sh
-   assemblr unit add @acme/node
-   assemblr unit amend package.json
-   ```
-
-   Edit the copy under `amendments/`. Assemblr merges it with future versions
-   of `@acme/node`.
-
-4. **Build and check it.** `build/` shows exactly what a project would
-   receive:
-
-   ```sh
-   assemblr unit build
-   assemblr unit check
-   ```
-
-5. **Publish it.** Set `version` in `manifest.jsonc`, commit, then tag and
-   push:
-
-   ```sh
-   git add -A && git commit -m "First version"
-   assemblr unit publish
-   git push --follow-tags origin HEAD
-   ```
-
-   Before the first push, create an empty repository on your Git host and
-   connect it with `git remote add origin <URL>`.
-
-   A published version never changes. To release a fix, raise the version
-   and publish again.
-
-## Share units with a catalog
-
-A catalog is a Git repository that lists units. Anyone with access registers
-all of them with one `assemblr registry add`.
-
-1. **Create the catalog:**
-
-   ```sh
-   assemblr catalog init @acme/catalog
-   cd catalog
-   ```
-
-2. **Add each unit** by its repository URL. Each command updates the catalog
-   and commits:
-
-   ```sh
-   assemblr catalog add https://github.com/acme/node.git
-   assemblr catalog add https://github.com/acme/web.git
-   ```
-
-3. **Describe and push it.** Fill in the `README.md` and `AGENTS.md` it
-   created and commit them. Create an empty repository on your Git host, then
-   connect and push:
-
-   ```sh
-   git add -A && git commit -m "Describe the catalog"
-   git remote add origin https://github.com/acme/catalog.git
-   git push -u origin HEAD
-   ```
-
-4. **Use it** on any machine:
-
-   ```sh
-   assemblr registry add https://github.com/acme/catalog.git
-   ```
-
-**After a unit publishes a new version,** run `assemblr catalog refresh` in
-the catalog and `git push`. Other machines then pick up the version with
-`assemblr registry sync`.
 
 ## Work with a coding agent
 
@@ -342,15 +391,15 @@ Assemblr is designed so that coding agents can use it as well as people can.
 
 | Command | What it does |
 | --- | --- |
+| `assemblr unit` | Create, build, check, amend, update, and publish units |
+| `assemblr catalog` | Create a catalog and add, remove, or refresh its units |
+| `assemblr registry` | Register, list, sync, and remove units and catalogs |
+| `assemblr search` / `info` | Find units and show their versions and parameters |
 | `assemblr init` | Create a project's `assemblr.jsonc` |
 | `assemblr add` / `remove` | Add or remove a unit and compose the project |
 | `assemblr update` | Move units to the newest versions allowed |
 | `assemblr status` | Show updates, edited files, and pending conflicts |
 | `assemblr compose` | Compose the project again from `assemblr.jsonc` |
-| `assemblr search` / `info` | Find units and show their versions and parameters |
-| `assemblr registry` | Register, list, sync, and remove units and catalogs |
-| `assemblr unit` | Create, build, check, amend, update, and publish units |
-| `assemblr catalog` | Create a catalog and add, remove, or refresh its units |
 | `assemblr guide` / `skill` | Help coding agents use Assemblr |
 
 Every command explains itself with `--help`, including examples.
@@ -377,8 +426,7 @@ Every command explains itself with `--help`, including examples.
 ## Development
 
 Assemblr is written in Rust. The toolchain is pinned in
-`rust-toolchain.toml`, and rustup installs it automatically. Development
-tracking lives in [issue #9](https://github.com/metamao/assemblr/issues/9).
+`rust-toolchain.toml`, and rustup installs it automatically.
 
 ```sh
 cargo run -- --help                                        # run the CLI
