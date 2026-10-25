@@ -109,6 +109,18 @@ mod tests {
             schema["definitions"]["parameterName"]["not"],
             serde_json::json!({ "const": "own" })
         );
+        // A parameter is defined or inherited, `{ "from": "<identity>" }`.
+        assert_eq!(
+            schema["properties"]["params"]["additionalProperties"]["oneOf"][1]["$ref"],
+            "#/definitions/inheritedParameter"
+        );
+        let inherited = &schema["definitions"]["inheritedParameter"];
+        assert_eq!(inherited["required"], serde_json::json!(["from"]));
+        assert_eq!(inherited["additionalProperties"], false);
+        assert_eq!(
+            inherited["properties"]["from"]["$ref"],
+            "#/definitions/identity"
+        );
     }
 
     #[test]

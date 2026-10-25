@@ -146,6 +146,7 @@ mod tests {
                 .collect(),
             BTreeMap::new(),
             BTreeMap::new(),
+            BTreeMap::new(),
             amendments
                 .iter()
                 .map(|(file, unit, base)| {

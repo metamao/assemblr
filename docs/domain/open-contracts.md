@@ -807,6 +807,22 @@ How the status of a statement affects implementation:
 - **Origin:** Foundation
 - **Context:** [update](authoring-workflow.md#update--approved)
 
+### OC-54
+
+- **Approved (normative):** A unit may declare a parameter as **inherited**
+  from a direct dependency, `"name": { "from": "<dependency>" }` in
+  `params`, instead of copying the dependency's definition: it takes the
+  definition of the dependency's parameter of the same name and passes its
+  value on to it. Decided by the owner on
+  [#120](https://github.com/metamao/assemblr/issues/120) (2026-10-25).
+- **Open detail:** **Provisional (D-49):** the definition is the one of the
+  dependency's version composed, followed through dependencies that inherit
+  it in turn; `options` may not also set that parameter of the dependency;
+  `info` names the dependency rather than a definition; `unit add` declares
+  a required parameter it cannot map as inherited instead of copying it.
+- **Origin:** #120
+- **Context:** [declaration](parameters-and-options.md#declaration--approved)
+
 ## Resolved contracts
 
 ### OC-1

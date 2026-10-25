@@ -500,3 +500,76 @@ fn a_pattern_refuses_a_value_that_does_not_match_wherever_it_comes_from() {
         "{err}"
     );
 }
+
+#[test]
+fn an_inherited_parameter_takes_the_dependency_s_definition_and_passes_the_value_on() {
+    let fixture = Fixture::new("inherited");
+    let base = fixture.repo("base");
+    base.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/base",
+            "1.0.0",
+            &[],
+            r#", "params": {"title": {"type": "string", "description": "The site title.", "pattern": "^[A-Z]", "example": "Demo"}}"#,
+        ),
+    );
+    base.write("src/base.txt.assemblr.tmpl", "{{ title }}\n");
+    succeed(&fixture.build(&base));
+    base.publish("1.0.0");
+    fixture.register(&base);
+
+    // The unit re-exposes the parameter without copying its definition, and
+    // builds with the dependency's example.
+    let web = fixture.repo("web");
+    web.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/web",
+            "1.0.0",
+            &[("@acme/base", "^1.0.0")],
+            r#", "params": {"title": {"from": "@acme/base"}}"#,
+        ),
+    );
+    web.write("src/web.html.assemblr.tmpl", "<h1>{{ title | e }}</h1>\n");
+    succeed(&fixture.build(&web));
+    assert_eq!(
+        fs::read_to_string(web.path.join("build/web.html")).unwrap(),
+        "<h1>Demo</h1>\n"
+    );
+    web.publish("1.0.0");
+    fixture.register(&web);
+
+    let info = fixture.assemblr(&fixture.dir, &["info", "@acme/web"]);
+    succeed(&info);
+    let out = String::from_utf8_lossy(&info.stdout).into_owned();
+    assert!(
+        out.contains("title (inherited from @acme/base; `assemblr info @acme/base` describes it)"),
+        "{out}"
+    );
+    let info = fixture.assemblr(&fixture.dir, &["info", "@acme/web", "--json"]);
+    let info: Value = serde_json::from_slice(&info.stdout).unwrap();
+    assert_eq!(info["params"]["title"]["from"], "@acme/base");
+
+    // The consumer sets it once, on the unit it selected, checked against
+    // the dependency's definition.
+    let shop = project(
+        &fixture,
+        "shop",
+        "{\"dependencies\": {}, \"options\": {}}\n",
+    );
+    let err = failure(&fixture.assemblr(&shop, &["add", "@acme/web", "--option", "title=shop"]));
+    assert!(err.contains("does not match the pattern `^[A-Z]`"), "{err}");
+    succeed(&fixture.assemblr(
+        &shop,
+        &["add", "@acme/web", "--option", "title=Bob's <Shop>"],
+    ));
+    assert_eq!(
+        fs::read_to_string(shop.join("web.html")).unwrap(),
+        "<h1>Bob&#39;s &lt;Shop&gt;</h1>\n"
+    );
+    assert_eq!(
+        fs::read_to_string(shop.join("base.txt")).unwrap(),
+        "Bob's <Shop>\n"
+    );
+}

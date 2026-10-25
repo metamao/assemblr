@@ -45,6 +45,17 @@ Each parameter has:
 Values supplied for a parameter, its default, and its example are validated
 against its type, its allowed values, and its pattern.
 
+A parameter may instead be **inherited** from a direct dependency,
+`"name": { "from": "<dependency>" }`: it has the definition of that
+dependency's parameter of the same name, and its value is passed on to that
+parameter as a mapping would pass it, so a unit re-exposes a dependency's
+parameter without copying its type, description, allowed values, pattern,
+default, or example (owner decision of 2026-10-25,
+[#120](https://github.com/metamao/assemblr/issues/120); **OC-54**). The
+definition is the one of the dependency's version composed, followed through
+a dependency that inherits it in turn, and `options` may not also set that
+parameter of the dependency (**Provisional (D-49)**).
+
 The name `own` is **reserved** for the amending author's template context
 (see
 [amendments-and-composition.md](amendments-and-composition.md#template-contexts--approved)).
@@ -241,7 +252,8 @@ its direct dependencies**. It does so through:
 
 Rules:
 
-- A mapping may reference only parameters the unit declares in its `params`.
+- A mapping may reference only parameters the unit declares in its `params`,
+  defined or inherited.
   Assemblr validates that each referenced parameter exists, and that its type
   and allowed values are compatible with the dependency parameter it
   configures.

@@ -51,6 +51,11 @@ pub(super) fn composition_advice(error: &CompositionError, audience: Audience) -
             "give the option in {options} a value of the parameter's type and, for an \
              enumerated parameter, one of its allowed values"
         ),
+        CompositionError::InheritedParameter { .. } => {
+            "the unit's author must define the parameter instead of inheriting it, or depend on \
+             a version of the dependency that declares it"
+                .to_owned()
+        }
         CompositionError::MappingIncompatible { .. } => {
             "the unit's author must change the mapping or the parameters; a mapping never \
              converts a value"

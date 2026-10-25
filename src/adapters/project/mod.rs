@@ -2081,8 +2081,8 @@ fn parameter_types(
         .dependencies
         .manifest(identity, locked.version())
         .map(|manifest| {
-            manifest
-                .params()
+            resolved
+                .params(manifest)
                 .iter()
                 .map(|(name, definition)| {
                     (

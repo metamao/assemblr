@@ -125,7 +125,13 @@ fn print_text(info: &UnitInfo) {
             println!("    {unit} {requirement}");
         }
     });
-    section("parameters", manifest.params().is_empty(), || {
+    let declared = manifest.params().is_empty() && manifest.inherited().is_empty();
+    section("parameters", declared, || {
+        // Which definition an inherited parameter takes depends on the
+        // version composed, so it is named, not shown.
+        for (name, from) in manifest.inherited() {
+            println!("    {name} (inherited from {from}; `assemblr info {from}` describes it)");
+        }
         for (name, parameter) in manifest.params() {
             let mut facts = vec![type_name(parameter).to_owned()];
             match parameter.default() {
@@ -207,11 +213,20 @@ fn info_json(info: &UnitInfo) -> Value {
             if let Some(values) = allowed(parameter) {
                 entry.insert("allowed".to_owned(), json!(values));
             }
+            if let Some(pattern) = parameter.pattern() {
+                entry.insert("pattern".to_owned(), json!(pattern.as_str()));
+            }
             if let Some(example) = parameter.example() {
                 entry.insert("example".to_owned(), value_json(example));
             }
             (name.as_str().to_owned(), Value::Object(entry))
         })
+        .chain(manifest.inherited().iter().map(|(name, from)| {
+            (
+                name.as_str().to_owned(),
+                json!({ "from": from.to_string() }),
+            )
+        }))
         .collect();
     let options: Map<String, Value> = manifest
         .options()

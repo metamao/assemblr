@@ -164,8 +164,12 @@ default and no value in the unit's `options` is **mapped** from a parameter
 of the unit's own with the same name (see
 [parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved)):
 the unit's own parameter when it declares one that can be mapped, and
-otherwise one declared for it in `params` with the dependency's type,
-description, allowed values, and example, and no default. `--option
+otherwise one declared for it in `params` as inherited from the added unit,
+`{ "from": "<unit>" }`, which takes the dependency's definition and needs no
+entry in `options` (owner decision of 2026-10-25 on
+[#120](https://github.com/metamao/assemblr/issues/120), **Provisional
+(D-49)**; see
+[declaration](parameters-and-options.md#declaration--approved)). `--option
 <name>=<value>` sets a literal instead, read by the parameter's type as the
 consumer's `add` reads it. The command refuses, changing nothing, when the
 unit's own parameter of that name cannot be mapped, and when the

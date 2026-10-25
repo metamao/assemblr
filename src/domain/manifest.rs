@@ -75,11 +75,20 @@ pub struct Manifest {
     dependencies: BTreeMap<UnitIdentity, VersionRequirement>,
     options: BTreeMap<UnitIdentity, UnitOptionValues>,
     params: BTreeMap<ParameterName, ParameterDefinition>,
+    inherited: BTreeMap<ParameterName, UnitIdentity>,
     amendments: BTreeMap<RelativePath, AmendmentDeclaration>,
 }
 
 impl Manifest {
     /// Creates a manifest, reporting every invariant it would break.
+    ///
+    /// `inherited` holds the parameters the unit declares as
+    /// `{ "from": "<dependency>" }`: each takes that dependency's
+    /// definition and passes its value on to it.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one argument per manifest member, each a distinct type"
+    )]
     pub fn new(
         name: UnitIdentity,
         version: Version,
@@ -87,14 +96,19 @@ impl Manifest {
         dependencies: BTreeMap<UnitIdentity, VersionRequirement>,
         options: BTreeMap<UnitIdentity, UnitOptionValues>,
         params: BTreeMap<ParameterName, ParameterDefinition>,
+        inherited: BTreeMap<ParameterName, UnitIdentity>,
         amendments: BTreeMap<RelativePath, AmendmentDeclaration>,
     ) -> Result<Self, Vec<ManifestError>> {
         let declared = dependencies.keys().cloned().collect();
         let mut errors = relation_errors(Some(&name), &declared, options.keys());
+        errors.extend(inheritance_errors(&declared, &options, &inherited));
+        for parameter in inherited.keys().filter(|name| params.contains_key(*name)) {
+            errors.push(ManifestError::DeclaredTwice(parameter.clone()));
+        }
         for (target, values) in &options {
             for (parameter, value) in values {
                 if let OptionValue::From(source) = value {
-                    if !params.contains_key(source) {
+                    if !params.contains_key(source) && !inherited.contains_key(source) {
                         errors.push(ManifestError::UndeclaredMappingSource {
                             target: target.clone(),
                             parameter: parameter.clone(),
@@ -114,6 +128,7 @@ impl Manifest {
             dependencies,
             options,
             params,
+            inherited,
             amendments,
         })
     }
@@ -169,9 +184,42 @@ impl Manifest {
         &self.options
     }
 
-    /// The unit's own public parameters.
+    /// The public parameters the unit defines itself. The ones it inherits
+    /// are in [`Manifest::inherited`].
     pub fn params(&self) -> &BTreeMap<ParameterName, ParameterDefinition> {
         &self.params
+    }
+
+    /// The public parameters the unit inherits, by the direct dependency
+    /// whose parameter of the same name defines each and receives its
+    /// value.
+    pub fn inherited(&self) -> &BTreeMap<ParameterName, UnitIdentity> {
+        &self.inherited
+    }
+
+    /// Every public parameter with its definition: the unit's own, and each
+    /// inherited one with the definition it takes, followed from dependency
+    /// to dependency through `lookup`, which gives a unit's manifest at the
+    /// version composed. An inherited parameter that cannot be followed to
+    /// a definition is left out and reported.
+    pub fn resolved_params<'m>(
+        &'m self,
+        lookup: impl Fn(&UnitIdentity) -> Option<&'m Manifest>,
+    ) -> (
+        BTreeMap<ParameterName, ParameterDefinition>,
+        Vec<InheritanceError>,
+    ) {
+        let mut params = self.params.clone();
+        let mut errors = Vec::new();
+        for (name, from) in &self.inherited {
+            match inherited_definition(name, from, &lookup) {
+                Ok(definition) => {
+                    params.insert(name.clone(), definition.clone());
+                }
+                Err(error) => errors.push(error),
+            }
+        }
+        (params, errors)
     }
 
     /// The unit's amendments, by the amended file's path in the provider's
@@ -179,6 +227,83 @@ impl Manifest {
     pub fn amendments(&self) -> &BTreeMap<RelativePath, AmendmentDeclaration> {
         &self.amendments
     }
+}
+
+/// The definition `name`, inherited from `from`, takes: followed through
+/// each dependency that inherits it in turn. Resolution never yields a
+/// cycle; a lookup that did is cut off where it repeats.
+fn inherited_definition<'m>(
+    name: &ParameterName,
+    from: &UnitIdentity,
+    lookup: &impl Fn(&UnitIdentity) -> Option<&'m Manifest>,
+) -> Result<&'m ParameterDefinition, InheritanceError> {
+    let mut visited = BTreeSet::new();
+    let mut unit = from;
+    loop {
+        let error = || InheritanceError {
+            parameter: name.clone(),
+            unit: unit.clone(),
+        };
+        if !visited.insert(unit) {
+            return Err(error());
+        }
+        let manifest = lookup(unit).ok_or_else(error)?;
+        if let Some(definition) = manifest.params.get(name) {
+            return Ok(definition);
+        }
+        unit = manifest.inherited.get(name).ok_or_else(error)?;
+    }
+}
+
+/// An inherited parameter whose definition cannot be found: `unit`, the
+/// dependency it is inherited from or one that dependency inherits it
+/// from in turn, does not declare it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InheritanceError {
+    /// The parameter.
+    pub parameter: ParameterName,
+    /// The unit that should declare it.
+    pub unit: UnitIdentity,
+}
+
+impl fmt::Display for InheritanceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the parameter `{}` is inherited from {}, which does not declare it",
+            self.parameter, self.unit
+        )
+    }
+}
+
+impl std::error::Error for InheritanceError {}
+
+/// Checks that each inherited parameter names a declared dependency and
+/// that `options` does not also set it there, since the inherited parameter
+/// already passes its value on.
+pub(crate) fn inheritance_errors(
+    declared: &BTreeSet<UnitIdentity>,
+    options: &BTreeMap<UnitIdentity, UnitOptionValues>,
+    inherited: &BTreeMap<ParameterName, UnitIdentity>,
+) -> Vec<ManifestError> {
+    let mut errors = Vec::new();
+    for (parameter, unit) in inherited {
+        if !declared.contains(unit) {
+            errors.push(ManifestError::UndeclaredInheritance {
+                parameter: parameter.clone(),
+                unit: unit.clone(),
+            });
+        } else if options
+            .get(unit)
+            .is_some_and(|values| values.contains_key(parameter))
+        {
+            errors.push(ManifestError::InheritedOption {
+                parameter: parameter.clone(),
+                unit: unit.clone(),
+            });
+        }
+    }
+    errors
 }
 
 /// Checks the relations between a manifest's name, dependencies, and option
@@ -229,6 +354,24 @@ pub enum ManifestError {
         /// The parameter the mapping names.
         source: ParameterName,
     },
+    /// A parameter is inherited from a unit that is not a declared
+    /// dependency.
+    UndeclaredInheritance {
+        /// The inherited parameter.
+        parameter: ParameterName,
+        /// The unit it names.
+        unit: UnitIdentity,
+    },
+    /// `options` sets the parameter of the dependency that an inherited
+    /// parameter already passes its value to.
+    InheritedOption {
+        /// The inherited parameter, and the dependency's parameter.
+        parameter: ParameterName,
+        /// The dependency.
+        unit: UnitIdentity,
+    },
+    /// A parameter is both defined and inherited.
+    DeclaredTwice(ParameterName),
 }
 
 impl fmt::Display for ManifestError {
@@ -250,6 +393,22 @@ impl fmt::Display for ManifestError {
                 "the option `{parameter}` of {target} is mapped from `{source}`, which is not a \
                  parameter this unit declares in `params`"
             ),
+            Self::UndeclaredInheritance { parameter, unit } => write!(
+                f,
+                "the parameter `{parameter}` is inherited from {unit}, which is not declared in \
+                 `dependencies`; a parameter is inherited only from a direct dependency"
+            ),
+            Self::InheritedOption { parameter, unit } => write!(
+                f,
+                "the option `{parameter}` of {unit} is set, but the inherited parameter \
+                 `{parameter}` already passes its value to {unit}; remove the option"
+            ),
+            Self::DeclaredTwice(parameter) => {
+                write!(
+                    f,
+                    "the parameter `{parameter}` is both defined and inherited"
+                )
+            }
         }
     }
 }
@@ -306,6 +465,7 @@ mod tests {
             Description::new("An app.").unwrap(),
             dependencies,
             options,
+            BTreeMap::new(),
             BTreeMap::new(),
             amendments,
         )

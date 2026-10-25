@@ -147,7 +147,7 @@ fn add_declares_the_dependency_builds_and_lets_amend_follow() {
         "{out}"
     );
     assert!(
-        out.contains("declared `appName`, `mode` in params and mapped them"),
+        out.contains("declared `appName`, `mode` in params as inherited from it"),
         "{out}"
     );
     assert!(out.contains("Built @acme/app 0.1.0 into build/"), "{out}");
@@ -156,25 +156,22 @@ fn add_declares_the_dependency_builds_and_lets_amend_follow() {
         "{}",
         stderr(&output)
     );
-    // The manifest keeps its comment and holds the declaration, the mapped
-    // parameters with the dependency's type, allowed values, and example,
-    // and the mappings.
+    // The manifest keeps its comment and holds the declaration and the
+    // required parameters, inherited from the dependency rather than copied,
+    // so they need no mapping in `options`.
     let text = app.read("manifest.jsonc");
     assert!(text.contains("// The app."), "{text}");
     let manifest = app.manifest();
     assert_eq!(manifest["dependencies"]["@acme/base"], "^1.0.0");
-    assert_eq!(manifest["params"]["appName"]["type"], "string");
-    assert_eq!(manifest["params"]["appName"]["example"], "demo");
     assert_eq!(
-        manifest["params"]["mode"]["allowed"],
-        serde_json::json!(["dev", "prod"])
+        manifest["params"]["appName"],
+        serde_json::json!({ "from": "@acme/base" })
     );
-    assert!(manifest["params"]["mode"].get("default").is_none());
     assert_eq!(
-        manifest["options"]["@acme/base"]["appName"]["from"],
-        "appName"
+        manifest["params"]["mode"],
+        serde_json::json!({ "from": "@acme/base" })
     );
-    assert_eq!(manifest["options"]["@acme/base"]["mode"]["from"], "mode");
+    assert!(manifest.get("options").is_none(), "{manifest}");
     assert!(manifest["params"].get("port").is_none(), "{manifest}");
     assert_eq!(app.read("build/cfg.txt"), "name=demo mode=dev port=8080\n");
     assert_eq!(app.lockfile()["units"]["@acme/base"]["version"], "1.0.0");
@@ -355,7 +352,7 @@ fn an_own_parameter_that_cannot_be_mapped_is_refused_with_the_option_as_the_way_
     );
     let manifest = app.manifest();
     assert_eq!(manifest["options"]["@acme/base"]["appName"], "shop");
-    assert_eq!(manifest["options"]["@acme/base"]["mode"]["from"], "mode");
+    assert_eq!(manifest["params"]["mode"]["from"], "@acme/base");
     assert_eq!(manifest["params"]["appName"]["type"], "integer");
 }
 
@@ -521,12 +518,12 @@ fn a_unit_with_params_after_its_description_takes_a_dependency() {
     let manifest = app.manifest();
     assert_eq!(manifest["dependencies"]["@acme/base"], "^1.0.0");
     assert_eq!(manifest["params"]["title"]["example"], "Demo");
-    assert_eq!(manifest["params"]["appName"]["example"], "demo");
+    assert_eq!(manifest["params"]["appName"]["from"], "@acme/base");
     // The one-line `params` object stays on one line.
     assert!(
         app.read("manifest.jsonc").contains(
-            "\"example\": \"Demo\" }, \"appName\": { \"type\": \"string\", \"description\": \
-             \"The app name.\", \"example\": \"demo\" }"
+            "\"example\": \"Demo\" }, \"appName\": { \"from\": \"@acme/base\" }, \"mode\": \
+             { \"from\": \"@acme/base\" } }"
         ),
         "{}",
         app.read("manifest.jsonc")
@@ -595,6 +592,6 @@ fn a_manifest_with_trailing_commas_keeps_them_in_what_add_writes() {
         text.contains("\"dependencies\": {\n    \"@acme/base\": \"^1.0.0\",\n  },"),
         "{text}"
     );
-    assert!(text.contains("\"example\": \"demo\",\n    },"), "{text}");
-    assert!(text.contains("\"from\": \"appName\",\n      },"), "{text}");
+    assert!(text.contains("\"from\": \"@acme/base\",\n    },"), "{text}");
+    assert!(text.ends_with("  },\n}\n"), "{text}");
 }

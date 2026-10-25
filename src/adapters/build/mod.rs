@@ -529,16 +529,23 @@ impl PendingFile {
 
 /// The values a unit is built with: a required parameter is built with its
 /// example, for this unit only, and a consumer never sees them. The
-/// parameters without a default or an example are given too.
+/// parameters without a default or an example are given too. An inherited
+/// parameter takes its definition from `resolved`; without it, only the
+/// unit's own parameters are considered.
 pub(super) fn development_values(
     manifest: &Manifest,
+    resolved: Option<&Resolved>,
 ) -> (
     BTreeMap<UnitIdentity, crate::domain::OptionValues>,
     Vec<ParameterName>,
 ) {
+    let params = match resolved {
+        Some(resolved) => resolved.params(manifest),
+        None => manifest.params().clone(),
+    };
     let mut development = crate::domain::OptionValues::new();
     let mut parameters: Vec<ParameterName> = Vec::new();
-    for (name, definition) in manifest.params() {
+    for (name, definition) in &params {
         if definition.default().is_some() {
             continue;
         }
@@ -620,6 +627,7 @@ pub(super) fn without_amendments(manifest: &Manifest) -> Manifest {
         manifest.dependencies().clone(),
         manifest.options().clone(),
         manifest.params().clone(),
+        manifest.inherited().clone(),
         BTreeMap::new(),
     )
     .unwrap_or_else(|_| manifest.clone())
@@ -635,6 +643,25 @@ pub(crate) struct Resolved {
 }
 
 impl Resolved {
+    /// The manifest of `identity` at its locked version.
+    pub(crate) fn manifest_of(&self, identity: &UnitIdentity) -> Option<&Manifest> {
+        let locked = self.lock.units().get(identity)?;
+        self.dependencies.manifest(identity, locked.version())
+    }
+
+    /// The parameters of `manifest`, a locked unit or the unit being
+    /// built, each inherited one with the definition it takes from the
+    /// locked versions. One that cannot be followed is left out; the
+    /// composition reports it.
+    pub(crate) fn params(
+        &self,
+        manifest: &Manifest,
+    ) -> BTreeMap<ParameterName, crate::domain::ParameterDefinition> {
+        manifest
+            .resolved_params(|identity| self.manifest_of(identity))
+            .0
+    }
+
     /// The content of every locked unit, for composition, after each
     /// published amender's bases were verified against the index.
     pub(crate) fn units(&self) -> BTreeMap<UnitIdentity, UnitContent<'_>> {
@@ -796,11 +823,11 @@ pub(super) fn validate(
         contribution: Vec::new(),
         result: None,
     };
-    let (development, parameters) = development_values(manifest);
+    let (_, parameters) = development_values(manifest, None);
     if !parameters.is_empty() {
         problems.push(BuildProblem::DevelopmentValues {
             unit: manifest.name().clone(),
-            parameters,
+            parameters: parameters.clone(),
         });
     }
     let Some(resolved) = resolve_graph(
@@ -812,6 +839,18 @@ pub(super) fn validate(
     ) else {
         return validation;
     };
+    // The inherited parameters are known once the dependencies are.
+    let (development, all) = development_values(manifest, Some(&resolved));
+    let inherited: Vec<ParameterName> = all
+        .into_iter()
+        .filter(|name| !parameters.contains(name))
+        .collect();
+    if !inherited.is_empty() {
+        problems.push(BuildProblem::DevelopmentValues {
+            unit: manifest.name().clone(),
+            parameters: inherited,
+        });
+    }
     // A build never moves an amended unit away from its base. The cause is
     // told apart here, with the previous lock; the composition below would
     // only see that the base and the resolved version differ.

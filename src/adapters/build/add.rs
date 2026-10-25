@@ -10,7 +10,6 @@
 //! unit's own, declared for them when the unit has none, unless `--option`
 //! gives a literal.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -28,8 +27,8 @@ use crate::adapters::project::declaration::{
 };
 use crate::adapters::registry::Registry;
 use crate::domain::{
-    Edit, Manifest, OptionValue, ParameterDefinition, ParameterName, ParameterType, ParameterValue,
-    UnitIdentity, Value, Version, VersionRequirement, mapping_problem,
+    Edit, Manifest, OptionValue, ParameterDefinition, ParameterName, ParameterValue, UnitIdentity,
+    Value, Version, VersionRequirement, mapping_problem,
 };
 
 const OPTIONS: &str = "options";
@@ -190,18 +189,18 @@ fn plan(
         ))));
     };
     let version = locked.version().clone();
-    let empty = BTreeMap::new();
     let params = resolved
-        .dependencies
-        .manifest(identity, &version)
-        .map_or(&empty, Manifest::params);
+        .manifest_of(identity)
+        .map(|dependency| resolved.params(dependency))
+        .unwrap_or_default();
+    let existing = resolved.params(manifest);
     let own = edited.options().get(identity).cloned().unwrap_or_default();
 
     // What the dependency's `options` entry gains, literals first: each as
     // the manifest holds it, and as the text is edited to hold it.
     let mut set: Vec<(ParameterName, OptionValue)> = Vec::new();
     let mut parameters = Vec::new();
-    let mut declared_params: Vec<(ParameterName, ParameterDefinition)> = Vec::new();
+    let mut inherited: Vec<ParameterName> = Vec::new();
     for (name, raw) in options {
         let parameter = ParameterName::parse(name)
             .map_err(|error| rejected(AddProblem::InvalidOption(error.to_string())))?;
@@ -231,14 +230,14 @@ fn plan(
         set.push((parameter.clone(), OptionValue::Literal(literal)));
         parameters.push(AddedParameter::Literal(parameter));
     }
-    for (name, definition) in params {
+    for (name, definition) in &params {
         if !definition.is_required()
             || own.contains_key(name)
             || options.iter().any(|(given, _)| *given == name.as_str())
         {
             continue;
         }
-        match manifest.params().get(name) {
+        match existing.get(name) {
             Some(existing) => {
                 if let Some(reason) = mapping_problem(existing, definition) {
                     return Err(rejected(AddProblem::ParameterClash {
@@ -249,52 +248,37 @@ fn plan(
                     }));
                 }
                 parameters.push(AddedParameter::MappedToExisting(name.clone()));
+                set.push((name.clone(), OptionValue::From(name.clone())));
             }
             None => {
                 // The unit's build uses the example as the development
-                // value; without one, the mapped parameter cannot be built.
-                let Some(example) = definition.example() else {
+                // value; without one, the inherited parameter cannot be
+                // built.
+                if definition.example().is_none() {
                     return Err(rejected(AddProblem::NoExample {
                         dependency: identity.clone(),
                         version: version.clone(),
                         parameter: name.clone(),
                     }));
-                };
-                let own = ParameterDefinition::new(
-                    definition.parameter_type().clone(),
-                    definition.description().clone(),
-                    None,
-                )
-                .and_then(|own| own.with_example(example.clone()))
-                .map_err(|error| error.to_string())
-                .and_then(|own| match definition.pattern() {
-                    Some(pattern) => own
-                        .with_pattern(pattern.clone())
-                        .map_err(|problem| problem.to_string()),
-                    None => Ok(own),
-                })
-                .map_err(|error| {
-                    rejected(AddProblem::CannotEdit(format!(
-                        "the parameter `{name}` of {identity} {version} cannot be declared: {error}"
-                    )))
-                })?;
-                declared_params.push((name.clone(), own));
-                parameters.push(AddedParameter::Declared(name.clone()));
+                }
+                // An inherited parameter passes its value on by itself, so
+                // the dependency's `options` gains nothing for it.
+                inherited.push(name.clone());
+                parameters.push(AddedParameter::Inherited(name.clone()));
             }
         }
-        set.push((name.clone(), OptionValue::From(name.clone())));
     }
     let values: Vec<(String, Value)> = set
         .iter()
         .map(|(name, value)| (name.as_str().to_owned(), option_text(value)))
         .collect();
-    let text = declare_params(&text, &declared_params).map_err(cannot)?;
+    let text = declare_params(&text, identity, &inherited).map_err(cannot)?;
     let text = set_options(&text, identity, &values).map_err(cannot)?;
 
     // What the text must describe: the manifest plus the declarations,
     // which a reading the editor misjudged would not match.
-    let mut params = manifest.params().clone();
-    params.extend(declared_params);
+    let mut inherits = manifest.inherited().clone();
+    inherits.extend(inherited.into_iter().map(|name| (name, identity.clone())));
     let mut unit_options = manifest.options().clone();
     if !set.is_empty() {
         unit_options
@@ -312,7 +296,8 @@ fn plan(
         manifest.description().clone(),
         dependencies,
         unit_options,
-        params,
+        manifest.params().clone(),
+        inherits,
         manifest.amendments().clone(),
     )
     .map_err(|errors| {
@@ -342,20 +327,24 @@ fn plan(
     })
 }
 
-/// `text` with each of `declared` added to `params`, after the last one. A
-/// manifest without `params` gets the object after `options`, or after
-/// `dependencies`.
+/// `text` with each of `inherited` added to `params`, after the last one,
+/// as inherited from `dependency`. A manifest without `params` gets the
+/// object after `options`, or after `dependencies`.
 fn declare_params(
     text: &str,
-    declared: &[(ParameterName, ParameterDefinition)],
+    dependency: &UnitIdentity,
+    inherited: &[ParameterName],
 ) -> Result<String, EditFailure> {
     let mut text = text.to_owned();
-    for (name, definition) in declared {
+    for name in inherited {
         let root = parse_value(&text).map_err(|error| EditFailure::Cannot(error.to_string()))?;
         let Value::Object(members) = &root else {
             return Err(EditFailure::Cannot("it is not a JSON object".to_owned()));
         };
-        let value = definition_value(definition);
+        let value = Value::Object(vec![(
+            "from".to_owned(),
+            Value::String(dependency.to_string()),
+        )]);
         let edit = match root.member(PARAMS) {
             Some(Value::Object(params)) => Edit::Insert {
                 parent: vec![PARAMS.to_owned()],
@@ -383,47 +372,6 @@ fn anchor(members: &[(String, Value)], preferred: &[&str]) -> Option<String> {
         .find(|key| members.iter().any(|(name, _)| name == *key))
         .map(|key| (*key).to_owned())
         .or_else(|| members.last().map(|(name, _)| name.clone()))
-}
-
-/// A parameter definition as the manifest writes it: its type, its
-/// description, its allowed values, its pattern, and its example, without a
-/// default.
-fn definition_value(definition: &ParameterDefinition) -> Value {
-    let (base, allowed) = match definition.parameter_type() {
-        ParameterType::String => ("string", None),
-        ParameterType::Integer => ("integer", None),
-        ParameterType::Boolean => ("boolean", None),
-        ParameterType::EnumeratedString(allowed) => ("string", Some(allowed)),
-    };
-    let mut members = vec![
-        ("type".to_owned(), Value::String(base.to_owned())),
-        (
-            "description".to_owned(),
-            Value::String(definition.description().as_str().to_owned()),
-        ),
-    ];
-    if let Some(allowed) = allowed {
-        members.push((
-            "allowed".to_owned(),
-            Value::Array(
-                allowed
-                    .as_slice()
-                    .iter()
-                    .map(|value| Value::String(value.clone()))
-                    .collect(),
-            ),
-        ));
-    }
-    if let Some(pattern) = definition.pattern() {
-        members.push((
-            "pattern".to_owned(),
-            Value::String(pattern.as_str().to_owned()),
-        ));
-    }
-    if let Some(example) = definition.example() {
-        members.push(("example".to_owned(), parameter_value(example)));
-    }
-    Value::Object(members)
 }
 
 /// An option value as the manifest writes it: the literal, or the mapping
@@ -479,9 +427,10 @@ pub enum AddedParameter {
     Literal(ParameterName),
     /// The parameter is mapped from a parameter the unit declares already.
     MappedToExisting(ParameterName),
-    /// The parameter is mapped from a parameter declared for it, with the
-    /// dependency's type, description, allowed values, and example.
-    Declared(ParameterName),
+    /// The unit declares the parameter as inherited from the dependency,
+    /// `{ "from": "<dependency>" }`, which takes the dependency's definition
+    /// and passes its value on.
+    Inherited(ParameterName),
 }
 
 /// Why `unit add` failed.

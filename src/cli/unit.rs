@@ -700,20 +700,14 @@ fn describe_parameters(parameters: &[AddedParameter]) -> Vec<String> {
     if !literal.is_empty() {
         phrases.push(format!("set {}", literal.join(", ")));
     }
-    let declared = names(|parameter| match parameter {
-        AddedParameter::Declared(name) => Some(name),
+    let inherited = names(|parameter| match parameter {
+        AddedParameter::Inherited(name) => Some(name),
         _ => None,
     });
-    if !declared.is_empty() {
+    if !inherited.is_empty() {
         phrases.push(format!(
-            "declared {} in params and mapped {} to {}",
-            declared.join(", "),
-            if declared.len() == 1 { "it" } else { "them" },
-            if declared.len() == 1 {
-                "the dependency's parameter"
-            } else {
-                "the dependency's parameters"
-            }
+            "declared {} in params as inherited from it",
+            inherited.join(", ")
         ));
     }
     let existing = names(|parameter| match parameter {

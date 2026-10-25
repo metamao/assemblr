@@ -131,6 +131,16 @@ A parameter definition has these properties:
 }
 ```
 
+A parameter may instead be inherited from a direct dependency, with no
+other property (**OC-54**, details **Provisional (D-49)**):
+
+```jsonc
+{
+  "dependencies": { "@metamao/node": "^1.0.0" },
+  "params": { "appName": { "from": "@metamao/node" } }
+}
+```
+
 Other rules:
 
 - **Parameter names** start with an ASCII letter and continue with ASCII
