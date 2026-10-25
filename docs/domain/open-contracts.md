@@ -735,7 +735,9 @@ How the status of a statement affects implementation:
   its role, in the first `compose` and in a reconciliation alike. Owner
   decision of 2026-10-23
   ([#113](https://github.com/metamao/assemblr/issues/113)), which replaces
-  D-10 and D-13 for such a file.
+  D-10 and D-13 for such a file. The `AGENTS.md` that `init` wrote, still
+  unchanged, is Assemblr's and is replaced by a unit's instead (owner
+  decision of 2026-10-25, [#120](https://github.com/metamao/assemblr/issues/120)).
 - **Open detail:** What a composition does with such a path when what it
   holds cannot carry conflict markers: content that is not UTF-8 text, a
   directory, or a symbolic link. **Provisional (D-10)**: it is refused before

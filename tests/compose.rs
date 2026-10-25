@@ -3353,3 +3353,45 @@ fn status_does_not_call_a_project_with_a_missing_base_up_to_date() {
     assert_eq!(status_json(&fixture, &project)["up_to_date"], Value::Null);
     fails(fixture.compose(&project));
 }
+
+#[test]
+fn the_agents_md_init_wrote_gives_way_to_a_unit_s_and_an_edited_one_does_not() {
+    let fixture = Fixture::new("agents-scaffold");
+    let guide = fixture.repo("guide");
+    guide.write("manifest.jsonc", &manifest("@acme/guide", "1.0.0", &[], ""));
+    guide.write("src/AGENTS.md", "# The stack's guidance\n");
+    guide.publish("1.0.0");
+    fixture.register(&guide);
+
+    // Untouched since `init`: the unit's file replaces it, with a note.
+    let project = fixture.project("untouched", &[("@acme/guide", "^1")], "");
+    let output = succeeds(fixture.compose(&project));
+    assert!(
+        stderr(&output).contains(
+            "AGENTS.md was still the one `assemblr init` wrote, so the composition's replaced it"
+        ),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(read(&project.join("AGENTS.md")), "# The stack's guidance\n");
+    // It is a composed file now: removing the unit removes it.
+    declare(&project, &[], "");
+    succeeds(fixture.compose(&project));
+    assert!(!project.join("AGENTS.md").exists());
+
+    // With CRLF line endings, as a checkout may convert it, the same.
+    let project = fixture.project("crlf", &[("@acme/guide", "^1")], "");
+    let agents = read(&project.join("AGENTS.md")).replace('\n', "\r\n");
+    fs::write(project.join("AGENTS.md"), agents).unwrap();
+    succeeds(fixture.compose(&project));
+    assert_eq!(read(&project.join("AGENTS.md")), "# The stack's guidance\n");
+
+    // Edited by the consumer: a conflict, as for any file of their own.
+    let project = fixture.project("edited", &[("@acme/guide", "^1")], "");
+    let edited = format!("{}\nOur own rule.\n", read(&project.join("AGENTS.md")));
+    fs::write(project.join("AGENTS.md"), &edited).unwrap();
+    fails(fixture.compose(&project));
+    let agents = read(&project.join("AGENTS.md"));
+    assert!(agents.contains("<<<<<<< current"), "{agents}");
+    assert!(agents.contains("Our own rule."), "{agents}");
+}

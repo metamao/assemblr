@@ -25,9 +25,14 @@ assemblr init my-prod-app
 - `init` creates only the minimal Assemblr project configuration: the project
   configuration file, `assemblr.jsonc`, and, when nothing is at that path
   yet, an `AGENTS.md` that points coding agents to `assemblr guide`. Owner
-  decision of 2026-10-23 ([#115](https://github.com/metamao/assemblr/issues/115)). A unit that delivers its own
-  `AGENTS.md` makes it a conflict for the consumer to resolve, as any file
-  Assemblr did not compose (OC-44).
+  decision of 2026-10-23 ([#115](https://github.com/metamao/assemblr/issues/115)). When a unit delivers its own
+  `AGENTS.md` and the project's is still exactly the one `init` wrote, line
+  endings aside, the composition replaces it with the unit's and says so:
+  Assemblr wrote that file, so it is not the consumer's. One the consumer
+  edited is a conflict for them to resolve, as any file Assemblr did not
+  compose (OC-44). Owner decision of 2026-10-25
+  ([#120](https://github.com/metamao/assemblr/issues/120)), which replaces
+  the conflict #115 described for the untouched file.
 - `init` does **not** generate application code, resolve, retrieve, or
   materialize units, run package managers or other external programs,
   initialize technology-specific frameworks, or modify existing application
