@@ -25,7 +25,7 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0006](0006-reading-git-repositories.md) | Reading Git repositories through the `git` executable | Accepted, extended by 0008 |
 | [0007](0007-local-registry-storage.md) | Local registry storage, replacement, and locking | Accepted |
 | [0008](0008-unit-build.md) | Unit builds: working-tree reading, the unit lockfile, and publishing `build/` | Accepted |
-| [0009](0009-rendering.md) | Rendering templates with a purpose-built interpolator | Accepted |
+| [0009](0009-rendering.md) | Rendering templates with a purpose-built interpolator | Accepted, points 4 and 8 amended by 0035 |
 | [0010](0010-unit-amend.md) | `unit amend`: the search, the manifest edit, and recovery; amendments in a build | Accepted, point 8 superseded by 0011 |
 | [0011](0011-published-amendments.md) | Published amendments: reading them, validating them at index time, and composing them at the base | Accepted, the composition at the base only narrowed by 0023, points 5 and 6 narrowed by 0015, points 4 to 6 superseded by 0032 |
 | [0012](0012-unit-update.md) | `unit update`: resolving with a partial lock, rewriting bases in place, and the update journal | Accepted, the refusal of a changed file and of a published amender off its base lifted by 0023 |
@@ -51,3 +51,4 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0032](0032-layered-amendments.md) | Layered amendments: the base below an amender, marked sibling conflicts, the pending state, and the rebase in `unit update` | Accepted |
 | [0033](0033-catalog-entry-commands.md) | Catalog entry commands: `catalog init`, `add`, and `remove`, URL-only references, and commits | Accepted |
 | [0034](0034-agent-bench.md) | The agent bench: coding agents on fixed scenarios, run by hand before a release | Accepted |
+| [0035](0035-filters-and-patterns.md) | Template filters and parameter patterns: `tojson` and `e` with Jinja's output, and `pattern` with `regex-lite` | Accepted |

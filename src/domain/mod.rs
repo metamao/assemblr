@@ -46,7 +46,7 @@ pub use merge::{
 pub use parameter::{
     AllowedValues, AllowedValuesError, BlankDescription, Description, OWN, ParameterDefinition,
     ParameterName, ParameterNameError, ParameterNameErrorReason, ParameterType, ParameterValue,
-    ParameterValueError, ValueKind,
+    ParameterValueError, PatternError, PatternProblem, ValueKind, ValuePattern,
 };
 pub use path::{RelativePath, RelativePathError, RelativePathErrorReason};
 pub use project::{Project, ReconciliationState};

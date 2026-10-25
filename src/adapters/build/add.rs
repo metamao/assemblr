@@ -266,6 +266,13 @@ fn plan(
                     None,
                 )
                 .and_then(|own| own.with_example(example.clone()))
+                .map_err(|error| error.to_string())
+                .and_then(|own| match definition.pattern() {
+                    Some(pattern) => own
+                        .with_pattern(pattern.clone())
+                        .map_err(|problem| problem.to_string()),
+                    None => Ok(own),
+                })
                 .map_err(|error| {
                     rejected(AddProblem::CannotEdit(format!(
                         "the parameter `{name}` of {identity} {version} cannot be declared: {error}"
@@ -379,7 +386,8 @@ fn anchor(members: &[(String, Value)], preferred: &[&str]) -> Option<String> {
 }
 
 /// A parameter definition as the manifest writes it: its type, its
-/// description, its allowed values, and its example, without a default.
+/// description, its allowed values, its pattern, and its example, without a
+/// default.
 fn definition_value(definition: &ParameterDefinition) -> Value {
     let (base, allowed) = match definition.parameter_type() {
         ParameterType::String => ("string", None),
@@ -404,6 +412,12 @@ fn definition_value(definition: &ParameterDefinition) -> Value {
                     .map(|value| Value::String(value.clone()))
                     .collect(),
             ),
+        ));
+    }
+    if let Some(pattern) = definition.pattern() {
+        members.push((
+            "pattern".to_owned(),
+            Value::String(pattern.as_str().to_owned()),
         ));
     }
     if let Some(example) = definition.example() {

@@ -136,6 +136,9 @@ fn print_text(info: &UnitInfo) {
                 let shown: Vec<String> = values.iter().map(|value| format!("{value:?}")).collect();
                 facts.push(format!("one of {}", shown.join(", ")));
             }
+            if let Some(pattern) = parameter.pattern() {
+                facts.push(format!("matching `{}`", pattern.as_str()));
+            }
             if let Some(example) = parameter.example() {
                 facts.push(format!("example {example}"));
             }

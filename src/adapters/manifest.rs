@@ -11,9 +11,9 @@ use super::jsonc::{self, Json, SyntaxError};
 use crate::domain::{
     self, AllowedValues, AllowedValuesError, AmendmentDeclaration, BlankDescription, Description,
     IdentityError, Manifest, ManifestError, OptionValue, OptionValues, ParameterDefinition,
-    ParameterName, ParameterNameError, ParameterType, ParameterValue, ParameterValueError, Project,
-    RelativePath, RelativePathError, RequirementError, UnitIdentity, UnitOptionValues, Version,
-    VersionError, VersionRequirement,
+    ParameterName, ParameterNameError, ParameterType, ParameterValue, ParameterValueError,
+    PatternError, PatternProblem, Project, RelativePath, RelativePathError, RequirementError,
+    UnitIdentity, UnitOptionValues, ValuePattern, Version, VersionError, VersionRequirement,
 };
 
 pub(crate) const MANIFEST_FIELDS: &[&str] = &[
@@ -27,7 +27,14 @@ pub(crate) const MANIFEST_FIELDS: &[&str] = &[
     "amendments",
 ];
 const PROJECT_FIELDS: &[&str] = &["$schema", "dependencies", "options"];
-const PARAMETER_FIELDS: &[&str] = &["type", "description", "default", "allowed", "example"];
+const PARAMETER_FIELDS: &[&str] = &[
+    "type",
+    "description",
+    "default",
+    "allowed",
+    "pattern",
+    "example",
+];
 const MAPPING_FIELDS: &[&str] = &["from"];
 const AMENDMENT_FIELDS: &[&str] = &["unit", "base"];
 const SCALAR: &[JsonKind] = &[JsonKind::String, JsonKind::Integer, JsonKind::Boolean];
@@ -260,6 +267,10 @@ pub enum IssueKind {
     AllowedValuesRequireString,
     /// The `allowed` list is invalid.
     InvalidAllowedValues(AllowedValuesError),
+    /// `pattern` is declared for a parameter that is not a string.
+    PatternRequiresString,
+    /// The `pattern` is not a valid regular expression.
+    InvalidPattern(PatternError),
     /// The default does not satisfy the parameter's type.
     InvalidDefault(ParameterValueError),
     /// The example does not satisfy the parameter's type.
@@ -316,6 +327,10 @@ impl fmt::Display for IssueKind {
                 f.write_str("allowed values are only supported for parameters of type \"string\"")
             }
             Self::InvalidAllowedValues(error) => error.fmt(f),
+            Self::PatternRequiresString => {
+                f.write_str("a pattern is only supported for parameters of type \"string\"")
+            }
+            Self::InvalidPattern(error) => error.fmt(f),
             Self::InvalidDefault(error) => write!(f, "invalid default: {error}"),
             Self::InvalidExample(error) => write!(f, "invalid example: {error}"),
             Self::MappingInConsumer => f.write_str(
@@ -933,10 +948,43 @@ impl Reader {
             self.report(path.key("example"), IssueKind::InvalidExample(error));
             return None;
         }
+        let pattern = match fields.get("pattern") {
+            None => None,
+            Some(json) => {
+                let path = path.key("pattern");
+                let source = self.string(&path, json)?;
+                match ValuePattern::new(source) {
+                    Ok(pattern) => Some((path, pattern)),
+                    Err(error) => {
+                        self.report(path, IssueKind::InvalidPattern(error));
+                        return None;
+                    }
+                }
+            }
+        };
         let definition = ParameterDefinition::new(parameter_type, description?, default).ok()?;
-        match example {
-            Some(example) => definition.with_example(example).ok(),
-            None => Some(definition),
+        let definition = match example {
+            Some(example) => definition.with_example(example).ok()?,
+            None => definition,
+        };
+        let Some((pattern_path, pattern)) = pattern else {
+            return Some(definition);
+        };
+        match definition.with_pattern(pattern) {
+            Ok(definition) => Some(definition),
+            Err(problem) => {
+                let (at, kind) = match problem {
+                    PatternProblem::NotAString => (pattern_path, IssueKind::PatternRequiresString),
+                    PatternProblem::Default(error) => {
+                        (path.key("default"), IssueKind::InvalidDefault(error))
+                    }
+                    PatternProblem::Example(error) => {
+                        (path.key("example"), IssueKind::InvalidExample(error))
+                    }
+                };
+                self.report(at, kind);
+                None
+            }
         }
     }
 
@@ -1419,6 +1467,57 @@ mod tests {
             issues[3].1.to_string(),
             "expected a string, an integer, or a boolean, found an array"
         );
+    }
+
+    #[test]
+    fn a_pattern_is_a_valid_expression_on_a_string_that_its_values_match() {
+        let text = with(
+            r#""params": {
+                 "slug": {"type": "string", "description": "A.", "pattern": "^[a-z-]+$", "example": "my-app"},
+                 "badPattern": {"type": "string", "description": "A.", "pattern": "[a-"},
+                 "unicodeClass": {"type": "string", "description": "A.", "pattern": "\\p{L}"},
+                 "onInteger": {"type": "integer", "description": "A.", "pattern": "^1"},
+                 "badDefault": {"type": "string", "description": "A.", "pattern": "^a", "default": "b"},
+                 "badExample": {"type": "string", "description": "A.", "pattern": "^a", "example": "b"}
+               }"#,
+        );
+        let issues = issues(&text);
+        let found: Vec<(&str, String)> = issues
+            .iter()
+            .map(|(path, kind)| (path.as_str(), kind.to_string()))
+            .collect();
+        assert_eq!(found.len(), 5, "{found:#?}");
+        assert_eq!(
+            found[0],
+            (
+                "params.badDefault.default",
+                "invalid default: \"b\" does not match the pattern `^a`".to_owned()
+            )
+        );
+        assert_eq!(
+            found[1],
+            (
+                "params.badExample.example",
+                "invalid example: \"b\" does not match the pattern `^a`".to_owned()
+            )
+        );
+        assert_eq!(found[2].0, "params.badPattern.pattern");
+        assert!(found[2].1.starts_with("invalid pattern: "), "{found:#?}");
+        assert_eq!(
+            found[3],
+            (
+                "params.onInteger.pattern",
+                "a pattern is only supported for parameters of type \"string\"".to_owned()
+            )
+        );
+        assert_eq!(found[4].0, "params.unicodeClass.pattern");
+
+        let manifest = read_manifest(&with(
+            r#""params": {"slug": {"type": "string", "description": "A.", "pattern": "^[a-z-]+$", "example": "my-app"}}"#,
+        ))
+        .unwrap();
+        let slug = &manifest.params()[&ParameterName::parse("slug").unwrap()];
+        assert_eq!(slug.pattern().unwrap().as_str(), "^[a-z-]+$");
     }
 
     #[test]

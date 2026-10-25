@@ -43,7 +43,7 @@ These four fields are **maps**:
 |-------|------|--------|
 | `dependencies` | Unit identities (`@owner/unit-name`) | A SemVer requirement string |
 | `options` | Identities of the unit's **direct** dependencies | A map from parameter name to the value required for that parameter |
-| `params` | Parameter names | The parameter's typed definition: its type, its description, an optional default, and optional allowed values |
+| `params` | Parameter names | The parameter's typed definition: its type, its description, an optional default, optional allowed values, and an optional pattern |
 | `amendments` | Amended paths: the file's path in the provider's `src/`, which is the copy's path under `amendments/` | An object with `unit`, the identity of the **direct** dependency that provides the file, and `base`, the exact version the copy was taken from, as a string |
 
 - An option value or a default is written as the JSON value of the parameter's
@@ -113,7 +113,8 @@ A parameter definition has these properties:
 | `description` | Yes | A string that is not empty or only whitespace |
 | `default` | No | A JSON value of the parameter's type. Its presence makes the parameter optional. |
 | `allowed` | No | Only with `"type": "string"`, which makes the parameter an enumerated string. A non-empty array of strings with no duplicates. |
-| `example` | No | A JSON value of the parameter's type that satisfies `allowed`. The value the unit is built, checked, and published with when the parameter is required and has no default. It is not a default and never a consumer value (decision log D-24). |
+| `pattern` | No | Only with `"type": "string"`. A regular expression that the default, the example, and every value a unit or a project supplies must match somewhere, as JSON Schema's `pattern`: `^…$` anchors it. The syntax is the `regex-lite` crate's, in which `\d`, `\w`, and `\s` are ASCII classes as in ECMAScript; Unicode classes such as `\p{L}` are rejected. Owner decision of 2026-10-25 ([#120](https://github.com/metamao/assemblr/issues/120)); the syntax is **Provisional (D-48)**. |
+| `example` | No | A JSON value of the parameter's type that satisfies `allowed` and `pattern`. The value the unit is built, checked, and published with when the parameter is required and has no default. It is not a default and never a consumer value (decision log D-24). |
 
 ```jsonc
 {

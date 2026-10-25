@@ -4,7 +4,9 @@
 //! that `options` cannot fix.
 
 use assemblr::adapters::{CrossVersionReason, MergeFailure};
-use assemblr::domain::{CompositionError, Requirer, RootTargetReason, UnitIdentity, Version};
+use assemblr::domain::{
+    CompositionError, ParameterValueError, Requirer, RootTargetReason, UnitIdentity, Version,
+};
 
 /// Who reads the advice, since the same problem is fixed in different
 /// files: a consumer edits `assemblr.jsonc`, and an author edits the
@@ -37,6 +39,13 @@ pub(super) fn composition_advice(error: &CompositionError, audience: Audience) -
         CompositionError::UndeclaredParameter { .. } => format!(
             "spell the parameter as the unit declares it in {options}, or remove the entry; `assemblr \
              info <unit>` lists the parameters the unit declares"
+        ),
+        CompositionError::InvalidValue {
+            error: ParameterValueError::NoMatch { .. },
+            ..
+        } => format!(
+            "give the option in {options} a value that matches the pattern; `assemblr info \
+             <unit>` shows the parameter's description"
         ),
         CompositionError::InvalidValue { .. } => format!(
             "give the option in {options} a value of the parameter's type and, for an \

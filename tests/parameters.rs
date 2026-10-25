@@ -444,3 +444,59 @@ fn a_project_cannot_write_a_mapping_and_an_incompatible_mapping_is_refused_at_ch
         "{err}"
     );
 }
+
+#[test]
+fn a_pattern_refuses_a_value_that_does_not_match_wherever_it_comes_from() {
+    let fixture = Fixture::new("pattern");
+    let base = fixture.repo("base");
+    base.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/base",
+            "1.0.0",
+            &[],
+            r#", "params": {"name": {"type": "string", "description": "The package name.", "pattern": "^[a-z][a-z0-9-]*$", "example": "my-app"}}"#,
+        ),
+    );
+    base.write("src/name.txt.assemblr.tmpl", "{{ name }}\n");
+    succeed(&fixture.build(&base));
+    base.publish("1.0.0");
+    fixture.register(&base);
+
+    // A consumer's value.
+    let shop = project(
+        &fixture,
+        "shop",
+        "{\"dependencies\": {}, \"options\": {}}\n",
+    );
+    let err =
+        failure(&fixture.assemblr(&shop, &["add", "@acme/base", "--option", "name=Bob's App"]));
+    assert!(
+        err.contains("\"Bob's App\" does not match the pattern `^[a-z][a-z0-9-]*$`"),
+        "{err}"
+    );
+    assert!(err.contains("a value that matches the pattern"), "{err}");
+    assert!(!shop.join("name.txt").exists());
+    succeed(&fixture.assemblr(&shop, &["add", "@acme/base", "--option", "name=bobs-app"]));
+    assert_eq!(
+        fs::read_to_string(shop.join("name.txt")).unwrap(),
+        "bobs-app\n"
+    );
+
+    // A literal a unit sets for its dependency.
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[("@acme/base", "^1.0.0")],
+            r#", "options": {"@acme/base": {"name": "Not Kebab"}}"#,
+        ),
+    );
+    let err = failure(&fixture.build(&app));
+    assert!(
+        err.contains("\"Not Kebab\" does not match the pattern"),
+        "{err}"
+    );
+}

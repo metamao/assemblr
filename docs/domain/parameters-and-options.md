@@ -37,10 +37,13 @@ Each parameter has:
 - a **type**;
 - a **human-readable description**, which is required;
 - an optional **default**;
-- **allowed values**, optional, for constrained strings.
+- **allowed values**, optional, for constrained strings;
+- a **pattern**, optional, for strings: a regular expression every value
+  must match, with JSON Schema's meaning (owner decision of 2026-10-25,
+  [#120](https://github.com/metamao/assemblr/issues/120)).
 
-Values supplied for a parameter, and its default, are validated against its
-type and allowed values.
+Values supplied for a parameter, its default, and its example are validated
+against its type, its allowed values, and its pattern.
 
 The name `own` is **reserved** for the amending author's template context
 (see
@@ -211,8 +214,8 @@ Here the unit requires its `@metamao/node` dependency to be configured with
   any other identity, is an error.
 - Options may only configure parameters that the dependency **exposes** in its
   `params`. Configuring an undeclared parameter is an error.
-- Option values are validated against the dependency parameter's type and
-  allowed values.
+- Option values are validated against the dependency parameter's type,
+  allowed values, and pattern.
 - Two **identical** explicit requirements on the same dependency parameter are
   compatible.
 - **Incompatible** explicit requirements produce an **options conflict**, which

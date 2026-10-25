@@ -114,6 +114,10 @@
           "minItems": 1,
           "uniqueItems": true,
           "description": "The values a string parameter accepts, which makes it an enumerated string. Only with `\"type\": \"string\"`."
+        },
+        "pattern": {
+          "type": "string",
+          "description": "A regular expression every value must match somewhere, as in JSON Schema: anchor it with ^ and $. \\d, \\w, and \\s are ASCII classes, and Unicode classes such as \\p{L} are not supported. Checked for the default, the example, and every value a unit or a project supplies. Only with `\"type\": \"string\"`."
         }
       },
       "allOf": [
@@ -125,7 +129,7 @@
               "example": { "type": "string" }
             }
           },
-          "else": { "properties": { "allowed": false } }
+          "else": { "properties": { "allowed": false, "pattern": false } }
         },
         {
           "if": { "properties": { "type": { "const": "integer" } } },

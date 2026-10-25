@@ -85,7 +85,14 @@ mod tests {
         properties.sort_unstable();
         assert_eq!(
             properties,
-            ["allowed", "default", "description", "example", "type"]
+            [
+                "allowed",
+                "default",
+                "description",
+                "example",
+                "pattern",
+                "type"
+            ]
         );
         assert_eq!(
             parameter["properties"]["type"]["enum"],
@@ -93,10 +100,10 @@ mod tests {
         );
         assert_eq!(parameter["properties"]["allowed"]["minItems"], 1);
         assert_eq!(parameter["properties"]["allowed"]["uniqueItems"], true);
-        // `allowed` is refused for any type but `string`.
+        // `allowed` and `pattern` are refused for any type but `string`.
         assert_eq!(
             parameter["allOf"][0]["else"],
-            serde_json::json!({ "properties": { "allowed": false } })
+            serde_json::json!({ "properties": { "allowed": false, "pattern": false } })
         );
         assert_eq!(
             schema["definitions"]["parameterName"]["not"],
