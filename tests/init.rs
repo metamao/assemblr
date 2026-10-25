@@ -71,8 +71,9 @@ fn init_creates_the_scaffold_and_a_repository_in_a_new_directory() {
         "{first}"
     );
     assert!(
-        first
-            .ends_with(", manifest.jsonc, manifest.schema.json, .gitignore, README.md, AGENTS.md."),
+        first.ends_with(
+            ", manifest.jsonc, manifest.schema.json, .gitignore, README.md, AGENTS.md, src/."
+        ),
         "{first}"
     );
     assert!(
@@ -93,7 +94,8 @@ fn init_creates_the_scaffold_and_a_repository_in_a_new_directory() {
             "AGENTS.md",
             "README.md",
             "manifest.jsonc",
-            "manifest.schema.json"
+            "manifest.schema.json",
+            "src"
         ]
     );
     // The README and AGENTS.md are the author's to fill in; AGENTS.md
@@ -126,8 +128,10 @@ fn init_creates_the_scaffold_and_a_repository_in_a_new_directory() {
     assert_eq!(git(&unit, &["rev-parse", "--is-inside-work-tree"]), "true");
     assert!(git(&unit, &["log", "--oneline", "--all"]).is_empty());
 
-    // The scaffold checks and builds once it has a file.
-    fs::create_dir(unit.join("src")).unwrap();
+    // `src/` is there, empty: the scaffold checks and builds once it has a
+    // file.
+    assert!(unit.join("src").is_dir());
+    assert!(entries(&unit.join("src")).is_empty());
     fs::write(unit.join("src/app.txt"), "app").unwrap();
     succeeds(fixture.assemblr(&unit, &["unit", "build"]));
     let output = succeeds(fixture.assemblr(&unit, &["unit", "check"]));
@@ -184,7 +188,8 @@ fn init_without_a_directory_creates_one_named_after_the_unit() {
             "AGENTS.md",
             "README.md",
             "manifest.jsonc",
-            "manifest.schema.json"
+            "manifest.schema.json",
+            "src"
         ]
     );
     // The current directory gets nothing but the new one.
@@ -257,8 +262,8 @@ fn init_adopts_the_top_level_of_an_existing_repository() {
     let output = succeeds(fixture.init(&unit, &["@acme/existing", "."]));
     assert!(
         stdout(&output).contains(
-            "created manifest.jsonc, manifest.schema.json, AGENTS.md; replaced .gitignore \
-             (/build/ added); kept the Git repository, README.md."
+            "created manifest.jsonc, manifest.schema.json, AGENTS.md, src/; replaced \
+             .gitignore (/build/ added); kept the Git repository, README.md."
         ),
         "{}",
         stdout(&output)
@@ -319,7 +324,7 @@ fn init_again_completes_the_scaffold_and_changes_nothing_else() {
         stdout(&output).lines().next().unwrap(),
         format!(
             "Completed the scaffold of @acme/app in {}: created manifest.schema.json; already \
-             in place: the Git repository, manifest.jsonc, .gitignore, README.md, AGENTS.md.",
+             in place: the Git repository, manifest.jsonc, .gitignore, README.md, AGENTS.md, src/.",
             unit.display()
         )
     );
@@ -341,7 +346,7 @@ fn init_again_completes_the_scaffold_and_changes_nothing_else() {
     assert!(
         stdout(&output).contains(
             "already in place: the Git repository, manifest.jsonc, manifest.schema.json, \
-             .gitignore, README.md, AGENTS.md."
+             .gitignore, README.md, AGENTS.md, src/."
         ),
         "{}",
         stdout(&output)
@@ -354,7 +359,8 @@ fn init_again_completes_the_scaffold_and_changes_nothing_else() {
             "AGENTS.md",
             "README.md",
             "manifest.jsonc",
-            "manifest.schema.json"
+            "manifest.schema.json",
+            "src"
         ]
     );
 }
@@ -434,7 +440,6 @@ fn the_loop_runs_from_init_to_a_dependent_s_build_through_a_second_registry() {
     // A base unit, initialized, built, committed, and published.
     let node = fixture.dir.join("node");
     succeeds(fixture.init(&fixture.dir, &["@acme/node", "node"]));
-    fs::create_dir(node.join("src")).unwrap();
     fs::write(node.join("src/node.txt.assemblr.tmpl"), "port {{ port }}\n").unwrap();
     let manifest = read(&node.join("manifest.jsonc")).replace(
         "\"description\": \"The @acme/node unit.\"",
@@ -458,7 +463,6 @@ fn the_loop_runs_from_init_to_a_dependent_s_build_through_a_second_registry() {
          \"options\": {\"@acme/node\": {\"port\": 8080}}",
     );
     fs::write(app.join("manifest.jsonc"), manifest).unwrap();
-    fs::create_dir(app.join("src")).unwrap();
     fs::write(app.join("src/app.txt"), "app").unwrap();
     succeeds(fixture.assemblr(&app, &["unit", "build"]));
     succeeds(fixture.assemblr(&app, &["unit", "amend", "node.txt"]));

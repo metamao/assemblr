@@ -215,6 +215,7 @@ fn describe_initialized(initialized: &Initialized) -> String {
         ),
         ("README.md", initialized.readme(), "README.md"),
         ("AGENTS.md", initialized.agents(), "AGENTS.md"),
+        ("src/", initialized.src(), "src/"),
     ] {
         match outcome {
             FileOutcome::Created => created.push(name),
@@ -270,6 +271,7 @@ fn init_diagnosis(failure: &InitFailure, args: &InitArgs) -> Diagnosis {
                 (".gitignore", done.gitignore()),
                 ("README.md", done.readme()),
                 ("AGENTS.md", done.agents()),
+                ("src/", done.src()),
             ] {
                 if outcome != FileOutcome::Kept {
                     state.push(name);

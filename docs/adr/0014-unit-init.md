@@ -1,6 +1,6 @@
 # 0014: `unit init`: repository discovery and initialization, the scaffold's writes, and the embedded manifest schema
 
-- **Status:** Accepted, point 3 amended by #115
+- **Status:** Accepted, point 3 amended by #115 and #120
 - **Date:** 2026-10-21
 
 ## Context
@@ -58,6 +58,9 @@ JSON Schema is produced and tested.
    paths, and are never read: they are the author's from the start. Their
    texts are in `src/adapters/scaffold.rs`, with the project's and a
    catalog's.
+   *Amended (#120):* last, an empty `src/` is created with `create_dir`
+   when nothing is at that path. No placeholder such as `.gitkeep` goes in
+   it, since every file in `src/` is delivered to consumers.
 4. **The schema is a fixed document.** `src/adapters/manifest.schema.json`
    is embedded with `include_str!` and written byte for byte. It is JSON
    Schema draft 7, which every mainstream editor's JSON language service

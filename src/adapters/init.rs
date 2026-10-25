@@ -3,8 +3,10 @@
 //!
 //! The scaffold is the directory's Git repository, `manifest.jsonc`,
 //! `manifest.schema.json`, `.gitignore` with `/build/`, and a `README.md`
-//! and an `AGENTS.md` for the author to fill in. Nothing else is created: no
-//! `src/`, no `amendments/`, no commit. Everything is decided
+//! and an `AGENTS.md` for the author to fill in, and an empty `src/` for
+//! the unit's files. Nothing else is created: no `amendments/`, no file in
+//! `src/` (anything there is delivered to consumers), no commit. Everything
+//! is decided
 //! before anything is written: the directory's place in Git is discovered,
 //! and each file is read, so that an existing manifest is never overwritten
 //! and running the command again only completes what is missing. A manifest
@@ -33,6 +35,8 @@ const GITIGNORE: &str = ".gitignore";
 const README: &str = "README.md";
 /// The unit's instructions for coding agents, at the repository's top level.
 const AGENTS: &str = "AGENTS.md";
+/// The unit's files, at the repository's top level.
+const SRC: &str = "src";
 /// The line that keeps `build/` out of Git.
 const IGNORE_BUILD: &str = "/build/";
 /// The version a new unit starts at.
@@ -168,6 +172,9 @@ pub fn init_unit(
         false => Planned::Create(unit_agents(identity).into_bytes()),
         true => Planned::Keep,
     };
+    // Whatever is at `src` already is the author's; a build reports it if
+    // it is not a directory.
+    let src = !occupied(&directory.join(SRC))?;
     for name in [SCHEMA_NEW, GITIGNORE_NEW] {
         if fs::symlink_metadata(directory.join(name)).is_ok() {
             return Err(InitFailure::StagingOccupied(directory.join(name)));
@@ -187,6 +194,7 @@ pub fn init_unit(
         gitignore: FileOutcome::Kept,
         readme: FileOutcome::Kept,
         agents: FileOutcome::Kept,
+        src: FileOutcome::Kept,
     };
     let failed = |done: &Initialized, step: Step, error: io::Error| InitFailure::Write {
         step,
@@ -225,6 +233,11 @@ pub fn init_unit(
             README => done.readme = outcome,
             _ => done.agents = outcome,
         }
+    }
+    if src {
+        let path = directory.join(SRC);
+        fs::create_dir(&path).map_err(|error| failed(&done, Step::Directory(path), error))?;
+        done.src = FileOutcome::Created;
     }
     Ok(done)
 }
@@ -394,6 +407,7 @@ pub struct Initialized {
     gitignore: FileOutcome,
     readme: FileOutcome,
     agents: FileOutcome,
+    src: FileOutcome,
 }
 
 impl Initialized {
@@ -442,6 +456,11 @@ impl Initialized {
     /// What happened to `AGENTS.md`: created, or kept as it was.
     pub fn agents(&self) -> FileOutcome {
         self.agents
+    }
+
+    /// What happened to `src/`: created empty, or kept as it was.
+    pub fn src(&self) -> FileOutcome {
+        self.src
     }
 }
 
