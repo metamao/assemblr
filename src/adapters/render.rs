@@ -9,6 +9,10 @@
 //!   ASCII whitespace allowed inside the braces. A string value is inserted
 //!   as it is, an integer in decimal, and a boolean as `true` or `false`.
 //!   Nothing is quoted or escaped for the file's format.
+//! - `{{ name | tojson }}` inserts the value as a JSON literal, a string
+//!   quoted and escaped, and `{{ name | e }}` with the characters HTML gives
+//!   meaning to escaped. Both produce exactly what Jinja's filters of those
+//!   names produce for a string or an integer. One filter at most.
 //! - `{{ own.name }}` refers to the amending author's own context: the
 //!   amending unit's resolved parameter values, defined only when an
 //!   amendment copy is rendered. A unit's own files have no such context,
@@ -125,10 +129,15 @@ pub fn render(source: &str, context: &Context<'_>) -> Result<String, Vec<RenderE
         let construct = &rest[start..consumed];
         match expression {
             Some(Expression::Literal(text)) => out.push_str(text),
-            Some(Expression::Reference(reference)) => match context.resolve(&reference) {
-                Some(value) => write_value(&mut out, value),
+            Some(Expression::Reference(reference, filter)) => match context.resolve(&reference) {
+                Some(value) => write_value(&mut out, value, filter),
                 None => errors.push(RenderError::at(source, at, undefined(reference, context))),
             },
+            Some(Expression::UnknownFilter(filter)) => errors.push(RenderError::at(
+                source,
+                at,
+                RenderErrorKind::UnknownFilter { filter },
+            )),
             Some(Expression::Unsupported) | None => errors.push(RenderError::at(
                 source,
                 at,
@@ -185,7 +194,7 @@ pub fn parameters_referenced(source: &str) -> BTreeSet<ParameterName> {
             break;
         };
         if opener == Opener::Expression {
-            if let Expression::Reference(Reference::Parameter(name)) = parse(&after[..length]) {
+            if let Expression::Reference(Reference::Parameter(name), _) = parse(&after[..length]) {
                 names.insert(name);
             }
         }
@@ -244,9 +253,25 @@ fn next_opener(text: &str) -> Option<(usize, Opener)> {
 enum Expression {
     /// Text to insert as it is.
     Literal(&'static str),
-    Reference(Reference),
+    /// A reference, and the filter its value goes through.
+    Reference(Reference, Option<Filter>),
+    /// A reference through a filter that does not exist.
+    UnknownFilter(String),
     Unsupported,
 }
+
+/// How a value is written for the format of the file it goes into, with
+/// the output of Jinja's filter of the same name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Filter {
+    /// A JSON literal, valid in JSON, JavaScript, TypeScript, and YAML.
+    ToJson,
+    /// Text with `&`, `<`, `>`, `"`, and `'` escaped for HTML and XML.
+    Escape,
+}
+
+/// The filters, by the names templates spell them.
+const FILTERS: [(&str, Filter); 2] = [("tojson", Filter::ToJson), ("e", Filter::Escape)];
 
 /// The one escape: a double-quoted `{{`.
 const ESCAPE: &str = "\"{{\"";
@@ -256,19 +281,35 @@ fn parse(inner: &str) -> Expression {
     if trimmed == ESCAPE {
         return Expression::Literal("{{");
     }
+    let Some((reference, filter)) = trimmed.split_once('|') else {
+        return match reference(trimmed) {
+            Some(reference) => Expression::Reference(reference, None),
+            None => Expression::Unsupported,
+        };
+    };
+    let filter = filter.trim_matches(|c: char| c.is_ascii_whitespace());
+    let reference = reference.trim_matches(|c: char| c.is_ascii_whitespace());
+    // One filter, after a reference; a chain or anything else is not in
+    // the grammar.
+    let (Some(reference), Ok(name)) = (self::reference(reference), ParameterName::parse(filter))
+    else {
+        return Expression::Unsupported;
+    };
+    match FILTERS.iter().find(|(known, _)| *known == name.as_str()) {
+        Some((_, filter)) => Expression::Reference(reference, Some(*filter)),
+        None => Expression::UnknownFilter(name.as_str().to_owned()),
+    }
+}
+
+/// `name` or `own.name`, as a reference.
+fn reference(trimmed: &str) -> Option<Reference> {
     if let Some(name) = trimmed
         .strip_prefix(OWN)
         .and_then(|rest| rest.strip_prefix('.'))
     {
-        return match ParameterName::parse(name) {
-            Ok(name) => Expression::Reference(Reference::Own(name)),
-            Err(_) => Expression::Unsupported,
-        };
+        return ParameterName::parse(name).ok().map(Reference::Own);
     }
-    match ParameterName::parse(trimmed) {
-        Ok(name) => Expression::Reference(Reference::Parameter(name)),
-        Err(_) => Expression::Unsupported,
-    }
+    ParameterName::parse(trimmed).ok().map(Reference::Parameter)
 }
 
 fn undefined(reference: Reference, context: &Context<'_>) -> RenderErrorKind {
@@ -284,11 +325,70 @@ fn undefined(reference: Reference, context: &Context<'_>) -> RenderErrorKind {
     }
 }
 
-fn write_value(out: &mut String, value: &ParameterValue) {
-    match value {
-        ParameterValue::String(text) => out.push_str(text),
-        ParameterValue::Integer(number) => out.push_str(&number.to_string()),
-        ParameterValue::Boolean(flag) => out.push_str(if *flag { "true" } else { "false" }),
+fn write_value(out: &mut String, value: &ParameterValue, filter: Option<Filter>) {
+    let text = match value {
+        ParameterValue::String(text) => text.as_str(),
+        ParameterValue::Integer(number) => {
+            out.push_str(&number.to_string());
+            return;
+        }
+        ParameterValue::Boolean(flag) => {
+            out.push_str(if *flag { "true" } else { "false" });
+            return;
+        }
+    };
+    match filter {
+        None => out.push_str(text),
+        Some(Filter::ToJson) => write_json(out, text),
+        Some(Filter::Escape) => write_escaped(out, text),
+    }
+}
+
+/// `text` as Jinja's `tojson` writes a string: Python's `json.dumps` with
+/// ASCII output, so every character outside printable ASCII is a `\u`
+/// escape in lowercase hex, and then `<`, `>`, `&`, and `'` as `\u`
+/// escapes too, so that the literal is safe inside HTML and inside a
+/// single-quoted attribute or string.
+fn write_json(out: &mut String, text: &str) {
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '<' | '>' | '&' | '\'' => push_unicode_escape(out, u32::from(c)),
+            ' '..='~' => out.push(c),
+            _ => {
+                let mut units = [0; 2];
+                for unit in c.encode_utf16(&mut units) {
+                    push_unicode_escape(out, u32::from(*unit));
+                }
+            }
+        }
+    }
+    out.push('"');
+}
+
+fn push_unicode_escape(out: &mut String, unit: u32) {
+    out.push_str(&format!("\\u{unit:04x}"));
+}
+
+/// `text` as Jinja's `e` writes it: MarkupSafe's escape of `&`, `<`, `>`,
+/// `"`, and `'`.
+fn write_escaped(out: &mut String, text: &str) {
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&#34;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
     }
 }
 
@@ -363,6 +463,11 @@ pub enum RenderErrorKind {
         /// The construct, from its opener to its closer.
         construct: String,
     },
+    /// A reference through a filter that does not exist.
+    UnknownFilter {
+        /// The filter's name.
+        filter: String,
+    },
     /// An opener with no closer before the end of the file.
     Unterminated {
         /// The opener.
@@ -417,8 +522,14 @@ impl fmt::Display for RenderErrorKind {
             }
             Self::Unsupported { construct } => write!(
                 f,
-                "unsupported template construct {construct:?}; only `{{{{ name }}}}` references \
-                 and the escape `{{{{ {ESCAPE} }}}}` are supported"
+                "unsupported template construct {construct:?}; only `{{{{ name }}}}` references, \
+                 optionally through one filter as in `{{{{ name | tojson }}}}`, and the escape \
+                 `{{{{ {ESCAPE} }}}}` are supported"
+            ),
+            Self::UnknownFilter { filter } => write!(
+                f,
+                "unknown filter `{filter}`; the filters are `tojson`, which writes a JSON \
+                 literal, and `e`, which escapes HTML"
             ),
             Self::Unterminated { opener } => {
                 write!(f, "`{opener}` is never closed")
@@ -510,6 +621,78 @@ mod tests {
         assert_eq!(ok("{{appName}}{{appName}}"), "demodemo");
         assert_eq!(ok("no references"), "no references");
         assert_eq!(ok(""), "");
+    }
+
+    #[test]
+    fn filters_write_what_jinja_s_filters_of_the_same_name_write() {
+        // Each expected text is what Jinja 3.1.6 renders for the same value.
+        let cases = [
+            ("Bob's App", r#""Bob\u0027s App""#, "Bob&#39;s App"),
+            (
+                r#"say "hi" <b>&</b>"#,
+                r#""say \"hi\" \u003cb\u003e\u0026\u003c/b\u003e""#,
+                "say &#34;hi&#34; &lt;b&gt;&amp;&lt;/b&gt;",
+            ),
+            (
+                "back\\slash\nnew\ttab\r\u{8}\u{c}\u{1}\u{7f}",
+                r#""back\\slash\nnew\ttab\r\b\f\u0001\u007f""#,
+                "back\\slash\nnew\ttab\r\u{8}\u{c}\u{1}\u{7f}",
+            ),
+            (
+                "Café 日本 😀",
+                r#""Caf\u00e9 \u65e5\u672c \ud83d\ude00""#,
+                "Café 日本 😀",
+            ),
+            ("", r#""""#, ""),
+        ];
+        for (value, json, escaped) in cases {
+            let values = values(&[("title", text(value))]);
+            let context = Context::new(&values);
+            assert_eq!(render("{{ title | tojson }}", &context).unwrap(), json);
+            assert_eq!(render("{{title|e}}", &context).unwrap(), escaped);
+        }
+        // An integer is its decimal form either way; a boolean renders as
+        // it does without a filter.
+        assert_eq!(ok("{{ port | tojson }} {{ port | e }}"), "8080 8080");
+        assert_eq!(ok("{{ ssr | tojson }} {{ minify | e }}"), "true false");
+        // `own` references take filters too.
+        let (provider, own) = (sample(), values(&[("title", text("a'b"))]));
+        let context = Context::amended(&provider, &own);
+        assert_eq!(
+            render("{{ own.title | tojson }}", &context).unwrap(),
+            r#""a\u0027b""#
+        );
+    }
+
+    #[test]
+    fn a_filter_outside_the_grammar_is_an_error() {
+        assert_eq!(
+            errors("{{ appName | upper }}"),
+            [(
+                1,
+                1,
+                RenderErrorKind::UnknownFilter {
+                    filter: "upper".to_owned()
+                }
+            )]
+        );
+        assert_eq!(
+            errors("{{ appName | upper }}")[0].2.to_string(),
+            "unknown filter `upper`; the filters are `tojson`, which writes a JSON literal, and \
+             `e`, which escapes HTML"
+        );
+        for construct in [
+            "{{ appName | tojson | e }}",
+            "{{ appName | }}",
+            "{{ | e }}",
+            "{{ appName | e(1) }}",
+        ] {
+            assert_eq!(errors(construct), [(1, 1, unsupported(construct))]);
+        }
+        assert!(matches!(
+            &errors("{{ missing | e }}")[0].2,
+            RenderErrorKind::Undefined { name, .. } if name.as_str() == "missing"
+        ));
     }
 
     #[test]
@@ -682,7 +865,6 @@ mod tests {
         for construct in [
             "{% if ssr %}",
             "{# a comment #}",
-            "{{ appName | upper }}",
             "{{ port + 1 }}",
             "{{ 'literal' }}",
             "{{ \"other\" }}",
@@ -703,8 +885,9 @@ mod tests {
         let message = errors("{% if ssr %}")[0].2.to_string();
         assert_eq!(
             message,
-            "unsupported template construct \"{% if ssr %}\"; only `{{ name }}` references and \
-             the escape `{{ \"{{\" }}` are supported"
+            "unsupported template construct \"{% if ssr %}\"; only `{{ name }}` references, \
+             optionally through one filter as in `{{ name | tojson }}`, and the escape \
+             `{{ \"{{\" }}` are supported"
         );
     }
 

@@ -194,16 +194,20 @@ How the status of a statement affects implementation:
   byte for byte; the suffix is a rendering switch, not a file class, and an
   amendment copy keeps the provider's path, so it inherits the outcome. The
   grammar is `{{ name }}` references, `{{ own.name }}`, and the escape `{{
-  "{{" }}`, a subset of Jinja's; every other construct opening with `{{`,
-  `{%`, or `{#` is an error, never passed through. Strings render raw,
-  integers in decimal, and booleans as `true` or `false`, with no quoting or
-  format-specific escaping; inserted text is never rendered again; text
+  "{{" }}`, a subset of Jinja's, and a reference may go through one of the
+  filters `tojson` and `e`, with Jinja's output (owner decision of
+  2026-10-25, [#120](https://github.com/metamao/assemblr/issues/120)); every
+  other construct opening with `{{`, `{%`, or `{#` is an error, never passed
+  through. Without a filter, strings render raw, integers in decimal, and
+  booleans as `true` or `false`, with no quoting or format-specific
+  escaping; inserted text is never rendered again; text
   outside references is copied byte for byte. A template must be UTF-8.
   Rendering errors are collected across files, ordered by delivered path and
   position, with file, line, and column, and they gate `unit build`. Originals
   and amendments are rendered against compatible base contexts.
-- **Open detail:** Whether constructs beyond references, such as conditional
-  content or filters, are ever supported, and with which engine; if
+- **Open detail:** Whether constructs beyond references and the two
+  filters, such as conditional content or other filters, are ever
+  supported, and with which engine; if
   conditional content is added, it must not silently discard changes.
 - **Origin:** Owner
 - **Context:** [rendering](parameters-and-options.md#rendering--approved),

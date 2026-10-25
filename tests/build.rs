@@ -1048,17 +1048,19 @@ fn rendering_problems_reject_the_build_and_change_nothing() {
     assert_eq!(
         lines,
         [
-            "error: template src/b.txt.assemblr.tmpl of @acme/app, line 1, column 1: unsupported \
-             template construct \"{{ title | upper }}\"; only `{{ name }}` references and the \
-             escape `{{ \"{{\" }}` are supported",
+            "error: template src/b.txt.assemblr.tmpl of @acme/app, line 1, column 1: unknown \
+             filter `upper`; the filters are `tojson`, which writes a JSON literal, and `e`, \
+             which escapes HTML",
             "error: template src/index.html.assemblr.tmpl of @acme/app, line 2, column 3: \
              undefined reference `titel`; the unit's parameters are `title`",
             "error: template src/index.html.assemblr.tmpl of @acme/app, line 3, column 1: \
-             unsupported template construct \"{% if title %}\"; only `{{ name }}` references and \
-             the escape `{{ \"{{\" }}` are supported",
+             unsupported template construct \"{% if title %}\"; only `{{ name }}` references, \
+             optionally through one filter as in `{{ name | tojson }}`, and the escape \
+             `{{ \"{{\" }}` are supported",
             "error: template src/index.html.assemblr.tmpl of @acme/app, line 3, column 16: \
-             unsupported template construct \"{% endif %}\"; only `{{ name }}` references and \
-             the escape `{{ \"{{\" }}` are supported",
+             unsupported template construct \"{% endif %}\"; only `{{ name }}` references, \
+             optionally through one filter as in `{{ name | tojson }}`, and the escape \
+             `{{ \"{{\" }}` are supported",
             "error: template src/index.html.assemblr.tmpl of @acme/app, line 4, column 1: \
              undefined reference `own.title`; `own` is defined only when an amendment copy is \
              rendered, and a unit's own files refer to its parameters by name",
@@ -2822,5 +2824,39 @@ fn update_does_not_depend_on_declaration_order() {
     assert_eq!(
         outputs[0].trim(),
         "Updated assemblr-lock.json: @acme/a 1.0.0 -> 1.1.0, @acme/b 1.0.0 -> 1.1.0."
+    );
+}
+
+#[test]
+fn filters_write_a_value_that_holds_quotes_safely_for_the_file_s_format() {
+    // A title that is valid for the user and would break a quoted literal
+    // inserted raw (#120).
+    let fixture = Fixture::new("template-filters");
+    let app = fixture.repo("app");
+    app.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/app",
+            "0.1.0",
+            &[],
+            r#", "params": {"title": {"type": "string", "description": "A title.", "example": "Bob's <App>"}}"#,
+        ),
+    );
+    app.write(
+        "src/app-title.ts.assemblr.tmpl",
+        "export const APP_NAME = {{ title | tojson }};\n",
+    );
+    app.write(
+        "src/index.html.assemblr.tmpl",
+        "<title>{{ title | e }}</title>\n",
+    );
+    succeeds(fixture.build(&app));
+    let ts = app.read("build/app-title.ts");
+    assert!(ts.starts_with("export const APP_NAME = \"Bob"), "{ts}");
+    assert!(!ts.contains('\''), "{ts}");
+    assert!(!ts.contains('<'), "{ts}");
+    assert_eq!(
+        app.read("build/index.html"),
+        "<title>Bob&#39;s &lt;App&gt;</title>\n"
     );
 }
