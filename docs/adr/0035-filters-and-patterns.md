@@ -46,8 +46,12 @@ with a regex crate recorded in an ADR. The details are D-47 and D-48.
    pattern and the value, which matters because both come from untrusted
    manifests and declarations (AGENTS.md §5). Its `\d`, `\w`, `\s` are
    ASCII, as in ECMAScript, and it refuses Unicode classes, look-around, and
-   back-references at parse time, so a pattern either means the same in an
-   editor's JSON Schema check or is refused. The `regex` crate was rejected:
+   back-references at parse time. The syntax is regex-lite's, not
+   ECMAScript's, and a few constructs still differ: `.` matches `\r` (it
+   does not in ECMAScript), and inline flags such as `(?i)`, `\A`/`\z`, and
+   POSIX classes such as `[[:alpha:]]` are accepted with Rust's meaning. A
+   pattern written with the common constructs means the same in an editor's
+   JSON Schema check. The `regex` crate was rejected:
    larger, and its Unicode `\d` and `\w` would accept values an editor
    rejects. MSRV: `regex-lite` 0.1.9 requires Rust 1.65.
 6. **The schema.** `manifest.schema.json` declares `pattern` as a string and

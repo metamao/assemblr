@@ -595,3 +595,22 @@ fn a_manifest_with_trailing_commas_keeps_them_in_what_add_writes() {
     assert!(text.contains("\"from\": \"@acme/base\",\n    },"), "{text}");
     assert!(text.ends_with("  },\n}\n"), "{text}");
 }
+
+#[test]
+fn a_dependency_whose_parameters_are_inherited_can_be_added_again() {
+    let fixture = Fixture::new("a_dependency_whose_parameters_are_inherited_can_be_added_again");
+    fixture.base();
+    let app = fixture.app();
+    succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
+    let output = succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
+    assert!(
+        stdout(&output).contains("@acme/base is already a dependency"),
+        "{}",
+        stdout(&output)
+    );
+    succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/base@1.0.0"]));
+    let manifest = app.manifest();
+    assert_eq!(manifest["dependencies"]["@acme/base"], "^1.0.0");
+    assert_eq!(manifest["params"]["appName"]["from"], "@acme/base");
+    assert!(manifest.get("options").is_none(), "{manifest}");
+}

@@ -233,6 +233,7 @@ fn plan(
     for (name, definition) in &params {
         if !definition.is_required()
             || own.contains_key(name)
+            || manifest.inherited().get(name) == Some(identity)
             || options.iter().any(|(given, _)| *given == name.as_str())
         {
             continue;

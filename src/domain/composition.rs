@@ -1143,7 +1143,12 @@ fn parameter_values(
         let (resolved, errors) = member
             .manifest
             .resolved_params(|unit| members.get(unit).map(|member| member.manifest));
-        for error in errors {
+        // A chain that breaks further down is reported once, by the
+        // member whose own `from` names the unit that lacks it.
+        for error in errors
+            .into_iter()
+            .filter(|error| member.manifest.inherited().get(&error.parameter) == Some(&error.unit))
+        {
             invalid.push((
                 (identity.to_owned().clone(), error.parameter.clone()),
                 CompositionError::InheritedParameter {
@@ -4221,6 +4226,27 @@ mod tests {
             errors[0].to_string(),
             "in @metamao/top 1.0.0, the parameter `title` is inherited from @metamao/base, which \
              does not declare it"
+        );
+    }
+
+    #[test]
+    fn a_broken_chain_is_reported_by_the_unit_that_names_the_unit_without_it() {
+        let units = vec![
+            Spec::new("@metamao/base", "1.0.0"),
+            Spec::new("@metamao/middle", "1.0.0")
+                .depends("@metamao/base", "^1")
+                .inherits("title", "@metamao/base"),
+            Spec::new("@metamao/top", "1.0.0")
+                .depends("@metamao/middle", "^1")
+                .inherits("title", "@metamao/middle"),
+        ];
+        let errors = run(&project(&[("@metamao/top", "^1")]), &units, &[]).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0]
+                .to_string()
+                .starts_with("in @metamao/middle 1.0.0,"),
+            "{errors:?}"
         );
     }
 
