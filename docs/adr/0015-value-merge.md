@@ -60,7 +60,11 @@ D) is evidence for the approach, not code that was adopted.
    offsets are the original's. The editor applies one edit at a time and
    rescans, since later edits name members earlier ones inserted; it
    follows the file's indentation unit, line endings, single-line objects,
-   and trailing commas, and renders inserted values with that unit. It
+   and trailing commas, and renders inserted values with that unit. A file
+   with a trailing comma anywhere gets one after the last member of every
+   container the editor writes over several lines, as Prettier writes JSONC
+   by default, and a value inserted into an object written on one line is
+   written on one line too (#120). It
    never reads a comment as content, and it trims a comma that a removal
    would leave trailing unless the file already used trailing commas.
 6. **Two checks around the engine.** The **projection check** reads the

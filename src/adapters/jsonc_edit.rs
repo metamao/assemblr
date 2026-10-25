@@ -122,6 +122,10 @@ struct Layout {
     newline: &'static str,
     /// One level of indentation, from the first indented member found.
     unit: String,
+    /// Whether the last member of a container written over several lines
+    /// takes a comma, as it does when the file has a trailing comma
+    /// anywhere: the style Prettier writes JSONC in by default.
+    trailing_commas: bool,
 }
 
 impl Layout {
@@ -138,7 +142,42 @@ impl Layout {
                     .then(|| line[..line.len() - trimmed.len()].to_owned())
             })
             .unwrap_or_else(|| "  ".to_owned());
-        Self { newline, unit }
+        Self {
+            newline,
+            unit,
+            trailing_commas: jsonc::has_trailing_comma(text),
+        }
+    }
+
+    /// The comma after the last member of a container written over several
+    /// lines, when the file's style has one.
+    fn trailing(&self) -> &'static str {
+        if self.trailing_commas { "," } else { "" }
+    }
+
+    /// `value` on one line, as a member of an object written on one line:
+    /// `{ "key": value }` and `[item, item]`.
+    fn render_inline(value: &Value) -> String {
+        match value {
+            Value::Object(members) if !members.is_empty() => {
+                let members: Vec<String> = members
+                    .iter()
+                    .map(|(key, value)| {
+                        format!(
+                            "{}: {}",
+                            Value::String(key.clone()),
+                            Self::render_inline(value)
+                        )
+                    })
+                    .collect();
+                format!("{{ {} }}", members.join(", "))
+            }
+            Value::Array(items) => {
+                let items: Vec<String> = items.iter().map(Self::render_inline).collect();
+                format!("[{}]", items.join(", "))
+            }
+            scalar => scalar.to_string(),
+        }
     }
 
     /// `value` as text, with its nested lines indented from `indent`.
@@ -157,6 +196,7 @@ impl Layout {
                     out.push_str(": ");
                     out.push_str(&self.render(value, &inner));
                 }
+                out.push_str(self.trailing());
                 out.push_str(self.newline);
                 out.push_str(indent);
                 out.push('}');
@@ -178,6 +218,7 @@ impl Layout {
                     out.push_str(&inner);
                     out.push_str(&self.render(item, &inner));
                 }
+                out.push_str(self.trailing());
                 out.push_str(self.newline);
                 out.push_str(indent);
                 out.push(']');
@@ -305,11 +346,14 @@ fn apply_one(text: &str, edit: &Edit) -> Result<String, EditError> {
                     Some(format!("{indent}{}", layout.unit))
                 })
                 .unwrap_or_else(|| layout.unit.clone());
-            let member = format!(
-                "{}: {}",
-                Value::String(key.clone()),
+            // A member of an object written on one line is written on one
+            // line too.
+            let rendered = if multiline || object.members.is_empty() {
                 layout.render(value, &member_indent)
-            );
+            } else {
+                Layout::render_inline(value)
+            };
+            let member = format!("{}: {}", Value::String(key.clone()), rendered);
             let mut edited = String::with_capacity(text.len() + member.len() + 8);
             match after {
                 None => {
@@ -340,6 +384,7 @@ fn apply_one(text: &str, edit: &Edit) -> Result<String, EditError> {
                             edited.push_str(layout.newline);
                             edited.push_str(&member_indent);
                             edited.push_str(&member);
+                            edited.push_str(layout.trailing());
                             edited.push_str(layout.newline);
                             edited.push_str(&closing_indent);
                         } else {
@@ -376,6 +421,7 @@ fn apply_one(text: &str, edit: &Edit) -> Result<String, EditError> {
                                 edited.push_str(layout.newline);
                                 edited.push_str(&member_indent);
                                 edited.push_str(&member);
+                                edited.push_str(layout.trailing());
                                 edited.push_str(&text[line_end..]);
                             }
                         }
@@ -739,6 +785,54 @@ mod tests {
         assert_eq!(
             result,
             "{\n  \"a\": 1 /* one */,\n  \"k\": \"v\",\n  \"b\": 2\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_file_with_trailing_commas_gets_them_in_what_is_inserted() {
+        // As Prettier writes JSONC by default.
+        let text = "{\n  \"dependencies\": {},\n  \"options\": {},\n}\n";
+        let object = Value::Object(vec![("name".to_owned(), s("a"))]);
+        let result = edited(
+            text,
+            &[
+                insert("/dependencies", "@acme/a", s("^1.0.0"), None),
+                insert("/options", "@acme/a", object.clone(), None),
+            ],
+        );
+        assert_eq!(
+            result,
+            "{\n  \"dependencies\": {\n    \"@acme/a\": \"^1.0.0\",\n  },\n  \"options\": {\n    \
+             \"@acme/a\": {\n      \"name\": \"a\",\n    },\n  },\n}\n"
+        );
+        // After a last member that has no comma of its own, in a file that
+        // has them elsewhere.
+        let text = "{\n  \"a\": [1,],\n  \"b\": 2\n}\n";
+        let result = edited(text, &[insert("/", "c", object, Some("b"))]);
+        assert_eq!(
+            result,
+            "{\n  \"a\": [1,],\n  \"b\": 2,\n  \"c\": {\n    \"name\": \"a\",\n  },\n}\n"
+        );
+        // A file without them gets none.
+        let result = edited(PACKAGE, &[insert("/", "o", s("x"), Some("files"))]);
+        assert!(
+            result.ends_with("\"files\": [\"dist\"],\n  \"o\": \"x\"\n}\n"),
+            "{result}"
+        );
+    }
+
+    #[test]
+    fn a_value_inserted_into_a_one_line_object_stays_on_its_line() {
+        let text = "{\n  \"params\": { \"a\": { \"type\": \"string\" } }\n}\n";
+        let value = Value::Object(vec![
+            ("type".to_owned(), s("string")),
+            ("allowed".to_owned(), Value::Array(vec![s("x"), s("y")])),
+        ]);
+        let result = edited(text, &[insert("/params", "b", value, Some("a"))]);
+        assert_eq!(
+            result,
+            "{\n  \"params\": { \"a\": { \"type\": \"string\" }, \"b\": { \"type\": \"string\", \
+             \"allowed\": [\"x\", \"y\"] } }\n}\n"
         );
     }
 

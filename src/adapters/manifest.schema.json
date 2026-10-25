@@ -119,16 +119,31 @@
       "allOf": [
         {
           "if": { "properties": { "type": { "const": "string" } } },
-          "then": { "properties": { "default": { "type": "string" }, "example": { "type": "string" } } },
+          "then": {
+            "properties": {
+              "default": { "type": "string" },
+              "example": { "type": "string" }
+            }
+          },
           "else": { "properties": { "allowed": false } }
         },
         {
           "if": { "properties": { "type": { "const": "integer" } } },
-          "then": { "properties": { "default": { "type": "integer" }, "example": { "type": "integer" } } }
+          "then": {
+            "properties": {
+              "default": { "type": "integer" },
+              "example": { "type": "integer" }
+            }
+          }
         },
         {
           "if": { "properties": { "type": { "const": "boolean" } } },
-          "then": { "properties": { "default": { "type": "boolean" }, "example": { "type": "boolean" } } }
+          "then": {
+            "properties": {
+              "default": { "type": "boolean" },
+              "example": { "type": "boolean" }
+            }
+          }
         }
       ]
     },

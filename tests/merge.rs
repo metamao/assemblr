@@ -408,12 +408,13 @@ fn lists_are_whole_values_and_jsonc_comments_and_trailing_commas_survive() {
         &[("wrangler.jsonc.assemblr.tmpl", &flags)],
     );
     succeeds(fixture.build(&app));
+    // The file has trailing commas, so the list written anew has them too.
     assert_eq!(
         app.read("build/wrangler.jsonc"),
         "{\n  // The worker's name.\n  \"name\": \"worker\",\n  \"compatibility_date\": \
          \"2026-01-01\",\n  \"compatibility_flags\": [\"nodejs_compat\"],\n  \"d1_databases\": [\n    \
-         {\n      \"binding\": \"DB\",\n      \"database_name\": \"main\"\n    },\n    {\n      \
-         \"binding\": \"AUDIT\",\n      \"database_name\": \"audit\"\n    }\n  ],\n}\n"
+         {\n      \"binding\": \"DB\",\n      \"database_name\": \"main\",\n    },\n    {\n      \
+         \"binding\": \"AUDIT\",\n      \"database_name\": \"audit\",\n    },\n  ],\n}\n"
     );
 
     // Two different changes inside one list are not merged.

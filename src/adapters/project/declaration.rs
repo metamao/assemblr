@@ -8,7 +8,7 @@
 //! refusal, never a different declaration.
 
 use crate::adapters::jsonc_edit::{apply, parse_value};
-use crate::domain::{Edit, ParameterType, UnitIdentity, Value, ValueKind};
+use crate::domain::{Edit, ParameterType, UnitIdentity, Value, ValueKind, show_path};
 
 const DEPENDENCIES: &str = "dependencies";
 const OPTIONS: &str = "options";
@@ -132,8 +132,14 @@ pub(crate) fn add_after(
             },
         ),
     };
+    // A `dependencies` object the edit creates is expected where the edit
+    // puts it, since the check compares members in order.
+    let after = match &edit {
+        Edit::Insert { parent, after, .. } if parent.is_empty() => after.clone(),
+        _ => None,
+    };
     let mut expected = root.clone();
-    set_selection(&mut expected, &key, Some(value));
+    set_selection(&mut expected, &key, Some(value), after.as_deref());
     let edited = apply_checked(text, &[edit], &expected)?;
     Ok((edited, change))
 }
@@ -166,7 +172,7 @@ pub(super) fn remove(
         });
     }
     let mut expected = root.clone();
-    set_selection(&mut expected, &key, None);
+    set_selection(&mut expected, &key, None, None);
     if options {
         if let Value::Object(members) = &mut expected {
             for (name, value) in members.iter_mut() {
@@ -301,17 +307,48 @@ fn apply_checked(text: &str, edits: &[Edit], expected: &Value) -> Result<String,
     match parse_value(&edited) {
         Ok(value) if value == *expected => Ok(edited),
         Ok(value) => Err(EditFailure::Cannot(format!(
-            "the edited declaration holds {}, not the intended {}",
-            value.brief(),
-            expected.brief()
+            "the edited text {}",
+            difference(&value, expected, &mut Vec::new())
         ))),
         Err(error) => Err(EditFailure::Cannot(error.to_string())),
     }
 }
 
+/// Where `actual` first differs from `expected`, which it does, and how:
+/// the path of the first object whose members differ or the first value
+/// that does, so that the diagnostic shows the difference instead of two
+/// documents cut short.
+fn difference(actual: &Value, expected: &Value, path: &mut Vec<String>) -> String {
+    if let (Value::Object(actual), Value::Object(expected)) = (actual, expected) {
+        let held: Vec<&str> = actual.iter().map(|(key, _)| key.as_str()).collect();
+        let intended: Vec<&str> = expected.iter().map(|(key, _)| key.as_str()).collect();
+        if held != intended {
+            return format!(
+                "holds the members {} at {}, not the intended {}",
+                held.join(", "),
+                show_path(path),
+                intended.join(", ")
+            );
+        }
+        for ((key, actual), (_, expected)) in actual.iter().zip(expected) {
+            if actual != expected {
+                path.push(key.clone());
+                return difference(actual, expected, path);
+            }
+        }
+    }
+    format!(
+        "holds {} at {}, not the intended {}",
+        actual.brief(),
+        show_path(path),
+        expected.brief()
+    )
+}
+
 /// Sets, or with `None` removes, the member `key` of `dependencies`,
-/// creating `dependencies` last when the declaration has none.
-fn set_selection(root: &mut Value, key: &str, value: Option<Value>) {
+/// creating `dependencies` after the member `after` when the declaration
+/// has none, or last without one.
+fn set_selection(root: &mut Value, key: &str, value: Option<Value>, after: Option<&str>) {
     let Value::Object(members) = root else {
         return;
     };
@@ -329,10 +366,18 @@ fn set_selection(root: &mut Value, key: &str, value: Option<Value>) {
                 }
             }
         }
-        (None, Some(value)) => members.push((
-            DEPENDENCIES.to_owned(),
-            Value::Object(vec![(key.to_owned(), value)]),
-        )),
+        (None, Some(value)) => {
+            let at = after
+                .and_then(|after| members.iter().position(|(name, _)| name == after))
+                .map_or(members.len(), |index| index + 1);
+            members.insert(
+                at,
+                (
+                    DEPENDENCIES.to_owned(),
+                    Value::Object(vec![(key.to_owned(), value)]),
+                ),
+            );
+        }
         (None, None) => {}
     }
 }
@@ -341,8 +386,8 @@ fn set_selection(root: &mut Value, key: &str, value: Option<Value>) {
 mod tests {
     #![allow(clippy::unwrap_used, reason = "fixtures are valid by construction")]
 
-    use super::{DeclarationChange, EditFailure, add, remove};
-    use crate::domain::UnitIdentity;
+    use super::{DeclarationChange, EditFailure, add, add_after, difference, remove};
+    use crate::domain::{UnitIdentity, Value};
 
     fn identity(input: &str) -> UnitIdentity {
         input.parse().unwrap()
@@ -422,6 +467,55 @@ mod tests {
         assert_eq!(
             remove(DECLARATION, &identity("@acme/b")).unwrap_err(),
             EditFailure::NotSelected
+        );
+    }
+
+    #[test]
+    fn a_missing_dependencies_object_goes_after_the_preferred_member_wherever_it_is() {
+        // `description` is not the last member: the check must expect the
+        // object where the edit puts it, not last (#120).
+        let manifest = "{\n  \"name\": \"@acme/u\",\n  \"description\": \"U.\",\n  \
+                        \"params\": { \"title\": { \"type\": \"string\" } }\n}\n";
+        let (text, _) = add_after(
+            manifest,
+            &identity("@acme/a"),
+            "^1.0.0",
+            &["description", "version", "name"],
+        )
+        .unwrap();
+        let value = crate::adapters::jsonc_edit::parse_value(&text).unwrap();
+        let Value::Object(members) = value else {
+            panic!("not an object: {text}");
+        };
+        let keys: Vec<&str> = members.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(keys, ["name", "description", "dependencies", "params"]);
+    }
+
+    #[test]
+    fn a_mismatch_names_where_the_edited_text_differs() {
+        let expected = Value::Object(vec![
+            ("name".to_owned(), Value::String("x".to_owned())),
+            (
+                "dependencies".to_owned(),
+                Value::Object(vec![("@acme/a".to_owned(), Value::String("^1".to_owned()))]),
+            ),
+        ]);
+        let mut reordered = expected.clone();
+        if let Value::Object(members) = &mut reordered {
+            members.reverse();
+        }
+        assert_eq!(
+            difference(&reordered, &expected, &mut Vec::new()),
+            "holds the members dependencies, name at /, not the intended name, dependencies"
+        );
+        let mut changed = expected.clone();
+        if let Value::Object(members) = &mut changed {
+            members[1].1 =
+                Value::Object(vec![("@acme/a".to_owned(), Value::String("^2".to_owned()))]);
+        }
+        assert_eq!(
+            difference(&changed, &expected, &mut Vec::new()),
+            "holds \"^2\" at /dependencies/@acme/a, not the intended \"^1\""
         );
     }
 

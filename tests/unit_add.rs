@@ -497,3 +497,102 @@ fn a_requirement_spelled_differently_is_kept_as_written() {
     );
     assert_eq!(app.read("manifest.jsonc"), before);
 }
+
+#[test]
+fn a_unit_with_params_after_its_description_takes_a_dependency() {
+    // `unit init` writes `description` last; parameters added below it used
+    // to make every `unit add` refuse the edit (#120).
+    let fixture = Fixture::new("a_unit_with_params_after_its_description_takes_a_dependency");
+    fixture.base();
+    let app = fixture.app();
+    app.write(
+        "manifest.jsonc",
+        "{\n  \"name\": \"@acme/app\",\n  \"version\": \"0.1.0\",\n  \"description\": \
+         \"The app.\",\n  \"params\": { \"title\": { \"type\": \"string\", \"description\": \
+         \"The title.\", \"example\": \"Demo\" } }\n}\n",
+    );
+    app.write("src/title.txt.assemblr.tmpl", "{{ title }}\n");
+    let output = succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
+    assert!(
+        stdout(&output).contains("declared `appName`, `mode` in params"),
+        "{}",
+        stdout(&output)
+    );
+    let manifest = app.manifest();
+    assert_eq!(manifest["dependencies"]["@acme/base"], "^1.0.0");
+    assert_eq!(manifest["params"]["title"]["example"], "Demo");
+    assert_eq!(manifest["params"]["appName"]["example"], "demo");
+    // The one-line `params` object stays on one line.
+    assert!(
+        app.read("manifest.jsonc").contains(
+            "\"example\": \"Demo\" }, \"appName\": { \"type\": \"string\", \"description\": \
+             \"The app name.\", \"example\": \"demo\" }"
+        ),
+        "{}",
+        app.read("manifest.jsonc")
+    );
+    assert_eq!(app.read("build/title.txt"), "Demo\n");
+}
+
+#[test]
+fn templates_written_first_name_every_parameter_to_declare() {
+    let fixture = Fixture::new("templates_written_first_name_every_parameter_to_declare");
+    fixture.base();
+    let app = fixture.app();
+    app.write(
+        "src/page.txt.assemblr.tmpl",
+        "{{ title }} {{ slug }} {{ title }}\n",
+    );
+    let before = app.read("manifest.jsonc");
+    let output = fails(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
+    assert!(
+        stderr(&output).contains(
+            "hint: declare `title`, `slug` under `params` in manifest.jsonc, each like \
+             `\"title\": { \"type\": \"string\", \"description\": \"...\", \"example\": \"...\" }`"
+        ),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(app.read("manifest.jsonc"), before);
+    let output = fails(fixture.assemblr(&app.path, &["unit", "build"]));
+    assert!(
+        stderr(&output).contains("hint: declare `title`, `slug` under `params`"),
+        "{}",
+        stderr(&output)
+    );
+
+    // Declared after `description`, as an author adds them, they let the
+    // dependency be added.
+    app.write(
+        "manifest.jsonc",
+        &before.replace(
+            "\"The app.\"\n}",
+            "\"The app.\",\n  \"params\": {\n    \"title\": { \"type\": \"string\", \
+             \"description\": \"T.\", \"example\": \"T\" },\n    \"slug\": { \"type\": \
+             \"string\", \"description\": \"S.\", \"example\": \"s\" }\n  }\n}",
+        ),
+    );
+    succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
+    assert_eq!(app.read("build/page.txt"), "T s T\n");
+}
+
+#[test]
+fn a_manifest_with_trailing_commas_keeps_them_in_what_add_writes() {
+    // Prettier writes JSONC with trailing commas by default.
+    let fixture = Fixture::new("a_manifest_with_trailing_commas_keeps_them_in_what_add_writes");
+    fixture.base();
+    let app = fixture.app();
+    app.write(
+        "manifest.jsonc",
+        "{\n  \"name\": \"@acme/app\",\n  \"version\": \"0.1.0\",\n  \"description\": \
+         \"The app.\",\n}\n",
+    );
+    succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
+    let text = app.read("manifest.jsonc");
+    assert!(
+        text.contains("\"dependencies\": {\n    \"@acme/base\": \"^1.0.0\",\n  },"),
+        "{text}"
+    );
+    assert!(text.contains("\"example\": \"demo\",\n    },"), "{text}");
+    assert!(text.contains("\"from\": \"appName\",\n      },"), "{text}");
+}
