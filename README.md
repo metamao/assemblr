@@ -3,10 +3,11 @@
 **Build projects from reusable, versioned units, and keep them up to date.**
 
 Assemblr is a command-line tool that puts a project together from **units**.
-A unit is a reusable part of a project. It can be a Dockerfile for Rust
-services, a GitHub Actions or GitLab CI pipeline, or a Terraform module
-layout. It can also be a Python package setup, Kubernetes manifests, an
-Android build configuration, or your team's lint rules. Each unit lives in its own Git repository and has its own
+A unit is a reusable, opinionated part of a project, built the way its
+author thinks it should be done. It can be a whole starting point, such as
+a React web app, a Flutter mobile app, or a Rust CLI. It can also be one
+piece: a Dockerfile, a CI pipeline, a Terraform cloud setup, or your team's
+lint rules. Each unit lives in its own Git repository and has its own
 versions.
 
 **Assemblr works with any technology.** A unit is just files, so any
