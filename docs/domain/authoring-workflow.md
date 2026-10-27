@@ -12,7 +12,7 @@ An author should be able to:
 3. validate its contracts;
 4. publish a reproducible, versioned unit;
 5. make it available through the local registry, by registering its
-   repository directly or through a catalog.
+   repository.
 
 Reusing and evolving units in consumer projects, without needlessly destroying
 consumer modifications, is the larger goal. That workflow is described in
@@ -34,8 +34,8 @@ assemblr unit publish
 
 The **operations and their intent** are approved. The exact command grammar,
 flags, arguments, and edge-case behavior are **Open (OC-7)**, except where a
-details subsection below records a decision. Registry and catalog operations
-are described in [registries-and-discovery.md](registries-and-discovery.md).
+details subsection below records a decision. Registry operations are
+described in [registries-and-discovery.md](registries-and-discovery.md).
 
 ## Typical flow — Conceptual
 
@@ -45,7 +45,7 @@ init ──> edit src/, add <dependency> ──> amend (as needed) ──> check
 
 later:  update <dependency> ──> check ──> build ──> verify ──> publish
 
-once:   registry add <unit repository>, directly or through a catalog
+once:   registry add <unit repository>
 ```
 
 ## Initialization — Approved

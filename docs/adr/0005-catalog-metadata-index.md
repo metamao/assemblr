@@ -1,6 +1,6 @@
 # 0005: Catalog metadata index and metadata-first registry
 
-- **Status:** Accepted
+- **Status:** Superseded by [0038](0038-remove-registry-catalogs.md)
 - **Date:** 2026-10-19
 
 ## Context

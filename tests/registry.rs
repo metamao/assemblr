@@ -365,10 +365,7 @@ fn listing_an_empty_registry_creates_no_state() {
 
     let output = succeeds(assemblr(&data, &dir, &["registry", "list"]));
     assert!(stdout(&output).contains("No unit repositories are registered"));
-    assert_eq!(
-        list_json(&data, &dir),
-        serde_json::json!({ "units": [], "catalogs": [] })
-    );
+    assert_eq!(list_json(&data, &dir), serde_json::json!({ "units": [] }));
     succeeds(assemblr(&data, &dir, &["registry", "sync"]));
 
     assert!(!data.exists());
@@ -700,10 +697,7 @@ fn removal_drops_only_the_registration() {
     let output = succeeds(assemblr(&data, &dir, &["registry", "remove", "@acme/node"]));
 
     assert!(stdout(&output).contains("The repository was not modified"));
-    assert_eq!(
-        list_json(&data, &dir),
-        serde_json::json!({ "units": [], "catalogs": [] })
-    );
+    assert_eq!(list_json(&data, &dir), serde_json::json!({ "units": [] }));
     assert_eq!(repo.git(&["status", "--porcelain"]), status);
     assert_eq!(repo.rev("HEAD"), head);
     assert_eq!(repo.rev("v1.0.0"), head);
@@ -820,10 +814,52 @@ fn only_the_implemented_registry_commands_are_offered() {
         assert!(!help.contains(missing), "{missing}: {help}");
     }
 
-    // A catalog's maintainer has commands of their own.
-    let output = succeeds(assemblr(&data, &dir, &["catalog", "--help"]));
-    let help = stdout(&output);
-    for command in ["init", "add", "remove", "refresh"] {
-        assert!(help.contains(&format!("  {command} ")), "{command}: {help}");
-    }
+    // The registry.jsonc catalogs are gone (#129).
+    let output = assemblr(&data, &dir, &["catalog", "--help"]);
+    assert!(!output.status.success());
+}
+
+#[test]
+fn a_registry_jsonc_catalog_is_not_a_unit_repository() {
+    let dir = scratch("old_catalog");
+    let data = dir.join("data");
+    let repo = Repo::new(&dir, "catalog");
+    repo.write(
+        "registry.jsonc",
+        r#"{"name": "@acme/catalog", "units": {}}"#,
+    );
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "catalog"]);
+
+    let output = fails(assemblr(&data, &dir, &["registry", "add", "catalog"]));
+
+    let stderr = stderr(&output);
+    assert!(stderr.contains("no `manifest.jsonc`"), "{stderr}");
+    assert!(
+        stderr.contains("has `manifest.jsonc` at its root"),
+        "{stderr}"
+    );
+    assert!(!index_file(&data).exists());
+}
+
+#[test]
+fn an_index_that_lists_old_catalogs_is_refused_with_what_to_do() {
+    let dir = scratch("old_index");
+    let data = dir.join("data");
+    let index = index_file(&data);
+    fs::create_dir_all(index.parent().unwrap()).unwrap();
+    let old = serde_json::json!({"format": 3, "units": {}, "catalogs": {"@acme/catalog": {
+        "source": "https://example.com/catalog.git", "commit": "c".repeat(40), "units": {}
+    }}});
+    fs::write(&index, old.to_string()).unwrap();
+
+    let output = fails(assemblr(&data, &dir, &["registry", "list"]));
+
+    let stderr = stderr(&output);
+    assert!(stderr.contains("no longer reads"), "{stderr}");
+    assert!(
+        stderr.contains("`assemblr registry add <repository>`"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read_to_string(&index).unwrap(), old.to_string());
 }

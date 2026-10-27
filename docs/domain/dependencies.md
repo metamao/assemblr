@@ -6,7 +6,7 @@
 - Each dependency is an **owner-qualified identity** (`@owner/unit-name`) with
   a **SemVer range**.
 - Dependencies are never inferred from owner names, unit names, repository
-  layout, catalog membership, or registry structure.
+  layout, or registry structure.
 
 `dependencies` is a map from identity to SemVer requirement (see
 [manifest.md](manifest.md#serialization-of-dependencies-placeholders-and-amendments--approved)).

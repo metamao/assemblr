@@ -33,8 +33,8 @@ use crate::adapters::registry::{
     observe_tags as observe,
 };
 use crate::domain::{
-    CatalogIdentity, Excluded, ObjectId, ObservedTag, ObservedVersion, Provenance, RegistryError,
-    SourceReference, UnitIdentity, Version,
+    Excluded, ObjectId, ObservedTag, ObservedVersion, Provenance, RegistryError, SourceReference,
+    UnitIdentity, Version,
 };
 
 /// Publishes the version the committed manifest of the unit whose
@@ -209,11 +209,6 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
                 Registration::None
             }
             None => match index.units().get(&identity) {
-                // Only the catalogs' indexes list the versions of a unit
-                // they manage, whichever repository it is published from.
-                Some(unit) if !unit.is_direct() => Registration::Managed {
-                    catalogs: index.listing(&identity),
-                },
                 Some(unit) => Registration::Elsewhere {
                     source: unit.source().clone(),
                 },
@@ -268,10 +263,6 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
             published.index = IndexOutcome::RegisteredElsewhere { source };
             return Ok(published);
         }
-        Registration::Managed { catalogs } => {
-            published.index = IndexOutcome::Managed { catalogs };
-            return Ok(published);
-        }
         Registration::None => return Ok(published),
     };
     match registry.index_source(&source) {
@@ -286,10 +277,6 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
             Ok(published)
         }
         Ok(Indexed::NotRegistered) => Ok(published),
-        Ok(Indexed::Managed { catalogs }) => {
-            published.index = IndexOutcome::Managed { catalogs };
-            Ok(published)
-        }
         Err(error) => Err(PublishFailure::IndexNotUpdated {
             published: Box::new(published),
             error,
@@ -303,9 +290,6 @@ enum Registration {
     Here { source: SourceReference },
     /// It registers the identity from another reference.
     Elsewhere { source: SourceReference },
-    /// Only registered catalogs declare the identity, from another
-    /// reference.
-    Managed { catalogs: Vec<CatalogIdentity> },
     /// It does not register the identity.
     None,
 }
@@ -382,12 +366,6 @@ pub enum IndexOutcome {
     },
     /// The registry does not register the unit.
     NotRegistered,
-    /// Only catalogs manage the unit, so the version becomes discoverable
-    /// when one of them lists it and is synchronized.
-    Managed {
-        /// The catalogs that declare the unit.
-        catalogs: Vec<CatalogIdentity>,
-    },
 }
 
 /// Why a publication failed.

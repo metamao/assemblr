@@ -1,6 +1,6 @@
 # 0033: Catalog entry commands: `catalog init`, `add`, and `remove`, URL-only references, and commits
 
-- **Status:** Accepted
+- **Status:** Superseded by [0038](0038-remove-registry-catalogs.md)
 - **Date:** 2026-10-23
 
 ## Context

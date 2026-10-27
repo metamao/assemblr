@@ -155,9 +155,8 @@ How the status of a statement affects implementation:
 
 - **Question:** **Lock portability across machines.** What happens when the
   source a consumer lock records for a unit differs from the source registered
-  for that identity on another machine. A catalog declares no local paths,
-  so a unit obtained through a catalog has the same reference on every
-  machine. Unavailable sources and Git objects are OC-9.
+  for that identity on another machine. Unavailable sources and Git objects
+  are OC-9.
 - **Origin:** Readiness
 - **Context:** [lock](consumer-projects.md#lock-and-reconciliation-state--approved),
   [source conflicts](registries-and-discovery.md#source-conflicts--approved)
@@ -185,17 +184,14 @@ How the status of a statement affects implementation:
 - **Approved (normative):** The authoring operations (`init`, `amend`,
   `check`, `build`, `update`, `publish`), the registry command
   responsibilities (`add`, `remove`, `list`, `info`, `sync`, `doctor`),
-  the catalog maintainer's commands (`catalog init`, `catalog add`, `catalog
-  remove`, `catalog refresh`, which commit the catalog's two files unless
-  told not to and never push), discovery (`search`, `info`, with a
+  discovery (`search`, `info`, with a
   machine-readable form), the agent guide (`guide`, whose name stays stable in
   every version; see [agent
   guide](registries-and-discovery.md#agent-guide--approved)), the agent's
   skill (`skill install <agent>`, for `claude` only), and the
   consumer operations (`init`, `add`, `remove`, `compose`, and continuing or
   aborting a pending composition) and their intent. `unit init` establishes the unit's Git repository.
-  `catalog add` takes a unit's repository reference and reads its identity
-  from the unit. `add` accepts one
+  `add` accepts one
   unit per invocation and records a caret (`^`) requirement by default. The
   CLI is non-interactive by default. For local unit repositories, the registry
   grammar is `registry add <path>`, `registry list`, `registry list --json`
@@ -254,13 +250,9 @@ How the status of a statement affects implementation:
   published for them, the files edited since the last composition, and the
   units that deliver each file (**Provisional (D-46)**; see
   [status](consumer-projects.md#status--provisional-d-46)).
-  `catalog init <catalog> [<directory>]` creates a catalog's repository
-  and `registry.jsonc`, and `catalog refresh` regenerates its index
-  (**Provisional (D-36)**); `catalog add <reference>` and `catalog remove
-  <identity>` edit `registry.jsonc` and refresh, and the three commit unless
-  given `--no-commit` (**Provisional (D-45)**). `registry add` registers a catalog as well,
-  `registry sync` synchronizes catalogs, and `registry remove --catalog
-  <identity>` removes one (**Provisional (D-39)**).
+  The `catalog` commands for `registry.jsonc` catalogs were removed with
+  them (owner decision of 2026-10-27,
+  [#129](https://github.com/metamao/assemblr/issues/129)).
 - **Open detail:** Exact grammar and semantics of every other command, flag,
   and argument, including: how `registry info` relates to the top-level
   `info`, and whether unit inspection is spelled `info` or `unit info`; what
@@ -273,8 +265,7 @@ How the status of a statement affects implementation:
 - **Origin:** Owner
 - **Context:** [commands](authoring-workflow.md#commands--conceptual),
   [initialization](authoring-workflow.md#initialization--approved), [registry
-  commands](registries-and-discovery.md#registry-commands--approved), [catalog
-  refresh](registries-and-discovery.md#catalog-refresh--approved),
+  commands](registries-and-discovery.md#registry-commands--approved),
   [composition commands](consumer-projects.md#composition-commands--approved)
 
 ### OC-8
@@ -374,7 +365,7 @@ How the status of a statement affects implementation:
 ### OC-23
 
 - **Approved (normative):** *Revised by the registry model.* One global local
-  registry, administered through the CLI. Unit repositories and catalogs are
+  registry, administered through the CLI. Unit repositories are
   registered explicitly, validated as untrusted input, and incorporated
   atomically. Identical references to the same identity may be deduplicated.
   Different references to the same identity conflict. Two references are never
@@ -440,44 +431,17 @@ How the status of a statement affects implementation:
 - **Origin:** Foundation
 - **Context:** [discovery](registries-and-discovery.md#discovery-and-information--approved)
 
-### OC-32
-
-- **Approved (normative):** A catalog is a Git repository whose
-  `registry.jsonc` has a `name` (an `@owner/name` catalog identity, in a
-  namespace separate from units) and a `units` map from expected unit
-  identities to plain-string Git references. HTTPS and SSH references and
-  `file://` URLs are permitted; local paths are not. The
-  referenced manifest must declare the catalog's identity for it.
-  `registry.jsonc` duplicates no versions, dependencies, placeholders, or
-  hashes, and indexing adds no fields to it. A catalog needs no SemVer or
-  release publication. Entries are added and removed with `catalog add` and
-  `catalog remove`, or edited directly and validated through refresh,
-  registration, or synchronization. Remote catalogs synchronize from
-  the Git default branch, and the index records the exact catalog commit.
-- **Open detail:** Whether `registry.jsonc` may contain fields beyond `name`
-  and `units`. How conflicting catalog identities are handled. Which revision
-  is read for a local catalog, and how uncommitted local catalog changes are
-  treated. Implemented provisionally for catalog
-  refresh (D-36): only `name`, `units`, and `$schema` are accepted, and
-  refresh reads the working tree. Implemented provisionally for
-  registration (D-39): a local catalog is read as committed at `HEAD`.
-- **Origin:** Registry
-- **Context:** [catalogs](registries-and-discovery.md#catalogs--approved),
-  [synchronization](registries-and-discovery.md#synchronization--approved)
-
 ### OC-33
 
 - **Approved (normative):** Registration and synchronization validate
   untrusted sources and never execute their code. Synchronization updates
-  catalogs and units, validates the complete proposed index before replacing
+  the registered units, validates the complete proposed index before replacing
   the active one, keeps the previous valid state when a source-level
-  validation fails, removes dropped catalog references from discovery,
-  preserves snapshots required by locks, and never modifies consumer projects
-  or lock files. Removal deletes only the registry relationship. Versions of
-  catalog-managed units are discovered through the catalog's metadata index.
-  An invalid version is excluded from the usable index and reported, and the
-  operation continues. A source-level failure, such as an invalid or
-  inaccessible repository, an invalid catalog manifest, or a source conflict,
+  validation fails, preserves snapshots required by locks, and never
+  modifies consumer projects or lock files. Removal deletes only the
+  registry relationship. An invalid version is excluded from the usable
+  index and reported, and the operation continues. A source-level failure,
+  such as an invalid or inaccessible repository or a source conflict,
   rejects the registration or synchronization atomically. For unit
   repositories, every check is
   [classified](registries-and-discovery.md#invalid-versions-and-failed-sources--approved):
@@ -490,13 +454,7 @@ How the status of a statement affects implementation:
   invalid rejects the whole synchronization, across the registry. Checks that
   depend on other sources, such as verifying a base's content against the
   registry record, belong to the build that composes the amendment.
-- **Open detail:** The classification of the checks of catalogs and their
-  metadata indexes. Whether synchronization can target individual sources. How
-  the index update of `unit publish`, and a unit registered both individually
-  and through a catalog, interact with versions the catalog's index does not
-  yet list. Implemented provisionally (D-39): every catalog problem is
-  source-level; `unit publish` indexes nothing for a unit only catalogs
-  manage; a unit registered both ways is indexed with every valid tag.
+- **Open detail:** Whether synchronization can target individual sources.
 - **Origin:** Registry
 - **Context:** [registration](registries-and-discovery.md#registration--approved),
   [synchronization](registries-and-discovery.md#synchronization--approved)
@@ -581,49 +539,12 @@ How the status of a statement affects implementation:
   resolution](consumer-projects.md#version-resolution--approved), [explicit
   updates](dependencies.md#explicit-updates--approved)
 
-### OC-40
-
-- **Approved (normative):** A catalog publishes an Assemblr-generated,
-  deterministic metadata index, derived from its declared sources and their
-  published manifests, which stay authoritative. Catalog refresh regenerates
-  it and is a maintainer operation, suitable for automation, with no mandatory
-  central service, webhook, or back-reference.
-- **Open detail:** The index's file name, serialization, storage location, and
-  hash representation; whether a catalog without a published index can be
-  registered; how refresh reports partial failures. Implemented
-  provisionally (D-36, D-39, [ADR 0030](../adr/0030-catalog-index.md)): a
-  catalog with no committed index cannot be registered;
-  `registry-index.json` at the catalog's root, JSON with sorted keys, Git
-  commit and tree ids, and an invalid version excluded with a warning while
-  any source-level failure rejects the whole refresh.
-- **Origin:** Owner
-- **Context:** [catalog metadata
-  index](registries-and-discovery.md#catalog-metadata-index--approved)
-
-### OC-41
-
-- **Approved (normative):** Catalog-generated metadata is untrusted.
-  Registration and synchronization validate its structure, identities,
-  provenance, internal consistency, and correspondence with authoritative
-  published unit data, to the extent the source-trust guarantees require.
-  Neither unverified trust nor full source downloads on every ordinary
-  registry operation is acceptable.
-- **Open detail:** The verification and caching strategy that achieves these
-  guarantees efficiently. Implemented provisionally (D-39, [ADR
-  0031](../adr/0031-catalog-registration.md)): registration checks each
-  listed manifest's structure, identity, and version; the commit, tree, and
-  manifest are checked against the unit's repository when its content is
-  first retrieved, and every build checks them again.
-- **Origin:** Owner
-- **Context:** [metadata ingestion and
-  trust](registries-and-discovery.md#metadata-ingestion-and-trust--approved)
-
 ### OC-42
 
 - **Approved (normative):** Source declarations, validated metadata, and
   complete unit content are distinct. Discovery and inspection work from
   metadata. Complete content is retrieved and cached when composition requires
-  it, not when a catalog is registered.
+  it, not when a source is registered.
 - **Open detail:** Which operations retrieve content on demand, and how that
   relates to the rule that `search`, `info`, `unit check`, `unit build`, and
   `unit update` never fetch implicitly; Git partial-fetch and caching
@@ -631,14 +552,13 @@ How the status of a statement affects implementation:
   repositories: `registry add` and `registry sync` fetch every published tag
   and `HEAD` into a full bare copy, with no partial fetch, and every other
   operation reads the copy and never fetches. **Decided by the owner
-  (2026-10-23, in session, #95)** for catalogs: registering or synchronizing
-  a catalog reads only its metadata, and a unit's content is fetched when
-  composition first needs it, so `add` and `compose` may fetch.
-  **Provisional (D-39)**: any operation that reads a version the copy lacks
+  (2026-10-23, in session, #95)** for the `registry.jsonc` catalogs, since
+  removed (#129): a unit's content is fetched when composition first needs
+  it, so `add` and `compose` may fetch. **Provisional (D-39)**: any operation that reads a version the copy lacks
   fetches it, including `update` and the dependencies read by `unit build`,
   `unit check`, `unit update`, and `unit amend`; fetching the content of an indexed commit is not read as
   fetching remote changes, since it cannot change the index or a
-  resolution. For remote unit repositories, the catalog design the owner
+  resolution. For remote unit repositories, the multi-unit catalog design the owner
   adopted (2026-10-27, in session, #126) replaces the full copy of D-35:
   registration and synchronization fetch commits, trees, and the metadata
   files only, and a version's files are fetched when it is first read,
@@ -833,9 +753,8 @@ How the status of a statement affects implementation:
 
 - **Resolution:** **Superseded** by the registry model. The entry asked how
   units are discovered inside a directory grouping unit repositories. Grouping
-  directories are no longer sources: units are registered individually or
-  declared explicitly by a catalog, and a directory is never scanned to
-  discover units.
+  directories are no longer sources: units are registered individually, and
+  a directory is never scanned to discover units.
 - **Context:** [registered
   sources](registries-and-discovery.md#registered-sources--approved), [ADR
   0003](../adr/0003-managed-local-registry.md)
@@ -852,6 +771,32 @@ How the status of a statement affects implementation:
   undeclared placeholder-shaped token, a warning there, do not gate a
   build.
 - **Context:** [build details](authoring-workflow.md#build-details--approved)
+
+### OC-32
+
+- **Resolution:** **No longer applies.** The `registry.jsonc` catalogs it
+  described were removed by the owner's decision of 2026-10-27
+  ([#129](https://github.com/metamao/assemblr/issues/129)).
+- **Context:** [registered
+  sources](registries-and-discovery.md#registered-sources--approved)
+
+### OC-40
+
+- **Resolution:** **No longer applies.** The catalog metadata index
+  (`registry-index.json`) and catalog refresh were removed with the
+  `registry.jsonc` catalogs (owner decision of 2026-10-27,
+  [#129](https://github.com/metamao/assemblr/issues/129)).
+- **Context:** [registered
+  sources](registries-and-discovery.md#registered-sources--approved)
+
+### OC-41
+
+- **Resolution:** **No longer applies.** No catalog-generated metadata is
+  ingested any more: registration reads each unit's metadata from its own
+  repository (owner decision of 2026-10-27,
+  [#129](https://github.com/metamao/assemblr/issues/129)).
+- **Context:** [metadata
+  ingestion](registries-and-discovery.md#metadata-ingestion--approved)
 
 ### OC-30
 

@@ -115,7 +115,7 @@ fn guide_prints_the_agent_guide_and_help_points_to_it() {
         guide.starts_with("Assemblr (the `assemblr` CLI)"),
         "{guide}"
     );
-    for section in ["Projects:", "Units:", "Catalogs:", "Always:"] {
+    for section in ["Projects:", "Units:", "Always:"] {
         assert!(guide.contains(section), "{guide}");
     }
     assert!(stderr(&output).is_empty());
