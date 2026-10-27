@@ -587,7 +587,7 @@ fn a_locked_version_whose_content_changed_is_rejected() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("restore the tag in the unit's repository; deleting assemblr-lock.json is not a repair: it discards every locked version"),
+        stderr.contains("restoring the tag in the unit's repository repairs, or this lockfile was built against content never published as that version; deleting assemblr-lock.json is not a repair: it discards every locked version"),
         "{stderr}"
     );
 }
@@ -1772,6 +1772,44 @@ fn a_base_the_amender_s_lockfile_misidentifies_is_an_integrity_conflict() {
     }
     assert!(!consumer.path.join("build").exists());
     assert!(!consumer.path.join("assemblr-lock.json").exists());
+}
+
+#[test]
+fn a_base_locked_under_another_commit_with_the_same_tree_is_verified() {
+    // A pull request's merge commit holds the same tree as the head the
+    // amender was built against (#123).
+    let fixture = Fixture::new("base-recommitted");
+    let (node, app) = app_amending_node(&fixture);
+    succeeds(amend(&fixture, &app, &["bin/run"]));
+    let commit = node.rev("v1.0.0");
+    let lockfile = app.read("assemblr-lock.json");
+    assert!(lockfile.contains(&commit), "{lockfile}");
+    app.write(
+        "assemblr-lock.json",
+        &lockfile.replace(&commit, &"0".repeat(40)),
+    );
+    app.publish("0.1.0");
+    fixture.register(&app);
+
+    let consumer = consumer(&fixture, "consumer", &[("@acme/app", "^0.1")], "");
+    succeeds(fixture.build(&consumer));
+    assert!(consumer.path.join("build").exists());
+}
+
+#[test]
+fn a_locked_version_committed_again_with_the_same_tree_is_kept() {
+    let fixture = Fixture::new("content-recommitted");
+    let (node, app) = app_on_node(&fixture, "^1");
+    let tree = node.rev("v1.0.0^{tree}");
+    let other = "0".repeat(40);
+    let lockfile = format!(
+        r#"{{"format": 1, "units": {{"@acme/node": {{"version": "1.0.0", "commit": "{other}", "tree": "{tree}"}}}}}}"#
+    );
+    app.write("assemblr-lock.json", &lockfile);
+    succeeds(fixture.build(&app));
+    let written = app.read("assemblr-lock.json");
+    assert!(written.contains(&other), "{written}");
+    assert!(!written.contains(&node.rev("v1.0.0")), "{written}");
 }
 
 fn update(fixture: &Fixture, repo: &Repo, args: &[&str]) -> Output {

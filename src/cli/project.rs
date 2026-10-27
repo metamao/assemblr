@@ -776,7 +776,10 @@ fn enclosing_project(root: &Path) -> Option<&Path> {
 fn build_advice(problem: &BuildProblem) -> Option<String> {
     Some(match problem {
         BuildProblem::Lock(LockError::ContentChanged { .. }) => {
-            "published versions never change: restore the tag in the unit's repository".to_owned()
+            "published versions never change: either its tag was moved, which restoring the tag \
+             in the unit's repository repairs, or the lockfile was built against content never \
+             published as that version"
+                .to_owned()
         }
         BuildProblem::Resolution(ResolutionError::Unavailable { .. }) => {
             "run `assemblr registry sync` to index newly published versions".to_owned()

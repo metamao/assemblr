@@ -1149,8 +1149,9 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
             "run `assemblr unit update` to complete the interrupted update".to_owned()
         }
         BuildProblem::Lock(LockError::ContentChanged { .. }) => format!(
-            "published versions never change: restore the tag in the unit's repository; \
-             {DELETING_THE_LOCKFILE}"
+            "published versions never change: either its tag was moved, which restoring the \
+             tag in the unit's repository repairs, or this lockfile was built against content \
+             never published as that version; {DELETING_THE_LOCKFILE}"
         ),
         // The message already says what to do.
         BuildProblem::AmendmentBase(_) => return None,
