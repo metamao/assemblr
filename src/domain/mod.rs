@@ -11,8 +11,8 @@ mod identity;
 mod lock;
 mod manifest;
 mod merge;
-mod parameter;
 mod path;
+mod placeholder;
 mod project;
 mod provenance;
 mod reconcile;
@@ -23,11 +23,9 @@ mod text_merge;
 mod update;
 mod version;
 
-pub(crate) use composition::mapping_problem;
 pub use composition::{
-    Amendment, ComposedFile, Composition, CompositionError, ContributedPath, FileTree,
-    OptionRequirement, ParameterValues, Root, RootTargetReason, TEMPLATE_SUFFIX, UnitContent,
-    UnitFile, compose, delivered_path, dependency_closure,
+    Amendment, ComposedFile, Composition, CompositionError, ContributedPath, FileTree, Root,
+    UnitContent, UnitFile, compose, dependency_closure,
 };
 pub use contribution::{ContributionError, contribution_problems};
 pub use discovery::{EmptyQuery, SearchQuery};
@@ -36,20 +34,17 @@ pub use lock::{
     AmendmentBaseError, BaseIntegrityError, LockError, LockedUnit, PublishedAmendmentError,
     UnitLock, amendment_bases, published_amendments, relock, verify_bases,
 };
-pub use manifest::{
-    AmendmentDeclaration, InheritanceError, Manifest, ManifestError, OptionValue, OptionValues,
-    UnitOptionValues,
-};
+pub use manifest::{AmendmentDeclaration, BlankDescription, Description, Manifest, ManifestError};
 pub use merge::{
     Combined, Conflict, ConflictKind, Derived, Edit, Lists, MergeFormat, Operation, Plan, Value,
     ValueChange, combine, derive, plan, show_path, write_json_string,
 };
-pub use parameter::{
-    AllowedValues, AllowedValuesError, BlankDescription, Description, OWN, ParameterDefinition,
-    ParameterName, ParameterNameError, ParameterNameErrorReason, ParameterType, ParameterValue,
-    ParameterValueError, PatternError, PatternProblem, ValueKind, ValuePattern,
-};
 pub use path::{RelativePath, RelativePathError, RelativePathErrorReason};
+pub use placeholder::{
+    Location, PlaceholderCheck, PlaceholderDeclaration, PlaceholderError, PlaceholderList,
+    PlaceholderName, PlaceholderNameError, PlaceholderReport, Placeholders, Remaining,
+    UnresolvedTokens, check_placeholders, declarations,
+};
 pub use project::{Project, ReconciliationState};
 pub use provenance::{ObjectId, Provenance};
 pub use reconcile::{
@@ -73,4 +68,4 @@ pub use text_merge::{
 pub use update::{ReconcileCause, ReconcileError, update_lock};
 pub use version::{RequirementError, Version, VersionError, VersionRequirement};
 
-pub(crate) use manifest::{inheritance_errors, relation_errors};
+pub(crate) use manifest::relation_errors;

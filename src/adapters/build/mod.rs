@@ -22,7 +22,7 @@ mod check;
 mod exclusive;
 mod layering;
 pub use layering::UnresolvedFile;
-pub(crate) use layering::{layer_sources, render_files};
+pub(crate) use layering::{layer_file, layer_files};
 mod output;
 mod publish;
 mod update;
@@ -33,7 +33,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-pub use add::{AddFailure, AddProblem, AddedParameter, DependencyAdded, add_dependency};
+pub use add::{AddFailure, AddProblem, DependencyAdded, add_dependency};
 pub use amend::{AmendFailure, AmendProblem, AmendState, Amended, Match, WriteError, amend_unit};
 pub use check::{CheckFailure, CheckProblem, Checked, check_unit};
 use exclusive::BuildLock;
@@ -49,13 +49,12 @@ use super::git::{GitError, GitRepository, InvalidVersion, MANIFEST_LIMIT, ReadSr
 use super::lockfile::{self, LockfileError, PublishedLockfileError};
 use super::manifest::{ReadManifestError, read_manifest};
 use super::registry::{Registry, StorageError};
-use super::render::RenderError;
 use crate::domain::{
     AmendmentBaseError, AvailableVersions, BaseIntegrityError, CompositionError, ContributionError,
-    FileTree, LockChange, LockError, Manifest, ObjectId, ParameterName, PublishedAmendmentError,
-    RelativePath, Requirer, ResolutionError, Root, TEMPLATE_SUFFIX, UnitContent, UnitFile,
-    UnitIdentity, UnitLock, ValueKind, Version, amendment_bases, compose, contribution_problems,
-    published_amendments, relock, resolve, verify_bases,
+    FileTree, LockChange, LockError, Manifest, ObjectId, PlaceholderError, PlaceholderReport,
+    PublishedAmendmentError, RelativePath, Requirer, ResolutionError, Root, UnitContent, UnitFile,
+    UnitIdentity, UnitLock, UnresolvedTokens, Version, amendment_bases, check_placeholders,
+    compose, contribution_problems, published_amendments, relock, resolve, verify_bases,
 };
 
 /// The unit's manifest, at the repository's top level.
@@ -266,6 +265,8 @@ fn publish_validated(
         lockfile,
         changes: validated.changes,
         notes: validated.notes,
+        placeholders: validated.placeholders,
+        unresolved: validated.unresolved,
         leftover: published.leftover,
     })
 }
@@ -301,7 +302,7 @@ fn write_pending(
         match crate::adapters::manifest::declare_amendment(
             &edited,
             &declared,
-            &pending.source,
+            &pending.path,
             &declaration,
         ) {
             Ok(text) => edited = text,
@@ -310,7 +311,7 @@ fn write_pending(
                 continue;
             }
         }
-        if let Some(next) = declared.with_amendment(pending.source.clone(), declaration) {
+        if let Some(next) = declared.with_amendment(pending.path.clone(), declaration) {
             declared = next;
         }
         placements.push(pending);
@@ -318,7 +319,7 @@ fn write_pending(
     // The directories the copies need, each once: two copies can share a
     // new one.
     let mut missing = Vec::new();
-    match amend::real_directories_of(root, placements.iter().map(|pending| &pending.source)) {
+    match amend::real_directories_of(root, placements.iter().map(|pending| &pending.path)) {
         Ok(directories) => missing = directories,
         Err(amend::DirectoryProblem::NotADirectory(path)) => {
             problems.push(BuildProblem::NotADirectory { path });
@@ -354,7 +355,7 @@ fn write_pending(
     for pending in &placements {
         let copy_path = root
             .join(super::git::UnitDirectory::Amendments.as_str())
-            .join(pending.source.as_str());
+            .join(pending.path.as_str());
         if let Err(error) = amend::write_copy(&copy_path, &pending.copy, &[]) {
             let _ = fs::remove_file(&copy_path);
             if written.is_empty() {
@@ -366,7 +367,7 @@ fn write_pending(
                 written,
             };
         }
-        written.push(pending.source.clone());
+        written.push(pending.path.clone());
     }
     if let Err(error) = amend::write_manifest(root, &staged, edited.as_bytes()) {
         let _ = fs::remove_file(&staged);
@@ -376,9 +377,8 @@ fn write_pending(
             written,
         };
     }
-    written.push(
-        RelativePath::parse(MANIFEST).unwrap_or_else(|_| validated.pending[0].source.clone()),
-    );
+    written
+        .push(RelativePath::parse(MANIFEST).unwrap_or_else(|_| validated.pending[0].path.clone()));
     let lockfile_outcome = match &opened.previous {
         None => LockfileOutcome::Created,
         Some(previous) if *previous == validated.lock => LockfileOutcome::Unchanged,
@@ -460,6 +460,11 @@ pub(super) struct Validation {
     /// The problems with the unit's contribution, which gate publication
     /// and never a build (OC-11). Empty when resolution did not finish.
     pub(super) contribution: Vec<ContributionError>,
+    /// The tokens in the unit's own files that look like placeholders and
+    /// that neither it nor its graph declares or ignores: a warning for a
+    /// build, a problem for a publication. Empty when resolution did not
+    /// finish.
+    pub(super) unresolved: UnresolvedTokens,
     /// The validated unit, when every validation passed.
     pub(super) result: Option<Validated>,
 }
@@ -470,7 +475,7 @@ pub(super) struct Validated {
     pub(super) lock: UnitLock,
     /// How that lock differs from the previous one.
     pub(super) changes: BTreeMap<UnitIdentity, LockChange>,
-    /// The composed files, rendered, by delivered path.
+    /// The composed files, by path.
     pub(super) files: Vec<(RelativePath, UnitFile)>,
     /// What the composition reports without failing: parts of amendment
     /// copies the merge could not carry, each naming the file.
@@ -479,6 +484,10 @@ pub(super) struct Validated {
     /// the build creates the marked copies instead of `build/` (the
     /// pending state, see `docs/domain/authoring-workflow.md`).
     pub(super) pending: Vec<PendingFile>,
+    /// The declared placeholders the composed files hold.
+    pub(super) placeholders: PlaceholderReport,
+    /// As [`Validation::unresolved`].
+    pub(super) unresolved: UnresolvedTokens,
 }
 
 /// A copy the pending state creates: the composition of a file with the
@@ -487,7 +496,7 @@ pub(super) struct Validated {
 pub struct PendingFile {
     /// The path in the provider's `src/`, and the copy's under
     /// `amendments/`.
-    source: RelativePath,
+    path: RelativePath,
     /// The provider.
     provider: UnitIdentity,
     /// Its locked version, the copy's base.
@@ -503,7 +512,7 @@ pub struct PendingFile {
 impl PendingFile {
     /// The copy's path under `amendments/`.
     pub fn path(&self) -> &RelativePath {
-        &self.source
+        &self.path
     }
 
     /// The provider of the amended file.
@@ -527,43 +536,6 @@ impl PendingFile {
     }
 }
 
-/// The values a unit is built with: a required parameter is built with its
-/// example, for this unit only, and a consumer never sees them. The
-/// parameters without a default or an example are given too. An inherited
-/// parameter takes its definition from `resolved`; without it, only the
-/// unit's own parameters are considered.
-pub(super) fn development_values(
-    manifest: &Manifest,
-    resolved: Option<&Resolved>,
-) -> (
-    BTreeMap<UnitIdentity, crate::domain::OptionValues>,
-    Vec<ParameterName>,
-) {
-    let params = match resolved {
-        Some(resolved) => resolved.params(manifest),
-        None => manifest.params().clone(),
-    };
-    let mut development = crate::domain::OptionValues::new();
-    let mut parameters: Vec<ParameterName> = Vec::new();
-    for (name, definition) in &params {
-        if definition.default().is_some() {
-            continue;
-        }
-        match definition.example() {
-            Some(example) => {
-                development.insert(name.clone(), example.clone());
-            }
-            None => parameters.push(name.clone()),
-        }
-    }
-    let development = if development.is_empty() {
-        BTreeMap::new()
-    } else {
-        BTreeMap::from([(manifest.name().clone(), development)])
-    };
-    (development, parameters)
-}
-
 /// The pending copy for each file of `unresolved` that `manifest`, the
 /// unit being built, does not amend: the sources layered, with the
 /// conflict marked, for the unit to resolve. The files it amends are given
@@ -584,13 +556,13 @@ pub(super) fn pending_files(
             kept.push(unresolved);
             continue;
         };
-        if manifest.amendments().contains_key(&unresolved.source) {
+        if manifest.amendments().contains_key(&unresolved.path) {
             kept.push(unresolved);
             continue;
         }
-        let copy = layer_sources(
+        let copy = layer_file(
             composition,
-            &unresolved.delivered,
+            &unresolved.path,
             lock,
             Some(manifest.name()),
             dependencies,
@@ -600,7 +572,7 @@ pub(super) fn pending_files(
             continue;
         };
         pending.push(PendingFile {
-            source: unresolved.source.clone(),
+            path: unresolved.path.clone(),
             provider: unresolved.provider.clone(),
             base: locked.version().clone(),
             amenders: unresolved.amenders.clone(),
@@ -613,24 +585,6 @@ pub(super) fn pending_files(
         });
     }
     (pending, kept)
-}
-
-/// `manifest` without its amendments: the root of a composition that
-/// gives the bases of the unit's own amendments, which are no part of
-/// them, and that is not disturbed by a copy an interrupted run left
-/// undeclared or by one that still holds conflict markers.
-pub(super) fn without_amendments(manifest: &Manifest) -> Manifest {
-    Manifest::new(
-        manifest.name().clone(),
-        manifest.version().clone(),
-        manifest.description().clone(),
-        manifest.dependencies().clone(),
-        manifest.options().clone(),
-        manifest.params().clone(),
-        manifest.inherited().clone(),
-        BTreeMap::new(),
-    )
-    .unwrap_or_else(|_| manifest.clone())
 }
 
 /// The resolved, verified dependencies of a root: a unit, or a consumer
@@ -647,19 +601,6 @@ impl Resolved {
     pub(crate) fn manifest_of(&self, identity: &UnitIdentity) -> Option<&Manifest> {
         let locked = self.lock.units().get(identity)?;
         self.dependencies.manifest(identity, locked.version())
-    }
-
-    /// The parameters of `manifest`, a locked unit or the unit being
-    /// built, each inherited one with the definition it takes from the
-    /// locked versions. One that cannot be followed is left out; the
-    /// composition reports it.
-    pub(crate) fn params(
-        &self,
-        manifest: &Manifest,
-    ) -> BTreeMap<ParameterName, crate::domain::ParameterDefinition> {
-        manifest
-            .resolved_params(|identity| self.manifest_of(identity))
-            .0
     }
 
     /// The content of every locked unit, for composition, after each
@@ -803,10 +744,10 @@ pub(crate) fn newest_allowed(
 }
 
 /// Runs every validation that gates a build on `inputs` (see
-/// `docs/domain/authoring-workflow.md`): development values, resolution
-/// under the lock against `index`, the lock's integrity, the amendment
-/// bases, the published content of every locked version, the bases of
-/// published amenders, composition, and rendering. Every problem found is
+/// `docs/domain/authoring-workflow.md`): resolution under the lock against
+/// `index`, the lock's integrity, the amendment bases, the published
+/// content of every locked version, the bases of published amenders, the
+/// unit's placeholders, composition, and layering. Every problem found is
 /// added to `problems`, and the result is given only when none was.
 pub(super) fn validate(
     inputs: &Inputs<'_>,
@@ -821,15 +762,9 @@ pub(super) fn validate(
     } = *inputs;
     let mut validation = Validation {
         contribution: Vec::new(),
+        unresolved: UnresolvedTokens::new(),
         result: None,
     };
-    let (_, parameters) = development_values(manifest, None);
-    if !parameters.is_empty() {
-        problems.push(BuildProblem::DevelopmentValues {
-            unit: manifest.name().clone(),
-            parameters: parameters.clone(),
-        });
-    }
     let Some(resolved) = resolve_graph(
         Some(manifest.name()),
         manifest.dependencies(),
@@ -839,18 +774,6 @@ pub(super) fn validate(
     ) else {
         return validation;
     };
-    // The inherited parameters are known once the dependencies are.
-    let (development, all) = development_values(manifest, Some(&resolved));
-    let inherited: Vec<ParameterName> = all
-        .into_iter()
-        .filter(|name| !parameters.contains(name))
-        .collect();
-    if !inherited.is_empty() {
-        problems.push(BuildProblem::DevelopmentValues {
-            unit: manifest.name().clone(),
-            parameters: inherited,
-        });
-    }
     // A build never moves an amended unit away from its base. The cause is
     // told apart here, with the previous lock; the composition below would
     // only see that the base and the resolved version differ.
@@ -882,13 +805,25 @@ pub(super) fn validate(
     }
     validation.contribution =
         contribution_problems(manifest, src, amendments, &resolved.providers());
+    let graph = resolved
+        .lock
+        .units()
+        .keys()
+        .filter_map(|identity| resolved.manifest_of(identity));
+    let placeholders = check_placeholders(manifest, src, amendments, graph);
+    problems.extend(
+        placeholders
+            .problems
+            .into_iter()
+            .map(BuildProblem::Placeholder),
+    );
+    validation.unresolved = placeholders.unresolved;
     let units = resolved.units();
     let root_content = UnitContent::new(manifest, src, amendments);
     let composition = compose(
         resolved.resolution.graph(),
         Root::Unit(root_content),
         &units,
-        &development,
     );
     let composition = match composition {
         Ok(composition) => composition,
@@ -896,10 +831,8 @@ pub(super) fn validate(
             problems.extend(
                 errors
                     .into_iter()
-                    // Already reported, from the manifest alone, or with
-                    // the cause, from the lock.
+                    // Already reported, with the cause, from the lock.
                     .filter(|error| match error {
-                        CompositionError::MissingValue { unit, .. } => unit != manifest.name(),
                         CompositionError::AmendmentBase {
                             amender: Requirer::Root,
                             path,
@@ -912,7 +845,7 @@ pub(super) fn validate(
             return validation;
         }
     };
-    let Some(rendered) = render_files(
+    let Some(layered) = layer_files(
         &composition,
         &resolved.lock,
         Some(manifest.name()),
@@ -927,7 +860,7 @@ pub(super) fn validate(
     // and the rest is reported.
     let (pending, kept) = pending_files(
         &composition,
-        rendered.unresolved,
+        layered.unresolved,
         &resolved.lock,
         manifest,
         &resolved.dependencies,
@@ -937,12 +870,20 @@ pub(super) fn validate(
     if !problems.is_empty() {
         return validation;
     }
+    let placeholders = PlaceholderReport::find(layered.files.iter().filter_map(|(path, file)| {
+        composition
+            .files()
+            .get(path)
+            .map(|composed| (path, file.contents(), composed.placeholders()))
+    }));
     validation.result = Some(Validated {
         lock: resolved.lock,
         changes: resolved.resolution.changes().clone(),
-        files: rendered.files,
-        notes: rendered.notes.into_iter().map(|(_, note)| note).collect(),
+        files: layered.files,
+        notes: layered.notes.into_iter().map(|(_, note)| note).collect(),
         pending,
+        placeholders,
+        unresolved: validation.unresolved.clone(),
     });
     validation
 }
@@ -1242,6 +1183,8 @@ pub struct Built {
     lockfile: LockfileOutcome,
     changes: BTreeMap<UnitIdentity, LockChange>,
     notes: Vec<String>,
+    placeholders: PlaceholderReport,
+    unresolved: UnresolvedTokens,
     leftover: Option<(PathBuf, io::Error)>,
 }
 
@@ -1280,6 +1223,18 @@ impl Built {
     /// copies the merge could not carry, each naming the file.
     pub fn notes(&self) -> &[String] {
         &self.notes
+    }
+
+    /// The declared placeholders `build/` holds, for the consumer to
+    /// replace.
+    pub fn placeholders(&self) -> &PlaceholderReport {
+        &self.placeholders
+    }
+
+    /// The tokens in the unit's own files that look like placeholders and
+    /// are not declared or ignored, which `unit publish` refuses.
+    pub fn unresolved(&self) -> &UnresolvedTokens {
+        &self.unresolved
     }
 
     /// The previous build, if it was replaced but could not be deleted, and
@@ -1372,9 +1327,9 @@ impl fmt::Display for BuildFailure {
                         f,
                         "amendments/{}: the amendments of {} of src/{} of {} {} conflict, and \
                          the copy holds each conflict between markers:",
-                        file.source,
+                        file.path,
                         amenders.join(" and "),
-                        file.source,
+                        file.path,
                         file.provider,
                         file.base
                     )?;
@@ -1421,14 +1376,9 @@ pub enum BuildProblem {
     Output(OutputProblem),
     /// The lockfile cannot be read.
     Lockfile(LockfileError),
-    /// The unit being built has required parameters with neither a default
-    /// nor an example, so it has no value to be built with.
-    DevelopmentValues {
-        /// The unit.
-        unit: UnitIdentity,
-        /// The parameters, sorted.
-        parameters: Vec<ParameterName>,
-    },
+    /// The unit's placeholder declarations do not suit its files or its
+    /// resolved graph.
+    Placeholder(PlaceholderError),
     /// The registry index cannot be read.
     Registry(StorageError),
     /// A dependency's registered repository could not be read.
@@ -1522,21 +1472,6 @@ pub enum BuildProblem {
         /// Why it cannot be applied.
         reason: CrossVersionReason,
     },
-    /// A template cannot be rendered.
-    Template {
-        /// The unit whose `src/` provides the template.
-        unit: UnitIdentity,
-        /// The template's path in that `src/`.
-        path: RelativePath,
-        /// The unit whose copy at `amendments/<path>` is rendered instead
-        /// of the provider's file, if the template is amended.
-        amended_by: Option<UnitIdentity>,
-        /// That unit's published version, when it is not the unit being
-        /// built.
-        published: Option<Version>,
-        /// What is wrong.
-        error: TemplateError,
-    },
 }
 
 impl fmt::Display for BuildProblem {
@@ -1560,17 +1495,7 @@ impl fmt::Display for BuildProblem {
             Self::Amendments(error) => error.fmt(f),
             Self::Output(problem) => problem.fmt(f),
             Self::Lockfile(error) => error.fmt(f),
-            Self::DevelopmentValues { unit, parameters } => {
-                let names: Vec<String> =
-                    parameters.iter().map(|name| format!("`{name}`")).collect();
-                write!(
-                    f,
-                    "{unit} declares required parameters without defaults or examples: {}; \
-                     building it needs a value for each, and an `example` on the parameter \
-                     supplies one",
-                    names.join(", ")
-                )
-            }
+            Self::Placeholder(error) => error.fmt(f),
             Self::Registry(error) => error.fmt(f),
             Self::Source { unit, error } => {
                 write!(f, "could not read the registered source of {unit}: {error}")
@@ -1678,54 +1603,6 @@ impl fmt::Display for BuildProblem {
                          (it is applied across versions only to a file that is unchanged), or a \
                          copy or version of it is not UTF-8 text",
                     ),
-                    CrossVersionReason::Parameter {
-                        name,
-                        base: then,
-                        resolved: now,
-                    } => {
-                        let kind = |kind: &Option<ValueKind>| {
-                            kind.as_ref().map_or_else(
-                                || "not declared".to_owned(),
-                                |kind| format!("declared as {kind}"),
-                            )
-                        };
-                        write!(
-                            f,
-                            "it names parameter `{name}`, which is {} in {unit} {base} and {} in \
-                             {unit} {resolved}, so the amendment's contribution cannot be \
-                             told from the provider's own change",
-                            kind(then),
-                            kind(now)
-                        )
-                    }
-                }
-            }
-            Self::Template {
-                unit,
-                path,
-                amended_by,
-                published,
-                error,
-            } => {
-                match (amended_by, published) {
-                    (Some(amender), Some(version)) => write!(
-                        f,
-                        "amendments/{path} of {amender} {version} (a copy of template src/{path} \
-                         of {unit})"
-                    )?,
-                    (Some(amender), None) => write!(
-                        f,
-                        "amendments/{path} of {amender} (a copy of template src/{path} of {unit})"
-                    )?,
-                    (None, _) => write!(f, "template src/{path} of {unit}")?,
-                }
-                match error {
-                    TemplateError::NotUtf8 => write!(
-                        f,
-                        " is not UTF-8 text; a template is rendered as text, and a file that is \
-                         not text must not end in `{TEMPLATE_SUFFIX}`"
-                    ),
-                    TemplateError::Render(error) => write!(f, ", {error}"),
                 }
             }
         }
@@ -1741,25 +1618,6 @@ pub enum CrossVersionReason {
     BaseUnavailable,
     /// The file differs and has no merge, or is not text.
     NoMerge,
-    /// A parameter a template names is not declared at the resolved
-    /// version, or is declared as another kind of value.
-    Parameter {
-        /// The parameter.
-        name: ParameterName,
-        /// Its kind at the base version, when declared.
-        base: Option<ValueKind>,
-        /// Its kind at the resolved version, when declared.
-        resolved: Option<ValueKind>,
-    },
-}
-
-/// Why a template cannot be rendered.
-#[derive(Debug)]
-pub enum TemplateError {
-    /// Its source is not UTF-8 text.
-    NotUtf8,
-    /// A construct in it cannot be rendered.
-    Render(RenderError),
 }
 
 /// Why a published version cannot be used as the index records it.

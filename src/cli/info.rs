@@ -8,9 +8,7 @@
 use std::process::ExitCode;
 
 use assemblr::adapters::{InfoFailure, Registry, UnitInfo};
-use assemblr::domain::{
-    OptionValue, ParameterDefinition, ParameterType, ParameterValue, UnitIdentity, Version,
-};
+use assemblr::domain::{UnitIdentity, Version};
 use clap::Args;
 use serde_json::{Map, Value, json};
 
@@ -86,31 +84,6 @@ fn hint(failure: &InfoFailure) -> Option<String> {
     })
 }
 
-/// The type as the manifest spells it, with the allowed values of an
-/// enumerated string beside it.
-fn type_name(parameter: &ParameterDefinition) -> &'static str {
-    match parameter.parameter_type() {
-        ParameterType::String | ParameterType::EnumeratedString(_) => "string",
-        ParameterType::Integer => "integer",
-        ParameterType::Boolean => "boolean",
-    }
-}
-
-fn allowed(parameter: &ParameterDefinition) -> Option<&[String]> {
-    match parameter.parameter_type() {
-        ParameterType::EnumeratedString(values) => Some(values.as_slice()),
-        _ => None,
-    }
-}
-
-fn value_json(value: &ParameterValue) -> Value {
-    match value {
-        ParameterValue::String(text) => json!(text),
-        ParameterValue::Integer(number) => json!(number),
-        ParameterValue::Boolean(flag) => json!(flag),
-    }
-}
-
 fn print_text(info: &UnitInfo) {
     let manifest = info.manifest();
     println!("{} {}", info.identity(), info.version());
@@ -125,48 +98,20 @@ fn print_text(info: &UnitInfo) {
             println!("    {unit} {requirement}");
         }
     });
-    let declared = manifest.params().is_empty() && manifest.inherited().is_empty();
-    section("parameters", declared, || {
-        // Which definition an inherited parameter takes depends on the
-        // version composed, so it is named, not shown.
-        for (name, from) in manifest.inherited() {
-            println!("    {name} (inherited from {from}; `assemblr info {from}` describes it)");
-        }
-        for (name, parameter) in manifest.params() {
-            let mut facts = vec![type_name(parameter).to_owned()];
-            match parameter.default() {
-                Some(default) => facts.push(format!("default {default}")),
-                None => facts.push("required".to_owned()),
-            }
-            if let Some(values) = allowed(parameter) {
-                let shown: Vec<String> = values.iter().map(|value| format!("{value:?}")).collect();
-                facts.push(format!("one of {}", shown.join(", ")));
-            }
-            if let Some(pattern) = parameter.pattern() {
-                facts.push(format!("matching `{}`", pattern.as_str()));
-            }
-            if let Some(example) = parameter.example() {
-                facts.push(format!("example {example}"));
-            }
-            println!(
-                "    {name} ({}): {}",
-                facts.join("; "),
-                parameter.description().as_str()
-            );
+    let placeholders = manifest.placeholders();
+    section("placeholders", placeholders.replace().is_empty(), || {
+        for (placeholder, description) in placeholders.replace() {
+            println!("    {placeholder}: {description}");
         }
     });
-    section("options", manifest.options().is_empty(), || {
-        for (unit, values) in manifest.options() {
-            let assigned: Vec<String> = values
-                .iter()
-                .map(|(name, value)| match value {
-                    OptionValue::Literal(value) => format!("{name} = {value}"),
-                    OptionValue::From(source) => format!("{name} = from {source}"),
-                })
-                .collect();
-            println!("    {unit}: {}", assigned.join(", "));
-        }
-    });
+    if !placeholders.ignore().is_empty() {
+        let ignored: Vec<&str> = placeholders
+            .ignore()
+            .iter()
+            .map(|token| token.as_str())
+            .collect();
+        println!("  not placeholders: {}", ignored.join(", "));
+    }
     section("amendments", manifest.amendments().is_empty(), || {
         for (path, declaration) in manifest.amendments() {
             println!(
@@ -196,54 +141,18 @@ fn info_json(info: &UnitInfo) -> Value {
         .iter()
         .map(|(unit, requirement)| (unit.to_string(), json!(requirement.to_string())))
         .collect();
-    let params: Map<String, Value> = manifest
-        .params()
+    let placeholders = manifest.placeholders();
+    let replace: Map<String, Value> = placeholders
+        .replace()
         .iter()
-        .map(|(name, parameter)| {
-            let mut entry = Map::new();
-            entry.insert("type".to_owned(), json!(type_name(parameter)));
-            entry.insert(
-                "description".to_owned(),
-                json!(parameter.description().as_str()),
-            );
-            entry.insert("required".to_owned(), json!(parameter.is_required()));
-            if let Some(default) = parameter.default() {
-                entry.insert("default".to_owned(), value_json(default));
-            }
-            if let Some(values) = allowed(parameter) {
-                entry.insert("allowed".to_owned(), json!(values));
-            }
-            if let Some(pattern) = parameter.pattern() {
-                entry.insert("pattern".to_owned(), json!(pattern.as_str()));
-            }
-            if let Some(example) = parameter.example() {
-                entry.insert("example".to_owned(), value_json(example));
-            }
-            (name.as_str().to_owned(), Value::Object(entry))
+        .map(|(placeholder, description)| {
+            (placeholder.as_str().to_owned(), json!(description.as_str()))
         })
-        .chain(manifest.inherited().iter().map(|(name, from)| {
-            (
-                name.as_str().to_owned(),
-                json!({ "from": from.to_string() }),
-            )
-        }))
         .collect();
-    let options: Map<String, Value> = manifest
-        .options()
+    let ignore: Vec<&str> = placeholders
+        .ignore()
         .iter()
-        .map(|(unit, values)| {
-            let values: Map<String, Value> = values
-                .iter()
-                .map(|(name, value)| {
-                    let value = match value {
-                        OptionValue::Literal(value) => value_json(value),
-                        OptionValue::From(source) => json!({ "from": source.as_str() }),
-                    };
-                    (name.as_str().to_owned(), value)
-                })
-                .collect();
-            (unit.to_string(), Value::Object(values))
-        })
+        .map(|token| token.as_str())
         .collect();
     let amendments: Map<String, Value> = manifest
         .amendments()
@@ -267,8 +176,7 @@ fn info_json(info: &UnitInfo) -> Value {
         "commit": info.provenance().commit().as_str(),
         "tree": info.provenance().tree().as_str(),
         "dependencies": dependencies,
-        "params": params,
-        "options": options,
+        "placeholders": { "replace": replace, "ignore": ignore },
         "amendments": amendments,
     })
 }

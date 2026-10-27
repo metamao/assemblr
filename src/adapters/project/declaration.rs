@@ -8,10 +8,9 @@
 //! refusal, never a different declaration.
 
 use crate::adapters::jsonc_edit::{apply, parse_value};
-use crate::domain::{Edit, ParameterType, UnitIdentity, Value, ValueKind, show_path};
+use crate::domain::{Edit, UnitIdentity, Value, show_path};
 
 const DEPENDENCIES: &str = "dependencies";
-const OPTIONS: &str = "options";
 
 /// What an edit did to the declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,9 +21,8 @@ pub enum DeclarationChange {
     Replaced { from: String, to: String },
     /// The unit was selected already with this requirement, which stays.
     Kept { requirement: String },
-    /// The unit's selection was removed, together with its `options` entry
-    /// when it had one.
-    Removed { options: bool },
+    /// The unit's selection was removed.
+    Removed,
 }
 
 /// Why the declaration was not edited.
@@ -144,8 +142,7 @@ pub(crate) fn add_after(
     Ok((edited, change))
 }
 
-/// `text` without the selection of `identity` and without its entry in
-/// `options`.
+/// `text` without the selection of `identity`.
 pub(super) fn remove(
     text: &str,
     identity: &UnitIdentity,
@@ -159,146 +156,13 @@ pub(super) fn remove(
     if !selected {
         return Err(EditFailure::NotSelected);
     }
-    let mut edits = vec![Edit::Delete {
+    let edits = [Edit::Delete {
         path: vec![DEPENDENCIES.to_owned(), key.clone()],
     }];
-    let options = matches!(
-        root.member(OPTIONS),
-        Some(Value::Object(entries)) if entries.iter().any(|(name, _)| *name == key)
-    );
-    if options {
-        edits.push(Edit::Delete {
-            path: vec![OPTIONS.to_owned(), key.clone()],
-        });
-    }
     let mut expected = root.clone();
     set_selection(&mut expected, &key, None, None);
-    if options {
-        if let Value::Object(members) = &mut expected {
-            for (name, value) in members.iter_mut() {
-                if name == OPTIONS {
-                    if let Value::Object(entries) = value {
-                        entries.retain(|(entry, _)| *entry != key);
-                    }
-                }
-            }
-        }
-    }
     let edited = apply_checked(text, &edits, &expected)?;
-    Ok((edited, DeclarationChange::Removed { options }))
-}
-
-/// The value that `--option <name>=<raw>` sets, read by the parameter's
-/// type when it is known. A string parameter takes the text as it is, so
-/// `name=true` is the string "true"; a quoted JSON string still gives its
-/// content. Any other parameter, or one the unit does not declare, takes the
-/// JSON value the text reads as, and a string when it is not JSON, so that
-/// `port=8080` is a number and the composition reports a value that does
-/// not fit.
-pub(crate) fn option_value(raw: &str, parameter: Option<&ParameterType>) -> Value {
-    let json = parse_value(raw).ok();
-    match (parameter.map(ParameterType::value_kind), json) {
-        (Some(ValueKind::String), Some(Value::String(text))) => Value::String(text),
-        (Some(ValueKind::String), _) | (_, None) => Value::String(raw.to_owned()),
-        (_, Some(value)) => value,
-    }
-}
-
-/// `text` with each of `options`, a parameter name and its value, set in
-/// the `options` entry of `identity`. Entries and members that are missing
-/// are created after the last one there.
-pub(crate) fn set_options(
-    text: &str,
-    identity: &UnitIdentity,
-    options: &[(String, Value)],
-) -> Result<String, EditFailure> {
-    if options.is_empty() {
-        return Ok(text.to_owned());
-    }
-    let mut text = text.to_owned();
-    let key = identity.to_string();
-    for (name, value) in options {
-        let root = parse_value(&text).map_err(|error| EditFailure::Cannot(error.to_string()))?;
-        let Value::Object(members) = &root else {
-            return Err(EditFailure::Cannot("it is not a JSON object".to_owned()));
-        };
-        let edit = match root.member(OPTIONS) {
-            None => Edit::Insert {
-                parent: Vec::new(),
-                key: OPTIONS.to_owned(),
-                value: Value::Object(vec![(
-                    key.clone(),
-                    Value::Object(vec![(name.clone(), value.clone())]),
-                )]),
-                after: members.last().map(|(member, _)| member.clone()),
-            },
-            Some(Value::Object(entries)) => match entries.iter().find(|(entry, _)| *entry == key) {
-                None => Edit::Insert {
-                    parent: vec![OPTIONS.to_owned()],
-                    key: key.clone(),
-                    value: Value::Object(vec![(name.clone(), value.clone())]),
-                    after: entries.last().map(|(entry, _)| entry.clone()),
-                },
-                Some((_, Value::Object(set))) => {
-                    match set.iter().find(|(given, _)| given == name) {
-                        Some(_) => Edit::Set {
-                            path: vec![OPTIONS.to_owned(), key.clone(), name.clone()],
-                            value: value.clone(),
-                        },
-                        None => Edit::Insert {
-                            parent: vec![OPTIONS.to_owned(), key.clone()],
-                            key: name.clone(),
-                            value: value.clone(),
-                            after: set.last().map(|(given, _)| given.clone()),
-                        },
-                    }
-                }
-                Some(_) => {
-                    return Err(EditFailure::Cannot(format!(
-                        "the options of {identity} are not an object"
-                    )));
-                }
-            },
-            Some(_) => return Err(EditFailure::Cannot("`options` is not an object".to_owned())),
-        };
-        let mut expected = root.clone();
-        set_option(&mut expected, &key, name, value.clone());
-        text = apply_checked(&text, &[edit], &expected)?;
-    }
-    Ok(text)
-}
-
-/// Sets `options.<key>.<name>` in `root`, creating what is missing last.
-fn set_option(root: &mut Value, key: &str, name: &str, value: Value) {
-    let Value::Object(members) = root else {
-        return;
-    };
-    let entries = match members.iter().position(|(member, _)| member == OPTIONS) {
-        Some(at) => &mut members[at].1,
-        None => {
-            members.push((OPTIONS.to_owned(), Value::Object(Vec::new())));
-            let last = members.len() - 1;
-            &mut members[last].1
-        }
-    };
-    let Value::Object(entries) = entries else {
-        return;
-    };
-    let set = match entries.iter().position(|(entry, _)| entry == key) {
-        Some(at) => &mut entries[at].1,
-        None => {
-            entries.push((key.to_owned(), Value::Object(Vec::new())));
-            let last = entries.len() - 1;
-            &mut entries[last].1
-        }
-    };
-    let Value::Object(set) = set else {
-        return;
-    };
-    match set.iter().position(|(given, _)| given == name) {
-        Some(at) => set[at].1 = value,
-        None => set.push((name.to_owned(), value)),
-    }
+    Ok((edited, DeclarationChange::Removed))
 }
 
 /// Applies `edits` to `text` and requires the result to hold `expected`.
@@ -394,8 +258,7 @@ mod tests {
     }
 
     const DECLARATION: &str = "{\n  // The units this project selects.\n  \"dependencies\": {\n    \
-                               \"@acme/a\": \"^1.0.0\" // first\n  },\n  \"options\": {\n    \
-                               \"@acme/a\": { \"mode\": \"x\" }\n  }\n}\n";
+                               \"@acme/a\": \"^1.0.0\" // first\n  }\n}\n";
 
     #[test]
     fn a_selection_is_added_after_the_last_one_keeping_comments_and_layout() {
@@ -409,21 +272,20 @@ mod tests {
         assert_eq!(
             text,
             "{\n  // The units this project selects.\n  \"dependencies\": {\n    \"@acme/a\": \
-             \"^1.0.0\", // first\n    \"@acme/b\": \"^2.1.0\"\n  },\n  \"options\": {\n    \
-             \"@acme/a\": { \"mode\": \"x\" }\n  }\n}\n"
+             \"^1.0.0\", // first\n    \"@acme/b\": \"^2.1.0\"\n  }\n}\n"
         );
     }
 
     #[test]
     fn an_empty_dependencies_object_and_a_missing_one_both_take_the_selection() {
         let (text, _) = add(
-            "{\n  \"dependencies\": {},\n  \"options\": {}\n}\n",
+            "{\n  \"dependencies\": {}\n}\n",
             &identity("@acme/a"),
             "^1.0.0",
         )
         .unwrap();
         assert!(text.contains("\"@acme/a\": \"^1.0.0\""), "{text}");
-        let (text, _) = add("{\n  \"options\": {}\n}\n", &identity("@acme/a"), "^1.0.0").unwrap();
+        let (text, _) = add("{}\n", &identity("@acme/a"), "^1.0.0").unwrap();
         assert!(text.contains("\"dependencies\": {"), "{text}");
         assert!(text.contains("\"@acme/a\": \"^1.0.0\""), "{text}");
     }
@@ -450,16 +312,16 @@ mod tests {
     }
 
     #[test]
-    fn a_removal_takes_the_selection_and_its_options_and_nothing_else() {
+    fn a_removal_takes_the_selection_and_nothing_else() {
         let (text, change) = remove(DECLARATION, &identity("@acme/a")).unwrap();
-        assert_eq!(change, DeclarationChange::Removed { options: true });
+        assert_eq!(change, DeclarationChange::Removed);
         assert!(!text.contains("@acme/a"), "{text}");
         assert!(
             text.contains("// The units this project selects."),
             "{text}"
         );
         let value = crate::adapters::jsonc_edit::parse_value(&text).unwrap();
-        assert_eq!(value.brief(), "{\"dependencies\":{},\"options\":{}}");
+        assert_eq!(value.brief(), "{\"dependencies\":{}}");
     }
 
     #[test]
@@ -475,7 +337,7 @@ mod tests {
         // `description` is not the last member: the check must expect the
         // object where the edit puts it, not last (#120).
         let manifest = "{\n  \"name\": \"@acme/u\",\n  \"description\": \"U.\",\n  \
-                        \"params\": { \"title\": { \"type\": \"string\" } }\n}\n";
+                        \"placeholders\": { \"ignore\": [\"__init__\"] }\n}\n";
         let (text, _) = add_after(
             manifest,
             &identity("@acme/a"),
@@ -488,7 +350,10 @@ mod tests {
             panic!("not an object: {text}");
         };
         let keys: Vec<&str> = members.iter().map(|(key, _)| key.as_str()).collect();
-        assert_eq!(keys, ["name", "description", "dependencies", "params"]);
+        assert_eq!(
+            keys,
+            ["name", "description", "dependencies", "placeholders"]
+        );
     }
 
     #[test]

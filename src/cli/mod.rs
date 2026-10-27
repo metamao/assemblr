@@ -5,6 +5,7 @@ mod catalog;
 mod diagnostic;
 mod guide;
 mod info;
+mod placeholders;
 mod project;
 mod registry;
 mod search;

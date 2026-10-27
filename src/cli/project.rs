@@ -7,6 +7,7 @@ use super::advice::{
     Audience, composition_advice, cross_version_advice, distinct, merge_problem_advice,
 };
 use super::diagnostic::{Diagnosis, count, fail, fail_with};
+use super::placeholders;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -117,29 +118,11 @@ fn unit_only(argument: &str) -> Result<UnitIdentity, String> {
     }
 }
 
-/// Parses `name=value` for `--option`; the value is read later, by the
-/// parameter's type.
-pub(super) fn option_argument(argument: &str) -> Result<(String, String), String> {
-    match argument.split_once('=') {
-        Some((name, value)) if !name.is_empty() => Ok((name.to_owned(), value.to_owned())),
-        _ => Err(format!(
-            "`{argument}` is not name=value, like `appName=shop`"
-        )),
-    }
-}
-
 #[derive(Debug, Args)]
 pub(super) struct AddArgs {
     /// The unit, like `@acme/web` or `@acme/web@^1.2`
     #[arg(value_name = "UNIT", value_parser = unit_argument)]
     unit: UnitArgument,
-    /// Set an option of the unit; repeat for several
-    ///
-    /// The value is read by the parameter's type: `appName=true` sets the
-    /// string "true" for a string parameter, and `port=8080` the number 8080
-    /// for an integer one.
-    #[arg(long = "option", value_name = "NAME=VALUE", value_parser = option_argument)]
-    options: Vec<(String, String)>,
     /// Also show warnings about unchanged files and cross-version amendments
     #[arg(long)]
     verbose: bool,
@@ -157,32 +140,15 @@ pub(super) struct RemoveArgs {
 
 pub(super) fn add(args: &AddArgs) -> ExitCode {
     let identity = args.unit.identity();
-    let mut options: Vec<(&str, &str)> = Vec::new();
-    for (name, value) in &args.options {
-        if options.iter().any(|(given, _)| given == name) {
-            return fail(
-                &format!("--option {name} is given more than once"),
-                Some("give each option once"),
-            );
-        }
-        options.push((name, value));
-    }
-    let names: Vec<&str> = options.iter().map(|(name, _)| *name).collect();
-    run_with(
-        Some((identity, &names)),
-        None,
-        args.verbose,
-        |root, registry| add_unit(root, registry, identity, args.unit.version(), &options),
-    )
+    run_with(Some(identity), None, args.verbose, |root, registry| {
+        add_unit(root, registry, identity, args.unit.version())
+    })
 }
 
 pub(super) fn remove(args: &RemoveArgs) -> ExitCode {
-    run_with(
-        Some((&args.unit, &[])),
-        None,
-        args.verbose,
-        |root, registry| remove_unit(root, registry, &args.unit),
-    )
+    run_with(Some(&args.unit), None, args.verbose, |root, registry| {
+        remove_unit(root, registry, &args.unit)
+    })
 }
 
 #[derive(Debug, Args)]
@@ -291,12 +257,11 @@ fn report_aborted(recovery: &ComposeRecovery) {
 }
 
 /// Runs `operation` on the project in the current directory and reports
-/// it. `unit` is the unit `add` or `remove` was given, with the options
-/// `add` sets; `named` holds the units `update` was asked to update, which
+/// it. `unit` is the unit `add` or `remove` was given; `named` holds the units `update` was asked to update, which
 /// the report tells apart from the ones that moved with them; and `verbose`
 /// says whether `--verbose` was given.
 fn run_with(
-    unit: Option<(&UnitIdentity, &[&str])>,
+    unit: Option<&UnitIdentity>,
     named: Option<&[UnitIdentity]>,
     verbose: bool,
     operation: impl FnOnce(&Path, &Registry) -> Result<Composed, ComposeFailure>,
@@ -377,43 +342,21 @@ fn crosses_versions(failure: &ComposeFailure) -> bool {
     })
 }
 
-fn report_declaration(unit: Option<(&UnitIdentity, &[&str])>, composed: &Composed) {
-    let (Some((unit, options)), Some(change)) = (unit, composed.declaration()) else {
+fn report_declaration(unit: Option<&UnitIdentity>, composed: &Composed) {
+    let (Some(unit), Some(change)) = (unit, composed.declaration()) else {
         return;
-    };
-    let set = match options {
-        [] => String::new(),
-        [one] => format!("set option `{one}`"),
-        many => format!(
-            "set options {}",
-            many.iter()
-                .map(|name| format!("`{name}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    };
-    let and_set = if set.is_empty() {
-        String::new()
-    } else {
-        format!(" and {set}")
     };
     match change {
         DeclarationChange::Added { requirement } => {
-            println!("Selected {unit} ({requirement}){and_set} in assemblr.jsonc.");
+            println!("Selected {unit} ({requirement}) in assemblr.jsonc.");
         }
-        DeclarationChange::Replaced { from, to } => println!(
-            "Changed the requirement of {unit} from {from} to {to}{and_set} in assemblr.jsonc."
-        ),
-        DeclarationChange::Kept { requirement } if set.is_empty() => {
-            println!("{unit} is already selected ({requirement}); assemblr.jsonc is unchanged.")
+        DeclarationChange::Replaced { from, to } => {
+            println!("Changed the requirement of {unit} from {from} to {to} in assemblr.jsonc.")
         }
         DeclarationChange::Kept { requirement } => {
-            println!("{unit} is already selected ({requirement}); {set} in assemblr.jsonc.")
+            println!("{unit} is already selected ({requirement}); assemblr.jsonc is unchanged.")
         }
-        DeclarationChange::Removed { options } => println!(
-            "Removed {unit}{} from assemblr.jsonc.",
-            if *options { " and its options" } else { "" }
-        ),
+        DeclarationChange::Removed => println!("Removed {unit} from assemblr.jsonc."),
     }
 }
 
@@ -437,6 +380,22 @@ fn report(composed: &Composed, named: Option<&[UnitIdentity]>, verbose: bool) {
         report_pending(composed);
         return;
     }
+    summarize(composed, named);
+    // The placeholders are hidden while the composition waits, as `status`
+    // hides the edits then.
+    if let Some(report) = composed.placeholders().filter(|report| !report.is_empty()) {
+        println!();
+        println!("{}", placeholders::heading(report));
+        for line in placeholders::body(report) {
+            println!("{line}");
+        }
+        eprintln!();
+        eprintln!("hint: {}", placeholders::HINT);
+    }
+}
+
+/// The result of a composition that does not wait for the consumer.
+fn summarize(composed: &Composed, named: Option<&[UnitIdentity]>) {
     // A declaration that changed without changing the composition, as when
     // a unit that is in the composition already is selected.
     let declaration_only = composed.declaration().is_some()

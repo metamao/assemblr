@@ -3,11 +3,10 @@
 //! and `docs/adr/0017-consumer-reconciliation.md`).
 //!
 //! `init` creates `assemblr.jsonc`, the editable declaration of the
-//! project's explicit selections and their options, and nothing else: no
-//! Git repository, no files, no commands run. `compose` resolves the
-//! declared units from the local registry under the project's lock,
-//! composes and renders their files as a unit build does with the project
-//! as the root, and reconciles the project with them three-way: the
+//! project's explicit selections, and nothing else: no Git repository, no
+//! files, no commands run. `compose` resolves the declared units from the
+//! local registry under the project's lock, composes and layers their files
+//! as a unit build does with the project as the root, and reconciles the project with them three-way: the
 //! stored reconciliation base, what the project holds now, and the
 //! incoming composition decide each path, so that the consumer's edits
 //! stay and the composition's changes arrive, and a path both sides
@@ -15,7 +14,10 @@
 //! Everything is decided before anything is written, the writes are
 //! journaled with the previous content of what they replace so that an
 //! interrupted composition is completed or reverted by the next one, and
-//! a composition that would change nothing changes nothing.
+//! a composition that would change nothing changes nothing. What the
+//! project holds afterwards is searched for the placeholders its units
+//! declare, which the consumer replaces in the files themselves (see
+//! `docs/domain/placeholders.md`).
 
 pub(crate) mod declaration;
 mod ignore;
@@ -40,7 +42,7 @@ pub use status::{
 pub use store::StoreError;
 use store::{Journal, JournalEntry, Pending, STATE_DIR, Store, write_new};
 
-use super::build::{BuildProblem, Resolved, render_files, resolve_graph};
+use super::build::{BuildProblem, Resolved, layer_files, resolve_graph};
 use super::git::MANIFEST_LIMIT;
 use super::lockfile::{self, LOCKFILE, Lockfile, LockfileError, serialize_lockfile};
 use super::manifest::{ReadManifestError, read_project};
@@ -49,9 +51,9 @@ use super::registry::Registry;
 use super::scaffold::{PROJECT_AGENTS, is_project_agents};
 use crate::domain::{
     Action, BaseIdentity, BlobId, Conflict, Contributor, Current, Disagreement, LockChange,
-    MergeFormat, Mergeability, Project, ReconciliationState, RegistryIndex, RelativePath, Root,
-    Snapshot, SnapshotFile, UnitFile, UnitIdentity, UnitLock, Version, VersionRequirement, compose,
-    is_text, reconcile, update_lock,
+    MergeFormat, Mergeability, PlaceholderDeclaration, PlaceholderReport, Project,
+    ReconciliationState, RegistryIndex, RelativePath, Root, Snapshot, SnapshotFile, UnitFile,
+    UnitIdentity, UnitLock, Version, VersionRequirement, compose, is_text, reconcile, update_lock,
 };
 
 /// The project's declaration, at its top level.
@@ -61,7 +63,7 @@ const MANIFEST: &str = "manifest.jsonc";
 /// Where a new lockfile is written before it replaces the old one.
 const LOCK_STAGING: &str = ".assemblr-lock.json.new";
 /// The text `init` writes.
-const INITIAL_DECLARATION: &str = "{\n  \"dependencies\": {},\n  \"options\": {}\n}\n";
+const INITIAL_DECLARATION: &str = "{\n  \"dependencies\": {}\n}\n";
 
 /// The project's instructions for coding agents, which `init` writes when
 /// missing.
@@ -273,32 +275,22 @@ pub fn update_units(
 /// Selects `identity` in the declaration of the project whose top level is
 /// `root`, then composes it as [`compose_project`] does. Without a
 /// `requirement` the unit is recorded with a caret requirement on the
-/// version the resolution picks; a unit already selected keeps its own.
-/// Each of `options`, a parameter name and the text of its value, is set
-/// in the unit's `options` entry, read by the parameter's type: the text
-/// itself for a string parameter, and otherwise the JSON value it reads
-/// as, such as `8080` or `true`, or a string when it is not JSON. A
+/// version the resolution picks; a unit already selected keeps its own. A
 /// composition that is refused leaves the declaration as it was.
 pub fn add_unit(
     root: &Path,
     registry: &Registry,
     identity: &UnitIdentity,
     requirement: Option<&str>,
-    options: &[(&str, &str)],
 ) -> Result<Composed, ComposeFailure> {
     let edit = DeclarationEdit::Add {
         identity: identity.clone(),
         requirement: requirement.map(str::to_owned),
-        options: options
-            .iter()
-            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-            .collect(),
     };
     compose_with(root, registry, Some(&edit), None, &mut |_| Ok(()))
 }
 
-/// Removes the selection of `identity`, and its `options` entry, from the
-/// declaration of the project whose top level is `root`, then composes it
+/// Removes the selection of `identity` from the declaration of the project whose top level is `root`, then composes it
 /// as [`compose_project`] does.
 pub fn remove_unit(
     root: &Path,
@@ -316,7 +308,6 @@ enum DeclarationEdit {
     Add {
         identity: UnitIdentity,
         requirement: Option<String>,
-        options: Vec<(String, String)>,
     },
     Remove {
         identity: UnitIdentity,
@@ -563,6 +554,7 @@ fn compose_with(
         mut unit_conflicts,
         notes: file_notes,
         crossed,
+        scopes,
         ..
     } = planned;
     // What the merge reports about a file, its author's to act on, is told
@@ -592,6 +584,14 @@ fn compose_with(
         // a file did: it records the versions and provenance the project was
         // composed from.
         if *state.base() == identity && !declaration_changes && resolved.lock == previous_lock {
+            // Every composed path is managed already, and only the ones
+            // whose composed content holds a placeholder are read.
+            let placeholders = remaining_placeholders(&scopes, |path| {
+                existing_file(root, path, false)
+                    .ok()
+                    .flatten()
+                    .map(|(bytes, _)| bytes)
+            });
             return Ok(Composed {
                 units: resolved.lock.units().len(),
                 files: 0,
@@ -609,6 +609,7 @@ fn compose_with(
                 pending: BTreeSet::new(),
                 consumer_conflicts: BTreeSet::new(),
                 unit_conflicts: Vec::new(),
+                placeholders: Some(placeholders),
             });
         }
     }
@@ -1001,6 +1002,24 @@ fn compose_with(
     for path in &marked {
         paths.entry(path.clone()).or_insert(FileChange::Conflicted);
     }
+    // What the project holds at each composed path now, as decided above:
+    // what was written, what was kept, or nothing when the consumer's
+    // deletion stays. A composition that waits shows no placeholders, as
+    // `status` shows no edits then.
+    let placeholders = marked.is_empty().then(|| {
+        remaining_placeholders(&scopes, |path| match changes.get(path) {
+            Some(Change::Create(file) | Change::Modify { file, .. }) => {
+                Some(file.contents().to_vec())
+            }
+            Some(Change::Remove { .. }) => None,
+            None => match current.get(path) {
+                Some(held) => matches!(held.compared, Current::File(_)).then(|| held.bytes.clone()),
+                None if base.files().contains_key(path) => None,
+                // A created path that already held the composed content.
+                None => files.get(path).map(|file| file.contents().to_vec()),
+            },
+        })
+    });
     let (written, unwritten): (Vec<_>, Vec<_>) = file_notes
         .into_iter()
         .partition(|(path, _)| changes.contains_key(path));
@@ -1026,7 +1045,25 @@ fn compose_with(
         pending: marked,
         consumer_conflicts,
         unit_conflicts,
+        placeholders,
     })
+}
+
+/// The declared placeholders that remain in the project: each path of
+/// `scopes`, with the bytes `content` gives for it, searched for the
+/// placeholders in its scope. A path without content is not searched.
+fn remaining_placeholders(
+    scopes: &BTreeMap<RelativePath, Vec<PlaceholderDeclaration>>,
+    content: impl Fn(&RelativePath) -> Option<Vec<u8>>,
+) -> PlaceholderReport {
+    let held: Vec<(&RelativePath, Vec<u8>, &[PlaceholderDeclaration])> = scopes
+        .iter()
+        .filter_map(|(path, scope)| content(path).map(|bytes| (path, bytes, scope.as_slice())))
+        .collect();
+    PlaceholderReport::find(
+        held.iter()
+            .map(|(path, bytes, scope)| (*path, bytes.as_slice(), *scope)),
+    )
 }
 
 /// A composition planned from a declaration, before it is reconciled
@@ -1045,10 +1082,13 @@ struct Planned {
     crossed: Vec<String>,
     /// Which units deliver each file.
     origins: BTreeMap<RelativePath, Origin>,
+    /// The placeholders in scope of each composed file whose content holds
+    /// one of them: the only files searched for what remains.
+    scopes: BTreeMap<RelativePath, Vec<PlaceholderDeclaration>>,
 }
 
 /// Resolves `project` under `resolution_lock` against `index`, composes,
-/// and renders it. What changed is told against the whole of
+/// and layers it. What changed is told against the whole of
 /// `previous_lock`, and a kept version must still be published with the
 /// content it was locked to, whatever lock the resolver was given. Every
 /// problem found is returned.
@@ -1081,14 +1121,9 @@ fn plan(
             return Err(build(found));
         }
     };
-    let (rendered, origins) = {
+    let (layered, origins, scopes) = {
         let units = resolved.units();
-        let composition = match compose(
-            resolved.resolution.graph(),
-            Root::Project,
-            &units,
-            project.options(),
-        ) {
+        let composition = match compose(resolved.resolution.graph(), Root::Project, &units) {
             Ok(composition) => composition,
             Err(errors) => {
                 found.extend(errors.into_iter().map(BuildProblem::Composition));
@@ -1107,40 +1142,57 @@ fn plan(
                 (path.clone(), Origin::new(file.unit().clone(), amenders))
             })
             .collect();
-        let rendered = render_files(
+        let scopes: BTreeMap<RelativePath, Vec<PlaceholderDeclaration>> = composition
+            .files()
+            .iter()
+            .filter(|(_, file)| !file.placeholders().is_empty())
+            .map(|(path, file)| (path.clone(), file.placeholders().to_vec()))
+            .collect();
+        let layered = layer_files(
             &composition,
             &resolved.lock,
             None,
             &resolved.dependencies,
             &mut found,
         );
-        (rendered, origins)
+        (layered, origins, scopes)
     };
-    let Some(rendered) = rendered.filter(|_| found.is_empty()) else {
+    let Some(layered) = layered.filter(|_| found.is_empty()) else {
         return Err(build(found));
     };
-    let mut files: BTreeMap<RelativePath, UnitFile> = rendered.files.into_iter().collect();
+    let mut files: BTreeMap<RelativePath, UnitFile> = layered.files.into_iter().collect();
     // A conflict between sibling amenders that no unit above both resolves
     // is the consumer's to resolve (owner decision on #101): the file, each
     // conflict between markers, is the composition's, so the markers reach
     // the project like any incoming change and the composition waits.
     let mut unit_conflicts: Vec<(RelativePath, String)> = Vec::new();
-    for unresolved in rendered.unresolved {
+    for unresolved in layered.unresolved {
         let report = unresolved.to_string();
         files.insert(
-            unresolved.delivered.clone(),
+            unresolved.path.clone(),
             UnitFile::new(unresolved.bytes, unresolved.executable),
         );
-        unit_conflicts.push((unresolved.delivered, report));
+        unit_conflicts.push((unresolved.path, report));
     }
+    // Only a file whose composed content holds a placeholder in its scope
+    // is searched in the project later.
+    let scopes = scopes
+        .into_iter()
+        .filter(|(path, scope)| {
+            files.get(path).is_some_and(|file| {
+                !PlaceholderReport::find([(path, file.contents(), scope.as_slice())]).is_empty()
+            })
+        })
+        .collect();
     Ok(Planned {
         resolved,
         lock_changes,
         files,
         unit_conflicts,
-        notes: rendered.notes,
-        crossed: rendered.crossed.into_iter().map(|(_, line)| line).collect(),
+        notes: layered.notes,
+        crossed: layered.crossed.into_iter().map(|(_, line)| line).collect(),
         origins,
+        scopes,
     })
 }
 
@@ -1979,7 +2031,6 @@ fn plan_declaration(
         DeclarationEdit::Add {
             identity,
             requirement,
-            options,
         } => {
             let requirement = match requirement {
                 // `add <unit>@1.2.3` records `^1.2.3`, as `npm install`
@@ -1999,38 +2050,12 @@ fn plan_declaration(
                     None => probe_requirement(text, identity, previous_lock, index)?,
                 },
             };
-            let (edited, change) = declaration::add(text, identity, &requirement).map_err(
-                |failure| match failure {
-                    declaration::EditFailure::Cannot(detail) => cannot(detail),
-                    declaration::EditFailure::NotSelected => {
-                        cannot("the unit is not selected".to_owned())
-                    }
-                },
-            )?;
-            let types = if options.is_empty() {
-                BTreeMap::new()
-            } else {
-                parameter_types(&edited, identity, previous_lock, index)
-            };
-            let values: Vec<(String, crate::domain::Value)> = options
-                .iter()
-                .map(|(name, raw)| {
-                    (
-                        name.clone(),
-                        declaration::option_value(raw, types.get(name.as_str())),
-                    )
-                })
-                .collect();
-            let edited =
-                declaration::set_options(&edited, identity, &values).map_err(|failure| {
-                    match failure {
-                        declaration::EditFailure::Cannot(detail) => cannot(detail),
-                        declaration::EditFailure::NotSelected => {
-                            cannot("the unit is not selected".to_owned())
-                        }
-                    }
-                })?;
-            (edited, change)
+            declaration::add(text, identity, &requirement).map_err(|failure| match failure {
+                declaration::EditFailure::Cannot(detail) => cannot(detail),
+                declaration::EditFailure::NotSelected => {
+                    cannot("the unit is not selected".to_owned())
+                }
+            })?
         }
         DeclarationEdit::Remove { identity } => {
             declaration::remove(text, identity).map_err(|failure| match failure {
@@ -2049,50 +2074,6 @@ fn plan_declaration(
         text: edited,
         change,
     })
-}
-
-/// The type of each parameter `identity` declares at the version the
-/// declaration `text` resolves it to, so that `--option` values are read
-/// by type. Empty when the declaration does not resolve: the composition
-/// reports why.
-fn parameter_types(
-    text: &str,
-    identity: &UnitIdentity,
-    previous_lock: &UnitLock,
-    index: &RegistryIndex,
-) -> BTreeMap<String, crate::domain::ParameterType> {
-    let Ok(project) = read_project(text) else {
-        return BTreeMap::new();
-    };
-    let mut ignored = Vec::new();
-    let Some(resolved) = resolve_graph(
-        None,
-        project.dependencies(),
-        previous_lock,
-        index,
-        &mut ignored,
-    ) else {
-        return BTreeMap::new();
-    };
-    let Some(locked) = resolved.lock.units().get(identity) else {
-        return BTreeMap::new();
-    };
-    resolved
-        .dependencies
-        .manifest(identity, locked.version())
-        .map(|manifest| {
-            resolved
-                .params(manifest)
-                .iter()
-                .map(|(name, definition)| {
-                    (
-                        name.as_str().to_owned(),
-                        definition.parameter_type().clone(),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// The requirement an `add` without one records: a caret requirement on
@@ -2149,9 +2130,17 @@ pub struct Composed {
     pending: BTreeSet<RelativePath>,
     consumer_conflicts: BTreeSet<RelativePath>,
     unit_conflicts: Vec<(RelativePath, String)>,
+    placeholders: Option<PlaceholderReport>,
 }
 
 impl Composed {
+    /// The placeholders the units declare that the project still holds,
+    /// in the files the composition manages, or `None` while the
+    /// composition waits for its conflicts.
+    pub fn placeholders(&self) -> Option<&PlaceholderReport> {
+        self.placeholders.as_ref()
+    }
+
     /// The conflicts between units that no unit above them resolves and
     /// that the project holds between markers, each with the delivered
     /// path and the report of what the units contend. Every such path is
