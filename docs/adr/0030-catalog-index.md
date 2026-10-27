@@ -1,6 +1,6 @@
 # 0030: Catalog index: `registry-index.json`, embedded manifests, and all-or-nothing refresh
 
-- **Status:** Accepted; `registry create` renamed `catalog init`, refresh commits, and references are remote only, by [0033](0033-catalog-entry-commands.md)
+- **Status:** Superseded by [0038](0038-remove-registry-catalogs.md)
 - **Date:** 2026-10-23
 
 ## Context

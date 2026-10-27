@@ -78,8 +78,7 @@ These documents cover:
 - the full lifecycle of **authoring, developing, maintaining, validating, and
   publishing units**;
 - the **local registry**: the CLI-managed registry, registration of unit
-  repositories and catalogs, catalog metadata indexes, synchronization, and
-  discovery;
+  repositories, synchronization, and discovery;
 - the **consumer-project lifecycle**: initializing a project, declaring its
   composition in `assemblr.jsonc`, adding and removing units, composing, file
   contributions, reconciliation, conflict resolution, and lock state.
@@ -96,7 +95,7 @@ Details that are still open are listed in
 | [placeholders.md](placeholders.md) | Placeholders: what a unit declares, the author's checks, and the consumer's report |
 | [dependencies.md](dependencies.md) | Dependency declarations and resolution |
 | [amendments-and-composition.md](amendments-and-composition.md) | Amendments, merge semantics, and supporting evidence |
-| [registries-and-discovery.md](registries-and-discovery.md) | The CLI-managed local registry, Git-based units, catalogs and their metadata indexes, registration, synchronization, immutability, removal, `search` and `info` |
+| [registries-and-discovery.md](registries-and-discovery.md) | The CLI-managed local registry, Git-based units, registration, synchronization, immutability, removal, `search` and `info` |
 | [authoring-workflow.md](authoring-workflow.md) | `unit init`, `amend`, `check`, `build`, `update`, `publish`, and author responsibilities |
 | [consumer-projects.md](consumer-projects.md) | `init`, `assemblr.jsonc`, `add`, `remove`, `compose`, explicit and transitive dependencies, file contributions, reconciliation, conflict resolution, and the lockfile |
 | [open-contracts.md](open-contracts.md) | Register of unresolved contracts |
@@ -120,13 +119,10 @@ Details that are still open are listed in
 | **Composition** | A unit, or a consumer project's explicit selections, together with the resolved dependency graph and their combined contributions. |
 | **Contribution** | What a unit adds beyond its dependencies: files or amendments. |
 | **Local registry** | The CLI-managed subsystem, global to the user's Assemblr installation, that records registered sources, their published versions, and discoverable metadata. |
-| **Registered source** | A unit repository or a catalog that has been explicitly registered and validated. |
-| **Catalog** | A Git repository with an `@owner/name` identity, in a namespace separate from units, whose `registry.jsonc` maps unit identities to Git repository references. An inventory of sources: it contains no unit sources, and its declaration lists no unit versions. |
-| **Catalog manifest** | `registry.jsonc`, the catalog's declarative manifest: a `name` and a `units` map of identities to plain-string Git references. |
-| **Catalog metadata index** | The Assemblr-generated, derived metadata a catalog publishes about the published versions of the units it declares. Never edited by hand. Unit manifests remain authoritative. |
+| **Registered source** | A unit repository that has been explicitly registered and validated. |
 | **Source** | The Git repository reference from which a unit is obtained. Different references are never assumed to denote the same repository. |
 | **Registration** | Validating an untrusted source and adding it to the local registry, atomically. It never publishes. |
-| **Synchronization** | Explicitly refreshing registered catalogs and units, validating the complete result, and replacing the index only if it is valid. |
+| **Synchronization** | Explicitly refreshing registered units, validating the complete result, and replacing the index only if it is valid. |
 | **Registry index** | The registry's validated, discoverable metadata about registered sources, units, and published versions. Read offline. |
 | **Integrity conflict** | Different content for the same unit identity and published version. |
 | **Snapshot** | A fixed, identifiable copy of a unit's content at a resolved version, with its Git provenance. |

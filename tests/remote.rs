@@ -455,3 +455,35 @@ fn an_indexed_commit_no_tag_names_now_is_read_from_a_new_copy() {
         "node 1.0.0\n"
     );
 }
+
+#[test]
+fn a_rewritten_version_is_reported_when_a_new_copy_lacks_its_commit() {
+    let fixture = Fixture::new("rewritten");
+    let remote = fixture.remote("node", &["1.0.0"]);
+    succeeds(fixture.assemblr(&["registry", "add", &remote.url()]));
+
+    // The tagged commit is rewritten and pruned on the remote, so a new copy
+    // has no commit that the index recorded.
+    fs::write(remote.path.join("src/node.txt"), "rewritten\n").unwrap();
+    remote.git(&["commit", "-q", "--amend", "-am", "rewritten"]);
+    remote.git(&["tag", "-f", "v1.0.0"]);
+    remote.git(&["reflog", "expire", "--expire=now", "--all"]);
+    remote.git(&["gc", "-q", "--prune=now"]);
+    fs::remove_dir_all(fixture.data.join("sources")).unwrap();
+
+    let project = fixture.dir.join("app");
+    succeeds(fixture.assemblr(&["init", "app"]));
+    let rejected = fails(
+        fixture
+            .command(&project, &["add", "@acme/node"])
+            .output()
+            .unwrap(),
+    );
+    assert!(!project.join("node.txt").exists());
+    assert!(
+        stderr(&rejected).contains("a published version was rewritten")
+            && stderr(&rejected).contains("git ls-remote"),
+        "{}",
+        stderr(&rejected)
+    );
+}

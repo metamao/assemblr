@@ -1,4 +1,4 @@
-//! The sample units, projects, and catalog that scenarios start from.
+//! The sample units and projects that scenarios start from.
 //!
 //! The units' files are in `fixture/units/`, later versions in
 //! `fixture/releases/<unit>/<version>/`, and other repositories in
@@ -38,28 +38,6 @@ pub(crate) fn units(machine: &Machine<'_>) -> Result<(), String> {
         copy_tree(&data(&format!("units/{name}")), &dir)?;
         publish(machine, &dir, "Release 1.0.0")?;
         machine.assemblr(&units, &["registry", "add", arg(&dir)?])?;
-    }
-    Ok(())
-}
-
-/// Gives each of `units`, already published, a remote: a bare clone in
-/// `remotes/<unit>.git`, set as its `origin` by a `file://` URL, as a unit
-/// pushed to a Git host has.
-pub(crate) fn remotes(machine: &Machine<'_>, units: &[&str]) -> Result<(), String> {
-    let root = &machine.root.path;
-    for name in units {
-        let dir = root.join("units").join(name);
-        let remote = root.join("remotes").join(format!("{name}.git"));
-        machine.git(root, &["clone", "-q", "--bare", arg(&dir)?, arg(&remote)?])?;
-        machine.git(
-            &dir,
-            &[
-                "remote",
-                "add",
-                "origin",
-                &format!("file://{}", arg(&remote)?),
-            ],
-        )?;
     }
     Ok(())
 }
@@ -137,23 +115,4 @@ pub(crate) fn repository(machine: &Machine<'_>, name: &str, dir: &Path) -> Resul
     copy_tree(&data(&format!("repos/{name}")), dir)?;
     machine.git(dir, &["init", "-q"])?;
     commit(machine, dir, "Initial commit")
-}
-
-/// The catalog `@acme/catalog` in `catalog/`, listing every unit by a
-/// `file://` URL, with its index refreshed and committed, and the README.md
-/// and AGENTS.md that `catalog init` writes committed as they are.
-pub(crate) fn catalog(machine: &Machine<'_>) -> Result<PathBuf, String> {
-    let root = &machine.root.path;
-    machine.assemblr(root, &["catalog", "init", "@acme/catalog", "catalog"])?;
-    let dir = root.join("catalog");
-    machine.git(&dir, &["add", "README.md", "AGENTS.md"])?;
-    machine.git(&dir, &["commit", "-qm", "Describe the catalog"])?;
-    for name in UNITS {
-        let source = root.join("units").join(name);
-        machine.assemblr(
-            &dir,
-            &["catalog", "add", &format!("file://{}", arg(&source)?)],
-        )?;
-    }
-    Ok(dir)
 }

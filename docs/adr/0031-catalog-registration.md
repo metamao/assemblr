@@ -1,6 +1,6 @@
 # 0031: Catalog registration: catalogs in the registry index, versions from the catalog index, and content on demand
 
-- **Status:** Accepted; point 4 amended by [0033](0033-catalog-entry-commands.md): no catalog declares a local path
+- **Status:** Superseded by [0038](0038-remove-registry-catalogs.md)
 - **Date:** 2026-10-23
 
 ## Context

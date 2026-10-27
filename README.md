@@ -37,9 +37,8 @@ then maintained alone. A unit keeps improving every project that uses it.
   their files, so a team can extend a shared base without copying it.
 - **Start a new project in minutes** with the stack you already trust, and
   mix units from different authors.
-- **Git is the only backend.** Units are Git repositories, versions are Git
-  tags, and catalogs are Git repositories that list units. There is no
-  server to run.
+- **Git is the only backend.** Units are Git repositories and versions are
+  Git tags. There is no server to run.
 - **Safe and predictable.** Assemblr never runs code from a unit. It plans
   every change before it writes a file, published versions never change, and
   the same inputs always give the same result.
@@ -91,7 +90,6 @@ Every other service that uses the unit gets the same update the same way.
 | **Version** | A published state of a unit, stored as a Git tag such as `v1.1.0`. It never changes once published. |
 | **Project** | Any directory with an `assemblr.jsonc` that lists the units it uses. |
 | **Registry** | The list of units this machine knows, kept on this machine. |
-| **Catalog** | A Git repository that lists units, so one command registers all of them. |
 | **Amendment** | A unit's change to a file that one of the units it builds on delivers. |
 | **Placeholder** | A token such as `__APP_NAME__` that a unit's files hold for a value each project sets. The project replaces it in its own files. |
 
@@ -99,12 +97,9 @@ Every other service that uses the unit gets the same update the same way.
 units in your local registry, and you decide what goes in it. Assemblr gives
 you the tools to fill it and keep it current:
 
-- `assemblr registry add <URL or path>` registers a unit's repository, or a
-  catalog with all of its units.
+- `assemblr registry add <URL or path>` registers a unit's repository.
 - `assemblr registry sync` picks up the versions published since then.
 - `assemblr search <words>` and `assemblr info <unit>` show what you can use.
-- `assemblr catalog` lets a team publish one list of units that everyone
-  registers with a single command.
 
 Assemblr records what it delivered to a project in `assemblr-lock.json` and
 `.assemblr/`. That record is how it tells your edits apart from a unit's
@@ -287,50 +282,16 @@ repository can use the unit, with the Git access they already have.
    ```
 
    Registering a unit does not register the units it builds on. They must be
-   registered too, which is what a catalog solves.
-
-### Share many units with a catalog
-
-A catalog is a Git repository that lists units. Anyone with access registers
-all of them with one command, and picks up new versions with
-`assemblr registry sync`.
-
-1. **Create the catalog:**
-
-   ```sh
-   assemblr catalog init @acme/catalog
-   cd catalog
-   ```
-
-2. **Add each unit** by its repository URL. Each command updates the catalog
-   and commits:
-
-   ```sh
-   assemblr catalog add https://github.com/acme/rust-base.git
-   assemblr catalog add https://github.com/acme/rust-service.git
-   ```
-
-3. **Describe and push it.** Fill in the `README.md` and `AGENTS.md` it
-   created, and commit them. Create an empty repository on your Git host,
-   then connect and push:
-
-   ```sh
-   git add -A && git commit -m "Describe the catalog"
-   git remote add origin https://github.com/acme/catalog.git
-   git push -u origin HEAD
-   ```
-
-**After a unit publishes a new version,** run `assemblr catalog refresh` in
-the catalog, then `git push`. Everyone who registered the catalog then gets
-the version with `assemblr registry sync`.
+   registered too.
 
 ## Use units in a project
 
-1. **Register the units** you want to use in your local registry. A catalog
-   registers all of its units at once:
+1. **Register the units** you want to use in your local registry, and the
+   units they build on:
 
    ```sh
-   assemblr registry add https://github.com/acme/catalog.git
+   assemblr registry add https://github.com/acme/rust-base.git
+   assemblr registry add https://github.com/acme/rust-service.git
    ```
 
    Then `assemblr search rust` and `assemblr info @acme/rust-service` show
@@ -399,8 +360,7 @@ Assemblr is designed so that coding agents can use it as well as people can.
 | Command | What it does |
 | --- | --- |
 | `assemblr unit` | Create, build, check, amend, update, and publish units |
-| `assemblr catalog` | Create a catalog and add, remove, or refresh its units |
-| `assemblr registry` | Register, list, sync, and remove units and catalogs |
+| `assemblr registry` | Register, list, sync, and remove units |
 | `assemblr search` / `info` | Find units and show their versions and placeholders |
 | `assemblr init` | Create a project's `assemblr.jsonc` |
 | `assemblr add` / `remove` | Add or remove a unit and compose the project |

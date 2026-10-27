@@ -29,7 +29,7 @@ pub use composition::{
 };
 pub use contribution::{ContributionError, contribution_problems};
 pub use discovery::{EmptyQuery, SearchQuery};
-pub use identity::{CatalogIdentity, IdentityError, IdentityErrorReason, Segment, UnitIdentity};
+pub use identity::{IdentityError, IdentityErrorReason, Segment, UnitIdentity};
 pub use lock::{
     AmendmentBaseError, BaseIntegrityError, LockError, LockedUnit, PublishedAmendmentError,
     UnitLock, amendment_bases, published_amendments, relock, verify_bases,
@@ -52,9 +52,8 @@ pub use reconcile::{
     reconcile,
 };
 pub use registry::{
-    Change, Excluded, IntegrityChange, InvalidIndex, ObservedTag, ObservedVersion,
-    RegisteredCatalog, RegisteredUnit, RegistryError, RegistryIndex, Removed, RemovedCatalog,
-    SourceReference, Unremovable, catalog_tags, declared_identity,
+    Change, Excluded, IntegrityChange, InvalidIndex, ObservedTag, ObservedVersion, RegisteredUnit,
+    RegistryError, RegistryIndex, Removed, SourceReference, declared_identity,
 };
 pub use resolution::{
     AvailableVersions, Dependencies, Lock, LockChange, Requirement, Requirer, Resolution,

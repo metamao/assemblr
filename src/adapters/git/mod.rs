@@ -62,14 +62,8 @@ const SRC_ENTRY_LIMIT: usize = 10_000;
 const MANIFEST: &[u8] = b"manifest.jsonc";
 
 /// The top-level files registration and synchronization read at a version
-/// tag or at `HEAD`: a unit's manifest and lockfile, and a catalog's
-/// declaration and index.
-const METADATA_FILES: [&str; 4] = [
-    "manifest.jsonc",
-    "assemblr-lock.json",
-    "registry.jsonc",
-    "registry-index.json",
-];
+/// tag or at `HEAD`: a unit's manifest and lockfile.
+const METADATA_FILES: [&str; 2] = ["manifest.jsonc", "assemblr-lock.json"];
 
 /// The files of a unit directory, with their blob ids and executable bits,
 /// and the entries that cannot be unit files.

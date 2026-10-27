@@ -9,10 +9,10 @@
 //! not apply, so a file the build composed is never left out of the
 //! publication as "ignored".
 //!
-//! Creating the tag, initializing a repository for `unit init`, and
-//! committing a catalog's files are the Git commands Assemblr runs that
-//! write, and the ones that run with the author's own Git configuration and
-//! identity: the tag, the repository, and the commit are the author's. Network access and prompts stay disabled, and the
+//! Creating the tag and initializing a repository for `unit init` are the
+//! Git commands Assemblr runs that write, and the ones that run with the
+//! author's own Git configuration and identity: the tag and the repository
+//! are the author's. Network access and prompts stay disabled, and the
 //! repository is still named explicitly where one exists.
 
 use std::path::{Path, PathBuf};
@@ -158,68 +158,6 @@ impl GitRepository {
             return Err(self.failed(&shown, output.status, &output.stderr));
         }
         Ok(())
-    }
-}
-
-impl GitRepository {
-    /// Commits `paths`, given relative to `work_tree`, the repository's top
-    /// level, and nothing else, with `message`, when the working tree
-    /// changes them; other staged changes stay staged and uncommitted.
-    /// Returns whether a commit was made. Like
-    /// [`create_annotated_tag`](Self::create_annotated_tag), it runs with
-    /// the author's own Git configuration, without network access and
-    /// without prompting.
-    pub fn commit_paths(
-        &self,
-        work_tree: &Path,
-        paths: &[&str],
-        message: &str,
-    ) -> Result<bool, GitError> {
-        let mut status = vec!["status", "--porcelain", "--untracked-files=all", "--"];
-        status.extend_from_slice(paths);
-        if self.author_command(work_tree, &status, &status)?.is_empty() {
-            return Ok(false);
-        }
-        let mut add = vec!["add", "--"];
-        add.extend_from_slice(paths);
-        self.author_command(work_tree, &add, &add)?;
-        let mut commit = vec!["commit", "--quiet", "--message", message, "--"];
-        commit.extend_from_slice(paths);
-        let mut shown = vec!["commit", "--quiet", "--message", "<message>", "--"];
-        shown.extend_from_slice(paths);
-        self.author_command(work_tree, &commit, &shown)?;
-        Ok(true)
-    }
-
-    /// Runs `git <args>` in `work_tree` with the author's configuration and
-    /// returns its output; `shown` is how a failure names the command.
-    fn author_command(
-        &self,
-        work_tree: &Path,
-        args: &[&str],
-        shown: &[&str],
-    ) -> Result<Vec<u8>, GitError> {
-        let mut command = Command::new("git");
-        for variable in LOCATION_VARIABLES {
-            command.env_remove(variable);
-        }
-        command
-            .current_dir(work_tree)
-            .env("GIT_DIR", &self.git_dir)
-            .env("GIT_WORK_TREE", work_tree)
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .env("GIT_ALLOW_PROTOCOL", "none")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .arg("--no-pager")
-            .args(args)
-            .stdin(Stdio::null());
-        let output = command
-            .output()
-            .map_err(|error| self.error(GitErrorKind::Unavailable(error)))?;
-        if !output.status.success() {
-            return Err(self.failed(shown, output.status, &output.stderr));
-        }
-        Ok(output.stdout)
     }
 }
 

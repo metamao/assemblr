@@ -4,18 +4,12 @@
 //! Nothing is fetched and nothing is written: the repository is read through
 //! [`GitRepository`] as for a build, and a version whose content no longer
 //! matches the index is reported, never described from what it holds now.
-//! A unit only catalogs manage, whose content has not been retrieved yet, is
-//! described from the manifest its catalog's index lists, read from the
-//! catalog at the commit the registry records.
 
-use std::collections::BTreeMap;
 use std::fmt;
 
-use super::super::catalog::{PublishedCatalog, read_catalog_at};
-use super::{GitError, InvalidVersion, Registry, StorageError, is_remote_reference};
+use super::{GitError, InvalidVersion, Registry, StorageError};
 use crate::domain::{
-    CatalogIdentity, Manifest, Provenance, RegisteredUnit, RegistryIndex, SearchQuery,
-    SourceReference, UnitIdentity, Version,
+    Manifest, Provenance, RegisteredUnit, SearchQuery, SourceReference, UnitIdentity, Version,
 };
 
 /// A registered unit and one of its published versions.
@@ -206,14 +200,7 @@ impl Registry {
             .units()
             .get(identity)
             .ok_or_else(|| InfoFailure::NotRegistered(identity.clone()))?;
-        describe(
-            self,
-            &index,
-            &mut Listings::default(),
-            identity,
-            unit,
-            version,
-        )
+        describe(self, identity, unit, version)
     }
 
     /// The registered units that `query` matches, in identity order, each
@@ -224,9 +211,8 @@ impl Registry {
         let index = self.index()?;
         let mut found = Vec::new();
         let mut undescribed = Vec::new();
-        let mut listings = Listings::default();
         for (identity, unit) in index.units() {
-            let described = describe(self, &index, &mut listings, identity, unit, None);
+            let described = describe(self, identity, unit, None);
             let description = described
                 .as_ref()
                 .ok()
@@ -248,66 +234,10 @@ impl Registry {
     }
 }
 
-/// The catalogs read during one operation, each read once.
-#[derive(Default)]
-struct Listings {
-    read: BTreeMap<CatalogIdentity, Result<PublishedCatalog, String>>,
-}
-
-impl Listings {
-    /// The manifest a catalog that declares `identity` lists for it at
-    /// `provenance`, or why none can be read.
-    fn manifest(
-        &mut self,
-        registry: &Registry,
-        index: &RegistryIndex,
-        identity: &UnitIdentity,
-        version: &Version,
-        provenance: &Provenance,
-    ) -> Result<Manifest, String> {
-        let mut reasons = Vec::new();
-        for catalog in index.listing(identity) {
-            let Some(registered) = index.catalogs().get(&catalog) else {
-                continue;
-            };
-            let published = self.read.entry(catalog.clone()).or_insert_with(|| {
-                registry
-                    .open_source(registered.source())
-                    .map_err(|error| error.to_string())
-                    .and_then(|repository| {
-                        read_catalog_at(&repository, registered.commit().clone())
-                            .map_err(|problem| problem.to_string())
-                    })
-            });
-            match published {
-                Ok(published) => {
-                    let listed = published.units().get(identity);
-                    let same = listed.is_some_and(|listed| {
-                        listed.provenances().get(version) == Some(provenance)
-                    });
-                    if let Some(manifest) = listed.and_then(|listed| listed.manifest(version)) {
-                        if same {
-                            return Ok(manifest.clone());
-                        }
-                    }
-                    reasons.push(format!("the catalog {catalog} does not list it"));
-                }
-                Err(reason) => reasons.push(format!("the catalog {catalog}: {reason}")),
-            }
-        }
-        if reasons.is_empty() {
-            reasons.push("no registered catalog declares it".to_owned());
-        }
-        Err(reasons.join("; "))
-    }
-}
-
 /// Describes the registered `unit` at `version`, or at its newest stable
 /// version.
 fn describe(
     registry: &Registry,
-    index: &RegistryIndex,
-    listings: &mut Listings,
     identity: &UnitIdentity,
     unit: &RegisteredUnit,
     version: Option<&Version>,
@@ -337,32 +267,6 @@ fn describe(
         identity: identity.clone(),
         error: Box::new(error),
     };
-    if !unit.is_direct() && is_remote_reference(unit.source()) {
-        let retrieved = registry
-            .open_source(unit.source())
-            .and_then(|repository| repository.has_commits(&[provenance.commit()]))
-            .unwrap_or(false);
-        if !retrieved {
-            let manifest = listings
-                .manifest(registry, index, identity, chosen, &provenance)
-                .map_err(|reason| {
-                    source_error(GitError::not_a_repository(
-                        std::path::PathBuf::from(unit.source().as_str()),
-                        format!(
-                            "its content is not retrieved yet, and its catalog's metadata \
-                             cannot be read: {reason}"
-                        ),
-                    ))
-                })?;
-            return Ok(UnitInfo {
-                identity: identity.clone(),
-                source: unit.source().clone(),
-                versions,
-                provenance,
-                manifest,
-            });
-        }
-    }
     let repository = registry.open_source(unit.source()).map_err(source_error)?;
     let outcome = repository
         .read_published(&[provenance.commit()])

@@ -7,8 +7,8 @@
 //! cargo agent-bench --list
 //! ```
 //!
-//! Each run builds a fresh fixture (sample units, and the project, template,
-//! or catalog its scenario starts from) in a directory of its own under the
+//! Each run builds a fresh fixture (sample units, and the project or
+//! template its scenario starts from) in a directory of its own under the
 //! system's temporary directory, gives the agent the scenario's prompt with
 //! a home of its own, and then checks the state the agent left. Transcripts,
 //! checks, and a summary go to `target/agent-bench/<run id>/`.

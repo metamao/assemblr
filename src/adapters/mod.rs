@@ -6,7 +6,6 @@
 //! `docs/adr/0001-architecture.md`).
 
 mod build;
-mod catalog;
 mod git;
 mod init;
 mod jsonc;
@@ -29,12 +28,6 @@ pub use build::{
     PublishProblem, PublishState, Published, PublishedProblem, Recovered, RecoveryError,
     UnresolvedFile, UpdateFailure, UpdateProblem, UpdateState, UpdateWriteError, Updated,
     WriteError, add_dependency, amend_unit, build_unit, check_unit, publish_unit, update_unit,
-};
-pub use catalog::{
-    CATALOG_INDEX, CATALOG_MANIFEST, CatalogAdded, CatalogChangeFailure, CatalogInitFailure,
-    CatalogManifest, CatalogManifestError, CatalogProblem, RefreshFailure, RefreshProblem,
-    Refreshed, add_to_catalog, init_catalog, read_catalog_manifest, refresh_catalog,
-    remove_from_catalog,
 };
 pub use git::{
     Discovered, FetchError, FetchErrorKind, GitError, GitErrorKind, GitRepository,
@@ -59,8 +52,8 @@ pub use project::{
     init_project, project_status, remove_unit, update_units,
 };
 pub use registry::{
-    Added, Found, Indexed, InfoFailure, Problem, ReferenceError, Registry, RegistryFailure,
-    Removed, Search, StorageError, Synced, TagProblem, UnitInfo, local_reference, source_reference,
+    Added, Found, Indexed, InfoFailure, Problem, ReferenceError, Registry, RegistryFailure, Search,
+    StorageError, Synced, TagProblem, UnitInfo, local_reference, source_reference,
 };
 pub use schema::{MANIFEST_SCHEMA, MANIFEST_SCHEMA_REFERENCE, manifest_schema};
 pub use skill::{

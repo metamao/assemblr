@@ -39,8 +39,8 @@ Rules:
 - Owner and unit name **together** determine identity.
   `@metamao/cloudflare-angular-ssr` and `@alice/cloudflare-angular-ssr` are
   different units. Neither is official or privileged.
-- The unit's own manifest supplies its identity. Registries, catalogs, and
-  repository locations do not.
+- The unit's own manifest supplies its identity. Registries and repository
+  locations do not.
 - Identity does **not** imply dependencies. A unit declares its dependencies
   explicitly (see [dependencies.md](dependencies.md)).
 - Do not infer repository layout, dependency structure, or relationships
@@ -49,9 +49,6 @@ Rules:
 - The owner namespace is not necessarily tied permanently to a GitHub identity.
 - Authentication and verification of namespace ownership are **not required in
   Alpha**.
-
-Catalog identities use the same rules (see
-[registries-and-discovery.md](registries-and-discovery.md#catalogs--approved)).
 
 ## Versioning — Approved
 
