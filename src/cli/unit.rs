@@ -14,9 +14,9 @@ use assemblr::adapters::{
     AddFailure, AddProblem, AmendFailure, AmendProblem, AmendState, BuildFailure, BuildProblem,
     Built, CheckFailure, CheckProblem, DeclarationChange, FileOutcome, GitOutcome, IndexOutcome,
     InitFailure, Initialized, LockfileOutcome, ManifestFileError, Pending, PublishFailure,
-    PublishProblem, PublishState, Published, RecoveryError, Registry, TagProblem, UpdateFailure,
-    UpdateProblem, UpdateState, Updated, add_dependency, amend_unit, build_unit, check_unit,
-    init_unit, publish_unit, update_unit,
+    PublishProblem, PublishState, Published, PublishedProblem, RecoveryError, Registry, TagProblem,
+    UpdateFailure, UpdateProblem, UpdateState, Updated, add_dependency, amend_unit, build_unit,
+    check_unit, init_unit, publish_unit, update_unit,
 };
 use assemblr::domain::{
     ContributionError, Excluded, IntegrityChange, LockChange, LockError, PlaceholderError,
@@ -1185,6 +1185,16 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
                                         `assemblr registry remove <identity>` removes its \
                                         registration"
             .to_owned(),
+        // Content is checked when a version is first read (ADR 0037), and a
+        // version once indexed stays indexed, so synchronizing cannot help.
+        BuildProblem::Published {
+            unit,
+            problem: PublishedProblem::Src(_) | PublishedProblem::Amendments(_),
+            ..
+        } => format!(
+            "this version cannot be used: select another version of {unit}, or ask its author \
+             to publish a fixed one"
+        ),
         BuildProblem::Published { .. } => {
             "run `assemblr registry sync` to check the registered repositories again".to_owned()
         }

@@ -21,6 +21,7 @@ mod fetch;
 mod object;
 mod working_tree;
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -28,8 +29,8 @@ use std::process::ExitStatus;
 
 pub use authoring::{Discovered, discover_repository, init_repository};
 use command::{Object, Objects};
-pub(crate) use fetch::fetch;
 pub use fetch::{FetchError, FetchErrorKind};
+pub(crate) use fetch::{fetch, fetch_objects};
 use object::{EntryKind, TreeEntry, commit_tree, parse_tree};
 
 use super::manifest::{ReadManifestError, read_manifest};
@@ -60,6 +61,20 @@ const SRC_ENTRY_LIMIT: usize = 10_000;
 
 const MANIFEST: &[u8] = b"manifest.jsonc";
 
+/// The top-level files registration and synchronization read at a version
+/// tag or at `HEAD`: a unit's manifest and lockfile, and a catalog's
+/// declaration and index.
+const METADATA_FILES: [&str; 4] = [
+    "manifest.jsonc",
+    "assemblr-lock.json",
+    "registry.jsonc",
+    "registry-index.json",
+];
+
+/// The files of a unit directory, with their blob ids and executable bits,
+/// and the entries that cannot be unit files.
+type UnitFileEntries = (Vec<(RelativePath, ObjectId, bool)>, Vec<SrcEntryError>);
+
 /// A local Git repository, with or without a working tree.
 #[derive(Debug, Clone)]
 pub struct GitRepository {
@@ -68,6 +83,10 @@ pub struct GitRepository {
     /// Its Git directory, absolute: `path/.git`, or `path` itself when it is
     /// bare.
     git_dir: PathBuf,
+    /// For the copy of a registered remote, the reference its missing file
+    /// contents are fetched from, the first time a version's files are read
+    /// (ADR 0037). `None` for every other repository, which never fetches.
+    remote: Option<String>,
 }
 
 impl GitRepository {
@@ -92,6 +111,7 @@ impl GitRepository {
         let repository = Self {
             path: path.to_owned(),
             git_dir,
+            remote: None,
         };
         match repository.output(&["rev-parse", "--git-dir"]) {
             Ok(_) => Ok(repository),
@@ -109,6 +129,39 @@ impl GitRepository {
     /// The path the repository was opened at.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// This copy of the remote `reference`, made by a filtered fetch, with
+    /// the file contents of a version fetched from `reference` before they
+    /// are first read.
+    pub(crate) fn retrieving_from(self, reference: &str) -> Self {
+        Self {
+            remote: Some(reference.to_owned()),
+            ..self
+        }
+    }
+
+    /// Fetches the objects `commit` needs that the copy lacks, when this is
+    /// the copy of a remote. Every other repository is read as it is.
+    fn retrieve(&self, commit: &ObjectId) -> Result<(), GitError> {
+        let Some(reference) = &self.remote else {
+            return Ok(());
+        };
+        let missing = self.missing_content(&[commit])?;
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let unretrievable =
+            |reason: String| GitError::unretrievable(PathBuf::from(reference), reason);
+        fetch_objects(reference, &self.git_dir, &missing)
+            .map_err(|error| unretrievable(error.to_string()))?;
+        if self.missing_content(&[commit])?.is_empty() {
+            Ok(())
+        } else {
+            Err(unretrievable(format!(
+                "{reference} did not send every file of commit {commit}"
+            )))
+        }
     }
 
     /// The repository's Git directory, absolute. For a linked worktree or a
@@ -137,14 +190,32 @@ impl GitRepository {
     /// of its version is returned with the reason, and the other tags are
     /// still read.
     pub fn published_versions(&self) -> Result<Vec<VersionTag>, GitError> {
+        let refs = self.version_refs()?;
+        let mut objects = self.objects()?;
+        let mut tags = Vec::new();
+        for (object, name, version) in refs {
+            let (commit, outcome) = self.read_version(&mut objects, &object, &version)?;
+            tags.push(VersionTag {
+                name,
+                version,
+                commit,
+                outcome,
+            });
+        }
+        objects.finish()?;
+        tags.sort_by(|a, b| (&a.version, &a.name).cmp(&(&b.version, &b.name)));
+        Ok(tags)
+    }
+
+    /// The object, name, and version of every version tag, unordered.
+    fn version_refs(&self) -> Result<Vec<(ObjectId, String, Version)>, GitError> {
         let args = [
             "for-each-ref",
             "--format=%(objectname) %(refname)",
             "refs/tags/",
         ];
         let refs = self.output(&args)?;
-        let mut objects = self.objects()?;
-        let mut tags = Vec::new();
+        let mut found = Vec::new();
         for line in refs
             .split(|&byte| byte == b'\n')
             .filter(|line| !line.is_empty())
@@ -173,17 +244,87 @@ impl GitRepository {
             let Some(version) = Version::from_tag(name) else {
                 continue;
             };
-            let (commit, outcome) = self.read_version(&mut objects, &object, &version)?;
-            tags.push(VersionTag {
-                name: name.to_owned(),
-                version,
-                commit,
-                outcome,
-            });
+            found.push((object, name.to_owned(), version));
+        }
+        Ok(found)
+    }
+
+    /// The metadata files registration reads that the repository lacks:
+    /// the top-level [`METADATA_FILES`] of every version tag's commit and of
+    /// `HEAD`, by blob id, sorted. A copy made by a filtered fetch has the
+    /// trees that name them, but not their contents.
+    ///
+    /// Commits and trees that cannot be read are skipped: reading the
+    /// version reports them.
+    pub(crate) fn missing_metadata(&self) -> Result<Vec<ObjectId>, GitError> {
+        let refs = self.version_refs()?;
+        let mut objects = self.objects()?;
+        let mut commits = BTreeSet::new();
+        let peeled = refs
+            .iter()
+            .map(|(object, _, _)| format!("{object}^{{}}"))
+            .chain(["HEAD^{commit}".to_owned()]);
+        for name in peeled {
+            if let Some(header) = objects.header(&name)? {
+                if header.kind == "commit" {
+                    commits.insert(header.id);
+                }
+            }
+        }
+        let mut metadata = BTreeSet::new();
+        for commit in &commits {
+            let root = match self.root_entries(&mut objects, commit) {
+                Ok(root) => root,
+                Err(RootError::Git(error)) => return Err(error),
+                Err(_) => continue,
+            };
+            for entry in root {
+                if matches!(entry.kind, EntryKind::File { .. })
+                    && METADATA_FILES
+                        .iter()
+                        .any(|name| entry.name == name.as_bytes())
+                {
+                    metadata.insert(entry.id);
+                }
+            }
         }
         objects.finish()?;
-        tags.sort_by(|a, b| (&a.version, &a.name).cmp(&(&b.version, &b.name)));
-        Ok(tags)
+        // Asking `cat-file` about an object a filtered fetch left out is
+        // fatal while lazy fetching is disabled, so `rev-list` tells which
+        // ones are missing.
+        let commits: Vec<&ObjectId> = commits.iter().collect();
+        let mut missing = self.missing_content(&commits)?;
+        missing.retain(|id| metadata.contains(id));
+        Ok(missing)
+    }
+
+    /// The objects `commits` need, their trees and their files, that the
+    /// repository lacks, sorted. A commit that is itself missing is not
+    /// reported: [`has_commits`](Self::has_commits) tells that apart.
+    pub(crate) fn missing_content(&self, commits: &[&ObjectId]) -> Result<Vec<ObjectId>, GitError> {
+        if commits.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut args = vec!["rev-list", "--objects", "--no-walk", "--missing=print"];
+        args.extend(commits.iter().map(|commit| commit.as_str()));
+        let output = self.output(&args)?;
+        let mut missing = BTreeSet::new();
+        for line in output.split(|&byte| byte == b'\n') {
+            let Some(id) = line.strip_prefix(b"?") else {
+                continue;
+            };
+            let id = std::str::from_utf8(id)
+                .ok()
+                .and_then(ObjectId::parse)
+                .ok_or_else(|| {
+                    self.error(GitErrorKind::UnexpectedOutput {
+                        command: format!("git {}", args.join(" ")),
+                        detail: format!("unexpected line {:?}", String::from_utf8_lossy(line)),
+                    })
+                })?;
+            missing.insert(id);
+        }
+        Ok(missing.into_iter().collect())
     }
 
     fn read_version(
@@ -327,6 +468,7 @@ impl GitRepository {
         name: &str,
         limit: u64,
     ) -> Result<Option<Vec<u8>>, ReadFileError> {
+        self.retrieve(commit)?;
         let mut objects = self.objects()?;
         let root = self.root_entries(&mut objects, commit)?;
         let Some(entry) = root.into_iter().find(|entry| entry.name == name.as_bytes()) else {
@@ -393,19 +535,101 @@ impl GitRepository {
         self.read_unit_files(commit, UnitDirectory::Amendments)
     }
 
+    /// The paths of the `amendments/` copies of `commit`, checked by the
+    /// structural rules of [`read_src`](Self::read_src) only: entry kinds,
+    /// paths, and the number of entries. Nothing but trees is read, so the
+    /// copies' contents need not be in the repository, and their sizes are
+    /// checked when they are read.
+    pub fn amendment_paths(&self, commit: &ObjectId) -> Result<Vec<RelativePath>, ReadSrcError> {
+        self.unit_file_paths(commit, UnitDirectory::Amendments)
+    }
+
+    /// Checks the `src/` entries of `commit` by the structural rules of
+    /// [`read_src`](Self::read_src), as [`amendment_paths`](Self::amendment_paths)
+    /// does for `amendments/`.
+    pub fn check_src(&self, commit: &ObjectId) -> Result<(), ReadSrcError> {
+        self.unit_file_paths(commit, UnitDirectory::Src).map(|_| ())
+    }
+
+    fn unit_file_paths(
+        &self,
+        commit: &ObjectId,
+        directory: UnitDirectory,
+    ) -> Result<Vec<RelativePath>, ReadSrcError> {
+        let mut objects = self.objects()?;
+        let (files, mut errors) = self.walk_unit_files(&mut objects, commit, directory)?;
+        objects.finish()?;
+        if !errors.is_empty() {
+            errors.sort_by(|a, b| a.path.cmp(&b.path));
+            return Err(ReadSrcError::Entries(errors));
+        }
+        Ok(files.into_iter().map(|(path, _, _)| path).collect())
+    }
+
     fn read_unit_files(
         &self,
         commit: &ObjectId,
         directory: UnitDirectory,
     ) -> Result<FileTree, ReadSrcError> {
+        self.retrieve(commit)?;
         let mut objects = self.objects()?;
-        let root = self.root_entries(&mut objects, commit)?;
+        let (files, mut errors) = self.walk_unit_files(&mut objects, commit, directory)?;
+        // Sizes first, so nothing is read unless the whole directory fits.
+        let mut total: u64 = 0;
+        for (path, id, _) in &files {
+            let header = self.require(&mut objects, id.as_str(), 0)?.header;
+            if header.kind != "blob" {
+                return Err(self.malformed(id).into());
+            }
+            if header.size > FILE_LIMIT {
+                errors.push(SrcEntryError {
+                    directory,
+                    path: path.to_string(),
+                    reason: SrcEntryErrorReason::TooLarge {
+                        size: header.size,
+                        limit: FILE_LIMIT,
+                    },
+                });
+            }
+            total = total.saturating_add(header.size);
+        }
+        if !errors.is_empty() {
+            errors.sort_by(|a, b| a.path.cmp(&b.path));
+            return Err(ReadSrcError::Entries(errors));
+        }
+        if total > SRC_SIZE_LIMIT {
+            return Err(ReadSrcError::TooLarge {
+                directory,
+                size: total,
+                limit: SRC_SIZE_LIMIT,
+            });
+        }
+
+        let mut tree = FileTree::new();
+        for (path, id, executable) in files {
+            let blob = self.require(&mut objects, id.as_str(), FILE_LIMIT)?;
+            let contents = blob.contents.ok_or_else(|| self.malformed(&id))?;
+            tree.insert(path, UnitFile::new(contents, executable));
+        }
+        objects.finish()?;
+        Ok(tree)
+    }
+
+    /// The files under `directory` in `commit`'s tree, with their blob ids
+    /// and executable bits, and the entries a unit file cannot be, read from
+    /// trees alone. A directory over the entry limit is an error.
+    fn walk_unit_files(
+        &self,
+        objects: &mut Objects<'_>,
+        commit: &ObjectId,
+        directory: UnitDirectory,
+    ) -> Result<UnitFileEntries, ReadSrcError> {
+        let root = self.root_entries(objects, commit)?;
         let Some(src) = root
             .into_iter()
             .find(|entry| entry.name == directory.as_str().as_bytes())
         else {
-            objects.finish()?;
-            return Ok(FileTree::new());
+            return Ok((Vec::new(), Vec::new()));
         };
         if src.kind != EntryKind::Directory {
             return Err(ReadSrcError::NotADirectory(directory));
@@ -416,7 +640,7 @@ impl GitRepository {
         let mut entries = 0;
         let mut directories = vec![(Vec::new(), src.id)];
         while let Some((prefix, id)) = directories.pop() {
-            let listing = match self.read_tree(&mut objects, &id)? {
+            let listing = match self.read_tree(objects, &id)? {
                 Ok(listing) => listing,
                 Err(too_large) => {
                     errors.push(SrcEntryError {
@@ -463,46 +687,7 @@ impl GitRepository {
                 });
             }
         }
-
-        // Sizes first, so nothing is read unless the whole directory fits.
-        let mut total: u64 = 0;
-        for (path, id, _) in &files {
-            let header = self.require(&mut objects, id.as_str(), 0)?.header;
-            if header.kind != "blob" {
-                return Err(self.malformed(id).into());
-            }
-            if header.size > FILE_LIMIT {
-                errors.push(SrcEntryError {
-                    directory,
-                    path: path.to_string(),
-                    reason: SrcEntryErrorReason::TooLarge {
-                        size: header.size,
-                        limit: FILE_LIMIT,
-                    },
-                });
-            }
-            total = total.saturating_add(header.size);
-        }
-        if !errors.is_empty() {
-            errors.sort_by(|a, b| a.path.cmp(&b.path));
-            return Err(ReadSrcError::Entries(errors));
-        }
-        if total > SRC_SIZE_LIMIT {
-            return Err(ReadSrcError::TooLarge {
-                directory,
-                size: total,
-                limit: SRC_SIZE_LIMIT,
-            });
-        }
-
-        let mut tree = FileTree::new();
-        for (path, id, executable) in files {
-            let blob = self.require(&mut objects, id.as_str(), FILE_LIMIT)?;
-            let contents = blob.contents.ok_or_else(|| self.malformed(&id))?;
-            tree.insert(path, UnitFile::new(contents, executable));
-        }
-        objects.finish()?;
-        Ok(tree)
+        Ok((files, errors))
     }
 
     /// Reads an object that must exist, with its contents if they are at

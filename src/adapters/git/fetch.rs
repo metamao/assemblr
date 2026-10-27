@@ -8,12 +8,14 @@
 
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 
+use super::GitError;
 use super::authoring::LOCATION_VARIABLES;
 use super::command::discovery_command;
+use crate::domain::ObjectId;
 
 /// Where the copy records the remote's `HEAD`, so that `HEAD` of the copy
 /// names the commit the remote's `HEAD` named.
@@ -49,11 +51,61 @@ pub(crate) fn fetch(reference: &str, copy: &Path) -> Result<(), FetchError> {
         "--no-tags",
         "--prune",
         "--force",
+        // Commits, tags, and trees, but no file contents: registration needs
+        // only the metadata files, which `fetch_objects` retrieves, and a
+        // version's files are retrieved when it is first read. A server that
+        // does not support filters sends everything, which is still correct.
+        "--filter=blob:none",
         "--",
         reference,
         "+refs/tags/*:refs/tags/*",
         &format!("+HEAD:{HEAD_REF}"),
     ];
+    run(fetch_command(copy, &args), "fetch").map_err(failure)
+}
+
+/// Fetches the objects `ids` from `reference` into the copy at `copy`,
+/// which a filtered [`fetch`] left without them. They are asked for by id,
+/// with no filter, which would exclude them again, and with no negotiation,
+/// since the copy already has everything that leads to them.
+pub(crate) fn fetch_objects(
+    reference: &str,
+    copy: &Path,
+    ids: &[ObjectId],
+) -> Result<(), FetchError> {
+    let failure = |kind| FetchError {
+        reference: reference.to_owned(),
+        kind,
+    };
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let args = [
+        "-c",
+        "gc.auto=0",
+        "-c",
+        "fetch.fsckObjects=true",
+        "-c",
+        "fetch.negotiationAlgorithm=noop",
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--no-write-fetch-head",
+        "--stdin",
+        "--",
+        reference,
+    ];
+    let mut wanted = String::new();
+    for id in ids {
+        wanted.push_str(id.as_str());
+        wanted.push('\n');
+    }
+    run_with_input(fetch_command(copy, &args), "fetch", wanted.as_bytes()).map_err(failure)
+}
+
+/// A `git fetch` into the copy at `copy`, run with the user's Git
+/// configuration and credentials but over the allowed transports only.
+fn fetch_command(copy: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
     for variable in LOCATION_VARIABLES {
         command.env_remove(variable);
@@ -67,7 +119,7 @@ pub(crate) fn fetch(reference: &str, copy: &Path) -> Result<(), FetchError> {
         .env("LANGUAGE", "C")
         .arg("--no-pager")
         .args(args);
-    run(command, "fetch").map_err(failure)
+    command
 }
 
 /// Creates the bare copy: initialized in a directory beside it and renamed
@@ -117,6 +169,35 @@ fn run(mut command: Command, operation: &'static str) -> Result<(), FetchErrorKi
         .stdin(Stdio::null())
         .output()
         .map_err(FetchErrorKind::Unavailable)?;
+    outcome(output, operation)
+}
+
+/// Runs `command` with `input` as its standard input.
+fn run_with_input(
+    mut command: Command,
+    operation: &'static str,
+    input: &[u8],
+) -> Result<(), FetchErrorKind> {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(FetchErrorKind::Unavailable)?;
+    // Git reads all of its input before it writes much, so writing first
+    // cannot block on a full output pipe.
+    let written = child
+        .stdin
+        .take()
+        .map_or(Ok(()), |mut stdin| stdin.write_all(input));
+    let output = child
+        .wait_with_output()
+        .map_err(FetchErrorKind::Unavailable)?;
+    written.map_err(FetchErrorKind::Unavailable)?;
+    outcome(output, operation)
+}
+
+fn outcome(output: Output, operation: &'static str) -> Result<(), FetchErrorKind> {
     if output.status.success() {
         Ok(())
     } else {
@@ -136,6 +217,14 @@ pub struct FetchError {
 }
 
 impl FetchError {
+    /// The copy of `reference` could not be read after it was fetched.
+    pub(crate) fn unreadable(reference: &str, error: GitError) -> Self {
+        Self {
+            reference: reference.to_owned(),
+            kind: FetchErrorKind::Unreadable(Box::new(error)),
+        }
+    }
+
     /// What went wrong.
     pub fn kind(&self) -> &FetchErrorKind {
         &self.kind
@@ -156,6 +245,8 @@ pub enum FetchErrorKind {
         /// Why it failed.
         error: io::Error,
     },
+    /// The fetched copy could not be read to find the files it still needs.
+    Unreadable(Box<GitError>),
     /// A Git command failed, for example because the remote is unreachable
     /// or refused the credentials.
     Failed {
@@ -184,6 +275,12 @@ impl fmt::Display for FetchError {
                 "could not {action} {} to fetch {reference}: {error}",
                 path.display()
             ),
+            FetchErrorKind::Unreadable(error) => {
+                write!(
+                    f,
+                    "could not read the copy of {reference} after fetching it: {error}"
+                )
+            }
             FetchErrorKind::Failed {
                 operation,
                 status,
@@ -203,6 +300,7 @@ impl std::error::Error for FetchError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match &self.kind {
             FetchErrorKind::Unavailable(error) | FetchErrorKind::Io { error, .. } => Some(error),
+            FetchErrorKind::Unreadable(error) => Some(error.as_ref()),
             FetchErrorKind::Failed { .. } => None,
         }
     }

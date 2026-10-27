@@ -1,6 +1,6 @@
 # 0029: Remote unit sources: bare copies, fetching, and transports
 
-- **Status:** Accepted
+- **Status:** Accepted, point 3 amended by 0037
 - **Date:** 2026-10-23
 
 ## Context
@@ -82,4 +82,6 @@ credential manager.
   a lock written on one machine verifies on another that registered the
   same unit from any reference (OC-49).
 - Partial fetches and shallow copies are not used (OC-42). A copy holds
-  every object reachable from the remote's tags and `HEAD`.
+  every object reachable from the remote's tags and `HEAD`. Amended by
+  [ADR 0037](0037-partial-fetch.md): a copy holds every commit and tree, but
+  a version's files only once it has been read.

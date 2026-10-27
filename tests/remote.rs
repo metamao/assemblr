@@ -242,3 +242,179 @@ fn unsafe_references_are_refused_before_anything_is_fetched() {
     assert!(!fixture.data.join("sources").exists());
     assert!(!fixture.data.join("registry").exists());
 }
+
+impl Fixture {
+    /// The bare copy Assemblr keeps of the one remote source registered.
+    fn copy(&self) -> PathBuf {
+        let mut copies: Vec<PathBuf> = fs::read_dir(self.data.join("sources"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.join("HEAD").is_file())
+            .collect();
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        copies.remove(0)
+    }
+
+    /// The paths of the files whose contents the copy does not have.
+    fn missing_files(&self) -> Vec<String> {
+        let copy = self.copy();
+        let mut command = common::git_command(&copy);
+        command.env("GIT_DIR", &copy).env("GIT_NO_LAZY_FETCH", "1");
+        let output = command
+            .args(["rev-list", "--objects", "--all", "--missing=print"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", stderr(&output));
+        let missing: Vec<String> = stdout(&output)
+            .lines()
+            .filter_map(|line| line.strip_prefix('?'))
+            .map(str::to_owned)
+            .collect();
+        // `--missing=print` names no paths, so match the ids to the trees.
+        let mut paths = Vec::new();
+        for tag in git(&copy, &["tag", "--list"]).lines() {
+            for entry in git(&copy, &["ls-tree", "-r", "--full-tree", tag]).lines() {
+                let (object, path) = entry.split_once('\t').unwrap();
+                let id = object.rsplit(' ').next().unwrap();
+                if missing.iter().any(|missing| missing == id) {
+                    paths.push(path.to_owned());
+                }
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+}
+
+impl Remote {
+    /// Lets clients fetch with a filter, as GitHub and GitLab do. Without
+    /// it, a `file://` remote sends everything.
+    fn serve_filters(&self) {
+        self.git(&["config", "uploadpack.allowFilter", "true"]);
+        self.git(&["config", "uploadpack.allowAnySHA1InWant", "true"]);
+    }
+}
+
+#[test]
+fn registration_fetches_metadata_and_a_version_is_fetched_when_first_read() {
+    let fixture = Fixture::new("partial");
+    let remote = fixture.remote("node", &["1.0.0", "1.1.0"]);
+    remote.serve_filters();
+    succeeds(fixture.assemblr(&["registry", "add", &remote.url()]));
+
+    // Registration read every manifest, but no unit file.
+    assert_eq!(fixture.missing_files(), ["src/node.txt"]);
+    let info = stdout(&succeeds(fixture.assemblr(&["info", "@acme/node@1.0.0"])));
+    assert!(info.contains("The Node runtime."), "{info}");
+
+    let project = fixture.dir.join("app");
+    succeeds(
+        fixture
+            .command(&fixture.dir, &["init", "app"])
+            .output()
+            .unwrap(),
+    );
+    succeeds(
+        fixture
+            .command(&project, &["add", "@acme/node"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("node.txt")).unwrap(),
+        "node 1.1.0\n"
+    );
+
+    // Only the version read was fetched, and it stays readable offline.
+    assert_eq!(fixture.missing_files(), ["src/node.txt"]);
+    fs::remove_dir_all(&remote.path).unwrap();
+    let other = fixture.dir.join("other");
+    succeeds(
+        fixture
+            .command(&fixture.dir, &["init", "other"])
+            .output()
+            .unwrap(),
+    );
+    succeeds(
+        fixture
+            .command(&other, &["add", "@acme/node@1.1.0"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        fs::read_to_string(other.join("node.txt")).unwrap(),
+        "node 1.1.0\n"
+    );
+}
+
+#[test]
+fn a_version_that_cannot_be_fetched_when_first_read_is_reported() {
+    let fixture = Fixture::new("partial_offline");
+    let remote = fixture.remote("node", &["1.0.0"]);
+    remote.serve_filters();
+    let url = remote.url();
+    succeeds(fixture.assemblr(&["registry", "add", &url]));
+    fs::remove_dir_all(&remote.path).unwrap();
+
+    let project = fixture.dir.join("app");
+    succeeds(
+        fixture
+            .command(&fixture.dir, &["init", "app"])
+            .output()
+            .unwrap(),
+    );
+    let failed = fails(
+        fixture
+            .command(&project, &["add", "@acme/node"])
+            .output()
+            .unwrap(),
+    );
+    let err = stderr(&failed);
+    assert!(err.contains("could not fetch"), "{err}");
+    assert!(err.contains(&format!("`git ls-remote {url}`")), "{err}");
+    assert!(!project.join("node.txt").exists());
+}
+
+#[test]
+fn a_file_too_large_to_read_fails_the_first_read_of_its_version() {
+    let fixture = Fixture::new("partial_oversized");
+    let remote = fixture.remote("node", &[]);
+    remote.serve_filters();
+    fs::create_dir_all(remote.path.join("src")).unwrap();
+    fs::write(
+        remote.path.join("src/large.bin"),
+        vec![b'x'; 16 * 1024 * 1024 + 1],
+    )
+    .unwrap();
+    remote.publish("1.0.0");
+
+    // Its size is unknown until the file is fetched, so registration
+    // indexes the version.
+    succeeds(fixture.assemblr(&["registry", "add", &remote.url()]));
+    assert_eq!(
+        fixture.list()["units"][0]["versions"][0]["version"],
+        "1.0.0"
+    );
+
+    let project = fixture.dir.join("app");
+    succeeds(
+        fixture
+            .command(&fixture.dir, &["init", "app"])
+            .output()
+            .unwrap(),
+    );
+    let failed = fails(
+        fixture
+            .command(&project, &["add", "@acme/node"])
+            .output()
+            .unwrap(),
+    );
+    let err = stderr(&failed);
+    assert!(err.contains("src/large.bin"), "{err}");
+    assert!(
+        err.contains("select another version of @acme/node"),
+        "{err}"
+    );
+    assert!(!project.join("node.txt").exists());
+}

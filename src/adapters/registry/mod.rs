@@ -32,7 +32,7 @@ use store::Store;
 use super::catalog::{CatalogProblem, PublishedCatalog, is_catalog, read_published_catalog};
 use super::git::{
     FetchError, GitError, GitRepository, HeadManifestError, InvalidVersion, ReadFileError,
-    ReadSrcError, VersionTag, fetch,
+    ReadSrcError, VersionTag, fetch, fetch_objects,
 };
 use super::lockfile::{PublishedLockfileError, read_published};
 use crate::domain::{
@@ -104,8 +104,10 @@ impl Registry {
     /// A remote source whose copy is missing or lacks one of `commits` is
     /// fetched first: that is how the content of a unit only catalogs
     /// manage is retrieved, when a build or a composition first needs it.
-    /// The index is never changed, and the caller checks that each commit
-    /// still has the tree the index records.
+    /// The repository returned fetches a version's file contents the first
+    /// time they are read, since a remote copy holds only trees and
+    /// metadata files (ADR 0037). The index is never changed, and the
+    /// caller checks that each commit still has the tree the index records.
     pub(crate) fn open_registered(
         source: &SourceReference,
         commits: &[&ObjectId],
@@ -119,26 +121,25 @@ impl Registry {
                 format!("the registry that holds its copy cannot be found: {error}"),
             )
         })?;
-        if registry.copy_of(source).is_dir() {
-            let repository = registry.open_source(source)?;
-            if repository.has_commits(commits)? {
-                return Ok(repository);
-            }
+        let present = registry.copy_of(source).is_dir()
+            && registry.open_source(source)?.has_commits(commits)?;
+        if !present {
+            registry.fetch_source(source).map_err(|error| {
+                GitError::unretrievable(PathBuf::from(source.as_str()), error.to_string())
+            })?;
         }
-        registry.fetch_source(source).map_err(|error| {
-            GitError::unretrievable(PathBuf::from(source.as_str()), error.to_string())
-        })?;
         let repository = registry.open_source(source)?;
-        if repository.has_commits(commits)? {
-            Ok(repository)
-        } else {
-            Err(GitError::unretrievable(
+        if !repository.has_commits(commits)? {
+            return Err(GitError::unretrievable(
                 PathBuf::from(source.as_str()),
                 "it no longer has a commit that was indexed, so a published version was \
                  rewritten"
                     .to_owned(),
-            ))
+            ));
         }
+        // The copy holds trees but not file contents (ADR 0037): a version's
+        // files are fetched the first time they are read.
+        Ok(repository.retrieving_from(source.as_str()))
     }
 
     /// Where the copy of the remote `source` is kept: a directory named by
@@ -150,14 +151,20 @@ impl Registry {
         self.copies.join(name)
     }
 
-    /// Fetches the remote `source` into its copy. A local source is read in
-    /// place and needs nothing.
+    /// Fetches the remote `source` into its copy: its tags, commits, and
+    /// trees, and the metadata files registration reads at each version tag
+    /// and at `HEAD`, but no other file contents (ADR 0037). A local source
+    /// is read in place and needs nothing.
     pub(crate) fn fetch_source(&self, source: &SourceReference) -> Result<(), FetchError> {
-        if is_remote_reference(source) {
-            fetch(source.as_str(), &self.copy_of(source))
-        } else {
-            Ok(())
+        if !is_remote_reference(source) {
+            return Ok(());
         }
+        let copy = self.copy_of(source);
+        fetch(source.as_str(), &copy)?;
+        let missing = GitRepository::open(&copy)
+            .and_then(|repository| repository.missing_metadata())
+            .map_err(|error| FetchError::unreadable(source.as_str(), error))?;
+        fetch_objects(source.as_str(), &copy, &missing)
     }
 
     /// The index. An empty one if nothing has been registered.
@@ -645,12 +652,15 @@ fn observe_tag(
     // content is.
     let indexed = unit.is_some_and(|unit| unit.versions().contains_key(tag.version()));
     if !indexed {
-        match repository.read_src(provenance.commit()) {
-            Ok(_) => {}
+        // Only trees are checked here, since a remote copy holds no other
+        // file contents (ADR 0037). The files' sizes are checked by the same
+        // readers when a build or a composition first reads them.
+        match repository.check_src(provenance.commit()) {
+            Ok(()) => {}
             Err(ReadSrcError::Git(error)) => return Err(error),
             Err(error) => return Ok(Err(TagProblem::Src(Arc::new(error)))),
         }
-        let copies = match repository.read_amendments(provenance.commit()) {
+        let copies = match repository.amendment_paths(provenance.commit()) {
             Ok(copies) => copies,
             Err(ReadSrcError::Git(error)) => return Err(error),
             Err(error) => return Ok(Err(TagProblem::Amendments(Arc::new(error)))),
@@ -665,7 +675,7 @@ fn observe_tag(
                 Err(error) => return Ok(Err(TagProblem::Lockfile(Arc::new(error)))),
             }
         };
-        let problems = published_amendments(manifest, copies.keys(), lock.as_ref());
+        let problems = published_amendments(manifest, &copies, lock.as_ref());
         if !problems.is_empty() {
             return Ok(Err(TagProblem::InvalidAmendments(problems)));
         }

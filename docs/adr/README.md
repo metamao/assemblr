@@ -45,7 +45,7 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0026](0026-private-alpha-distribution.md) | Private alpha distribution: prebuilt binaries as draft GitHub Releases | Accepted |
 | [0027](0027-journal-format-compatibility.md) | Journal formats: a number for every change, and readers that refuse what they do not know | Accepted, consumer journal at format 3 since #101 |
 | [0028](0028-isolated-validation.md) | Isolated validation: shared test fixtures, a sandbox for manual runs, and a reference scenario | Accepted |
-| [0029](0029-remote-sources.md) | Remote unit sources: bare copies, what is fetched, the fetch environment, and accepted transports | Accepted |
+| [0029](0029-remote-sources.md) | Remote unit sources: bare copies, what is fetched, the fetch environment, and accepted transports | Accepted, point 3 amended by 0037 |
 | [0030](0030-catalog-index.md) | Catalog index: `registry-index.json`, embedded manifests, and all-or-nothing refresh | Accepted, refresh commits and references are URLs since 0033 |
 | [0031](0031-catalog-registration.md) | Catalog registration: catalogs in the registry index, versions from the catalog index, and content on demand | Accepted, point 4 amended by 0033 |
 | [0032](0032-layered-amendments.md) | Layered amendments: the base below an amender, marked sibling conflicts, the pending state, and the rebase in `unit update` | Accepted |
@@ -53,3 +53,4 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0034](0034-agent-bench.md) | The agent bench: coding agents on fixed scenarios, run by hand before a release | Accepted |
 | [0035](0035-filters-and-patterns.md) | Template filters and parameter patterns: `tojson` and `e` with Jinja's output, and `pattern` with `regex-lite` | Superseded by 0036 |
 | [0036](0036-placeholders.md) | Placeholders: no rendering, the author's checks, and the consumer's report | Accepted |
+| [0037](0037-partial-fetch.md) | Partial fetch: metadata at registration, a version's files when first read, and no lazy fetching | Accepted |

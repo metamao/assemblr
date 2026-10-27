@@ -210,10 +210,14 @@ For unit repositories, the checks are classified as follows:
   point at a commit; a commit or root tree larger than Assemblr reads; a
   missing, oversized, non-UTF-8, or invalid manifest; a manifest declaring a
   different version; and invalid `src/` content, such as a symbolic link, a
-  submodule, an invalid path, or files larger than Assemblr reads. The tag is
-  excluded and reported, and the operation continues. Content is validated
-  when a version is first indexed, so an indexed version is a valid published
-  artifact, not only a valid manifest.
+  submodule, an invalid path, or too many entries. The tag is excluded and
+  reported, and the operation continues. The structure of the content is
+  validated when a version is first indexed, so an indexed version is a
+  valid published artifact, not only a valid manifest. File sizes are not:
+  registration does not fetch file contents, so a file or directory larger
+  than Assemblr reads fails the first operation that reads the version
+  (**proposed in #126, awaiting the owner's decision**, see
+  [ADR 0037](../adr/0037-partial-fetch.md)).
 - **Version-level, for a newly discovered version tag with amendments:** the
   properties the version shows on its own. Its `amendments/` is read by the
   rules of `src/`; every copy is declared and every declaration has a copy;
@@ -667,8 +671,12 @@ assemblr registry sync
   configuration, which supplies any credentials, into a copy that Assemblr
   keeps (**Provisional (D-35)**, see
   [ADR 0029](../adr/0029-remote-sources.md)). `add` fetches it, and `sync`
-  fetches every remote source again before reading it; nothing else fetches.
-  `info`, `search`, builds, and compositions read the copy, offline. A
+  fetches every remote source again before reading it. They fetch commits,
+  trees, and the metadata files registration reads, not the other files of
+  a version, which are fetched when the version is first read (see below and
+  [ADR 0037](../adr/0037-partial-fetch.md)); nothing else fetches. `info`
+  and `search` read the copy, offline, and so does every operation on a
+  version already fetched. A
   remote that cannot be fetched is a source-level failure: the registration
   or synchronization is rejected and the index is unchanged. A tag that
   moved or disappeared on the remote is an integrity conflict, like a local
@@ -796,8 +804,9 @@ assemblr catalog refresh [--no-commit]
   problem rejects the whole registration or synchronization.
 - `search` and `info` describe a unit only catalogs declare from the
   manifest its catalog lists, until its content has been retrieved.
-- A remote unit's content is retrieved into its copy the first time an
-  operation reads a version the copy does not hold: `add`, `compose`, and
+- A remote unit's content, whether registered directly or through a
+  catalog, is retrieved into its copy the first time an operation reads a
+  version the copy does not hold: `add`, `compose`, and
   `update` in a project, and `unit build`, `unit check`, `unit update`, and
   `unit amend` for a dependency. This retrieves exactly the
   commit the index records, which must still exist and hold the indexed
