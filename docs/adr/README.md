@@ -55,3 +55,4 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0036](0036-placeholders.md) | Placeholders: no rendering, the author's checks, and the consumer's report | Accepted |
 | [0037](0037-partial-fetch.md) | Partial fetch: metadata at registration, a version's files when first read, and no lazy fetching | Accepted |
 | [0038](0038-remove-registry-catalogs.md) | Remove the `registry.jsonc` catalogs: no catalog commands, no catalog index, and registry index format 4 | Accepted |
+| [0039](0039-catalog-repositories.md) | Catalog repositories: a unit inside a commit, one lockfile without the siblings, and joint resolution | Accepted |

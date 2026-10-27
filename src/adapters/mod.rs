@@ -23,11 +23,12 @@ mod skill;
 pub use build::{
     AddFailure, AddProblem, AmendFailure, AmendProblem, AmendState, Amended, BuildFailure,
     BuildLockError, BuildProblem, Built, Carried, CheckFailure, CheckProblem, Checked,
-    CrossVersionReason, DependencyAdded, FileState, IndexOutcome, LockfileOutcome,
+    CrossVersionReason, DependencyAdded, FileState, IndexOutcome, Location, LockfileOutcome,
     ManifestFileError, Match, OutputProblem, Pending, PendingFile, PublishError, PublishFailure,
     PublishProblem, PublishState, Published, PublishedProblem, Recovered, RecoveryError,
     UnresolvedFile, UpdateFailure, UpdateProblem, UpdateState, UpdateWriteError, Updated,
-    WriteError, add_dependency, amend_unit, build_unit, check_unit, publish_unit, update_unit,
+    WriteError, add_dependency, amend_unit, build_catalog, build_unit, check_catalog, check_unit,
+    locate_unit, publish_unit, update_unit,
 };
 pub use git::{
     Discovered, FetchError, FetchErrorKind, GitError, GitErrorKind, GitRepository,

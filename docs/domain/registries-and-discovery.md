@@ -34,10 +34,12 @@ engineering mechanisms behind it are recorded in
 
 ## Units are Git repositories — Approved
 
-- Every unit lives in **its own Git repository**, with `manifest.jsonc` at the
-  repository root (see
-  [units.md](units.md#authoring-repository-convention--approved)). Git is a
-  requirement, not a preferred convention.
+- Every unit lives in a Git repository: **its own**, with `manifest.jsonc`
+  at the repository root, or a **catalog**, with `catalog.jsonc` at the root
+  and the unit in `units/<name>` (see
+  [units.md](units.md#authoring-repository-convention--approved) and
+  [catalogs](units.md#catalogs--approved)). Git is a requirement, not a
+  preferred convention.
 - Git provides the unit's version **history**, not merely a transport.
 - Each published version is a Git tag of the form `v<version>`:
 
@@ -51,8 +53,10 @@ engineering mechanisms behind it are recorded in
   `v<version>`, where `<version>` is a valid SemVer version. Tags outside this
   convention, such as `release-1` or `latest`, are not published versions.
 - The tag version must match the exact SemVer `version` declared in the
-  manifest **at the tagged commit**. A version tag whose manifest declares a
-  different version is **invalid**.
+  manifest **at the tagged commit**, or, in a catalog, in `catalog.jsonc`. A
+  version tag whose manifest or catalog declares a different version is
+  **invalid**. A catalog's tag publishes every unit in it, and is invalid as
+  a whole when any unit in it is.
 - An invalid version never enters the usable version index, and it is reported
   explicitly (see [Registration](#registration--approved)).
 - Assemblr reads versioned content **without switching or modifying** the
@@ -97,8 +101,9 @@ Open:
 A directory is not a registry, and a directory that contains Git repositories
 is not automatically a source. Assemblr knows only the sources that have been
 **explicitly registered and validated**. A registered source is **a unit
-repository**: the Git repository of one unit. There are no separate registry
-types or operating modes.
+repository**: the Git repository of one unit, or a catalog, whose units are
+registered from it together. There are no separate registry types or
+operating modes.
 
 The `registry.jsonc` catalogs that once declared sets of unit repositories
 were removed by the owner's decision of 2026-10-27
@@ -149,6 +154,13 @@ Rules:
   must declare it, and synchronization never changes it, silently or
   otherwise. Renaming a unit requires removing its registration and
   registering it again.
+- `registry add` of a catalog registers every unit any of its valid versions
+  publishes, or, with none, every unit committed at `HEAD`. Its units are
+  registered and removed together, and synchronization registers a unit
+  that a new version of the catalog publishes for the first time
+  (**Provisional (D-54)**). A unit's identity in a catalog stays fixed as
+  for any source; a later version that no longer publishes an indexed unit
+  leaves that unit's earlier versions as they are.
 - Registration **never publishes** a unit. It never turns uncommitted or
   untagged working-tree content into a published version. A request for a
   published version always obtains tagged content, never the current working
@@ -298,6 +310,8 @@ Rules:
 - Changing the repository reference of an existing identity is a conflict that
   requires user intervention (see
   [Source conflicts](#source-conflicts--approved)).
+- A catalog's indexed version that no longer publishes one of its indexed
+  units is an integrity conflict, as a moved tag is.
 - Historical snapshots required by existing project locks and for
   reconciliation are preserved.
 - Synchronization **never modifies** consumer projects, dependency selections,
@@ -432,7 +446,8 @@ Open:
 ## Removal — Approved
 
 - `registry remove` removes a registered source's **registry relationship**
-  only.
+  only. For a unit of a catalog, that is every unit of the catalog, which
+  are registered together (**Provisional (D-54)**).
 - It never deletes the user's Git repositories or working trees.
 - It never modifies consumer projects or lock files. Historical snapshots
   required by existing locks and for reconciliation are not discarded.
@@ -492,7 +507,11 @@ assemblr registry sync
   moved or disappeared on the remote is an integrity conflict, like a local
   one.
 - `remove` takes the unit identity, which is unique in the registry, so a
-  source can be removed even when its repository no longer exists.
+  source can be removed even when its repository no longer exists. A
+  catalog's units are removed together, and the output lists them.
+- `add` of a catalog lists every unit it registered, each with its
+  versions. A catalog's excluded tag is reported for the catalog, since it
+  publishes all its units at once.
 - Data goes to stdout and diagnostics to stderr. A failed operation exits
   non-zero and leaves the registry index unchanged.
 - `list --json` prints one JSON object, derived from the same index as the

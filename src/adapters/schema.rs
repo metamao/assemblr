@@ -60,9 +60,11 @@ mod tests {
         let mut fields = MANIFEST_FIELDS.to_vec();
         fields.sort_unstable();
         assert_eq!(properties, fields);
+        // `version` is required outside a catalog only, which the schema
+        // cannot tell; Assemblr's validation enforces it.
         assert_eq!(
             schema["required"],
-            serde_json::json!(["name", "version", "description"])
+            serde_json::json!(["name", "description"])
         );
         assert!(manifest_schema().ends_with("}\n"));
     }

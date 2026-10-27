@@ -53,6 +53,42 @@ impl GitRepository {
         self.read_working_files(UnitDirectory::Amendments)
     }
 
+    /// The names directly under the working tree's `units/` that it would
+    /// publish, sorted, each with whether it is a real directory there: a
+    /// catalog's units are its directories, and anything else in `units/`
+    /// is reported. A directory whose files were all deleted is not listed.
+    pub(crate) fn working_units(&self) -> Result<BTreeMap<String, bool>, GitError> {
+        let root = self.work_tree()?;
+        let listing = self.listing(&root, super::catalog::UNITS)?;
+        let prefix = format!("{}/", super::catalog::UNITS);
+        let mut units = BTreeMap::new();
+        for path in listing.keys() {
+            let Some(rest) = path.strip_prefix(prefix.as_bytes()) else {
+                continue;
+            };
+            let (name, nested) = match rest.iter().position(|&byte| byte == b'/') {
+                Some(slash) => (&rest[..slash], true),
+                None => (rest, false),
+            };
+            let Ok(name) = std::str::from_utf8(name) else {
+                units.insert(String::from_utf8_lossy(name).into_owned(), false);
+                continue;
+            };
+            if units.contains_key(name) {
+                continue;
+            }
+            let directory = root.join(super::catalog::UNITS).join(name);
+            let directory = match fs::symlink_metadata(&directory) {
+                Ok(metadata) => nested && metadata.is_dir(),
+                // Deleted with everything in it.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => false,
+            };
+            units.insert(name.to_owned(), directory);
+        }
+        Ok(units)
+    }
+
     fn read_working_files(&self, directory: UnitDirectory) -> Result<FileTree, ReadSrcError> {
         let root = self.work_tree()?;
         // In a catalog, the unit's directory holds its own.

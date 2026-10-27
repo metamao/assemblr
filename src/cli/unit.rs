@@ -13,10 +13,11 @@ use std::process::ExitCode;
 use assemblr::adapters::{
     AddFailure, AddProblem, AmendFailure, AmendProblem, AmendState, BuildFailure, BuildProblem,
     Built, CheckFailure, CheckProblem, DeclarationChange, FileOutcome, GitOutcome, IndexOutcome,
-    InitFailure, Initialized, LockfileOutcome, ManifestFileError, Pending, PublishFailure,
-    PublishProblem, PublishState, Published, PublishedProblem, RecoveryError, Registry, TagProblem,
-    UpdateFailure, UpdateProblem, UpdateState, Updated, add_dependency, amend_unit, build_unit,
-    check_unit, init_unit, publish_unit, update_unit,
+    InitFailure, Initialized, Location, LockfileOutcome, ManifestFileError, Pending,
+    PublishFailure, PublishProblem, PublishState, Published, PublishedProblem, RecoveryError,
+    Registry, TagProblem, UpdateFailure, UpdateProblem, UpdateState, Updated, add_dependency,
+    amend_unit, build_catalog, build_unit, check_catalog, check_unit, init_unit, locate_unit,
+    publish_unit, update_unit,
 };
 use assemblr::domain::{
     ContributionError, Excluded, IntegrityChange, LockChange, LockError, PlaceholderError,
@@ -38,6 +39,9 @@ pub(super) enum UnitCommand {
     /// `web/`. Give `.` to set up the unit in the current directory, for
     /// example in a repository you already have. Running it again only
     /// adds what is missing.
+    ///
+    /// At a catalog's top level, the unit goes in `units/<name>`, with no
+    /// version of its own.
     #[command(after_long_help = "Examples:\n  \
         assemblr unit init @acme/web\n  \
         assemblr unit init @acme/web . --description \"Web server setup\"")]
@@ -54,16 +58,19 @@ pub(super) enum UnitCommand {
     ///
     /// Run it in the unit's directory. The first build creates
     /// `assemblr-lock.json`, which records the versions of the
-    /// dependencies.
+    /// dependencies. At a catalog's top level, it builds every unit into
+    /// its `units/<name>/build/`; in a unit's directory, that unit.
     Build,
     /// Check the unit for build and publication problems
     ///
-    /// Writes nothing.
+    /// Writes nothing. At a catalog's top level, it checks every unit.
     Check,
     /// Publish the committed unit as the version in its manifest
     ///
     /// Tags the commit at `HEAD` as `v<version>` and indexes the version in
-    /// the local registry when the repository is registered.
+    /// the local registry when the repository is registered. At a
+    /// catalog's top level, it publishes every unit at the version in
+    /// `catalog.jsonc`, with one tag.
     Publish,
     /// Copy a dependency's file to amendments/ to change it
     ///
@@ -192,6 +199,7 @@ fn describe_initialized(initialized: &Initialized) -> String {
             created.push(&nested);
         }
         GitOutcome::Adopted => kept.push("the Git repository"),
+        GitOutcome::InCatalog { .. } => kept.push("the catalog's Git repository"),
     }
     for (name, outcome, refreshed) in [
         ("manifest.jsonc", initialized.manifest(), "manifest.jsonc"),
@@ -332,11 +340,29 @@ fn locate() -> Result<(PathBuf, Registry), ExitCode> {
     Ok((root, registry))
 }
 
+/// Refuses `command` in a catalog, where it does not work yet: its
+/// edits and its build assume a unit with its own lockfile.
+fn refuse_in_catalog(command: &str, root: &Path) -> Option<ExitCode> {
+    if locate_unit(root) == Location::Unit {
+        return None;
+    }
+    Some(fail(
+        &format!("`assemblr unit {command}` does not work in a catalog yet"),
+        Some(
+            "edit the unit's manifest.jsonc, or copy the file under its amendments/ and \
+             declare it there, then run `assemblr unit build`",
+        ),
+    ))
+}
+
 fn amend(args: &AmendArgs) -> ExitCode {
     let (root, registry) = match locate() {
         Ok(located) => located,
         Err(code) => return code,
     };
+    if let Some(code) = refuse_in_catalog("amend", &root) {
+        return code;
+    }
     match amend_unit(&root, &registry, &args.file, args.unit.as_ref()) {
         Ok(amended) => {
             let found = amended.file();
@@ -414,6 +440,9 @@ fn update(args: &UpdateArgs) -> ExitCode {
         Ok(located) => located,
         Err(code) => return code,
     };
+    if let Some(code) = refuse_in_catalog("update", &root) {
+        return code;
+    }
     match update_unit(&root, &registry, units) {
         Ok(updated) => {
             report_recovered(&updated);
@@ -637,6 +666,9 @@ fn add(args: &AddArgs) -> ExitCode {
         Ok(located) => located,
         Err(code) => return code,
     };
+    if let Some(code) = refuse_in_catalog("add", &root) {
+        return code;
+    }
     match add_dependency(&root, &registry, identity, args.unit.version()) {
         Ok(added) => {
             let declaration = match added.change() {
@@ -654,7 +686,7 @@ fn add(args: &AddArgs) -> ExitCode {
                 }
             };
             println!("{declaration}.");
-            report_built(added.built());
+            report_built(added.built(), false);
             ExitCode::SUCCESS
         }
         Err(failure) => fail_with(&failure.to_string(), &add_diagnosis(&failure, &root)),
@@ -674,7 +706,7 @@ fn add_diagnosis(failure: &AddFailure, root: &Path) -> Diagnosis {
                 BuildFailure::Rejected(problems) => {
                     distinct(problems.iter().filter_map(|problem| advice(problem, root)))
                 }
-                BuildFailure::Publish(_) => Vec::new(),
+                BuildFailure::Publish(_) | BuildFailure::PartlyBuilt { .. } => Vec::new(),
                 BuildFailure::Pending(pending) => {
                     return pending_diagnosis(pending, "manifest.jsonc holds the dependency and ");
                 }
@@ -747,9 +779,27 @@ fn build() -> ExitCode {
         Ok(located) => located,
         Err(code) => return code,
     };
+    if locate_unit(&root) == Location::Catalog {
+        return match build_catalog(&root, &registry) {
+            Ok(built) => {
+                for built in &built {
+                    report_built(built, true);
+                }
+                ExitCode::SUCCESS
+            }
+            Err(failure) => {
+                if let BuildFailure::PartlyBuilt { built, .. } = &failure {
+                    for built in built {
+                        report_built(built, true);
+                    }
+                }
+                fail_with(&failure.to_string(), &diagnosis(&failure, &root))
+            }
+        };
+    }
     match build_unit(&root, &registry) {
         Ok(built) => {
-            report_built(&built);
+            report_built(&built, false);
             ExitCode::SUCCESS
         }
         Err(failure) => fail_with(&failure.to_string(), &diagnosis(&failure, &root)),
@@ -757,8 +807,9 @@ fn build() -> ExitCode {
 }
 
 /// Reports a build: the lockfile and warnings on stderr, the result on
-/// stdout.
-fn report_built(built: &Built) {
+/// stdout. `at_catalog` names each unit's `build/` by its path from the
+/// catalog's top level.
+fn report_built(built: &Built, at_catalog: bool) {
     report_lockfile(built);
     warn_notes(built.notes());
     if let Some((path, error)) = built.leftover() {
@@ -768,8 +819,12 @@ fn report_built(built: &Built) {
             path.display()
         );
     }
+    let into = match built.directory() {
+        Some(directory) if at_catalog => format!("units/{directory}/build/"),
+        _ => "build/".to_owned(),
+    };
     println!(
-        "Built {} {} into build/: {}, with {}.",
+        "Built {} {} into {into}: {}, with {}.",
         built.unit(),
         built.version(),
         count(built.files(), "file", "files"),
@@ -815,16 +870,23 @@ fn check() -> ExitCode {
         Ok(located) => located,
         Err(code) => return code,
     };
-    match check_unit(&root, &registry) {
+    let checked = if locate_unit(&root) == Location::Catalog {
+        check_catalog(&root, &registry)
+    } else {
+        check_unit(&root, &registry).map(|checked| vec![checked])
+    };
+    match checked {
         Ok(checked) => {
-            warn_notes(checked.notes());
-            println!(
-                "Checked {} {}: no problems; a build delivers {}, with {}.",
-                checked.unit(),
-                checked.version(),
-                count(checked.files(), "file", "files"),
-                count(checked.dependencies(), "dependency", "dependencies")
-            );
+            for checked in &checked {
+                warn_notes(checked.notes());
+                println!(
+                    "Checked {} {}: no problems; a build delivers {}, with {}.",
+                    checked.unit(),
+                    checked.version(),
+                    count(checked.files(), "file", "files"),
+                    count(checked.dependencies(), "dependency", "dependencies")
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(failure) => {
@@ -869,6 +931,7 @@ fn check_advice(problem: &CheckProblem, root: &Path, command: &str) -> Option<St
              marked and declares it; edit it to the content you want, remove every marker, and \
              build again"
         ),
+        CheckProblem::InUnit { problem, .. } => return check_advice(problem, root, command),
     })
 }
 
@@ -914,6 +977,16 @@ fn report_published(published: &Published) {
             published.unit(),
             published.version(),
             published.tag()
+        );
+    } else if !published.units().is_empty() {
+        let units: Vec<String> = published.units().iter().map(ToString::to_string).collect();
+        println!(
+            "Published the catalog {} {} as tag {} at commit {short}, with {}: {}.",
+            published.unit(),
+            published.version(),
+            published.tag(),
+            count(units.len(), "unit", "units"),
+            units.join(", ")
         );
     } else {
         println!(
@@ -1018,7 +1091,16 @@ fn publish_diagnosis(failure: &PublishFailure, root: &Path) -> Diagnosis {
             }),
             _ => None,
         }),
+        PublishProblem::InCatalogUnit { catalog } => Some(format!(
+            "run `assemblr unit publish` in {}",
+            catalog.display()
+        )),
         PublishProblem::Reference(_) => None,
+        PublishProblem::NotACatalog => Some(
+            "commit catalog.jsonc and the units, build/ excepted, and run `assemblr unit \
+             publish` again"
+                .to_owned(),
+        ),
     });
     Diagnosis::note("no tag was created and nothing was changed").advise_if(advice)
 }
@@ -1064,6 +1146,21 @@ fn diagnosis(failure: &BuildFailure, root: &Path) -> Diagnosis {
                         .advise("run `assemblr unit build` again")
                 }
             };
+        }
+        BuildFailure::PartlyBuilt { built, error, .. } => {
+            let built: Vec<String> = built.iter().map(|unit| unit.unit().to_string()).collect();
+            let state = match error.state() {
+                PublishState::Unchanged => "its build/ was not changed",
+                PublishState::BuildRemoved | PublishState::LockfileWithoutBuild => {
+                    "it has no build/ now"
+                }
+            };
+            return Diagnosis::note(format!(
+                "{} {} built before it, and the units after it were not; {state}",
+                built.join(", "),
+                if built.len() == 1 { "was" } else { "were" }
+            ))
+            .advise("fix the problem and run `assemblr unit build` again");
         }
         BuildFailure::Rejected(problems) => problems,
         BuildFailure::Pending(pending) => return pending_diagnosis(pending, ""),
@@ -1135,6 +1232,12 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
             "{} is not a unit repository's top level; run `assemblr unit build` in the \
              directory that holds `manifest.jsonc`",
             root.display()
+        ),
+        BuildProblem::InUnit { problem, .. } => return advice(problem, root),
+        BuildProblem::CatalogPending { directory, .. } => format!(
+            "run `assemblr unit build` in units/{directory}, which creates the copies and \
+             declares them; edit them to the content you want, remove every marker, and build \
+             again"
         ),
         BuildProblem::Lockfile(_) => format!("fix assemblr-lock.json; {DELETING_THE_LOCKFILE}"),
         BuildProblem::UpdateInterrupted { .. } => {

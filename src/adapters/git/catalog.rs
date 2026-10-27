@@ -215,6 +215,19 @@ impl GitRepository {
         })))
     }
 
+    /// Reads the catalog committed at `commit` and every unit in it, as a
+    /// tag of the commit would publish them, or `None` when the commit is
+    /// not a catalog.
+    pub(crate) fn read_catalog_at(
+        &self,
+        commit: &ObjectId,
+    ) -> Result<Option<Result<PublishedCatalog, InvalidVersion>>, GitError> {
+        let mut objects = self.objects()?;
+        let read = self.read_catalog_version(&mut objects, commit)?;
+        objects.finish()?;
+        Ok(read)
+    }
+
     /// The other units of the catalog at `commit`, each at the catalog's
     /// version with the commit and its directory's tree, or `None` when
     /// the commit is not a valid catalog. Only trees and `catalog.jsonc`

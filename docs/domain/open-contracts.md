@@ -652,6 +652,28 @@ How the status of a statement affects implementation:
 - **Origin:** #124
 - **Context:** [report details](placeholders.md#report-details--provisional-d-50)
 
+### OC-56
+
+- **Approved (normative):** A catalog is a repository with `catalog.jsonc`
+  and one unit in each directory of `units/`, published together at the
+  catalog's version with one tag; siblings are required as `"catalog"`; the
+  catalog has one lockfile at its root; `registry add` registers every unit
+  (owner decision of 2026-10-27, #127; see
+  [units.md](units.md#catalogs--approved) and
+  [authoring a catalog](authoring-workflow.md#authoring-a-catalog--approved)).
+- **Open detail:** **Provisional (D-52):** a unit's identity is
+  `@<catalog owner>/<directory>`, and its `name` must match it.
+  **Provisional (D-53):** the catalog's units resolve together into the one
+  lock, with siblings from the working tree, and publication runs at the
+  top level only. **Provisional (D-54):** a catalog's units are registered
+  and removed together, and synchronization registers a unit that a new
+  version publishes for the first time. **Provisional (D-55):** a range on
+  a sibling, and `"catalog"` outside a catalog or for a unit it does not
+  have, are errors. **Deferred (D-56):** `unit add`, `unit amend`, and
+  `unit update` in a catalog. Amendments between siblings wait for #128.
+- **Origin:** #127
+- **Context:** [catalogs](units.md#catalogs--approved)
+
 ## Resolved contracts
 
 ### OC-1

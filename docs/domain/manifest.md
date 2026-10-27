@@ -1,7 +1,8 @@
 # Manifest
 
 Every unit has a manifest named `manifest.jsonc` at the root of its unit
-repository.
+repository, or of its directory in a catalog, `units/<name>` (see
+[units.md](units.md#catalogs--approved)).
 
 ## Format — Approved
 
@@ -21,7 +22,7 @@ These fields make up the accepted conceptual vocabulary:
 |-------|---------|---------|
 | `$schema` | Points editors at the manifest JSON Schema, where applicable. | [Editor support](#editor-support--approved) |
 | `name` | The unit identity, `@owner/unit-name`. | [units.md](units.md#identity--approved) |
-| `version` | The unit's exact SemVer version. | [units.md](units.md#versioning--approved) |
+| `version` | The unit's exact SemVer version. Required, except in a catalog, where it is not allowed: the unit has the catalog's. | [units.md](units.md#versioning--approved) |
 | `description` | A human-readable description. **Required.** | |
 | `dependencies` | Owner-qualified identities with SemVer ranges. | [dependencies.md](dependencies.md) |
 | `placeholders` | The placeholders the unit's files hold for the consumer to replace, and the tokens that only look like placeholders. | [placeholders.md](placeholders.md#declaration--approved) |
@@ -40,7 +41,7 @@ either is rejected with an error that explains the replacement (see
 
 | Field | Form |
 |-------|------|
-| `dependencies` | A map from unit identities (`@owner/unit-name`) to SemVer requirement strings |
+| `dependencies` | A map from unit identities (`@owner/unit-name`) to SemVer requirement strings, or, for a sibling in a catalog, the string `"catalog"` |
 | `placeholders` | An object with two optional members: `replace`, a map from placeholders to non-empty descriptions, and `ignore`, an array of distinct placeholder-form tokens |
 | `amendments` | A map from amended paths, the file's path in the provider's `src/`, which is the copy's path under `amendments/`, to an object with `unit`, the identity of the **direct** dependency that provides the file, and `base`, the exact version the copy was taken from, as a string |
 

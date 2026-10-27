@@ -23,9 +23,12 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use super::catalog::{in_unit, joint_lock};
 use super::check::{CheckProblem, publication_checks};
 use super::exclusive::BuildLock;
-use super::{BuildProblem, Inputs, MANIFEST, ManifestFileError};
+use super::{
+    BuildProblem, Inputs, Joint, MANIFEST, ManifestFileError, PublishedContent, Sibling, Siblings,
+};
 use crate::adapters::git::{GitError, GitRepository, InvalidVersion, ReadFileError, ReadSrcError};
 use crate::adapters::lockfile::{self, PublishedLockfileError};
 use crate::adapters::registry::{
@@ -34,14 +37,28 @@ use crate::adapters::registry::{
 };
 use crate::domain::{
     Excluded, ObjectId, ObservedTag, ObservedVersion, Provenance, RegistryError, SourceReference,
-    UnitIdentity, Version,
+    UnitIdentity, UnitLock, Version,
 };
 
 /// Publishes the version the committed manifest of the unit whose
 /// repository's top level is `root` declares, resolving its dependencies
 /// from `registry` and updating the registry's index when it registers this
 /// repository.
+///
+/// At a catalog's top level, every unit of the catalog is published at the
+/// catalog's version, with one tag (see [`publish_catalog`]). In a unit's
+/// directory in a catalog, the publication is refused: a catalog's units
+/// are published together.
 pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, PublishFailure> {
+    match super::locate_unit(root) {
+        super::Location::Unit => {}
+        super::Location::Catalog => return publish_catalog(root, registry),
+        super::Location::CatalogUnit { catalog, .. } => {
+            return Err(PublishFailure::Rejected(vec![
+                PublishProblem::InCatalogUnit { catalog },
+            ]));
+        }
+    }
     let manifest_path = root.join(MANIFEST);
     if let Err(error) = fs::symlink_metadata(&manifest_path) {
         if error.kind() == io::ErrorKind::NotFound {
@@ -152,6 +169,7 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
             src: src.as_ref(),
             amendments: amendments.as_ref(),
             previous: &previous.clone().unwrap_or_default(),
+            catalog: None,
         },
         previous.is_some(),
         &index,
@@ -163,37 +181,10 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
             .map(|problem| PublishProblem::Check(Box::new(problem))),
     );
 
-    // The tag. A version is published once: a tag of this version at
-    // another commit, or one of equal precedence, refuses the publication.
     let tag = format!("v{version}");
-    let mut already = false;
-    let tags = match repository.published_versions() {
-        Ok(tags) => tags,
-        Err(error) => {
-            problems.push(build(BuildProblem::Repository(error)));
-            return Err(PublishFailure::Rejected(problems));
-        }
+    let Some(already) = check_tag(&repository, &version, &head, &mut problems) else {
+        return Err(PublishFailure::Rejected(problems));
     };
-    for existing in &tags {
-        if existing.version().cmp_precedence(&version) != std::cmp::Ordering::Equal {
-            continue;
-        }
-        if existing.version() == &version {
-            if existing.commit() == Some(&head) {
-                already = true;
-            } else {
-                problems.push(PublishProblem::TagElsewhere {
-                    tag: existing.name().to_owned(),
-                    commit: existing.commit().cloned(),
-                });
-            }
-        } else {
-            problems.push(PublishProblem::EqualPrecedence {
-                tag: existing.name().to_owned(),
-                version: existing.version().clone(),
-            });
-        }
-    }
 
     // The registry. When it registers this repository, the new tag must be
     // one it will index; that is checked now, so that a tag is never
@@ -248,6 +239,7 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
     }
     let mut published = Published {
         unit: identity,
+        units: Vec::new(),
         version,
         tag,
         provenance,
@@ -287,6 +279,341 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
     }
 }
 
+/// Publishes every unit of the catalog whose top level is `root` at the
+/// version its committed `catalog.jsonc` declares, with one tag,
+/// `v<version>`, after validating each unit of the commit at `HEAD` with its
+/// siblings as `unit check` does, under the catalog's one lockfile
+/// (**Provisional (D-53)**). The registry's index is updated when it
+/// registers this repository.
+fn publish_catalog(root: &Path, registry: &Registry) -> Result<Published, PublishFailure> {
+    let rejected = |problem| PublishFailure::Rejected(vec![problem]);
+    let build = |problem| PublishProblem::Check(Box::new(CheckProblem::Build(problem)));
+    let repository = GitRepository::open(root)
+        .map_err(|error| rejected(build(BuildProblem::Repository(error))))?;
+    let git_dir = repository
+        .git_directory()
+        .map_err(|error| rejected(build(BuildProblem::Repository(error))))?;
+    let _guard = BuildLock::acquire(&git_dir)
+        .map_err(|error| rejected(build(BuildProblem::BuildLock(error))))?;
+    match super::update::interrupted(&git_dir) {
+        Ok(None) => {}
+        Ok(Some(journal)) => {
+            return Err(rejected(build(BuildProblem::UpdateInterrupted { journal })));
+        }
+        Err(error) => return Err(rejected(build(BuildProblem::GitDirectory(error)))),
+    }
+    let Some(head) = repository
+        .head_commit()
+        .map_err(|error| rejected(build(BuildProblem::Repository(error))))?
+    else {
+        return Err(rejected(PublishProblem::NoCommit));
+    };
+
+    let mut problems = Vec::new();
+    match repository.uncommitted_paths(root) {
+        Ok(paths) if paths.is_empty() => {}
+        Ok(paths) => problems.push(PublishProblem::Uncommitted { paths }),
+        Err(error) => problems.push(build(BuildProblem::Repository(error))),
+    }
+    let catalog = match repository.read_catalog_at(&head) {
+        Ok(Some(Ok(catalog))) => Some(catalog),
+        Ok(Some(Err(invalid))) => {
+            problems.push(PublishProblem::CommittedManifest(invalid));
+            None
+        }
+        Ok(None) => {
+            problems.push(PublishProblem::NotACatalog);
+            None
+        }
+        Err(error) => {
+            problems.push(build(BuildProblem::Repository(error)));
+            None
+        }
+    };
+    let previous = match lockfile::read_published(&repository, &head) {
+        Ok(previous) => Some(previous),
+        Err(PublishedLockfileError::Read(ReadFileError::Git(error))) => {
+            problems.push(build(BuildProblem::Repository(error)));
+            None
+        }
+        Err(error) => {
+            problems.push(PublishProblem::CommittedLockfile(error));
+            None
+        }
+    };
+    let index = registry
+        .index()
+        .map_err(|error| problems.push(build(BuildProblem::Registry(error))))
+        .ok();
+    let (Some(catalog), Some(previous), Some(index)) = (catalog, previous, index) else {
+        return Err(PublishFailure::Rejected(problems));
+    };
+
+    // Each unit's committed files, as dependents read them.
+    let mut siblings = Siblings::default();
+    let mut directories = BTreeMap::new();
+    for unit in catalog.units() {
+        let identity = unit.manifest().name().clone();
+        let directory = identity.name().to_owned();
+        let unit_repository = repository.clone().for_unit(&identity);
+        let mut read =
+            |files: Result<_, ReadSrcError>, kind: fn(ReadSrcError) -> BuildProblem| match files {
+                Ok(files) => Some(files),
+                Err(ReadSrcError::Git(error)) => {
+                    problems.push(build(BuildProblem::Repository(error)));
+                    None
+                }
+                Err(error) => {
+                    problems.push(build(in_unit(&directory, kind(error))));
+                    None
+                }
+            };
+        let src = read(unit_repository.read_src(&head), BuildProblem::Src);
+        let amendments = read(
+            unit_repository.read_amendments(&head),
+            BuildProblem::Amendments,
+        );
+        let (Some(src), Some(amendments)) = (src, amendments) else {
+            continue;
+        };
+        directories.insert(identity.clone(), directory);
+        siblings.units.insert(
+            identity,
+            Sibling {
+                manifest: unit.manifest().clone(),
+                content: PublishedContent {
+                    files: src,
+                    amendments,
+                    lock: None,
+                },
+                provenance: unit.provenance().clone(),
+            },
+        );
+    }
+    if siblings.units.len() < catalog.units().len() {
+        return Err(PublishFailure::Rejected(problems));
+    }
+    // Read for the catalog's top level, the lockfile holds every unit, at
+    // this commit; the lockfile itself holds what they depend on in other
+    // repositories.
+    let previous = previous.map(|lock| {
+        UnitLock::new(
+            lock.units()
+                .iter()
+                .filter(|(identity, _)| !siblings.contains(identity))
+                .map(|(identity, locked)| (identity.clone(), locked.clone()))
+                .collect(),
+        )
+    });
+    let joint = match joint_lock(&siblings, previous.as_ref(), &index) {
+        Ok(joint) => joint,
+        Err(found) => {
+            problems.extend(found.into_iter().map(build));
+            return Err(PublishFailure::Rejected(problems));
+        }
+    };
+    for sibling in siblings.units.values_mut() {
+        if !sibling.manifest.amendments().is_empty() {
+            sibling.content.lock = Some(joint.lock.clone());
+        }
+    }
+    match &previous {
+        None => problems.push(PublishProblem::Check(Box::new(CheckProblem::NoLockfile))),
+        Some(_) if !joint.changes.is_empty() => {
+            problems.push(PublishProblem::Check(Box::new(
+                CheckProblem::LockfileStale {
+                    changes: joint.changes.clone(),
+                },
+            )));
+        }
+        Some(_) => {}
+    }
+    let mut notes = Vec::new();
+    let mut publishable = true;
+    for (identity, sibling) in &siblings.units {
+        let directory = directories.get(identity).cloned().unwrap_or_default();
+        let mut checks = Vec::new();
+        let outcome = publication_checks(
+            &Inputs {
+                manifest: &sibling.manifest,
+                src: Some(&sibling.content.files),
+                amendments: Some(&sibling.content.amendments),
+                previous: &joint.lock,
+                catalog: Some(&Joint {
+                    siblings: &siblings,
+                    lock: &joint.lock,
+                    changes: &BTreeMap::new(),
+                }),
+            },
+            true,
+            &index,
+            &mut checks,
+        );
+        publishable = publishable && outcome.is_some();
+        if let Some(outcome) = outcome {
+            notes.extend(outcome.notes);
+        }
+        problems.extend(checks.into_iter().map(|problem| {
+            PublishProblem::Check(Box::new(match problem {
+                CheckProblem::Build(problem) => CheckProblem::Build(in_unit(&directory, problem)),
+                problem => CheckProblem::InUnit {
+                    directory: directory.clone(),
+                    problem: Box::new(problem),
+                },
+            }))
+        }));
+    }
+
+    let name = catalog.catalog().name().clone();
+    let version = catalog.catalog().version().clone();
+    let tag = format!("v{version}");
+    let Some(already) = check_tag(&repository, &version, &head, &mut problems) else {
+        return Err(PublishFailure::Rejected(problems));
+    };
+    let units: Vec<UnitIdentity> = catalog
+        .units()
+        .iter()
+        .map(|unit| unit.manifest().name().clone())
+        .collect();
+    let registration = match local_reference(root) {
+        Ok(source) if !index.identities_of(&source).is_empty() => Registration::Here { source },
+        Ok(_) => match units.iter().find_map(|unit| index.units().get(unit)) {
+            Some(unit) => Registration::Elsewhere {
+                source: unit.source().clone(),
+            },
+            None => Registration::None,
+        },
+        Err(error) => {
+            problems.push(PublishProblem::Reference(error));
+            Registration::None
+        }
+    };
+    if let Registration::Here { source } = &registration {
+        match observe(&repository, &index, source) {
+            Ok(mut observed) => {
+                if !already {
+                    observed.push(ObservedTag::of_catalog(
+                        tag.clone(),
+                        version.clone(),
+                        Ok(catalog
+                            .units()
+                            .iter()
+                            .map(|unit| {
+                                ObservedVersion::new(
+                                    unit.manifest().name().clone(),
+                                    unit.provenance().clone(),
+                                )
+                            })
+                            .collect()),
+                    ));
+                }
+                if let Err(errors) = index.sync(BTreeMap::from([(source.clone(), observed)])) {
+                    problems.push(PublishProblem::Registry(errors));
+                }
+            }
+            Err(error) => problems.push(build(BuildProblem::Repository(error))),
+        }
+    }
+    if !publishable || !problems.is_empty() {
+        return Err(PublishFailure::Rejected(problems));
+    }
+
+    if !already {
+        repository
+            .create_annotated_tag(root, &tag, &format!("{name} {version}"), &head)
+            .map_err(PublishFailure::Tag)?;
+    }
+    let provenance = catalog
+        .units()
+        .first()
+        .map(|unit| unit.provenance().clone())
+        .unwrap_or_else(|| Provenance::new(head.clone(), head.clone()));
+    let mut published = Published {
+        unit: name,
+        units,
+        version,
+        tag,
+        provenance,
+        already,
+        index: IndexOutcome::NotRegistered,
+        notes,
+    };
+    let source = match registration {
+        Registration::Here { source } => source,
+        Registration::Elsewhere { source } => {
+            published.index = IndexOutcome::RegisteredElsewhere { source };
+            return Ok(published);
+        }
+        Registration::None => return Ok(published),
+    };
+    match registry.index_source(&source) {
+        Ok(Indexed::Indexed {
+            added, excluded, ..
+        }) => {
+            let indexed = published.units.iter().any(|unit| {
+                added
+                    .get(unit)
+                    .is_some_and(|versions| versions.contains(&published.version))
+            });
+            published.index = if indexed {
+                IndexOutcome::Indexed { excluded }
+            } else {
+                IndexOutcome::AlreadyIndexed { excluded }
+            };
+            Ok(published)
+        }
+        Ok(Indexed::NotRegistered) => Ok(published),
+        Err(error) => Err(PublishFailure::IndexNotUpdated {
+            published: Box::new(published),
+            error,
+        }),
+    }
+}
+
+/// Checks that the tag of `version` can be created at `head`: a version is
+/// published once, so a tag of this version at another commit, or one of
+/// equal precedence, refuses the publication. Whether the tag already
+/// points at `head`, or `None` when the tags cannot be read, which
+/// `problems` reports.
+fn check_tag(
+    repository: &GitRepository,
+    version: &Version,
+    head: &ObjectId,
+    problems: &mut Vec<PublishProblem>,
+) -> Option<bool> {
+    let tags = match repository.published_versions() {
+        Ok(tags) => tags,
+        Err(error) => {
+            problems.push(PublishProblem::Check(Box::new(CheckProblem::Build(
+                BuildProblem::Repository(error),
+            ))));
+            return None;
+        }
+    };
+    let mut already = false;
+    for existing in &tags {
+        if existing.version().cmp_precedence(version) != std::cmp::Ordering::Equal {
+            continue;
+        }
+        if existing.version() == version {
+            if existing.commit() == Some(head) {
+                already = true;
+            } else {
+                problems.push(PublishProblem::TagElsewhere {
+                    tag: existing.name().to_owned(),
+                    commit: existing.commit().cloned(),
+                });
+            }
+        } else {
+            problems.push(PublishProblem::EqualPrecedence {
+                tag: existing.name().to_owned(),
+                version: existing.version().clone(),
+            });
+        }
+    }
+    Some(already)
+}
+
 /// How the registry relates to the repository being published.
 enum Registration {
     /// It registers this repository for the unit's identity.
@@ -301,6 +628,7 @@ enum Registration {
 #[derive(Debug)]
 pub struct Published {
     unit: UnitIdentity,
+    units: Vec<UnitIdentity>,
     version: Version,
     tag: String,
     provenance: Provenance,
@@ -310,9 +638,15 @@ pub struct Published {
 }
 
 impl Published {
-    /// The unit published.
+    /// The unit published, or the catalog's name for a catalog.
     pub fn unit(&self) -> &UnitIdentity {
         &self.unit
+    }
+
+    /// The units a catalog's publication published, in the order of their
+    /// directories; empty for one unit.
+    pub fn units(&self) -> &[UnitIdentity] {
+        &self.units
     }
 
     /// The version published, as the committed manifest declares.
@@ -325,7 +659,8 @@ impl Published {
         &self.tag
     }
 
-    /// The tagged commit and its tree.
+    /// The tagged commit and its tree; for a catalog, the tree of its first
+    /// unit's directory.
     pub fn provenance(&self) -> &Provenance {
         &self.provenance
     }
@@ -456,6 +791,15 @@ pub enum PublishProblem {
     },
     /// The registry would not index the new tag.
     Registry(Vec<RegistryError<TagProblem>>),
+    /// The directory is a unit's in a catalog, whose units are published
+    /// together, from the catalog's top level.
+    InCatalogUnit {
+        /// The catalog's top level.
+        catalog: std::path::PathBuf,
+    },
+    /// The commit at `HEAD` has no `catalog.jsonc`, which the working tree
+    /// has.
+    NotACatalog,
 }
 
 impl fmt::Display for PublishProblem {
@@ -515,6 +859,15 @@ impl fmt::Display for PublishProblem {
                 }
                 Ok(())
             }
+            Self::InCatalogUnit { catalog } => write!(
+                f,
+                "this unit is in the catalog at {}, whose units are published together at the \
+                 catalog's version",
+                catalog.display()
+            ),
+            Self::NotACatalog => f.write_str(
+                "the commit at `HEAD` has no catalog.jsonc; commit it with the catalog's units",
+            ),
         }
     }
 }

@@ -39,6 +39,7 @@ use crate::domain::{
     FileTree, Manifest, ObjectId, Provenance, RelativePath, RelativePathError, UnitFile,
     UnitIdentity, Version,
 };
+pub(crate) use catalog::{CATALOG, UNITS};
 pub use catalog::{PublishedCatalog, TagContent};
 
 // Bounds on what is read from a repository, which is untrusted. Git stores

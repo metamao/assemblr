@@ -351,6 +351,9 @@ pub enum IssueKind {
     SiblingRange,
     /// `"catalog"` outside a catalog, where there are no siblings.
     SiblingOutsideCatalog,
+    /// A unit in a catalog amends a file of a sibling, which is not
+    /// supported yet.
+    SiblingAmendment,
 }
 
 impl fmt::Display for IssueKind {
@@ -424,6 +427,11 @@ impl fmt::Display for IssueKind {
             Self::SiblingOutsideCatalog => f.write_str(
                 "\"catalog\" requires a unit of the same catalog, and only a unit in a \
                  catalog's `units/` has one; give a version requirement such as \"^1.0.0\"",
+            ),
+            Self::SiblingAmendment => f.write_str(
+                "a unit in a catalog cannot amend a file of another unit of the same catalog \
+                 yet; amend a unit of another repository, or move the change into the unit \
+                 that provides the file",
             ),
         }
     }
@@ -1104,7 +1112,15 @@ impl Reader<'_> {
         let base = self
             .required(path, &fields, "base")
             .and_then(|json| self.version(&path.key("base"), json));
-        Some(AmendmentDeclaration::new(unit?, base?))
+        let unit = unit?;
+        if self
+            .in_catalog
+            .is_some_and(|in_catalog| in_catalog.is_sibling(&unit))
+        {
+            self.report(path.key("unit"), IssueKind::SiblingAmendment);
+            return None;
+        }
+        Some(AmendmentDeclaration::new(unit, base?))
     }
 }
 
