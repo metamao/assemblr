@@ -633,8 +633,8 @@ units, so that the other locked versions keep precedence and change only
 when the updated units' requirements force it (see
 [dependencies.md](dependencies.md#resolution-policy--approved)). What changed is
 reported against the complete previous lock state, and every kept version,
-named or not, must still be published with the content it was locked to;
-otherwise the update fails, as a build does. A run that changes nothing
+named or not, must still be published with the content (tree) it was
+locked to; otherwise the update fails, as a build does. A run that changes nothing
 reports that and touches no file.
 
 **Amendments** (owner decision on #100, replacing the earlier statement

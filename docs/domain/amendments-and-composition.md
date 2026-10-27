@@ -135,9 +135,12 @@ of the first amendments increment.
 - Whoever composes an amendment, a dependent unit's build or a consumer
   project, verifies the base: every lockfile entry the base depends on, the
   provider's at the declared version and each amender below's, is compared
-  with the composer's own registry record for that unit and version. If they
-  agree, the base is verified. If any differs, that is an **integrity
-  conflict**: the composition fails and changes nothing (see
+  with the composer's own registry record for that unit and version. They
+  agree when they record the same tree, the version's content identity; the
+  commit is provenance, so the same tree under another commit, as a pull
+  request's merge commit gives, agrees. If they agree, the base is verified.
+  If any tree differs, that is an **integrity conflict**: the composition
+  fails and changes nothing (see
   [registries-and-discovery.md](registries-and-discovery.md#integrity-and-snapshots--approved)).
   If a version or its content is unavailable, see **OC-9**.
 - A published amender's base is the composition at **its** locked versions.

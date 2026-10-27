@@ -31,9 +31,10 @@ use super::version::Version;
 /// The lock that records `graph`, and how it differs from `previous`, with
 /// each resolved version's provenance taken from `index`.
 ///
-/// A unit resolved to the version `previous` locks is kept, and must still
-/// be published with the content it was locked to; every one that is not
-/// is reported, sorted by identity. The changes are computed against the
+/// A unit resolved to the version `previous` locks is kept, entry and all,
+/// and must still be published with the tree it was locked to; every one
+/// that is not is reported, sorted by identity. A different commit with the
+/// same tree is not a change. The changes are computed against the
 /// whole of `previous`, whatever lock the resolver was given.
 pub fn update_lock(
     previous: &UnitLock,
@@ -58,7 +59,7 @@ pub fn update_lock(
         };
         match previous.units().get(identity) {
             Some(locked) if locked.version() == version => {
-                if locked.provenance() != published {
+                if locked.provenance().tree() != published.tree() {
                     errors.push(LockError::ContentChanged {
                         unit: identity.clone(),
                         version: version.clone(),
@@ -67,6 +68,10 @@ pub fn update_lock(
                     });
                     continue;
                 }
+                // The same content committed again, as a merge commit is,
+                // is the same locked version: the entry is kept as is.
+                units.insert(identity.clone(), locked.clone());
+                continue;
             }
             Some(locked) => {
                 changes.insert(
@@ -351,8 +356,19 @@ mod tests {
     }
 
     #[test]
-    fn a_kept_version_whose_content_changed_is_rejected_even_when_unlocked() {
+    fn a_kept_version_committed_again_with_the_same_tree_keeps_its_entry() {
         let previous = lock(&[("@acme/node", "1.1.0", provenance('9', 'b'))]);
+        let graph = graph("^1", &UnitLock::default());
+
+        let (lock, changes) = update_lock(&previous, &graph, &index()).unwrap();
+
+        assert_eq!(lock, previous);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn a_kept_version_whose_content_changed_is_rejected_even_when_unlocked() {
+        let previous = lock(&[("@acme/node", "1.1.0", provenance('2', 'd'))]);
         let graph = graph("^1", &UnitLock::default());
 
         let errors = update_lock(&previous, &graph, &index()).unwrap_err();
@@ -362,7 +378,7 @@ mod tests {
             [LockError::ContentChanged {
                 unit: identity("@acme/node"),
                 version: version("1.1.0"),
-                locked: provenance('9', 'b'),
+                locked: provenance('2', 'd'),
                 published: provenance('2', 'b'),
             }]
         );

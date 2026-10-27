@@ -10,7 +10,8 @@
 //!
 //! A published version's lockfile also identifies the bases of its
 //! amendments: the entry for an amended provider records the base version
-//! with the commit and tree it was published with. [`published_amendments`]
+//! with the commit and tree it was published with. The tree is what is
+//! verified; the commit is provenance. [`published_amendments`]
 //! checks that a published version's declarations, copies, and lockfile
 //! agree, and [`verify_bases`] checks each base against the composer's own
 //! registry record (see `docs/domain/amendments-and-composition.md`).
@@ -378,8 +379,10 @@ impl std::error::Error for PublishedAmendmentError {}
 /// Verifies the bases of the amendments that `manifest`, the manifest of
 /// the published version `version` of `amender`, declares: the entry of the
 /// amender's published lockfile `lock` for each provider at the declared
-/// base must identify the same commit and tree as `index` records for that
-/// provider and version. A disagreement is an integrity conflict. A base
+/// base must identify the same tree as `index` records for that provider and
+/// version. A different tree is an integrity conflict. The commit is
+/// provenance only: a version committed again with the same content, as a
+/// pull request's merge commit is, still agrees. A base
 /// the index does not record is not reported: the provider then resolves
 /// to another version, which the composition reports. Errors are sorted by
 /// path.
@@ -438,7 +441,7 @@ pub fn verify_bases<'m>(
             let Some(recorded) = recorded(unit, &locked.version) else {
                 continue;
             };
-            if locked.provenance != recorded {
+            if locked.provenance.tree() != recorded.tree() {
                 errors.push(BaseIntegrityError {
                     amender: amender.clone(),
                     version: version.clone(),
@@ -947,6 +950,21 @@ mod tests {
                 &version("0.1.0"),
                 &manifest,
                 &agreeing,
+                &index,
+                |_, _| None,
+            ),
+            []
+        );
+
+        // The same tree under another commit, as a merge commit gives, is
+        // the same content.
+        let recommitted = lock(&[("@acme/node", "1.0.0", provenance('9', '2'))]);
+        assert_eq!(
+            verify_bases(
+                &identity("@acme/app"),
+                &version("0.1.0"),
+                &manifest,
+                &recommitted,
                 &index,
                 |_, _| None,
             ),

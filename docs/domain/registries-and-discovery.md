@@ -223,7 +223,7 @@ For unit repositories, the checks are classified as follows:
   [amendments-and-composition.md](amendments-and-composition.md#base-identity-and-verification)).
   A version that fails any of these is excluded and reported, like invalid
   `src/` content. Whether the provider provides the amended path at the base,
-  and whether the base's commit and tree are the ones this registry records,
+  and whether the base's tree is the one this registry records,
   depend on other sources and on the order they are synchronized in, so they
   are checked by the build that composes the amendment, not at index time.
 - **Source-level**: a repository that cannot be read; valid versions that
@@ -577,6 +577,13 @@ Rules:
   composition, so a change to any file in the repository, such as a README,
   gives a different identity (see
   [ADR 0006](../adr/0006-reading-git-repositories.md)).
+- Lock state is verified against the registry by content identity: a locked
+  version agrees with the registry's record when both name the same tree.
+  The locked commit is kept as provenance; a different commit with the same
+  tree, as a pull request's merge commit gives, is the same content and
+  leaves the lock unchanged. Moving a version's tag is still an integrity
+  conflict at registration and synchronization, whatever tree the new
+  commit holds.
 - Snapshots and provenance preserve what is needed to reconstruct the exact
   historical files that amendments are based on (see
   [amendments-and-composition.md](amendments-and-composition.md#amendments--approved)).
