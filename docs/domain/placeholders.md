@@ -61,8 +61,9 @@ with any of them:
   description;
 - a token in `ignore` that a unit of the resolved graph declares in
   `replace`: it would hide the placeholder from consumers;
-- an entry of `replace` that no file of the unit contains, or of `ignore`
-  that no file holds as a token (delimited as below).
+- an entry of `replace` or `ignore` that does not appear in any file of the
+  unit (see [report details](#report-details--provisional-d-50) for what
+  appearing means).
 
 A token of the placeholder form in the unit's files, delimited as an
 identifier (by characters other than ASCII letters, digits, and `_`), is
@@ -76,8 +77,8 @@ how many files, in name order.
 
 ## Consumer report — Approved
 
-After `compose`, `add`, `update`, and `remove`, after `compose --continue`
-finishes a composition, and in `status`, Assemblr reports the declared placeholders that remain in the project's managed
+After `compose`, `add`, `update`, and `remove`, and in `status`, Assemblr
+reports the declared placeholders that remain in the project's managed
 files, with each declaration's description and every location. The report
 is informational: it never stops a composition and never changes an exit
 code. It is hidden while a composition waits for the consumer or was
@@ -113,11 +114,17 @@ interrupted, as `status` hides edits then.
   `compose` and `status` always agree.
 - The text report lists one `path:line` per row, a line that holds the
   placeholder twice once; `--json` lists every column.
+- `compose --continue` prints the report when it finishes a composition,
+  since it was hidden while the composition waited. When the registry
+  cannot be read, the report is left out and `status` says why.
+- A `replace` entry appears in a file wherever its text occurs, as the
+  report finds it; an `ignore` entry only where it is a token, delimited as
+  an identifier, the only place where ignoring it changes anything.
 
 ## Output — Approved
 
-`compose`, `add`, `update`, `remove`, and `compose --continue` print, after
-their summary and only when a placeholder remains:
+`compose`, `add`, `update`, and `remove` print, after their summary and only
+when a placeholder remains:
 
 ```text
 2 placeholders to replace, in 3 files:

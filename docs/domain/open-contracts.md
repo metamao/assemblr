@@ -720,7 +720,9 @@ How the status of a statement affects implementation:
   (owner decision on #124).
 - **Open detail:** **Provisional (D-50):** `status` derives the report with
   no stored state; only managed files whose composed content holds a
-  declared placeholder are reported; the text lists one `path:line` per row.
+  declared placeholder are reported; the text lists one `path:line` per row;
+  `compose --continue` prints the report; an `ignore` entry is used only
+  where it is a token.
   Deferred: a way for the consumer to silence a placeholder, and a
   `unit publish` note when a version removes or renames one.
 - **Origin:** #124
