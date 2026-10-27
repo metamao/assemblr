@@ -101,7 +101,10 @@ that settings such as the default branch name are the author's. When the
 directory is the top level of an existing repository, that repository is
 adopted. When it lies inside a repository whose top level holds
 `manifest.jsonc`, the command refuses, changing nothing: a repository holds
-exactly one unit. Inside any other repository, such as a home directory
+exactly one unit. Inside a catalog's repository, a directory that is not
+one of its `units/` is refused the same way, with a hint to run the
+command at the catalog's top level (**Provisional (D-61)**). Inside any
+other repository, such as a home directory
 kept in Git, the unit gets its own repository, nested in the enclosing one,
 and the result says so. A bare repository and a linked worktree, whose
 `.git` is a file, are refused: a unit's repository has a working tree with

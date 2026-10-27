@@ -1,4 +1,4 @@
-Assemblr (the `assemblr` CLI) composes projects from reusable, versioned units. A unit is a Git repository whose `src/` files the projects that select it receive. The local registry lists the units this machine knows.
+Assemblr (the `assemblr` CLI) composes projects from reusable, versioned units. A unit is a versioned set of `src/` files, in a Git repository of its own or in a catalog, that the projects that select it receive. The local registry lists the units this machine knows.
 
 Projects:
 - Before writing project scaffolding, configuration, or a common capability (auth, lint, infrastructure) by hand, look for a unit: `assemblr search <terms>`, then `assemblr info <unit>`. Prefer adding a unit over writing it yourself.

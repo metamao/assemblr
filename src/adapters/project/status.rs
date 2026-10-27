@@ -17,8 +17,8 @@ use std::path::Path;
 use super::lockfile::{self, LOCKFILE, Lockfile};
 use super::store::Store;
 use super::{
-    ComposeProblem, CurrentFile, DECLARATION, MANIFEST, Origin, Planned, plan, read_current,
-    read_text, remaining_placeholders, snapshot_of,
+    ComposeProblem, CurrentFile, DECLARATION, Origin, Planned, plan, read_current, read_text,
+    remaining_placeholders, snapshot_of,
 };
 use crate::adapters::build::{BuildProblem, newest_allowed};
 use crate::adapters::manifest::read_project;
@@ -35,8 +35,8 @@ use crate::domain::{
 /// from being planned is reported in the status instead, with everything
 /// else that could be read.
 pub fn project_status(root: &Path, registry: &Registry) -> Result<ProjectStatus, ComposeProblem> {
-    if root.join(MANIFEST).exists() {
-        return Err(ComposeProblem::UnitRepository(root.to_owned()));
+    if let Some(file) = super::unit_file(root) {
+        return Err(ComposeProblem::UnitRepository(root.to_owned(), file));
     }
     let declaration_path = root.join(DECLARATION);
     if std::fs::symlink_metadata(&declaration_path).is_err() {

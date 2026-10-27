@@ -3,7 +3,9 @@
 - **Status:** Accepted. Extended by [0008](0008-unit-build.md), which also
   reads a unit's working tree and index, for `unit build`, and by
   [0013](0013-unit-check-and-publish.md), whose tag creation is the one
-  command that runs with the author's own configuration.
+  command that runs with the author's own configuration. Point 7 narrowed
+  by [0039](0039-catalog-repositories.md): a unit of a catalog has the tree
+  of its directory as its content identity.
 - **Date:** 2026-10-20
 
 ## Context

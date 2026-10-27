@@ -44,7 +44,8 @@ pub(super) enum RegistryCommand {
     },
     /// Remove a unit's registration
     ///
-    /// No repository is changed.
+    /// No repository is changed. A unit of a catalog is removed with every
+    /// other unit of the catalog, since they are registered together.
     #[command(after_long_help = "Examples:\n  assemblr registry remove @acme/web")]
     Remove {
         /// The unit, like `@acme/web`

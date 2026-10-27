@@ -70,7 +70,11 @@ or anything else at that path, is kept as it is, and the result says so.
 be written. An existing declaration is never overwritten: a readable one means
 the project is initialized already and the command changes nothing; one
 Assemblr cannot read is an error. A directory holding `manifest.jsonc` is a
-unit's repository, not a consumer project, and is refused.
+unit's repository, not a consumer project, and is refused. So is a
+catalog's top level, holding `catalog.jsonc` beside a `units/` directory
+and no `assemblr.jsonc`, by `init`, `compose`, and `status` alike; a
+project that holds its own `catalog.jsonc` keeps working
+(**Provisional (D-61)**).
 
 ## Project configuration — Approved
 

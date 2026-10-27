@@ -62,6 +62,9 @@ use crate::domain::{
 pub const DECLARATION: &str = "assemblr.jsonc";
 /// A unit's manifest, which a consumer project's directory must not hold.
 const MANIFEST: &str = "manifest.jsonc";
+/// A catalog's file, which a consumer project's directory must not hold
+/// either.
+const CATALOG: &str = "catalog.jsonc";
 /// Where a new lockfile is written before it replaces the old one.
 const LOCK_STAGING: &str = ".assemblr-lock.json.new";
 /// The text `init` writes.
@@ -92,8 +95,8 @@ pub fn init_project(directory: &Path) -> Result<ProjectInitialized, InitProjectF
             });
         }
     };
-    if directory.join(MANIFEST).exists() {
-        return Err(InitProjectFailure::UnitRepository(directory));
+    if let Some(file) = unit_file(&directory) {
+        return Err(InitProjectFailure::UnitRepository(directory, file));
     }
     let declaration = directory.join(DECLARATION);
     match fs::symlink_metadata(&declaration) {
@@ -215,8 +218,9 @@ pub enum InitProjectFailure {
     },
     /// The path exists and is not a directory.
     NotADirectory(PathBuf),
-    /// The directory holds a unit's manifest.
-    UnitRepository(PathBuf),
+    /// The directory holds a unit's manifest, or a catalog's file: the
+    /// directory and that file's name.
+    UnitRepository(PathBuf, &'static str),
     /// `assemblr.jsonc` is a directory, a symbolic link, or another
     /// special file.
     NotAFile(PathBuf),
@@ -236,11 +240,12 @@ impl fmt::Display for InitProjectFailure {
             Self::NotADirectory(path) => {
                 write!(f, "{} exists and is not a directory", path.display())
             }
-            Self::UnitRepository(path) => write!(
+            Self::UnitRepository(path, file) => write!(
                 f,
-                "{} holds `manifest.jsonc`, so it is a unit's repository, not a consumer \
-                 project; a unit is initialized with `assemblr unit init`",
-                path.display()
+                "{} holds `{file}`, so it is {}, not a consumer project; a unit is \
+                 initialized with `assemblr unit init`",
+                path.display(),
+                repository_kind(file)
             ),
             Self::NotAFile(path) => write!(f, "{} is not a regular file", path.display()),
             Self::InvalidDeclaration { path, error } => write!(
@@ -374,8 +379,11 @@ fn compose_with(
     let declaration_path = root.join(DECLARATION);
     // A unit's directory is told apart first: the author is in the wrong
     // flow, not in the wrong directory.
-    if root.join(MANIFEST).exists() {
-        return Err(rejected(ComposeProblem::UnitRepository(root.to_owned())));
+    if let Some(file) = unit_file(root) {
+        return Err(rejected(ComposeProblem::UnitRepository(
+            root.to_owned(),
+            file,
+        )));
     }
     if fs::symlink_metadata(&declaration_path).is_err() {
         return Err(rejected(ComposeProblem::NoDeclaration(declaration_path)));
@@ -2358,14 +2366,44 @@ impl fmt::Display for ComposeFailure {
 
 impl std::error::Error for ComposeFailure {}
 
+/// The file that makes `directory` a unit's repository or a catalog's top
+/// level, where units are authored and a consumer project never is.
+///
+/// `catalog.jsonc` is a common name, which a project may hold as its own
+/// file, even one a unit delivers. It marks a catalog only beside a
+/// `units/` directory and without a project's `assemblr.jsonc`, so a
+/// project that holds such a file keeps composing.
+pub(crate) fn unit_file(directory: &Path) -> Option<&'static str> {
+    if directory.join(MANIFEST).exists() {
+        Some(MANIFEST)
+    } else if directory.join(CATALOG).is_file()
+        && directory.join("units").is_dir()
+        && fs::symlink_metadata(directory.join(DECLARATION)).is_err()
+    {
+        Some(CATALOG)
+    } else {
+        None
+    }
+}
+
+/// What a directory holding `file`, as [`unit_file`] finds it, is.
+fn repository_kind(file: &str) -> &'static str {
+    if file == CATALOG {
+        "a catalog of units"
+    } else {
+        "a unit's repository"
+    }
+}
+
 /// A problem that rejects a composition.
 #[derive(Debug)]
 pub enum ComposeProblem {
     /// There is no `assemblr.jsonc`: the directory is not a project's top
     /// level.
     NoDeclaration(PathBuf),
-    /// The directory holds a unit's manifest.
-    UnitRepository(PathBuf),
+    /// The directory holds a unit's manifest, or a catalog's file: the
+    /// directory and that file's name.
+    UnitRepository(PathBuf, &'static str),
     /// A file could not be read or written.
     Io {
         /// The file.
@@ -2531,10 +2569,11 @@ impl fmt::Display for ComposeProblem {
                 Some(directory) => write!(f, "no {DECLARATION} in {}", directory.display()),
                 None => write!(f, "{} does not exist", path.display()),
             },
-            Self::UnitRepository(path) => write!(
+            Self::UnitRepository(path, file) => write!(
                 f,
-                "{} holds `manifest.jsonc`, so it is a unit's repository, not a consumer project",
-                path.display()
+                "{} holds `{file}`, so it is {}, not a consumer project",
+                path.display(),
+                repository_kind(file)
             ),
             Self::Io { path, error } => write!(f, "could not use {}: {error}", path.display()),
             Self::InvalidDeclaration { path, error } => write!(f, "{}: {error}", path.display()),

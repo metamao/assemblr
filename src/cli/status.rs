@@ -72,7 +72,10 @@ pub(super) fn run(args: &StatusArgs) -> ExitCode {
 /// changes nothing, so there is no note saying so.
 fn diagnosis(problem: &ComposeProblem, root: &Path) -> Diagnosis {
     match problem {
-        ComposeProblem::UnitRepository(_) => {
+        ComposeProblem::UnitRepository(_, "catalog.jsonc") => {
+            Diagnosis::hint("in a catalog, `assemblr unit check` reports what is wrong")
+        }
+        ComposeProblem::UnitRepository(..) => {
             Diagnosis::hint("in a unit's repository, `assemblr unit check` reports what is wrong")
         }
         _ => match problem_advice(problem, root) {

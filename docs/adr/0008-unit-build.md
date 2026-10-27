@@ -1,6 +1,8 @@
 # 0008: Unit builds: working-tree reading, the unit lockfile, and publishing `build/`
 
-- **Status:** Accepted
+- **Status:** Accepted. Extended by
+  [0039](0039-catalog-repositories.md), where a catalog's units build from
+  one working tree under one lockfile.
 - **Date:** 2026-10-20
 
 ## Context

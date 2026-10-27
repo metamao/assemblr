@@ -64,7 +64,10 @@ pub(super) fn init(args: &InitArgs) -> ExitCode {
         Err(failure) => {
             let diagnosis = Diagnosis::note("nothing was changed");
             let diagnosis = match &failure {
-                InitProjectFailure::UnitRepository(_) => diagnosis
+                InitProjectFailure::UnitRepository(_, "catalog.jsonc") => {
+                    diagnosis.advise("run `assemblr init` in a directory outside the catalog")
+                }
+                InitProjectFailure::UnitRepository(..) => diagnosis
                     .advise("run `assemblr init` in a directory that is not a unit's repository"),
                 _ => diagnosis,
             };
@@ -653,7 +656,12 @@ fn diagnosis(failure: &ComposeFailure, root: &Path) -> Diagnosis {
 /// advice to give.
 pub(super) fn problem_advice(problem: &ComposeProblem, root: &Path) -> Option<String> {
     match problem {
-        ComposeProblem::UnitRepository(_) => Some(
+        ComposeProblem::UnitRepository(_, "catalog.jsonc") => Some(
+            "unit commands run here, for the catalog's units; a project is created in another \
+             directory with `assemblr init`"
+                .to_owned(),
+        ),
+        ComposeProblem::UnitRepository(..) => Some(
             "unit commands run here, and a dependency is added with `assemblr unit add <UNIT>`; \
              a project is created in another directory with `assemblr init`"
                 .to_owned(),

@@ -144,6 +144,13 @@ pub fn init_unit(
                     directory,
                     top_level,
                 });
+            } else if top_level.join(CATALOG).exists() {
+                // Inside a catalog, but not in its `units/`: a catalog's
+                // units are its `units/<name>`, never nested elsewhere.
+                return Err(InitFailure::InsideCatalog {
+                    directory,
+                    top_level,
+                });
             } else {
                 // Inside some other repository, such as a home directory
                 // kept in Git: the unit gets its own, nested repository.
@@ -680,6 +687,14 @@ pub enum InitFailure {
         /// The top level of the repository it is in.
         top_level: PathBuf,
     },
+    /// The directory is inside a catalog's repository, but not one of its
+    /// `units/`.
+    InsideCatalog {
+        /// The directory.
+        directory: PathBuf,
+        /// The catalog's top level.
+        top_level: PathBuf,
+    },
     /// The directory is in a bare repository.
     Bare(PathBuf),
     /// The directory is the top level of a linked worktree, whose `.git` is
@@ -793,6 +808,16 @@ impl fmt::Display for InitFailure {
                 f,
                 "{} is inside the unit repository at {}; a repository holds exactly one unit, \
                  at its top level",
+                directory.display(),
+                top_level.display()
+            ),
+            Self::InsideCatalog {
+                directory,
+                top_level,
+            } => write!(
+                f,
+                "{} is inside the catalog at {}, outside its units/; a catalog's units go in \
+                 units/, one directory each",
                 directory.display(),
                 top_level.display()
             ),

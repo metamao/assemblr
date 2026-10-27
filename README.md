@@ -7,8 +7,9 @@ A unit is a reusable, opinionated part of a project, built the way its
 author thinks it should be done. It can be a whole starting point, such as
 a React web app, a Flutter mobile app, or a Rust CLI. It can also be one
 piece: a Dockerfile, a CI pipeline, a Terraform cloud setup, or your team's
-lint rules. Each unit lives in its own Git repository and has its own
-versions.
+lint rules. Each unit lives in a Git repository and has versions: in a
+repository of its own, or published together with other units in a
+catalog.
 
 **Assemblr works with any technology.** A unit is just files, so any
 language, framework, cloud, or tool works. Assemblr never needs to know
