@@ -491,9 +491,9 @@ impl GitRepository {
         Ok(versions)
     }
 
-    /// The unit's tree at `commit` and the manifest in it, or why it has no
-    /// valid manifest: the root tree, or the unit's directory where the
-    /// commit is a catalog.
+    /// The commit's root tree, the unit's content identity, and the manifest
+    /// at `commit`, read from the unit's directory where the commit is a
+    /// catalog, or why it has no valid manifest.
     fn read_manifest(
         &self,
         objects: &mut Objects<'_>,

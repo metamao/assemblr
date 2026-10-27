@@ -3,10 +3,12 @@
 //! version (see `docs/domain/units.md`).
 //!
 //! A commit is a catalog when its root has `catalog.jsonc`. There, a unit's
-//! manifest, files, and tree are those of its directory, `units/<name>`, and
-//! its manifest is read by the catalog's rules (see
-//! [`read_catalog_manifest`]). The lockfile stays at the root, one for the
-//! whole catalog.
+//! manifest and files are those of its directory, `units/<name>`, and its
+//! manifest is read by the catalog's rules (see [`read_catalog_manifest`]).
+//! The lockfile stays at the root, one for the whole catalog. A unit's
+//! content identity is the commit's root tree, as for a unit outside a
+//! catalog, since what its composition depends on, such as the lockfile,
+//! lies outside its directory (owner decision of 2026-10-27).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,7 +22,7 @@ use crate::adapters::manifest::{InCatalog, read_catalog, read_catalog_manifest};
 use crate::domain::{Catalog, ObjectId, Provenance, UnitIdentity, Version};
 
 /// A sibling of a unit in a catalog: its identity, the catalog's version,
-/// and the commit with the sibling's directory's tree.
+/// and the commit with its root tree, the sibling's content identity.
 pub(crate) type Sibling = (UnitIdentity, Version, Provenance);
 
 /// A catalog's file at the root of the repository.
@@ -70,13 +72,14 @@ impl PublishedCatalog {
     }
 
     /// Its units, in the order of their directories, each with the
-    /// commit's provenance and its directory's tree.
+    /// commit's provenance and its root tree.
     pub fn units(&self) -> &[PublishedVersion] {
         &self.units
     }
 }
 
-/// The directory a unit is read from at a commit: its tree and entries, and
+/// The directory a unit is read from at a commit: the commit's root tree,
+/// the unit's content identity, the entries of the unit's directory, and
 /// the catalog when the commit is one, with the names of its unit
 /// directories.
 pub(super) struct UnitRoot {
@@ -135,7 +138,7 @@ impl GitRepository {
         };
         let directories = at.directories();
         Ok(Ok(UnitRoot {
-            tree: id.clone(),
+            tree,
             entries,
             catalog: Some((at.catalog, directories)),
         }))
@@ -206,7 +209,7 @@ impl GitRepository {
             };
             units.push(PublishedVersion {
                 manifest,
-                provenance: Provenance::new(commit.clone(), id.clone()),
+                provenance: Provenance::new(commit.clone(), tree.clone()),
             });
         }
         Ok(Some(Ok(PublishedCatalog {
@@ -229,7 +232,7 @@ impl GitRepository {
     }
 
     /// The other units of the catalog at `commit`, each at the catalog's
-    /// version with the commit and its directory's tree, or `None` when
+    /// version with the commit and its root tree, or `None` when
     /// the commit is not a valid catalog. Only trees and `catalog.jsonc`
     /// are read. A catalog's lockfile locks what its units depend on in
     /// other repositories; their siblings are these.
@@ -246,7 +249,7 @@ impl GitRepository {
         };
         objects.finish()?;
         let mut siblings = Vec::new();
-        for (directory, id) in &at.units {
+        for directory in at.units.keys() {
             if self.unit.as_deref() == Some(directory.as_str()) {
                 continue;
             }
@@ -256,7 +259,7 @@ impl GitRepository {
             siblings.push((
                 identity,
                 at.catalog.version().clone(),
-                Provenance::new(commit.clone(), id.clone()),
+                Provenance::new(commit.clone(), tree.clone()),
             ));
         }
         Ok(Some(siblings))

@@ -154,8 +154,11 @@ assemblr-lock.json    the catalog's one lockfile
   the catalog does not have (**Provisional (D-55)**). Units of other
   repositories are required with ranges as usual.
 - One tag, `v<version>`, publishes every unit at the catalog's version.
-  Each unit's content identity is the tree of its directory, so a version
-  whose unit is unchanged keeps that unit's tree.
+  Each unit's content identity is the root tree of the tagged commit, as
+  for a unit in its own repository: what composes a unit, such as the
+  catalog's lockfile, which fixes the bases of its amendments, lies outside
+  its directory (owner decision of 2026-10-27, revising the directory's
+  tree of the adopted design).
 - The catalog has one lockfile, at its root, for what its units depend on
   in other repositories. Read for one of its units, a published lock also
   holds the unit's siblings at the catalog's version and that commit.
