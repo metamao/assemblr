@@ -147,15 +147,23 @@ fn init(args: &InitArgs) -> ExitCode {
     ) {
         Ok(initialized) => {
             println!("{}", describe_initialized(&initialized));
+            let in_catalog = matches!(initialized.git(), GitOutcome::InCatalog { .. });
             let enter = match &args.directory {
                 Some(directory) if directory.as_os_str() == "." => String::new(),
                 Some(directory) => format!("`cd {}`, then ", directory.display()),
+                None if in_catalog => format!("`cd units/{}`, then ", args.identity.name()),
                 None => format!("`cd {}`, then ", args.identity.name()),
             };
             let fill = scaffold_to_fill(initialized.readme(), initialized.agents());
+            let dependencies = if in_catalog {
+                "declare dependencies in manifest.jsonc, with \"catalog\" for a unit of the \
+                 same catalog"
+            } else {
+                "add dependencies with `assemblr unit add <unit>`"
+            };
             println!(
-                "Next: {enter}add files under src/, add dependencies with `assemblr unit add \
-                 <unit>`, and run `assemblr unit build`.{fill}"
+                "Next: {enter}add files under src/, {dependencies}, and run `assemblr unit \
+                 build`.{fill}"
             );
             ExitCode::SUCCESS
         }
@@ -901,15 +909,38 @@ fn check() -> ExitCode {
     }
 }
 
-/// Advice for a problem a check or a publication found, for the command
-/// `command`.
-fn check_advice(problem: &CheckProblem, root: &Path, command: &str) -> Option<String> {
-    Some(match problem {
-        CheckProblem::Build(BuildProblem::Manifest(ManifestFileError::Missing { .. })) => format!(
+/// Advice for a manifest missing at `path` when `command` ran in `root`:
+/// in a catalog, every directory of `units/` is a unit, so its manifest is
+/// added or the directory removed.
+fn missing_manifest_advice(path: &Path, root: &Path, command: &str) -> String {
+    let unit = path.parent().filter(|unit| {
+        unit.parent()
+            .is_some_and(|units| units.file_name() == Some("units".as_ref()))
+            && locate_unit(unit) != Location::Unit
+    });
+    match unit.and_then(|unit| unit.file_name()) {
+        Some(directory) => {
+            let directory = directory.to_string_lossy();
+            format!(
+                "every directory of units/ is a unit: run `assemblr unit init @<owner>/{directory}` \
+                 at the catalog's top level to add its manifest, or remove units/{directory}"
+            )
+        }
+        None => format!(
             "{} is not a unit repository's top level; run `assemblr unit {command}` in the \
              directory that holds `manifest.jsonc`",
             root.display()
         ),
+    }
+}
+
+/// Advice for a problem a check or a publication found, for the command
+/// `command`.
+fn check_advice(problem: &CheckProblem, root: &Path, command: &str) -> Option<String> {
+    Some(match problem {
+        CheckProblem::Build(BuildProblem::Manifest(ManifestFileError::Missing { path })) => {
+            missing_manifest_advice(path, root, command)
+        }
         CheckProblem::Build(problem) => return advice(problem, root),
         CheckProblem::NoLockfile | CheckProblem::LockfileStale { .. } if command == "publish" => {
             "run `assemblr unit build`, which writes the lockfile, then commit it and publish \
@@ -1228,11 +1259,9 @@ const DELETING_THE_LOCKFILE: &str = "deleting assemblr-lock.json is not a repair
 /// Advice for the first problem that has one.
 fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
     Some(match problem {
-        BuildProblem::Manifest(ManifestFileError::Missing { .. }) => format!(
-            "{} is not a unit repository's top level; run `assemblr unit build` in the \
-             directory that holds `manifest.jsonc`",
-            root.display()
-        ),
+        BuildProblem::Manifest(ManifestFileError::Missing { path }) => {
+            missing_manifest_advice(path, root, "build")
+        }
         BuildProblem::InUnit { problem, .. } => return advice(problem, root),
         BuildProblem::CatalogPending { directory, .. } => format!(
             "run `assemblr unit build` in units/{directory}, which creates the copies and \

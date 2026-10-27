@@ -510,3 +510,37 @@ fn removing_a_unit_of_a_catalog_removes_every_unit_of_it() {
     assert!(!list.contains("@acme/a"), "{list}");
     assert!(list.contains("@acme/base"), "{list}");
 }
+
+#[cfg(unix)]
+#[test]
+fn units_behind_a_symbolic_link_are_refused() {
+    let fixture = Fixture::new("units-link");
+    let catalog = fixture.three_units();
+    let outside = fixture.dir.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::rename(catalog.join("units"), outside.join("units")).unwrap();
+    std::os::unix::fs::symlink(outside.join("units"), catalog.join("units")).unwrap();
+    let err = build_error(&fixture, &catalog);
+    assert!(err.contains("never behind a symbolic link"), "{err}");
+    assert!(!outside.join("units/a/build").exists());
+}
+
+#[test]
+fn a_directory_of_units_without_a_manifest_is_explained() {
+    let fixture = Fixture::new("no-manifest");
+    let catalog = fixture.three_units();
+    fs::remove_file(catalog.join("units/c/manifest.jsonc")).unwrap();
+    let err = build_error(&fixture, &catalog);
+    assert!(err.contains("every directory of units/ is a unit"), "{err}");
+}
+
+#[test]
+fn unit_init_at_a_catalog_says_where_the_unit_is() {
+    let fixture = Fixture::new("init-next");
+    let catalog = fixture.catalog("1.0.0");
+    let out = stdout(&succeeds(
+        fixture.run(&catalog, &["unit", "init", "@acme/a"]),
+    ));
+    assert!(out.contains("`cd units/a`"), "{out}");
+    assert!(!out.contains("unit add"), "{out}");
+}

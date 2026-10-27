@@ -472,6 +472,13 @@ fn open(root: &Path, registry: &Registry) -> Result<Opened, Vec<BuildProblem>> {
         .map_err(|error| problems.push(BuildProblem::Repository(error)))
         .unwrap_or_default();
     let units_path = root.join(UNITS);
+    // `units/` itself is a real directory: a link would read units, and
+    // write their builds, outside the repository.
+    if let Ok(metadata) = fs::symlink_metadata(&units_path) {
+        if !metadata.is_dir() {
+            return Err(vec![BuildProblem::UnitsNotADirectory { path: units_path }]);
+        }
+    }
     let mut directories = BTreeSet::new();
     for (name, directory) in entries {
         if directory {

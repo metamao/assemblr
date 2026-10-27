@@ -1685,6 +1685,11 @@ pub enum BuildProblem {
         /// The entry.
         path: PathBuf,
     },
+    /// A catalog's `units/` is a symbolic link or not a directory.
+    UnitsNotADirectory {
+        /// Its `units/`.
+        path: PathBuf,
+    },
     /// A catalog has no unit directory under `units/`.
     NoUnits {
         /// Its `units/`.
@@ -1842,6 +1847,12 @@ impl fmt::Display for BuildProblem {
             Self::NotAUnitDirectory { path } => write!(
                 f,
                 "{} is not a directory: each entry of a catalog's units/ is a unit's directory",
+                path.display()
+            ),
+            Self::UnitsNotADirectory { path } => write!(
+                f,
+                "{} is not a directory: a catalog's units are directories in its own units/, \
+                 never behind a symbolic link",
                 path.display()
             ),
             Self::NoUnits { path } => write!(
