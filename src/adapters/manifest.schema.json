@@ -3,7 +3,7 @@
   "title": "Assemblr unit manifest",
   "description": "Editor assistance for manifest.jsonc. Assemblr's own validation is authoritative: rules a schema cannot express, such as cross-field consistency, are still enforced by Assemblr. This file is written by `assemblr unit init`; run it again after upgrading Assemblr to refresh it.",
   "type": "object",
-  "required": ["name", "version", "description"],
+  "required": ["name", "description"],
   "additionalProperties": false,
   "properties": {
     "$schema": {
@@ -16,7 +16,7 @@
     },
     "version": {
       "$ref": "#/definitions/version",
-      "description": "The unit's exact SemVer version. Publication tags it as `v<version>`."
+      "description": "The unit's exact SemVer version, required outside a catalog. Publication tags it as `v<version>`. A unit in a catalog has none: it is published at the catalog's version."
     },
     "description": {
       "$ref": "#/definitions/text",
@@ -24,12 +24,12 @@
     },
     "dependencies": {
       "type": "object",
-      "description": "The units this unit composes, by identity, each with a SemVer requirement such as `^1.2`.",
+      "description": "The units this unit composes, by identity, each with a SemVer requirement such as `^1.2`, or, for another unit of the same catalog, `\"catalog\"`.",
       "propertyNames": { "$ref": "#/definitions/identity" },
       "additionalProperties": {
         "type": "string",
         "minLength": 1,
-        "description": "A SemVer requirement, such as `^1.2`, `~1.4`, or `=2.0.0`."
+        "description": "A SemVer requirement, such as `^1.2`, `~1.4`, or `=2.0.0`, or `\"catalog\"`: another unit of the same catalog, at the catalog's version."
       }
     },
     "placeholders": {

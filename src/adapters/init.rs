@@ -15,17 +15,29 @@
 //! before it changes anything. A directory inside a repository that is not a
 //! unit's, such as a home directory kept in Git, gets its own nested
 //! repository, as `git init` would give it.
+//!
+//! In a catalog, a unit is a directory of the catalog's `units/`, in the
+//! catalog's repository (see `docs/domain/units.md`). There the scaffold is
+//! the same except for the repository, which is the catalog's, and the
+//! manifest, which declares no version: it is the catalog's. The unit is
+//! named after its directory, with the catalog's owner. Without a
+//! directory, `unit init` at a catalog's top level puts the unit in
+//! `units/<name>`.
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use super::git::{Discovered, GitError, discover_repository, init_repository};
-use super::manifest::{ReadManifestError, read_manifest};
+use std::collections::BTreeSet;
+
+use super::git::{CATALOG, Discovered, GitError, UNITS, discover_repository, init_repository};
+use super::manifest::{
+    InCatalog, ReadManifestError, read_catalog, read_catalog_manifest, read_manifest,
+};
 use super::scaffold::{unit_agents, unit_readme};
 use super::schema::{MANIFEST_SCHEMA, MANIFEST_SCHEMA_REFERENCE, manifest_schema};
-use crate::domain::{Description, RelativePath, UnitIdentity, Version};
+use crate::domain::{Catalog, Description, IdentityError, RelativePath, UnitIdentity, Version};
 
 /// The unit's manifest, at the repository's top level.
 const MANIFEST: &str = "manifest.jsonc";
@@ -63,7 +75,13 @@ pub fn init_unit(
     let directory = match directory {
         Some(directory) => directory,
         None => {
-            derived = new_unit_directory(identity)?;
+            // At a catalog's top level, a new unit goes in its `units/`.
+            let parent = if Path::new(CATALOG).exists() {
+                Path::new(UNITS)
+            } else {
+                Path::new("")
+            };
+            derived = new_unit_directory(parent, identity)?;
             &derived
         }
     };
@@ -76,6 +94,10 @@ pub fn init_unit(
         path: directory.to_owned(),
         error,
     })?;
+    if fs::symlink_metadata(directory.join(CATALOG)).is_ok() {
+        return Err(InitFailure::CatalogTopLevel(directory));
+    }
+    let catalog = in_catalog(&directory, identity)?;
     let exists = match fs::symlink_metadata(&directory) {
         Ok(metadata) if metadata.is_dir() => true,
         Ok(_) => return Err(InitFailure::NotADirectory(directory)),
@@ -96,6 +118,18 @@ pub fn init_unit(
         nearest_existing_parent(&directory)
     };
     let git = match discover_repository(&probe).map_err(InitFailure::Git)? {
+        // A catalog's units are in the catalog's repository.
+        Discovered::WorkingTree { top_level }
+            if catalog
+                .as_ref()
+                .is_some_and(|(root, ..)| same_directory(&top_level, root)) =>
+        {
+            GitOutcome::InCatalog { catalog: top_level }
+        }
+        _ if catalog.is_some() => {
+            let root = catalog.map(|(root, ..)| root).unwrap_or_default();
+            return Err(InitFailure::CatalogNotARepository(root));
+        }
         Discovered::None => GitOutcome::Initialized,
         Discovered::Bare => return Err(InitFailure::Bare(directory)),
         Discovered::WorkingTree { top_level } => {
@@ -120,11 +154,20 @@ pub fn init_unit(
 
     // The files, as they are now.
     let manifest = match read_file(&directory.join(MANIFEST))? {
-        None => Planned::Create(manifest_text(identity, &description).into_bytes()),
+        None => {
+            Planned::Create(manifest_text(identity, &description, catalog.is_some()).into_bytes())
+        }
         Some(bytes) => {
             let text = String::from_utf8(bytes)
                 .map_err(|_| InitFailure::ManifestNotUtf8(directory.join(MANIFEST)))?;
-            let existing = read_manifest(&text).map_err(|error| InitFailure::InvalidManifest {
+            let existing = match &catalog {
+                Some((_, catalog, directories)) => read_catalog_manifest(
+                    &text,
+                    &InCatalog::new(catalog, identity.name(), directories),
+                ),
+                None => read_manifest(&text),
+            }
+            .map_err(|error| InitFailure::InvalidManifest {
                 path: directory.join(MANIFEST),
                 error,
             })?;
@@ -206,7 +249,10 @@ pub fn init_unit(
             .map_err(|error| failed(&done, Step::Directory(directory.clone()), error))?;
         done.directory_created = true;
     }
-    if done.git != GitOutcome::Adopted {
+    if matches!(
+        done.git,
+        GitOutcome::Initialized | GitOutcome::Nested { .. }
+    ) {
         init_repository(&directory).map_err(|error| InitFailure::Init {
             error,
             done: Box::new(done.clone()),
@@ -340,13 +386,20 @@ fn ignores_build(bytes: &[u8]) -> bool {
 }
 
 /// The text of a new manifest, which must read back as the manifest it
-/// describes; the scaffold never writes a manifest Assemblr rejects.
-fn manifest_text(identity: &UnitIdentity, description: &Description) -> String {
+/// describes; the scaffold never writes a manifest Assemblr rejects. A
+/// unit `in_catalog` has no version of its own.
+fn manifest_text(identity: &UnitIdentity, description: &Description, in_catalog: bool) -> String {
+    let name = serde_json::Value::String(identity.to_string());
+    let description_text = serde_json::Value::String(description.as_str().to_owned());
+    if in_catalog {
+        return format!(
+            "{{\n  \"$schema\": \"{MANIFEST_SCHEMA_REFERENCE}\",\n  \"name\": {name},\n  \
+             \"description\": {description_text}\n}}\n"
+        );
+    }
     let text = format!(
-        "{{\n  \"$schema\": \"{MANIFEST_SCHEMA_REFERENCE}\",\n  \"name\": {},\n  \"version\": \
-         \"{FIRST_VERSION}\",\n  \"description\": {}\n}}\n",
-        serde_json::Value::String(identity.to_string()),
-        serde_json::Value::String(description.as_str().to_owned()),
+        "{{\n  \"$schema\": \"{MANIFEST_SCHEMA_REFERENCE}\",\n  \"name\": {name},\n  \"version\": \
+         \"{FIRST_VERSION}\",\n  \"description\": {description_text}\n}}\n",
     );
     debug_assert!(
         read_manifest(&text).is_ok_and(|manifest| {
@@ -467,6 +520,11 @@ impl Initialized {
 /// What `unit init` did about the Git repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitOutcome {
+    /// The directory is a unit's in a catalog, whose repository holds it.
+    InCatalog {
+        /// The catalog's top level.
+        catalog: PathBuf,
+    },
     /// There was none, and one was initialized.
     Initialized,
     /// The directory lies inside another repository that is not a unit's,
@@ -491,15 +549,16 @@ pub enum FileOutcome {
     Kept,
 }
 
-/// The directory a unit gets when none is given: its name, in the current
-/// directory, refused when it holds other files and no manifest.
-fn new_unit_directory(identity: &UnitIdentity) -> Result<PathBuf, InitFailure> {
+/// The directory a unit gets when none is given: its name, in `parent`
+/// under the current directory, refused when it holds other files and no
+/// manifest.
+fn new_unit_directory(parent: &Path, identity: &UnitIdentity) -> Result<PathBuf, InitFailure> {
     let name = identity.name();
     // A name Windows reserves, such as `con`, cannot be a directory there.
     if RelativePath::parse(name).is_err() {
         return Err(InitFailure::ReservedName(name.to_owned()));
     }
-    let directory = PathBuf::from(name);
+    let directory = parent.join(name);
     match fs::read_dir(&directory) {
         Ok(mut entries) => {
             if entries.next().is_some() && !directory.join(MANIFEST).exists() {
@@ -513,9 +572,90 @@ fn new_unit_directory(identity: &UnitIdentity) -> Result<PathBuf, InitFailure> {
     }
 }
 
+/// The catalog `directory` is a unit's directory in, when it is one of a
+/// catalog's `units/`: its top level, its `catalog.jsonc`, and the names of
+/// its unit directories, `directory`'s included. `identity` must be the
+/// one the catalog gives the directory.
+fn in_catalog(
+    directory: &Path,
+    identity: &UnitIdentity,
+) -> Result<Option<(PathBuf, Catalog, BTreeSet<String>)>, InitFailure> {
+    let (Some(name), Some(units)) = (directory.file_name(), directory.parent()) else {
+        return Ok(None);
+    };
+    let Some(root) = units.parent() else {
+        return Ok(None);
+    };
+    let catalog_path = root.join(CATALOG);
+    if units.file_name() != Some(UNITS.as_ref()) || fs::symlink_metadata(&catalog_path).is_err() {
+        return Ok(None);
+    }
+    let bytes = read_file(&catalog_path)?.unwrap_or_default();
+    let text =
+        String::from_utf8(bytes).map_err(|_| InitFailure::ManifestNotUtf8(catalog_path.clone()))?;
+    let catalog = read_catalog(&text).map_err(|error| InitFailure::InvalidCatalog {
+        path: catalog_path,
+        error,
+    })?;
+    let name = name.to_string_lossy();
+    let expected = catalog
+        .unit_identity(&name)
+        .map_err(|error| InitFailure::CatalogDirectory {
+            directory: directory.to_owned(),
+            error,
+        })?;
+    if &expected != identity {
+        return Err(InitFailure::NotTheCatalogName {
+            given: identity.clone(),
+            expected,
+        });
+    }
+    // The other units, so that an existing manifest's `"catalog"`
+    // requirements are read as the build reads them.
+    let mut directories: BTreeSet<String> = fs::read_dir(units)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    directories.insert(name.into_owned());
+    Ok(Some((root.to_owned(), catalog, directories)))
+}
+
 /// Why `unit init` failed.
 #[derive(Debug)]
 pub enum InitFailure {
+    /// The directory is a catalog's top level, whose units go in `units/`.
+    CatalogTopLevel(PathBuf),
+    /// The directory is one of a catalog's `units/`, and the catalog is not
+    /// a Git repository's top level.
+    CatalogNotARepository(PathBuf),
+    /// The catalog's `catalog.jsonc` is not valid.
+    InvalidCatalog {
+        /// The file.
+        path: PathBuf,
+        /// Why.
+        error: ReadManifestError,
+    },
+    /// The directory is one of a catalog's `units/`, and its name is not a
+    /// unit name.
+    CatalogDirectory {
+        /// The directory.
+        directory: PathBuf,
+        /// Why.
+        error: IdentityError,
+    },
+    /// The identity is not the one the catalog gives the directory: its
+    /// name, with the catalog's owner.
+    NotTheCatalogName {
+        /// The identity given.
+        given: UnitIdentity,
+        /// The catalog's.
+        expected: UnitIdentity,
+    },
     /// The description is empty or only whitespace.
     BlankDescription,
     /// The directory could not be examined.
@@ -604,6 +744,30 @@ pub enum InitFailure {
 impl fmt::Display for InitFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CatalogTopLevel(path) => write!(
+                f,
+                "{} is a catalog's top level, with catalog.jsonc; its units go in units/, one \
+                 directory each",
+                path.display()
+            ),
+            Self::CatalogNotARepository(path) => write!(
+                f,
+                "the catalog at {} is not the top level of a Git repository; a catalog's units \
+                 are in the catalog's repository",
+                path.display()
+            ),
+            Self::InvalidCatalog { path, error } => write!(f, "{}: {error}", path.display()),
+            Self::CatalogDirectory { directory, error } => write!(
+                f,
+                "a unit in a catalog is named after its directory, and the name of {} is not a \
+                 unit name: {error}",
+                directory.display()
+            ),
+            Self::NotTheCatalogName { given, expected } => write!(
+                f,
+                "a unit in a catalog is named after its directory, with the catalog's owner: \
+                 this directory's unit is {expected}, not {given}"
+            ),
             Self::BlankDescription => {
                 f.write_str("the description must not be empty or only whitespace")
             }

@@ -79,34 +79,47 @@ fn with_registry(action: impl FnOnce(&Registry) -> ExitCode) -> ExitCode {
 fn add(registry: &Registry, path: &std::path::Path) -> ExitCode {
     match registry.add(path) {
         Ok(Added::Registered {
-            identity,
+            units,
             source,
-            versions,
             excluded,
         }) => {
             warn_excluded(&excluded);
-            if versions.is_empty() {
-                println!("Registered {identity} from {source}, with no published versions yet.");
-            } else {
-                println!(
-                    "Registered {identity} from {source}, with {} {}.",
-                    if versions.len() == 1 {
-                        "version"
-                    } else {
-                        "versions"
-                    },
-                    join(&versions)
-                );
+            match units.iter().collect::<Vec<_>>().as_slice() {
+                [(identity, versions)] => println!(
+                    "Registered {identity} from {source}, {}.",
+                    with_versions(versions)
+                ),
+                units => {
+                    println!(
+                        "Registered the catalog {source}, with {}:",
+                        count(units.len(), "unit", "units")
+                    );
+                    for (identity, versions) in units {
+                        println!("  {identity}, {}", with_versions(versions));
+                    }
+                }
             }
             report_excluded(&excluded);
             ExitCode::SUCCESS
         }
-        Ok(Added::AlreadyRegistered { identity, source }) => {
-            println!("{source} is already registered as {identity}; nothing changed.");
+        Ok(Added::AlreadyRegistered { identities, source }) => {
+            println!(
+                "{source} is already registered as {}; nothing changed.",
+                join(&identities)
+            );
             println!("Next: run `assemblr registry sync` to index newly published versions.");
             ExitCode::SUCCESS
         }
         Err(failure) => rejected("registration", &failure),
+    }
+}
+
+/// How a newly registered unit's versions are reported.
+fn with_versions(versions: &[assemblr::domain::Version]) -> String {
+    match versions {
+        [] => "with no published versions yet".to_owned(),
+        [version] => format!("with version {version}"),
+        versions => format!("with versions {}", join(versions)),
     }
 }
 
@@ -168,10 +181,20 @@ fn list_json(index: &RegistryIndex) -> Value {
 fn remove(registry: &Registry, identity: &UnitIdentity) -> ExitCode {
     match registry.remove(identity) {
         Ok(removed) => {
-            println!(
-                "Removed {identity}, registered from {}. The repository was not modified.",
-                removed.source()
-            );
+            let source = removed.source();
+            if removed.units().len() == 1 {
+                println!(
+                    "Removed {identity}, registered from {source}. The repository was not \
+                     modified."
+                );
+            } else {
+                let identities: Vec<&UnitIdentity> = removed.units().keys().collect();
+                println!(
+                    "Removed the units of the catalog {source}, which are registered together: \
+                     {}. The repository was not modified.",
+                    join(&identities)
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(failure) => rejected("removal", &failure),
@@ -225,7 +248,9 @@ fn rejection_hint(operation: &str, problems: &[Problem]) -> Option<String> {
             "to register {given} instead, run `assemblr registry remove {identity}` first"
         )),
         Problem::Invalid(RegistryError::Integrity { change, .. }) => Some(match change {
-            IntegrityChange::TagRemoved | IntegrityChange::TagMoved { .. } => {
+            IntegrityChange::TagRemoved
+            | IntegrityChange::TagMoved { .. }
+            | IntegrityChange::UnitMissing => {
                 "published versions never change: restore the tag where it was, \
                  or publish the change as a new version"
                     .to_owned()
@@ -260,7 +285,7 @@ pub(super) fn warn_excluded(excluded: &[Excluded<TagProblem>]) {
     for excluded in excluded {
         eprintln!(
             "warning: {}: excluded tag {}, which is not indexed as a published version: {}",
-            excluded.identity(),
+            excluded.subject(),
             excluded.tag(),
             excluded.reason()
         );
@@ -274,7 +299,7 @@ fn report_excluded(excluded: &[Excluded<TagProblem>]) {
     }
     let tags: Vec<String> = excluded
         .iter()
-        .map(|excluded| format!("{} {}", excluded.identity(), excluded.tag()))
+        .map(|excluded| format!("{} {}", excluded.subject(), excluded.tag()))
         .collect();
     println!(
         "Excluded {}, which {} not indexed: {}.",

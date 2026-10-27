@@ -16,6 +16,7 @@
 //! [`GitRepository::read_working_src`]).
 
 mod authoring;
+mod catalog;
 mod command;
 mod fetch;
 mod object;
@@ -33,10 +34,13 @@ pub use fetch::{FetchError, FetchErrorKind};
 pub(crate) use fetch::{fetch, fetch_objects};
 use object::{EntryKind, TreeEntry, commit_tree, parse_tree};
 
-use super::manifest::{ReadManifestError, read_manifest};
+use super::manifest::{InCatalog, ReadManifestError, read_catalog_manifest, read_manifest};
 use crate::domain::{
-    FileTree, Manifest, ObjectId, Provenance, RelativePath, RelativePathError, UnitFile, Version,
+    FileTree, Manifest, ObjectId, Provenance, RelativePath, RelativePathError, UnitFile,
+    UnitIdentity, Version,
 };
+pub(crate) use catalog::{CATALOG, UNITS};
+pub use catalog::{PublishedCatalog, TagContent};
 
 // Bounds on what is read from a repository, which is untrusted. Git stores
 // objects compressed, and trees can share subtrees, so a small repository can
@@ -65,6 +69,10 @@ const MANIFEST: &[u8] = b"manifest.jsonc";
 /// tag or at `HEAD`: a unit's manifest and lockfile.
 const METADATA_FILES: [&str; 2] = ["manifest.jsonc", "assemblr-lock.json"];
 
+/// What reading a version tag found: the commit it points at, whether that
+/// is a catalog, and what it publishes.
+type ReadTag = (Option<ObjectId>, bool, Result<TagContent, InvalidVersion>);
+
 /// The files of a unit directory, with their blob ids and executable bits,
 /// and the entries that cannot be unit files.
 type UnitFileEntries = (Vec<(RelativePath, ObjectId, bool)>, Vec<SrcEntryError>);
@@ -81,6 +89,11 @@ pub struct GitRepository {
     /// contents are fetched from, the first time a version's files are read
     /// (ADR 0037). `None` for every other repository, which never fetches.
     remote: Option<String>,
+    /// The directory under `units/` of the unit read, when the repository
+    /// is a catalog's: its manifest, files, and tree are that directory's at
+    /// a commit that is a catalog, and in the working tree. `None` reads the
+    /// unit at the top level.
+    unit: Option<String>,
 }
 
 impl GitRepository {
@@ -106,6 +119,7 @@ impl GitRepository {
             path: path.to_owned(),
             git_dir,
             remote: None,
+            unit: None,
         };
         match repository.output(&["rev-parse", "--git-dir"]) {
             Ok(_) => Ok(repository),
@@ -131,6 +145,21 @@ impl GitRepository {
     pub(crate) fn retrieving_from(self, reference: &str) -> Self {
         Self {
             remote: Some(reference.to_owned()),
+            ..self
+        }
+    }
+
+    /// This repository, reading the unit `identity` where a commit is a
+    /// catalog: the unit in `units/<name>`.
+    pub(crate) fn for_unit(self, identity: &UnitIdentity) -> Self {
+        self.in_unit_directory(identity.name())
+    }
+
+    /// This repository, reading the unit in `units/<directory>` where a
+    /// commit is a catalog, and in the working tree.
+    pub(crate) fn in_unit_directory(self, directory: &str) -> Self {
+        Self {
+            unit: Some(directory.to_owned()),
             ..self
         }
     }
@@ -210,11 +239,12 @@ impl GitRepository {
         let mut objects = self.objects()?;
         let mut tags = Vec::new();
         for (object, name, version) in refs {
-            let (commit, outcome) = self.read_version(&mut objects, &object, &version)?;
+            let (commit, catalog, outcome) = self.read_version(&mut objects, &object, &version)?;
             tags.push(VersionTag {
                 name,
                 version,
                 commit,
+                catalog,
                 outcome,
             });
         }
@@ -303,6 +333,7 @@ impl GitRepository {
                 Err(RootError::Git(error)) => return Err(error),
                 Err(_) => continue,
             };
+            metadata.extend(self.catalog_metadata(&mut objects, &root)?);
             for entry in root {
                 if matches!(entry.kind, EntryKind::File { .. })
                     && METADATA_FILES
@@ -357,48 +388,73 @@ impl GitRepository {
         objects: &mut Objects<'_>,
         tag: &ObjectId,
         version: &Version,
-    ) -> Result<(Option<ObjectId>, Result<PublishedVersion, InvalidVersion>), GitError> {
+    ) -> Result<ReadTag, GitError> {
         // `^{}` peels annotated tags, including tags of tags, to the object
         // they finally point at.
         let target = self.require(objects, &format!("{tag}^{{}}"), 0)?;
         if target.header.kind != "commit" {
             return Ok((
                 None,
+                false,
                 Err(InvalidVersion::NotACommit {
                     object_type: target.header.kind,
                 }),
             ));
         }
         let commit = target.header.id;
+        if let Some(read) = self.read_catalog_version(objects, &commit)? {
+            let outcome = read.and_then(|published| {
+                if published.catalog().version() == version {
+                    Ok(TagContent::Catalog(published))
+                } else {
+                    Err(InvalidVersion::CatalogVersionMismatch {
+                        catalog: published.catalog().version().clone(),
+                    })
+                }
+            });
+            return Ok((Some(commit), true, outcome));
+        }
         let outcome = match self.read_manifest(objects, &commit)? {
             Ok((_, manifest)) if manifest.version() != version => {
                 Err(InvalidVersion::VersionMismatch {
                     manifest: manifest.version().clone(),
                 })
             }
-            Ok((tree, manifest)) => Ok(PublishedVersion {
+            Ok((tree, manifest)) => Ok(TagContent::Unit(PublishedVersion {
                 manifest,
                 provenance: Provenance::new(commit.clone(), tree),
-            }),
+            })),
             Err(invalid) => Err(invalid),
         };
-        Ok((Some(commit), outcome))
+        Ok((Some(commit), false, outcome))
     }
 
-    /// Reads `manifest.jsonc` as committed at `HEAD`, without the working
-    /// tree or the index. Registration takes a unit's identity from it when
-    /// no version is published (see `docs/domain/registries-and-discovery.md`).
-    pub fn head_manifest(&self) -> Result<Manifest, HeadManifestError> {
+    /// The identities of the units committed at `HEAD`, without the working
+    /// tree or the index: the unit's, or every unit's of a catalog.
+    /// Registration takes them from there when no version is published (see
+    /// `docs/domain/registries-and-discovery.md`).
+    pub fn head_identities(&self) -> Result<Vec<UnitIdentity>, HeadManifestError> {
         let mut objects = self.objects()?;
         let Some(head) = objects.header("HEAD^{commit}")? else {
             return Err(HeadManifestError::NoCommit);
         };
-        let manifest = self
-            .read_manifest(&mut objects, &head.id)?
-            .map_err(HeadManifestError::Invalid)?
-            .1;
+        let identities = match self.read_catalog_version(&mut objects, &head.id)? {
+            Some(read) => read
+                .map_err(HeadManifestError::Invalid)?
+                .units()
+                .iter()
+                .map(|unit| unit.manifest().name().clone())
+                .collect(),
+            None => vec![
+                self.read_manifest(&mut objects, &head.id)?
+                    .map_err(HeadManifestError::Invalid)?
+                    .1
+                    .name()
+                    .clone(),
+            ],
+        };
         objects.finish()?;
-        Ok(manifest)
+        Ok(identities)
     }
 
     /// Reads the manifest at each of `commits`, in order, as the content of
@@ -435,22 +491,40 @@ impl GitRepository {
         Ok(versions)
     }
 
-    /// The root tree of `commit` and the manifest in it, or why it has no
-    /// valid manifest.
+    /// The unit's tree at `commit` and the manifest in it, or why it has no
+    /// valid manifest: the root tree, or the unit's directory where the
+    /// commit is a catalog.
     fn read_manifest(
         &self,
         objects: &mut Objects<'_>,
         commit: &ObjectId,
     ) -> Result<Result<(ObjectId, Manifest), InvalidVersion>, GitError> {
-        let tree = match self.commit_tree(objects, commit)? {
-            Ok(tree) => tree,
-            Err(too_large) => return Ok(Err(InvalidVersion::ObjectTooLarge(too_large))),
+        let unit = match self.unit_root(objects, commit)? {
+            Ok(unit) => unit,
+            Err(invalid) => return Ok(Err(invalid)),
         };
-        let root = match self.read_tree(objects, &tree)? {
-            Ok(root) => root,
-            Err(too_large) => return Ok(Err(InvalidVersion::ObjectTooLarge(too_large))),
+        let manifest = match &unit.catalog {
+            None => self.manifest_in(objects, unit.entries, read_manifest)?,
+            Some((catalog, directories)) => {
+                let directory = self.unit.as_deref().unwrap_or_default();
+                let in_catalog = InCatalog::new(catalog, directory, directories);
+                self.manifest_in(objects, unit.entries, |text| {
+                    read_catalog_manifest(text, &in_catalog)
+                })?
+            }
         };
-        let Some(entry) = root.into_iter().find(|entry| entry.name == MANIFEST) else {
+        Ok(manifest.map(|manifest| (unit.tree, manifest)))
+    }
+
+    /// The manifest among the `entries` of a unit's directory, read with
+    /// `read`, or why it is not valid.
+    fn manifest_in(
+        &self,
+        objects: &mut Objects<'_>,
+        entries: Vec<TreeEntry>,
+        read: impl FnOnce(&str) -> Result<Manifest, ReadManifestError>,
+    ) -> Result<Result<Manifest, InvalidVersion>, GitError> {
+        let Some(entry) = entries.into_iter().find(|entry| entry.name == MANIFEST) else {
             return Ok(Err(InvalidVersion::MissingManifest));
         };
         if !matches!(entry.kind, EntryKind::File { .. }) {
@@ -466,9 +540,7 @@ impl GitRepository {
         let Ok(text) = String::from_utf8(bytes) else {
             return Ok(Err(InvalidVersion::ManifestNotUtf8));
         };
-        Ok(read_manifest(&text)
-            .map(|manifest| (tree, manifest))
-            .map_err(InvalidVersion::InvalidManifest))
+        Ok(read(&text).map_err(InvalidVersion::InvalidManifest))
     }
 
     /// Whether the repository has every object in `ids`.
@@ -650,7 +722,7 @@ impl GitRepository {
         commit: &ObjectId,
         directory: UnitDirectory,
     ) -> Result<UnitFileEntries, ReadSrcError> {
-        let root = self.root_entries(objects, commit)?;
+        let root = self.unit_entries(objects, commit)?;
         let Some(src) = root
             .into_iter()
             .find(|entry| entry.name == directory.as_str().as_bytes())
@@ -780,7 +852,9 @@ pub struct VersionTag {
     name: String,
     version: Version,
     commit: Option<ObjectId>,
-    outcome: Result<PublishedVersion, InvalidVersion>,
+    /// Whether the commit is a catalog, valid or not.
+    catalog: bool,
+    outcome: Result<TagContent, InvalidVersion>,
 }
 
 impl VersionTag {
@@ -800,8 +874,15 @@ impl VersionTag {
         self.commit.as_ref()
     }
 
-    /// The published version, or why the tag does not publish a valid one.
-    pub fn outcome(&self) -> Result<&PublishedVersion, &InvalidVersion> {
+    /// Whether the tagged commit is a catalog, with `catalog.jsonc` at its
+    /// root, whether or not it is valid.
+    pub fn is_catalog(&self) -> bool {
+        self.catalog
+    }
+
+    /// The published version, of a unit or of a catalog's units, or why
+    /// the tag does not publish a valid one.
+    pub fn outcome(&self) -> Result<&TagContent, &InvalidVersion> {
         self.outcome.as_ref()
     }
 }
@@ -857,6 +938,49 @@ pub enum InvalidVersion {
         /// The version the manifest declares.
         manifest: Version,
     },
+    /// The commit has both `catalog.jsonc` and `manifest.jsonc` at its
+    /// root, and a repository is either a unit or a catalog.
+    CatalogAndManifest,
+    /// `catalog.jsonc` is a directory, a symbolic link, or a submodule.
+    CatalogNotAFile,
+    /// `catalog.jsonc` is larger than Assemblr reads.
+    CatalogTooLarge {
+        /// Its size, in bytes.
+        size: u64,
+        /// The largest size read, in bytes.
+        limit: u64,
+    },
+    /// `catalog.jsonc` is not UTF-8 text.
+    CatalogNotUtf8,
+    /// `catalog.jsonc` is not valid.
+    InvalidCatalog(ReadManifestError),
+    /// `catalog.jsonc` declares a version other than the tag's.
+    CatalogVersionMismatch {
+        /// The version `catalog.jsonc` declares.
+        catalog: Version,
+    },
+    /// The catalog has no `units/` directory, or no unit in it.
+    NoUnits,
+    /// `units` is not a directory.
+    UnitsNotADirectory,
+    /// An entry of `units/` is not a directory, and every entry there is a
+    /// unit's directory.
+    NotAUnitDirectory {
+        /// The entry's name.
+        name: String,
+    },
+    /// The catalog has no directory for the unit read.
+    NotInCatalog {
+        /// The directory, under `units/`.
+        directory: String,
+    },
+    /// A unit of the catalog is invalid, so the version of every unit is.
+    InvalidUnit {
+        /// The unit's directory, under `units/`.
+        directory: String,
+        /// Why it is invalid.
+        problem: Box<InvalidVersion>,
+    },
 }
 
 impl fmt::Display for InvalidVersion {
@@ -876,6 +1000,35 @@ impl fmt::Display for InvalidVersion {
             Self::InvalidManifest(error) => error.fmt(f),
             Self::VersionMismatch { manifest } => {
                 write!(f, "the manifest declares version {manifest}")
+            }
+            Self::CatalogAndManifest => f.write_str(
+                "the commit has both `catalog.jsonc` and `manifest.jsonc` at its root; a \
+                 repository is either one unit or a catalog of units",
+            ),
+            Self::CatalogNotAFile => f.write_str("`catalog.jsonc` is not a regular file"),
+            Self::CatalogTooLarge { size, limit } => write!(
+                f,
+                "`catalog.jsonc` has {size} bytes, more than the {limit} Assemblr reads"
+            ),
+            Self::CatalogNotUtf8 => f.write_str("`catalog.jsonc` is not UTF-8 text"),
+            Self::InvalidCatalog(error) => write!(f, "`catalog.jsonc` is invalid: {error}"),
+            Self::CatalogVersionMismatch { catalog } => {
+                write!(f, "`catalog.jsonc` declares version {catalog}")
+            }
+            Self::NoUnits => f.write_str(
+                "the catalog has no unit: each unit is a directory of `units/` with its \
+                 `manifest.jsonc`",
+            ),
+            Self::UnitsNotADirectory => f.write_str("`units` is not a directory"),
+            Self::NotAUnitDirectory { name } => write!(
+                f,
+                "`units/{name}` is not a directory; every entry of `units/` is a unit's directory"
+            ),
+            Self::NotInCatalog { directory } => {
+                write!(f, "the catalog has no unit in `units/{directory}`")
+            }
+            Self::InvalidUnit { directory, problem } => {
+                write!(f, "`units/{directory}`: {problem}")
             }
         }
     }
@@ -924,6 +1077,8 @@ pub enum ReadSrcError {
     ObjectTooLarge(ObjectTooLarge),
     /// The entry at the directory's path is not a directory.
     NotADirectory(UnitDirectory),
+    /// The commit is a catalog without the unit read, or not a valid one.
+    Unit(InvalidVersion),
     /// Entries that cannot be unit files, sorted by path. Every one is
     /// reported.
     Entries(Vec<SrcEntryError>),
@@ -961,6 +1116,7 @@ impl fmt::Display for ReadSrcError {
             } => write!(f, "{commit} is a {object_type}, not a commit"),
             Self::ObjectTooLarge(too_large) => too_large.fmt(f),
             Self::NotADirectory(directory) => write!(f, "`{directory}` is not a directory"),
+            Self::Unit(invalid) => invalid.fmt(f),
             Self::TooManyEntries { directory, limit } => write!(
                 f,
                 "`{directory}/` has more than {limit} files and directories, the most Assemblr \

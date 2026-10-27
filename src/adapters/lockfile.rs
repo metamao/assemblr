@@ -96,6 +96,11 @@ pub(crate) fn read_lockfile(root: &Path) -> Result<Option<(Vec<u8>, Lockfile)>, 
 
 /// Reads the lockfile committed at the root of `commit`'s tree in
 /// `repository`, or `None` if the commit has none.
+///
+/// A catalog has one lockfile, at its root, for what its units depend on in
+/// other repositories. Read for one of its units, the lock also holds the
+/// unit's siblings, at the catalog's version and this commit, since they
+/// are published with it.
 pub(crate) fn read_published(
     repository: &GitRepository,
     commit: &ObjectId,
@@ -103,7 +108,7 @@ pub(crate) fn read_published(
     let bytes = repository
         .read_top_level_file(commit, LOCKFILE, LOCKFILE_LIMIT)
         .map_err(PublishedLockfileError::Read)?;
-    bytes
+    let Some(lock) = bytes
         .as_deref()
         .map(|bytes| match parse(bytes) {
             Ok(Lockfile {
@@ -115,7 +120,21 @@ pub(crate) fn read_published(
             )),
             Err(detail) => Err(PublishedLockfileError::Invalid(detail)),
         })
-        .transpose()
+        .transpose()?
+    else {
+        return Ok(None);
+    };
+    let siblings = repository
+        .siblings_at(commit)
+        .map_err(|error| PublishedLockfileError::Read(ReadFileError::Git(error)))?;
+    let Some(siblings) = siblings else {
+        return Ok(Some(lock));
+    };
+    let mut units = lock.units().clone();
+    for (identity, version, provenance) in siblings {
+        units.insert(identity, LockedUnit::new(version, provenance));
+    }
+    Ok(Some(UnitLock::new(units)))
 }
 
 /// The lockfile's contents for `lock`, a unit's.

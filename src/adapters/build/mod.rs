@@ -18,6 +18,7 @@
 
 mod add;
 mod amend;
+mod catalog;
 mod check;
 mod exclusive;
 mod layering;
@@ -35,6 +36,7 @@ use std::path::{Path, PathBuf};
 
 pub use add::{AddFailure, AddProblem, DependencyAdded, add_dependency};
 pub use amend::{AmendFailure, AmendProblem, AmendState, Amended, Match, WriteError, amend_unit};
+pub use catalog::{Location, build_catalog, check_catalog, locate_unit};
 pub use check::{CheckFailure, CheckProblem, Checked, check_unit};
 use exclusive::BuildLock;
 pub use exclusive::BuildLockError;
@@ -62,7 +64,14 @@ const MANIFEST: &str = "manifest.jsonc";
 
 /// Builds the unit whose repository's top level is `root`, resolving its
 /// dependencies from `registry`.
+///
+/// In the directory of a unit in a catalog, the unit is built with its
+/// siblings from the catalog's working tree, under the catalog's one
+/// lockfile (see [`build_catalog`]).
 pub fn build_unit(root: &Path, registry: &Registry) -> Result<Built, BuildFailure> {
+    if let Location::CatalogUnit { catalog, directory } = locate_unit(root) {
+        return catalog::build_in_catalog(&catalog, &directory, registry);
+    }
     let mut opened = open(root, registry)?;
     let manifest = opened.manifest.clone();
     let validated = validate_opened(&mut opened, &manifest)?;
@@ -176,7 +185,7 @@ fn open(root: &Path, registry: &Registry) -> Result<Opened, BuildFailure> {
     // for a leftover, so nothing there is deleted.
     let interrupted = guard.interrupted().unwrap_or(false);
     problems.extend(
-        output::check(root, interrupted)
+        output::check(root, Some(root), interrupted)
             .into_iter()
             .map(BuildProblem::Output),
     );
@@ -217,6 +226,7 @@ fn validate_opened(opened: &mut Opened, manifest: &Manifest) -> Result<Validated
         src: opened.src.as_ref(),
         amendments: opened.amendments.as_ref(),
         previous: &previous_lock,
+        catalog: None,
     };
     // A build composes an ineffective unit as readily as any other: the
     // effective-contribution check gates publication (OC-11).
@@ -241,7 +251,14 @@ fn publish_validated(
     validated: Validated,
 ) -> Result<Built, BuildFailure> {
     if !validated.pending.is_empty() {
-        return Err(write_pending(root, opened, text, manifest, validated));
+        return Err(write_pending(
+            root,
+            root,
+            opened.previous.as_ref(),
+            text,
+            manifest,
+            validated,
+        ));
     }
     let lock = validated.lock;
     let lockfile = match &opened.previous {
@@ -255,13 +272,14 @@ fn publish_validated(
         .map(|(path, file)| (path, file))
         .collect();
     let new_lock = (lockfile != LockfileOutcome::Unchanged).then_some(&lock);
-    let published =
-        output::publish(root, &files, new_lock, &opened.guard).map_err(BuildFailure::Publish)?;
+    let published = output::publish(root, root, &files, new_lock, &opened.guard)
+        .map_err(BuildFailure::Publish)?;
     Ok(Built {
         unit: manifest.name().clone(),
         version: manifest.version().clone(),
+        directory: None,
         files: files.len(),
-        dependencies: lock.units().len(),
+        dependencies: validated.dependencies,
         lockfile,
         changes: validated.changes,
         notes: validated.notes,
@@ -275,16 +293,18 @@ fn publish_validated(
 /// declaration in the manifest, and the lockfile, since the resolution is
 /// sound and the conflict is a matter of content. `build/` is not touched.
 /// The copies are created first, new files only, then the manifest is
-/// replaced through its staging file, then the lockfile through its own.
+/// replaced through its staging file, then the lockfile, in `lock_root`,
+/// through its own. `previous` is the lockfile's content before.
 fn write_pending(
     root: &Path,
-    opened: &Opened,
+    lock_root: &Path,
+    previous: Option<&UnitLock>,
     text: &str,
     manifest: &Manifest,
     validated: Validated,
 ) -> BuildFailure {
     let staged = root.join(amend::MANIFEST_NEW);
-    let lock_staging = root.join(output::LOCK_STAGING);
+    let lock_staging = lock_root.join(output::LOCK_STAGING);
     let mut problems = Vec::new();
     for path in [&staged, &lock_staging] {
         if fs::symlink_metadata(path).is_ok() {
@@ -335,7 +355,7 @@ fn write_pending(
         Ok(bytes) => bytes,
         Err(error) => {
             return BuildFailure::PendingWrite {
-                path: root.join(lockfile::LOCKFILE),
+                path: lock_root.join(lockfile::LOCKFILE),
                 error,
                 written: Vec::new(),
             };
@@ -379,18 +399,18 @@ fn write_pending(
     }
     written
         .push(RelativePath::parse(MANIFEST).unwrap_or_else(|_| validated.pending[0].path.clone()));
-    let lockfile_outcome = match &opened.previous {
+    let lockfile_outcome = match previous {
         None => LockfileOutcome::Created,
         Some(previous) if *previous == validated.lock => LockfileOutcome::Unchanged,
         Some(_) => LockfileOutcome::Updated,
     };
     if lockfile_outcome != LockfileOutcome::Unchanged {
         let replaced = fs::write(&lock_staging, &lock_bytes)
-            .and_then(|()| fs::rename(&lock_staging, root.join(lockfile::LOCKFILE)));
+            .and_then(|()| fs::rename(&lock_staging, lock_root.join(lockfile::LOCKFILE)));
         if let Err(error) = replaced {
             let _ = fs::remove_file(&lock_staging);
             return BuildFailure::PendingWrite {
-                path: root.join(lockfile::LOCKFILE),
+                path: lock_root.join(lockfile::LOCKFILE),
                 error,
                 written,
             };
@@ -413,7 +433,12 @@ fn read_working_manifest(root: &Path) -> Result<Manifest, ManifestFileError> {
 
 /// Reads the text of the working tree's `manifest.jsonc`.
 fn read_working_manifest_text(root: &Path) -> Result<String, ManifestFileError> {
-    let path = root.join(MANIFEST);
+    read_working_text(root.join(MANIFEST))
+}
+
+/// Reads the text of a manifest, or of a catalog's `catalog.jsonc`, at
+/// `path` in the working tree.
+fn read_working_text(path: PathBuf) -> Result<String, ManifestFileError> {
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -451,8 +476,20 @@ pub(super) struct Inputs<'a> {
     pub(super) src: Option<&'a FileTree>,
     /// The amendment copies, or `None` as for `src`.
     pub(super) amendments: Option<&'a FileTree>,
-    /// The previous lock, empty when there is no lockfile.
+    /// The previous lock, empty when there is no lockfile. For a unit in a
+    /// catalog, the lock the whole catalog resolves to.
     pub(super) previous: &'a UnitLock,
+    /// The unit's catalog, when it is in one.
+    pub(super) catalog: Option<&'a Joint<'a>>,
+}
+
+/// What a unit in a catalog is validated with besides its own inputs: its
+/// siblings, and the lock the whole catalog resolves to, which is the one
+/// lockfile of the catalog, with how it differs from that lockfile.
+pub(super) struct Joint<'a> {
+    pub(super) siblings: &'a Siblings,
+    pub(super) lock: &'a UnitLock,
+    pub(super) changes: &'a BTreeMap<UnitIdentity, LockChange>,
 }
 
 /// What validating a unit found.
@@ -471,8 +508,11 @@ pub(super) struct Validation {
 
 /// A unit that passed every validation a build runs.
 pub(super) struct Validated {
-    /// The lock the resolution produces.
+    /// The lock the resolution produces: the lockfile's new content. For a
+    /// unit in a catalog, the whole catalog's.
     pub(super) lock: UnitLock,
+    /// How many units, direct and transitive, the unit was composed with.
+    pub(super) dependencies: usize,
     /// How that lock differs from the previous one.
     pub(super) changes: BTreeMap<UnitIdentity, LockChange>,
     /// The composed files, by path.
@@ -648,7 +688,28 @@ pub(crate) fn resolve_graph(
     index: &crate::domain::RegistryIndex,
     problems: &mut Vec<BuildProblem>,
 ) -> Option<Resolved> {
-    let dependencies = match Dependencies::read_for(index, name, requirements) {
+    resolve_graph_in(
+        name,
+        requirements,
+        previous,
+        index,
+        &Siblings::default(),
+        problems,
+    )
+}
+
+/// [`resolve_graph`], with the units of `siblings` resolved from it at its
+/// version and locked as it records them.
+fn resolve_graph_in(
+    name: Option<&UnitIdentity>,
+    requirements: &crate::domain::Dependencies,
+    previous: &UnitLock,
+    index: &crate::domain::RegistryIndex,
+    siblings: &Siblings,
+    problems: &mut Vec<BuildProblem>,
+) -> Option<Resolved> {
+    let index = &siblings.index(index);
+    let dependencies = match Dependencies::read_in(index, name, requirements, siblings) {
         Ok(dependencies) => dependencies,
         Err(found) => {
             problems.extend(found);
@@ -759,17 +820,20 @@ pub(super) fn validate(
         src,
         amendments,
         previous,
+        catalog,
     } = *inputs;
+    let alone = Siblings::default();
     let mut validation = Validation {
         contribution: Vec::new(),
         unresolved: UnresolvedTokens::new(),
         result: None,
     };
-    let Some(resolved) = resolve_graph(
+    let Some(resolved) = resolve_graph_in(
         Some(manifest.name()),
         manifest.dependencies(),
         previous,
         index,
+        catalog.map_or(&alone, |catalog| catalog.siblings),
         problems,
     ) else {
         return validation;
@@ -876,9 +940,14 @@ pub(super) fn validate(
             .get(path)
             .map(|composed| (path, file.contents(), composed.placeholders()))
     }));
+    let (lock, changes) = match catalog {
+        Some(catalog) => (catalog.lock.clone(), catalog.changes.clone()),
+        None => (resolved.lock.clone(), resolved.resolution.changes().clone()),
+    };
     validation.result = Some(Validated {
-        lock: resolved.lock,
-        changes: resolved.resolution.changes().clone(),
+        dependencies: resolved.lock.units().len(),
+        lock,
+        changes,
         files: layered.files,
         notes: layered.notes.into_iter().map(|(_, note)| note).collect(),
         pending,
@@ -898,6 +967,9 @@ pub(crate) struct Dependencies {
     repositories: BTreeMap<UnitIdentity, GitRepository>,
     /// Each available version's commit.
     commits: BTreeMap<(UnitIdentity, Version), ObjectId>,
+    /// The siblings of a unit in a catalog, by identity: their one version
+    /// and its content, which is not read from the registry.
+    siblings: BTreeMap<UnitIdentity, (Version, PublishedContent)>,
 }
 
 impl Dependencies {
@@ -926,17 +998,46 @@ impl Dependencies {
         name: Option<&UnitIdentity>,
         requirements: &crate::domain::Dependencies,
     ) -> Result<Self, Vec<BuildProblem>> {
+        Self::read_in(index, name, requirements, &Siblings::default())
+    }
+
+    /// [`read_for`](Self::read_for), with the units of `siblings` taken
+    /// from it, at its version, instead of from the registry.
+    fn read_in(
+        index: &crate::domain::RegistryIndex,
+        name: Option<&UnitIdentity>,
+        requirements: &crate::domain::Dependencies,
+        siblings: &Siblings,
+    ) -> Result<Self, Vec<BuildProblem>> {
         let mut dependencies = Self {
             available: AvailableVersions::new(),
             manifests: BTreeMap::new(),
             repositories: BTreeMap::new(),
             commits: BTreeMap::new(),
+            siblings: BTreeMap::new(),
         };
         let mut problems = Vec::new();
         let mut pending: BTreeSet<UnitIdentity> = requirements.keys().cloned().collect();
         let mut seen = BTreeSet::new();
         while let Some(identity) = pending.pop_first() {
             if !seen.insert(identity.clone()) || Some(&identity) == name {
+                continue;
+            }
+            if let Some(sibling) = siblings.units.get(&identity) {
+                let version = sibling.manifest.version().clone();
+                let requirements = sibling.manifest.dependencies();
+                pending.extend(requirements.keys().cloned());
+                dependencies.available.insert(
+                    identity.clone(),
+                    BTreeMap::from([(version.clone(), requirements.clone())]),
+                );
+                dependencies.manifests.insert(
+                    (identity.clone(), version.clone()),
+                    sibling.manifest.clone(),
+                );
+                dependencies
+                    .siblings
+                    .insert(identity, (version, sibling.content.clone()));
                 continue;
             }
             let Some(unit) = index.units().get(&identity) else {
@@ -952,7 +1053,7 @@ impl Dependencies {
                 .map(|provenance| provenance.commit())
                 .collect();
             let repository = match Registry::open_registered(unit.source(), &commits) {
-                Ok(repository) => repository,
+                Ok(repository) => repository.for_unit(&identity),
                 Err(error) => {
                     problems.push(unreadable(error));
                     continue;
@@ -1012,6 +1113,9 @@ impl Dependencies {
         identity: &UnitIdentity,
         version: &Version,
     ) -> Option<Result<FileTree, BuildProblem>> {
+        if let Some(content) = self.sibling(identity, version) {
+            return Some(Ok(content.files.clone()));
+        }
         let key = (identity.clone(), version.clone());
         let (repository, commit) = (self.repositories.get(identity)?, self.commits.get(&key)?);
         Some(repository.read_src(commit).map_err(|error| match error {
@@ -1034,6 +1138,9 @@ impl Dependencies {
         identity: &UnitIdentity,
         version: &Version,
     ) -> Option<Result<FileTree, BuildProblem>> {
+        if let Some(content) = self.sibling(identity, version) {
+            return Some(Ok(content.amendments.clone()));
+        }
         let key = (identity.clone(), version.clone());
         let (repository, commit) = (self.repositories.get(identity)?, self.commits.get(&key)?);
         Some(
@@ -1061,6 +1168,9 @@ impl Dependencies {
         identity: &UnitIdentity,
         version: &Version,
     ) -> Option<Result<Option<UnitLock>, BuildProblem>> {
+        if let Some(content) = self.sibling(identity, version) {
+            return Some(Ok(content.lock.clone()));
+        }
         let key = (identity.clone(), version.clone());
         let (repository, commit) = (self.repositories.get(identity)?, self.commits.get(&key)?);
         Some(
@@ -1080,6 +1190,14 @@ impl Dependencies {
         )
     }
 
+    /// The content of `identity` at `version`, when it is a sibling.
+    fn sibling(&self, identity: &UnitIdentity, version: &Version) -> Option<&PublishedContent> {
+        self.siblings
+            .get(identity)
+            .filter(|(sibling, _)| sibling == version)
+            .map(|(_, content)| content)
+    }
+
     /// Reads the content of the locked versions of `identities`: the
     /// `src/` files of each, and, for a version whose manifest declares
     /// amendments, its `amendments/` copies and its lockfile, which must
@@ -1095,6 +1213,10 @@ impl Dependencies {
             let Some(locked) = lock.units().get(identity) else {
                 continue;
             };
+            if let Some(content) = self.sibling(identity, locked.version()) {
+                contents.insert(identity.clone(), content.clone());
+                continue;
+            }
             let key = (identity.clone(), locked.version().clone());
             let (Some(repository), Some(commit), Some(manifest)) = (
                 self.repositories.get(identity),
@@ -1162,15 +1284,66 @@ impl Dependencies {
 }
 
 /// A published version's content, as the build composes it.
-#[derive(Debug, Default)]
-struct PublishedContent {
+#[derive(Debug, Clone, Default)]
+pub(super) struct PublishedContent {
     /// Its `src/` files.
-    files: FileTree,
+    pub(super) files: FileTree,
     /// Its `amendments/` copies; empty unless its manifest declares
     /// amendments.
-    amendments: FileTree,
+    pub(super) amendments: FileTree,
     /// Its lockfile, read only when its manifest declares amendments.
-    lock: Option<UnitLock>,
+    pub(super) lock: Option<UnitLock>,
+}
+
+/// The units of a catalog, as a build of one of them resolves its
+/// siblings: each at the catalog's version, with the content of the
+/// catalog's working tree or of the commit being published, never read from
+/// the registry (see `docs/domain/units.md`). Empty outside a catalog.
+#[derive(Default)]
+pub(super) struct Siblings {
+    pub(super) units: BTreeMap<UnitIdentity, Sibling>,
+}
+
+/// A unit of a catalog, as its siblings compose it.
+pub(super) struct Sibling {
+    pub(super) manifest: Manifest,
+    /// Its files, and, when it declares amendments, the catalog's lock,
+    /// which identifies their bases.
+    pub(super) content: PublishedContent,
+    /// What the lock records for it, while it resolves with its siblings.
+    pub(super) provenance: crate::domain::Provenance,
+}
+
+impl Siblings {
+    /// `index`, with every sibling registered at its one version in place
+    /// of any registration it has: a catalog's units resolve and lock
+    /// together, from the catalog itself.
+    fn index(&self, index: &crate::domain::RegistryIndex) -> crate::domain::RegistryIndex {
+        if self.units.is_empty() {
+            return index.clone();
+        }
+        let mut units = index.units().clone();
+        for (identity, sibling) in &self.units {
+            units.insert(
+                identity.clone(),
+                crate::domain::RegisteredUnit::new(
+                    crate::domain::SourceReference::new("the catalog being built"),
+                    BTreeMap::from([(
+                        sibling.manifest.version().clone(),
+                        sibling.provenance.clone(),
+                    )]),
+                ),
+            );
+        }
+        // One version for each sibling breaks no invariant. Were one
+        // broken, the siblings would be reported as not indexed.
+        crate::domain::RegistryIndex::from_units(units).unwrap_or_else(|_| index.clone())
+    }
+
+    /// Whether `identity` is a sibling.
+    pub(super) fn contains(&self, identity: &UnitIdentity) -> bool {
+        self.units.contains_key(identity)
+    }
 }
 
 /// A successful build.
@@ -1178,6 +1351,7 @@ struct PublishedContent {
 pub struct Built {
     unit: UnitIdentity,
     version: Version,
+    directory: Option<String>,
     files: usize,
     dependencies: usize,
     lockfile: LockfileOutcome,
@@ -1197,6 +1371,12 @@ impl Built {
     /// Its version, as its working tree's manifest declares.
     pub fn version(&self) -> &Version {
         &self.version
+    }
+
+    /// Its directory, under `units/`, when it is in a catalog: its build is
+    /// in `units/<directory>/build/`.
+    pub fn directory(&self) -> Option<&str> {
+        self.directory.as_deref()
     }
 
     /// How many files `build/` holds.
@@ -1282,6 +1462,17 @@ pub enum BuildFailure {
         /// What was written.
         written: Vec<RelativePath>,
     },
+    /// Building every unit of a catalog wrote the builds of `built`, then
+    /// writing the next one failed, and the rest were not written. The
+    /// error says what remains of that one.
+    PartlyBuilt {
+        /// The units built, in order; the first wrote the lockfile.
+        built: Vec<Built>,
+        /// The directory, under `units/`, of the unit whose build failed.
+        directory: String,
+        /// Why.
+        error: PublishError,
+    },
 }
 
 /// The pending state a build created.
@@ -1342,6 +1533,9 @@ impl fmt::Display for BuildFailure {
             Self::PendingWrite { path, error, .. } => {
                 write!(f, "cannot write {}: {error}", path.display())
             }
+            Self::PartlyBuilt {
+                directory, error, ..
+            } => write!(f, "units/{directory}: {error}"),
         }
     }
 }
@@ -1471,6 +1665,44 @@ pub enum BuildProblem {
         resolved: Version,
         /// Why it cannot be applied.
         reason: CrossVersionReason,
+    },
+    /// A problem with one unit of a catalog, where several are built or
+    /// checked together.
+    InUnit {
+        /// The unit's directory, under `units/`.
+        directory: String,
+        /// The problem.
+        problem: Box<BuildProblem>,
+    },
+    /// The directory has both `catalog.jsonc` and `manifest.jsonc`: a
+    /// repository is a catalog or one unit, not both.
+    CatalogAndManifest {
+        /// The manifest.
+        path: PathBuf,
+    },
+    /// An entry of a catalog's `units/` is not a directory.
+    NotAUnitDirectory {
+        /// The entry.
+        path: PathBuf,
+    },
+    /// A catalog's `units/` is a symbolic link or not a directory.
+    UnitsNotADirectory {
+        /// Its `units/`.
+        path: PathBuf,
+    },
+    /// A catalog has no unit directory under `units/`.
+    NoUnits {
+        /// Its `units/`.
+        path: PathBuf,
+    },
+    /// Building every unit of a catalog met a conflict between amenders of
+    /// a file that one unit does not amend: the unit's own build creates
+    /// the marked copies for it to resolve.
+    CatalogPending {
+        /// The unit's directory, under `units/`.
+        directory: String,
+        /// The copies its build would create, by path under `amendments/`.
+        paths: Vec<RelativePath>,
     },
 }
 
@@ -1604,6 +1836,41 @@ impl fmt::Display for BuildProblem {
                          copy or version of it is not UTF-8 text",
                     ),
                 }
+            }
+            Self::InUnit { directory, problem } => write!(f, "units/{directory}: {problem}"),
+            Self::CatalogAndManifest { path } => write!(
+                f,
+                "{} is beside catalog.jsonc: a repository is a catalog, with its units in \
+                 units/, or one unit, with its manifest at the top level, not both",
+                path.display()
+            ),
+            Self::NotAUnitDirectory { path } => write!(
+                f,
+                "{} is not a directory: each entry of a catalog's units/ is a unit's directory",
+                path.display()
+            ),
+            Self::UnitsNotADirectory { path } => write!(
+                f,
+                "{} is not a directory: a catalog's units are directories in its own units/, \
+                 never behind a symbolic link",
+                path.display()
+            ),
+            Self::NoUnits { path } => write!(
+                f,
+                "the catalog has no units: {} holds no unit directory",
+                path.display()
+            ),
+            Self::CatalogPending { directory, paths } => {
+                let paths: Vec<String> = paths
+                    .iter()
+                    .map(|path| format!("amendments/{path}"))
+                    .collect();
+                write!(
+                    f,
+                    "units/{directory}: amenders of files it does not amend conflict, and its \
+                     build creates {} with each conflict marked",
+                    paths.join(", ")
+                )
             }
         }
     }

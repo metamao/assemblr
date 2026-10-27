@@ -28,7 +28,14 @@ use crate::domain::{
 
 /// Checks the unit whose repository's top level is `root`, resolving its
 /// dependencies from `registry`.
+///
+/// In the directory of a unit in a catalog, the unit is checked with its
+/// siblings from the catalog's working tree, under the catalog's one
+/// lockfile (see [`check_catalog`](super::check_catalog)).
 pub fn check_unit(root: &Path, registry: &Registry) -> Result<Checked, CheckFailure> {
+    if let super::Location::CatalogUnit { catalog, directory } = super::locate_unit(root) {
+        return super::catalog::check_in_catalog(&catalog, &directory, registry);
+    }
     let manifest_path = root.join(MANIFEST);
     if let Err(error) = fs::symlink_metadata(&manifest_path) {
         if error.kind() == io::ErrorKind::NotFound {
@@ -99,6 +106,7 @@ pub fn check_unit(root: &Path, registry: &Registry) -> Result<Checked, CheckFail
             src: src.as_ref(),
             amendments: amendments.as_ref(),
             previous: &previous.clone().unwrap_or_default(),
+            catalog: None,
         },
         previous.is_some(),
         &index,
@@ -183,7 +191,7 @@ pub(super) fn publication_checks(
         .filter(|validated| validated.pending.is_empty())
         .map(|validated| Publishable {
             notes: validated.notes,
-            dependencies: validated.lock.units().len(),
+            dependencies: validated.dependencies,
             files: validated.files.len(),
         })
 }
@@ -191,11 +199,11 @@ pub(super) fn publication_checks(
 /// A unit that passed every check.
 #[derive(Debug)]
 pub struct Checked {
-    unit: UnitIdentity,
-    version: Version,
-    files: usize,
-    dependencies: usize,
-    notes: Vec<String>,
+    pub(super) unit: UnitIdentity,
+    pub(super) version: Version,
+    pub(super) files: usize,
+    pub(super) dependencies: usize,
+    pub(super) notes: Vec<String>,
 }
 
 impl Checked {
@@ -287,6 +295,13 @@ pub enum CheckProblem {
         /// Each conflict, as the merge reports it.
         conflicts: Vec<String>,
     },
+    /// A problem with one unit of a catalog, where every unit is checked.
+    InUnit {
+        /// The unit's directory, under `units/`.
+        directory: String,
+        /// The problem.
+        problem: Box<CheckProblem>,
+    },
 }
 
 impl fmt::Display for CheckProblem {
@@ -363,6 +378,7 @@ impl fmt::Display for CheckProblem {
                 }
                 Ok(())
             }
+            Self::InUnit { directory, problem } => write!(f, "units/{directory}: {problem}"),
         }
     }
 }

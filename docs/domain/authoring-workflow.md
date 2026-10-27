@@ -846,3 +846,48 @@ resolved). Other machines see a version once the commit and its tag reach
 the remote that they register, so after a new publication the result
 suggests `git push --follow-tags`, which pushes the commit and its annotated
 tag but no other local tag.
+
+## Authoring a catalog — Approved
+
+A [catalog](units.md#catalogs--approved) is authored with the same
+commands, run at its top level for every unit or in a unit's directory,
+`units/<name>`, for that unit (owner decision of 2026-10-27, adopting the
+catalog design; #127). The details are **Provisional (D-53)** unless noted.
+
+- **Siblings come from the working tree.** A build or a check reads every
+  unit of the catalog from its working tree, and resolves each sibling a
+  unit requires as `"catalog"` at the catalog's version with that content,
+  never from the registry. A problem in one unit's files fails the build or
+  check of the others, since they resolve together; at the top level, each
+  problem names its unit as `units/<name>`.
+- **One lock.** The catalog's units resolve together into one lock, which
+  is the catalog's one lockfile, `assemblr-lock.json` at its top level, and
+  which records what they depend on in other repositories, never the units
+  themselves. Each unit is then composed under that lock. A unit's build
+  and a build of every unit write the same lockfile.
+- **`unit build`** at the top level builds every unit into its
+  `units/<name>/build/`, in the order of their directories, and writes
+  nothing unless every unit builds. The builds are then written one unit at
+  a time, the first with the lockfile; a failure while writing names the
+  units already built, and building again completes it. At the top level,
+  a conflict between amenders of a file a unit does not amend is reported
+  with the unit; the unit's own build creates the pending state in its
+  directory, as for a unit outside a catalog.
+- **`unit check`** at the top level checks every unit, and reports a
+  missing or stale lockfile once, for the catalog.
+- **`unit publish`** runs at the top level only: in a unit's directory it is
+  refused, since a catalog's units are published together. It validates
+  every unit of the commit at `HEAD`, each with its committed siblings,
+  as a single unit's publication is validated, and creates one annotated
+  tag, `v<version>` of `catalog.jsonc`, with the message `<catalog name>
+  <version>`. The registry part is a single unit's, with every unit of the
+  catalog.
+- **`unit init`** at the top level, or with a directory in `units/`,
+  creates the unit in `units/<name>`, in the catalog's repository: no Git
+  repository of its own, a manifest without `version`, and the rest of the
+  scaffold in the unit's directory. Its identity must be the one the
+  catalog gives the directory. `unit init` never writes a manifest beside
+  `catalog.jsonc`.
+- **`unit add`, `unit amend`, and `unit update`** refuse to run in a
+  catalog for now, with a hint to edit the unit's manifest or copy and
+  build (**Deferred**, decision log D-56).

@@ -259,6 +259,29 @@ your own.
    A published version never changes. To release a fix, raise the version
    and publish again.
 
+### Keep several units in one repository
+
+Units that change together can share a repository, a catalog, and be
+published together at one version. Put `catalog.jsonc` at the top of a Git
+repository:
+
+```jsonc
+{ "name": "@acme/web", "version": "1.0.0" }
+```
+
+Then `assemblr unit init @acme/api` there creates the unit in `units/api/`.
+Its manifest has no `version`: every unit has the catalog's. One unit uses
+another of the same catalog with `"catalog"` instead of a version range:
+
+```jsonc
+"dependencies": { "@acme/api": "catalog" }
+```
+
+`assemblr unit build` and `assemblr unit check` at the top level cover every
+unit, and in `units/api/` only that one. `assemblr unit publish`, at the top
+level, tags the whole catalog as `v1.0.0`. Others register it once, and get
+every unit in it.
+
 ## Share your units
 
 A unit is shared through its Git repository. Anyone who can read the

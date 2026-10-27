@@ -49,8 +49,15 @@ pub(super) const LOCK_STAGING: &str = ".assemblr-lock.json.new";
 /// regular file for the new lockfile. A symbolic link or any other entry is
 /// left alone and reported. Unless an earlier build was `interrupted`,
 /// anything at the reserved paths beside `build/` is someone else's, and is
-/// reported too.
-pub(super) fn check(root: &Path, interrupted: bool) -> Vec<OutputProblem> {
+/// reported too. `build/` is in `root`, and the lockfile in `lock_root`,
+/// which is the same directory but in a catalog, whose units share one
+/// lockfile at its root; `None` leaves the lockfile's paths to another
+/// check.
+pub(super) fn check(
+    root: &Path,
+    lock_root: Option<&Path>,
+    interrupted: bool,
+) -> Vec<OutputProblem> {
     let mut problems = Vec::new();
     for (name, directory) in [
         (BUILD, true),
@@ -58,7 +65,11 @@ pub(super) fn check(root: &Path, interrupted: bool) -> Vec<OutputProblem> {
         (RETIRED, true),
         (LOCK_STAGING, false),
     ] {
-        let path = root.join(name);
+        let path = match (directory, lock_root) {
+            (true, _) => root.join(name),
+            (false, Some(lock_root)) => lock_root.join(name),
+            (false, None) => continue,
+        };
         let reserved = name != BUILD;
         let found = match fs::symlink_metadata(&path) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -85,15 +96,16 @@ pub(super) fn check(root: &Path, interrupted: bool) -> Vec<OutputProblem> {
 }
 
 /// Publishes `files` as `build/` and, when `lock` is given, writes it as the
-/// lockfile. `guard` proves this is the only build of the unit running.
-/// [`check`] must have found nothing.
+/// lockfile in `lock_root`. `guard` proves this is the only build of the
+/// unit running. [`check`] must have found nothing.
 pub(super) fn publish(
     root: &Path,
+    lock_root: &Path,
     files: &[(&RelativePath, &UnitFile)],
     lock: Option<&UnitLock>,
     guard: &BuildLock,
 ) -> Result<Published, PublishError> {
-    publish_with(root, files, lock, guard, &mut |_| Ok(()))
+    publish_with(root, lock_root, files, lock, guard, &mut |_| Ok(()))
 }
 
 /// The steps of publishing, so that tests can make each one fail.
@@ -112,6 +124,7 @@ enum Step {
 
 fn publish_with(
     root: &Path,
+    lock_root: &Path,
     files: &[(&RelativePath, &UnitFile)],
     lock: Option<&UnitLock>,
     guard: &BuildLock,
@@ -120,8 +133,8 @@ fn publish_with(
     let build = root.join(BUILD);
     let staging = root.join(STAGING);
     let retired = root.join(RETIRED);
-    let lockfile = root.join(LOCKFILE);
-    let lock_staging = root.join(LOCK_STAGING);
+    let lockfile = lock_root.join(LOCKFILE);
+    let lock_staging = lock_root.join(LOCK_STAGING);
     let failed = |operation, path: &Path, error, state| PublishError {
         operation,
         path: path.to_owned(),
@@ -527,7 +540,7 @@ mod tests {
     ) -> Result<Published, PublishError> {
         let tree = tree(files);
         let files: Vec<_> = tree.iter().collect();
-        publish_with(root, &files, lock, &guard(root), &mut |step| {
+        publish_with(root, root, &files, lock, &guard(root), &mut |step| {
             if failing.contains(&step) {
                 Err(io::Error::other(format!("injected failure at {step:?}")))
             } else {
@@ -679,7 +692,7 @@ mod tests {
         assert_eq!(published.leftover.unwrap().0, root.join(RETIRED));
         assert_eq!(contents(&root.join(BUILD)), new_build());
         assert!(recorded(&root));
-        assert!(check(&root, true).is_empty());
+        assert!(check(&root, Some(&root), true).is_empty());
         publish(&root, NEW, None, &[]).unwrap();
         assert_eq!(top_level(&root), [LOCKFILE, BUILD]);
         assert!(!recorded(&root));
@@ -696,7 +709,7 @@ mod tests {
         }
         fs::write(root.join(LOCK_STAGING), "{").unwrap();
         fs::write(git_dir(&root).join("assemblr-build.pending"), "").unwrap();
-        assert!(check(&root, true).is_empty());
+        assert!(check(&root, Some(&root), true).is_empty());
         publish(&root, NEW, Some(&lock("1.1.0")), &[]).unwrap();
         assert_eq!(contents(&root.join(BUILD)), new_build());
         assert_eq!(top_level(&root), [LOCKFILE, BUILD]);
@@ -721,7 +734,7 @@ mod tests {
             fs::write(root.join(name).join("notes.txt"), "mine").unwrap();
         }
         fs::write(root.join(LOCK_STAGING), "mine").unwrap();
-        let problems = check(&root, false);
+        let problems = check(&root, Some(&root), false);
         assert_eq!(problems.len(), 3);
         for problem in &problems {
             assert!(
@@ -732,7 +745,7 @@ mod tests {
             );
         }
         // The same paths, recorded as an interrupted build's, are leftovers.
-        assert!(check(&root, true).is_empty());
+        assert!(check(&root, Some(&root), true).is_empty());
     }
 
     #[test]
@@ -740,7 +753,7 @@ mod tests {
         let root = scratch("check");
         fs::write(root.join(BUILD), "a file").unwrap();
         fs::create_dir(root.join(LOCK_STAGING)).unwrap();
-        let problems = check(&root, true);
+        let problems = check(&root, Some(&root), true);
         let messages: Vec<String> = problems.iter().map(ToString::to_string).collect();
         assert_eq!(problems.len(), 2, "{messages:?}");
         assert!(messages[0].contains("is a regular file"), "{}", messages[0]);
@@ -755,7 +768,7 @@ mod tests {
         let elsewhere = scratch("symlink-target");
         fs::write(elsewhere.join("keep.txt"), "keep").unwrap();
         std::os::unix::fs::symlink(&elsewhere, root.join(BUILD)).unwrap();
-        let problems = check(&root, false);
+        let problems = check(&root, Some(&root), false);
         assert_eq!(problems.len(), 1);
         assert!(problems[0].to_string().contains("symbolic link"));
         assert_eq!(problems[0].path(), root.join(BUILD));
@@ -774,6 +787,7 @@ mod tests {
         let plain = UnitFile::new(b"text".to_vec(), false);
         let (run, readme) = ("run.sh".parse().unwrap(), "README".parse().unwrap());
         super::publish(
+            &root,
             &root,
             &[(&run, &script), (&readme, &plain)],
             None,

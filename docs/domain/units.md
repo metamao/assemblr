@@ -53,11 +53,12 @@ Rules:
 ## Versioning — Approved
 
 - Unit versions use SemVer.
-- The manifest declares the unit's **exact** version.
+- The manifest declares the unit's **exact** version. A unit in a
+  [catalog](#catalogs--approved) declares none: it has the catalog's.
 - Dependency declarations may use SemVer **ranges**.
 - Resolution and lock state record **exact** versions.
 - Each published version is a Git tag, `v<version>`, whose manifest declares
-  exactly that version (see
+  exactly that version, or, in a catalog, whose `catalog.jsonc` does (see
   [registries-and-discovery.md](registries-and-discovery.md#units-are-git-repositories--approved)).
 - Published versions are immutable (see
   [authoring-workflow.md](authoring-workflow.md#publication--approved)).
@@ -81,13 +82,16 @@ Open:
 
 ## Authoring repository convention — Approved
 
-Every unit is maintained in **its own Git repository**. This is a requirement,
-not just an organizational convention: Git holds the history from which
-published versions are identified and historical content is recovered.
+Every unit is maintained in a Git repository: **its own**, or a
+[catalog](#catalogs--approved) that publishes several units together. This
+is a requirement, not just an organizational convention: Git holds the
+history from which published versions are identified and historical content
+is recovered.
 
-- A repository holds exactly **one** unit, with `manifest.jsonc` at its root.
-  Several independently published units never share a repository.
-- Each unit has an independent publication lifecycle.
+- A unit's repository holds exactly **one** unit, with `manifest.jsonc` at
+  its root. Independently published units never share a repository: the
+  units of a catalog share its version and its publications.
+- Each unit's repository has an independent publication lifecycle.
 - Repositories may be private. The owner decides how they are hosted and
   organized.
 
@@ -116,6 +120,49 @@ assemblr-lock.json    the unit lockfile: CLI-managed, tracked, resolved versions
 The generated local manifest schema is `manifest.schema.json` at the top
 level, tracked (**OC-17**, resolved; D-2); see
   [authoring-workflow.md](authoring-workflow.md#initialization-details--provisional-d-5-d-33).
+
+## Catalogs — Approved
+
+A **catalog** is a Git repository with `catalog.jsonc` at its root and one
+unit in each directory of `units/`. Its units are separate units, each with
+its own identity, manifest, files, and dependencies, that are versioned and
+published together (owner decision of 2026-10-27, adopting the catalog
+design; #127).
+
+```text
+catalog.jsonc         required: the catalog's name and version
+units/
+  <name>/             one unit: manifest.jsonc, src/, amendments/, and the
+                      other files of a unit's repository, except the lockfile
+assemblr-lock.json    the catalog's one lockfile
+```
+
+- `catalog.jsonc` holds `name`, an `@owner/name` identity that names the
+  catalog, and `version`, the exact SemVer version of every unit in it.
+  `$schema` is allowed for editor support. A catalog has no
+  `manifest.jsonc` at its root: a repository is a catalog or one unit.
+- Every entry of `units/` is a directory, and every directory is a unit,
+  in the sorted order of their names. A catalog has at least one.
+- A unit's manifest declares no `version`. Its identity is
+  `@<catalog owner>/<directory>`, and its `name` must be exactly that
+  (**Provisional (D-52)**).
+- A unit requires another unit of the same catalog, a **sibling**, with the
+  requirement `"catalog"`, which means the sibling at the catalog's
+  version. A version range on a sibling is an error, since siblings are
+  published together, and so is `"catalog"` outside a catalog or for a unit
+  the catalog does not have (**Provisional (D-55)**). Units of other
+  repositories are required with ranges as usual.
+- One tag, `v<version>`, publishes every unit at the catalog's version.
+  Each unit's content identity is the tree of its directory, so a version
+  whose unit is unchanged keeps that unit's tree.
+- The catalog has one lockfile, at its root, for what its units depend on
+  in other repositories. Read for one of its units, a published lock also
+  holds the unit's siblings at the catalog's version and that commit.
+- A unit of a catalog cannot amend a sibling's file yet: that needs the
+  stored base of #128.
+
+`"catalog"` is Assemblr's own requirement, unrelated to pnpm's
+`catalog:` protocol, which names a version from a shared list.
 
 ## Unit contents — Approved
 

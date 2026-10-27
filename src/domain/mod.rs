@@ -34,7 +34,9 @@ pub use lock::{
     AmendmentBaseError, BaseIntegrityError, LockError, LockedUnit, PublishedAmendmentError,
     UnitLock, amendment_bases, published_amendments, relock, verify_bases,
 };
-pub use manifest::{AmendmentDeclaration, BlankDescription, Description, Manifest, ManifestError};
+pub use manifest::{
+    AmendmentDeclaration, BlankDescription, Catalog, Description, Manifest, ManifestError,
+};
 pub use merge::{
     Combined, Conflict, ConflictKind, Derived, Edit, Lists, MergeFormat, Operation, Plan, Value,
     ValueChange, combine, derive, plan, show_path, write_json_string,
@@ -53,7 +55,7 @@ pub use reconcile::{
 };
 pub use registry::{
     Change, Excluded, IntegrityChange, InvalidIndex, ObservedTag, ObservedVersion, RegisteredUnit,
-    RegistryError, RegistryIndex, Removed, SourceReference, declared_identity,
+    RegistryError, RegistryIndex, Removed, SourceReference, Subject, declared_identities,
 };
 pub use resolution::{
     AvailableVersions, Dependencies, Lock, LockChange, Requirement, Requirer, Resolution,
