@@ -177,6 +177,14 @@ fn a_catalog_is_built_published_with_one_tag_registered_and_composed() {
         "{}",
         stdout(&output)
     );
+    // The catalog's name is not a unit the registry knows: its units are.
+    assert!(
+        stdout(&output).contains(
+            "The local registry does not register the units of the catalog @acme/web, so"
+        ),
+        "{}",
+        stdout(&output)
+    );
     assert_eq!(git(&catalog, &["tag", "--list"]), "v1.0.0");
     assert_eq!(
         git(
@@ -917,4 +925,118 @@ fn a_failed_store_write_puts_the_rebased_copies_back() {
             .join("units/b/amendments/a.txt.assemblr-rebase-new")
             .exists()
     );
+}
+
+#[test]
+fn a_catalog_is_not_a_consumer_project() {
+    let fixture = Fixture::new("not-a-project");
+    let catalog = fixture.catalog("1.0.0");
+    succeeds(fixture.run(&catalog, &["unit", "init", "@acme/a"]));
+    for args in [&["init"][..], &["compose"], &["status"]] {
+        let err = stderr(&fails(fixture.run(&catalog, args)));
+        assert!(
+            err.contains(
+                "holds `catalog.jsonc`, so it is a catalog of units, not a consumer project"
+            ),
+            "{args:?}: {err}"
+        );
+    }
+    assert!(!catalog.join("assemblr.jsonc").exists());
+    assert!(!catalog.join("AGENTS.md").exists());
+}
+
+#[test]
+fn a_unit_is_not_created_inside_a_catalog_outside_its_units() {
+    let fixture = Fixture::new("nested");
+    let catalog = fixture.catalog("1.0.0");
+    succeeds(fixture.run(&catalog, &["unit", "init", "@acme/a"]));
+    let unit = catalog.join("units/a");
+    let err = stderr(&fails(fixture.run(&unit, &["unit", "init", "@acme/x"])));
+    assert!(
+        err.contains("is inside the catalog at") && err.contains("outside its units/"),
+        "{err}"
+    );
+    assert!(err.contains("run `assemblr unit init @acme/x` in"), "{err}");
+    assert!(!unit.join("x").exists());
+    // From the catalog's top level, the unit goes in `units/` as usual.
+    succeeds(fixture.run(&catalog, &["unit", "init", "@acme/x"]));
+    assert!(catalog.join("units/x/manifest.jsonc").is_file());
+}
+
+#[test]
+fn a_provider_of_another_repository_moves_by_its_declared_base() {
+    let fixture = Fixture::new("external-base");
+    let base = fixture.base();
+    let catalog = fixture.catalog("1.0.0");
+    succeeds(fixture.run(&catalog, &["unit", "init", "@acme/a"]));
+    write(
+        &catalog,
+        "units/a/manifest.jsonc",
+        &unit("a", r#""@acme/base": "^1.0.0""#),
+    );
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+    succeeds(fixture.run(&catalog.join("units/a"), &["unit", "amend", "base.txt"]));
+    write(&catalog, "units/a/amendments/base.txt", "base, by a\n");
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+
+    // The provider publishes 2.0.0, which adds a file.
+    write(
+        &base,
+        "manifest.jsonc",
+        r#"{"name": "@acme/base", "version": "2.0.0", "description": "A base."}"#,
+    );
+    write(&base, "src/more.txt", "more\n");
+    git(&base, &["add", "-A"]);
+    git(&base, &["commit", "-q", "-m", "2.0.0"]);
+    git(&base, &["tag", "v2.0.0"]);
+    succeeds(fixture.run(&fixture.dir, &["registry", "sync"]));
+
+    // A requirement only 2.0.0 satisfies: `unit update` does not run in a
+    // catalog, so the message says to move the declared base.
+    let manifest = read(&catalog.join("units/a/manifest.jsonc"));
+    write(
+        &catalog,
+        "units/a/manifest.jsonc",
+        &manifest.replace("^1.0.0", "^2.0.0"),
+    );
+    let err = stderr(&fails(fixture.run(&catalog, &["unit", "build"])));
+    assert!(
+        err.contains(
+            "declares @acme/base 1.0.0 as its base, but the catalog's units now resolve \
+             @acme/base to 2.0.0; declare 2.0.0 as the base in manifest.jsonc"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("unit update"), "{err}");
+
+    // Moving the base by hand: the build locks 2.0.0 on the copy.
+    let manifest = read(&catalog.join("units/a/manifest.jsonc"));
+    write(
+        &catalog,
+        "units/a/manifest.jsonc",
+        &manifest.replace(r#""base": "1.0.0""#, r#""base": "2.0.0""#),
+    );
+    let output = succeeds(fixture.run(&catalog, &["unit", "build"]));
+    assert!(
+        stderr(&output).contains("@acme/base 1.0.0 -> 2.0.0"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        read(&catalog.join("units/a/build/base.txt")),
+        "base, by a\n"
+    );
+    assert_eq!(read(&catalog.join("units/a/build/more.txt")), "more\n");
+    succeeds(fixture.run(&catalog, &["unit", "check"]));
+}
+
+#[test]
+fn a_project_may_hold_its_own_catalog_jsonc() {
+    let fixture = Fixture::new("project-catalog-file");
+    succeeds(fixture.run(&fixture.dir, &["init", "app"]));
+    let project = fixture.dir.join("app");
+    write(&project, "catalog.jsonc", "{}");
+    write(&project, "units/notes.txt", "a project's own files\n");
+    succeeds(fixture.run(&project, &["compose"]));
+    succeeds(fixture.run(&project, &["status"]));
 }

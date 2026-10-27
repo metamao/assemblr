@@ -523,16 +523,17 @@ fn validate_unit(
     index: &RegistryIndex,
     problems: &mut Vec<BuildProblem>,
 ) -> Option<Validated> {
+    let catalog = Joint {
+        siblings,
+        lock: &joint.lock,
+        changes: &joint.changes,
+    };
     let inputs = Inputs {
         manifest: &unit.manifest,
         src: unit.src.as_ref(),
         amendments: unit.amendments.as_ref(),
         previous: &joint.lock,
-        catalog: Some(&Joint {
-            siblings,
-            lock: &joint.lock,
-            changes: &joint.changes,
-        }),
+        catalog: Some(&catalog),
     };
     let mut found = Vec::new();
     let validated = validate(&inputs, index, &mut found).result;

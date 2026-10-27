@@ -678,7 +678,9 @@ How the status of a statement affects implementation:
   **Provisional (D-59):** every amendment in a catalog has a stored base,
   and `unit amend` works in a unit's directory. **Provisional (D-60):**
   which copies a build rebases, and what a failed or conflicting rebase
-  writes.
+  writes. **Provisional (D-61):** a catalog's top level is not a consumer
+  project, and `unit init` refuses a directory of a catalog's repository
+  outside its `units/`.
 - **Origin:** #127, #128
 - **Context:** [catalogs](units.md#catalogs--approved)
 

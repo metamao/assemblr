@@ -299,6 +299,12 @@ fn init_diagnosis(failure: &InitFailure, args: &InitArgs) -> Diagnosis {
             };
             diagnosis.advise("fix the problem and run the same command again to finish")
         }
+        InitFailure::InsideCatalog { top_level, .. } => Diagnosis::note("nothing was changed")
+            .advise(format!(
+                "run `assemblr unit init {}` in {}, which creates the unit in units/",
+                args.identity,
+                top_level.display()
+            )),
         InitFailure::Inside { top_level, .. } => {
             let diagnosis = Diagnosis::note("nothing was changed").advise(format!(
                 "initialize the unit in a directory outside {}",
@@ -1069,14 +1075,14 @@ fn report_published(published: &Published) {
                 "The local registry registers {} from {source}, not from this repository, so the \
                  version becomes discoverable when `assemblr registry sync` reads that source, \
                  for example after a push to it.",
-                published.unit()
+                registered_name(published)
             );
         }
         IndexOutcome::NotRegistered => {
             println!(
                 "The local registry does not register {}, so the version is not discoverable \
                  until `assemblr registry add {}` registers this repository.",
-                published.unit(),
+                registered_name(published),
                 root_display()
             );
         }
@@ -1085,6 +1091,16 @@ fn report_published(published: &Published) {
     // only once the commit and its annotated tag reach the remote.
     if !published.already_published() {
         println!("Next: run `git push --follow-tags` so that other machines can sync it.");
+    }
+}
+
+/// What the registry registers for `published`: the unit, or a catalog's
+/// units, since the catalog's own name is not a unit the registry knows.
+fn registered_name(published: &Published) -> String {
+    if published.units().is_empty() {
+        published.unit().to_string()
+    } else {
+        format!("the units of the catalog {}", published.unit())
     }
 }
 
@@ -1360,7 +1376,7 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
              never published as that version; {DELETING_THE_LOCKFILE}"
         ),
         // The message already says what to do.
-        BuildProblem::AmendmentBase(_) => return None,
+        BuildProblem::AmendmentBase(_) | BuildProblem::CatalogBase { .. } => return None,
         BuildProblem::BaseIntegrity(_) => "published versions never change: either the \
                                            provider's tag was moved and its source registered \
                                            again, or the amender was published against other \

@@ -18,8 +18,8 @@ use clap::{Parser, Subcommand};
 
 /// Compose and maintain projects from reusable, versioned units
 ///
-/// A unit is a versioned, reusable part of a project, kept in its own Git
-/// repository. Authors create and publish units with `assemblr unit`;
+/// A unit is a versioned, reusable part of a project, kept in a Git
+/// repository of its own or with others in a catalog. Authors create and publish units with `assemblr unit`;
 /// projects select units in `assemblr.jsonc` and compose them.
 #[derive(Debug, Parser)]
 #[command(

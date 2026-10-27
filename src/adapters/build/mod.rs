@@ -856,7 +856,25 @@ pub(super) fn validate(
                 | AmendmentBaseError::DeclarationChanged { path, .. }
                 | AmendmentBaseError::NotLocked { path, .. } => path.clone(),
             };
-            problems.push(BuildProblem::AmendmentBase(error));
+            problems.push(match error {
+                // In a catalog, `previous` is the catalog's new joint lock,
+                // not the lockfile, and `unit update` does not run there:
+                // the declared base moves by hand, and the build rebases
+                // the copy from its stored base.
+                AmendmentBaseError::DeclarationChanged {
+                    path,
+                    unit,
+                    base,
+                    resolved,
+                    ..
+                } if catalog.is_some() => BuildProblem::CatalogBase {
+                    path,
+                    unit,
+                    base,
+                    resolved,
+                },
+                error => BuildProblem::AmendmentBase(error),
+            });
             path
         })
         .collect();
@@ -1659,6 +1677,18 @@ pub enum BuildProblem {
     Lock(LockError),
     /// The resolution would move an amended unit away from its base.
     AmendmentBase(AmendmentBaseError),
+    /// In a catalog, an amendment declares a base other than the version
+    /// the catalog's units now resolve its provider to.
+    CatalogBase {
+        /// The amended path.
+        path: RelativePath,
+        /// The provider.
+        unit: UnitIdentity,
+        /// The declared base.
+        base: Version,
+        /// The version the catalog's units resolve the provider to.
+        resolved: Version,
+    },
     /// A published amender's lockfile identifies a base as other content
     /// than the registry records for that version.
     BaseIntegrity(Box<BaseIntegrityError>),
@@ -1831,6 +1861,18 @@ impl fmt::Display for BuildProblem {
             Self::Resolution(error) => error.fmt(f),
             Self::Lock(error) => error.fmt(f),
             Self::AmendmentBase(error) => error.fmt(f),
+            Self::CatalogBase {
+                path,
+                unit,
+                base,
+                resolved,
+            } => write!(
+                f,
+                "amendments/{path} declares {unit} {base} as its base, but the catalog's units \
+                 now resolve {unit} to {resolved}; declare {resolved} as the base in \
+                 manifest.jsonc and run `assemblr unit build`, which rebases the copy from its \
+                 stored base, or restore a requirement that {base} satisfies"
+            ),
             Self::BaseIntegrity(error) => error.fmt(f),
             Self::Composition(error) => error.fmt(f),
             Self::Merge {

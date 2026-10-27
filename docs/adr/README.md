@@ -22,14 +22,14 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0003](0003-managed-local-registry.md) | Managed local registry with Git-based units | Accepted (provisional mechanisms), amended by 0004 |
 | [0004](0004-registry-validation-and-synchronization.md) | Registry validation, synchronization, and offline reads | Accepted, amended by 0005 |
 | [0005](0005-catalog-metadata-index.md) | Catalog metadata index and metadata-first registry | Superseded by 0038 |
-| [0006](0006-reading-git-repositories.md) | Reading Git repositories through the `git` executable | Accepted, extended by 0008 |
+| [0006](0006-reading-git-repositories.md) | Reading Git repositories through the `git` executable | Accepted, extended by 0008, point 7 narrowed by 0039 |
 | [0007](0007-local-registry-storage.md) | Local registry storage, replacement, and locking | Accepted |
-| [0008](0008-unit-build.md) | Unit builds: working-tree reading, the unit lockfile, and publishing `build/` | Accepted |
+| [0008](0008-unit-build.md) | Unit builds: working-tree reading, the unit lockfile, and publishing `build/` | Accepted, extended by 0039 |
 | [0009](0009-rendering.md) | Rendering templates with a purpose-built interpolator | Superseded by 0036 |
 | [0010](0010-unit-amend.md) | `unit amend`: the search, the manifest edit, and recovery; amendments in a build | Accepted, point 8 superseded by 0011, point 2 by 0036 |
 | [0011](0011-published-amendments.md) | Published amendments: reading them, validating them at index time, and composing them at the base | Accepted, the composition at the base only narrowed by 0023, points 5 and 6 narrowed by 0015, points 4 to 6 superseded by 0032 |
 | [0012](0012-unit-update.md) | `unit update`: resolving with a partial lock, rewriting bases in place, and the update journal | Accepted, the refusal of a changed file and of a published amender off its base lifted by 0023 |
-| [0013](0013-unit-check-and-publish.md) | `unit check` and `unit publish`: shared validation, the committed tree, the tag, and one-source indexing | Accepted |
+| [0013](0013-unit-check-and-publish.md) | `unit check` and `unit publish`: shared validation, the committed tree, the tag, and one-source indexing | Accepted, extended by 0039 |
 | [0014](0014-unit-init.md) | `unit init`: repository discovery and initialization, the scaffold's writes, and the embedded manifest schema | Accepted, point 3 amended by #115 and #120, the parameter rules of points 4 and 5 replaced by 0036 |
 | [0015](0015-value-merge.md) | The value-level merge of several amendments: the domain engine, the JSONC editor, and the projection and round-trip checks | Accepted, point 6 clarified by 0018, the refusal of other formats narrowed by 0021, the flat model of point 3 superseded by 0032 |
 | [0016](0016-consumer-compose.md) | The first consumer `compose`: the project root, the lockfile's reconciliation state, the stored base, ignore rules, and the journal | Accepted, points 7 and 9 extended by 0017, point 6 revised by 0018, point 8 extended by 0019, options removed by 0036 |

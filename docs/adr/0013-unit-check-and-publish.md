@@ -1,6 +1,8 @@
 # 0013: `unit check` and `unit publish`: shared validation, the committed tree, the tag, and one-source indexing
 
-- **Status:** Accepted
+- **Status:** Accepted. Extended by
+  [0039](0039-catalog-repositories.md), where one tag publishes every unit
+  of a catalog and the registry is updated for all of them.
 - **Date:** 2026-10-21
 
 ## Context
