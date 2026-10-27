@@ -75,7 +75,8 @@ pub(super) enum UnitCommand {
     /// Copy a dependency's file to amendments/ to change it
     ///
     /// The copy is declared in `manifest.jsonc`, and the build delivers it
-    /// in place of the dependency's file.
+    /// in place of the dependency's file. In a catalog, run it in a unit's
+    /// directory; the copy's base is stored in the catalog's `.assemblr/`.
     #[command(after_long_help = "Examples:\n  \
         assemblr unit amend package.json\n  \
         assemblr unit amend config/app.json --unit @acme/base")]
@@ -356,10 +357,7 @@ fn refuse_in_catalog(command: &str, root: &Path) -> Option<ExitCode> {
     }
     Some(fail(
         &format!("`assemblr unit {command}` does not work in a catalog yet"),
-        Some(
-            "edit the unit's manifest.jsonc, or copy the file under its amendments/ and \
-             declare it there, then run `assemblr unit build`",
-        ),
+        Some("edit the unit's manifest.jsonc, then run `assemblr unit build`"),
     ))
 }
 
@@ -368,8 +366,14 @@ fn amend(args: &AmendArgs) -> ExitCode {
         Ok(located) => located,
         Err(code) => return code,
     };
-    if let Some(code) = refuse_in_catalog("amend", &root) {
-        return code;
+    if locate_unit(&root) == Location::Catalog {
+        return fail(
+            "`assemblr unit amend` amends a file for one unit, and this is a catalog's top level",
+            Some(
+                "run it in the directory of the unit that amends the file, such as \
+                 `cd units/<name>`",
+            ),
+        );
     }
     match amend_unit(&root, &registry, &args.file, args.unit.as_ref()) {
         Ok(amended) => {
@@ -400,6 +404,12 @@ fn amend(args: &AmendArgs) -> ExitCode {
                     "note: the amendments below conflict, and the copy holds each conflict \
                      between markers; edit it to the content you want, remove every marker, \
                      and run `assemblr unit build`"
+                );
+            }
+            if amended.base_stored() {
+                println!(
+                    "Its base is stored in the catalog's .assemblr/, which `unit build` rebases \
+                     the copy from when the file below changes; commit .assemblr/ with the copy."
                 );
             }
             ExitCode::SUCCESS
@@ -714,7 +724,11 @@ fn add_diagnosis(failure: &AddFailure, root: &Path) -> Diagnosis {
                 BuildFailure::Rejected(problems) => {
                     distinct(problems.iter().filter_map(|problem| advice(problem, root)))
                 }
-                BuildFailure::Publish(_) | BuildFailure::PartlyBuilt { .. } => Vec::new(),
+                BuildFailure::Publish(_)
+                | BuildFailure::PartlyBuilt { .. }
+                | BuildFailure::Rebased(_)
+                | BuildFailure::RebaseWrite(_)
+                | BuildFailure::AfterRebase { .. } => Vec::new(),
                 BuildFailure::Pending(pending) => {
                     return pending_diagnosis(pending, "manifest.jsonc holds the dependency and ");
                 }
@@ -796,7 +810,11 @@ fn build() -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(failure) => {
-                if let BuildFailure::PartlyBuilt { built, .. } = &failure {
+                let inner = match &failure {
+                    BuildFailure::AfterRebase { failure, .. } => failure.as_ref(),
+                    failure => failure,
+                };
+                if let BuildFailure::PartlyBuilt { built, .. } = inner {
                     for built in built {
                         report_built(built, true);
                     }
@@ -819,6 +837,16 @@ fn build() -> ExitCode {
 /// catalog's top level.
 fn report_built(built: &Built, at_catalog: bool) {
     report_lockfile(built);
+    for copy in built.rebased() {
+        eprintln!(
+            "note: rebased units/{}/amendments/{} onto the change in src/{} of {}, as the \
+             units below compose it, since its stored base",
+            copy.unit().name(),
+            copy.path(),
+            copy.path(),
+            copy.provider()
+        );
+    }
     warn_notes(built.notes());
     if let Some((path, error)) = built.leftover() {
         eprintln!(
@@ -1196,6 +1224,45 @@ fn diagnosis(failure: &BuildFailure, root: &Path) -> Diagnosis {
         BuildFailure::Rejected(problems) => problems,
         BuildFailure::Pending(pending) => return pending_diagnosis(pending, ""),
         BuildFailure::PendingWrite { written, .. } => return pending_write_diagnosis(written, ""),
+        BuildFailure::Rebased(copies) => {
+            let clean: Vec<String> = copies
+                .iter()
+                .filter(|copy| copy.conflicts().is_empty())
+                .map(|copy| format!("units/{}/amendments/{}", copy.unit().name(), copy.path()))
+                .collect();
+            let note = if clean.is_empty() {
+                "the copies and their stored bases in .assemblr/ were updated; build/ and \
+                 assemblr-lock.json were not changed"
+                    .to_owned()
+            } else {
+                format!(
+                    "{} {} rebased without conflicts; the copies and their stored bases in \
+                     .assemblr/ were updated; build/ and assemblr-lock.json were not changed",
+                    clean.join(", "),
+                    if clean.len() == 1 { "was" } else { "were" }
+                )
+            };
+            return Diagnosis::note(note).advise(
+                "edit each copy to the content you want, remove every conflict marker, and run \
+                 `assemblr unit build`",
+            );
+        }
+        BuildFailure::RebaseWrite(_) => {
+            return Diagnosis::note("build/ and assemblr-lock.json were not changed")
+                .advise("fix the problem and run `assemblr unit build` again");
+        }
+        BuildFailure::AfterRebase { rebased, failure } => {
+            let copies: Vec<String> = rebased
+                .iter()
+                .map(|copy| format!("units/{}/amendments/{}", copy.unit().name(), copy.path()))
+                .collect();
+            return diagnosis(failure, root).noting_first(&format!(
+                "{} {} rebased first, with {} stored base in .assemblr/",
+                copies.join(", "),
+                if copies.len() == 1 { "was" } else { "were" },
+                if copies.len() == 1 { "its" } else { "their" }
+            ));
+        }
     };
     let advice = distinct(problems.iter().filter_map(|problem| advice(problem, root)));
     let diagnosis = Diagnosis::note("build/ and assemblr-lock.json were not changed");
@@ -1267,6 +1334,21 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
             "run `assemblr unit build` in units/{directory}, which creates the copies and \
              declares them; edit them to the content you want, remove every marker, and build \
              again"
+        ),
+        BuildProblem::BaseStale { .. } => {
+            "run `assemblr unit build`, which rebases the copy onto the change".to_owned()
+        }
+        BuildProblem::BaseMissing { path, .. } => format!(
+            "restore .assemblr/ from version control if it was lost; otherwise move \
+             amendments/{path} away, remove its declaration from manifest.jsonc, run \
+             `assemblr unit amend {path}`, and make your changes again in the new copy"
+        ),
+        BuildProblem::BaseStore(_) => "restore .assemblr/ from version control; it is \
+             Assemblr's record of what each copy was taken from"
+            .to_owned(),
+        BuildProblem::BaseUnmergeable { path, .. } => format!(
+            "edit amendments/{path} by hand to hold the change, then move it away, remove its \
+             declaration, run `assemblr unit amend {path}`, and put your edited copy back"
         ),
         BuildProblem::Lockfile(_) => format!("fix assemblr-lock.json; {DELETING_THE_LOCKFILE}"),
         BuildProblem::UpdateInterrupted { .. } => {

@@ -83,7 +83,7 @@ const PENDING_MEMBERS: [&str; 3] = ["lock", "files", "declaration"];
 const TEXT_LIMIT: u64 = 64 * 1024 * 1024;
 
 /// The store under `root/.assemblr`.
-pub(super) struct Store {
+pub(crate) struct Store {
     dir: PathBuf,
     /// The store's own files that writing the base restored, because
     /// they had been edited.
@@ -91,7 +91,7 @@ pub(super) struct Store {
 }
 
 impl Store {
-    pub(super) fn new(root: &Path) -> Self {
+    pub(crate) fn new(root: &Path) -> Self {
         Self {
             dir: root.join(STATE_DIR),
             restored: std::cell::RefCell::new(Vec::new()),
@@ -129,7 +129,7 @@ impl Store {
     /// each path to store, creating the directory and its attributes when
     /// they do not exist. A blob or listing already stored is left as it
     /// is when its bytes are the expected ones, and is an error otherwise.
-    pub(super) fn write_base(
+    pub(crate) fn write_base(
         &self,
         snapshot: &Snapshot,
         files: &[(&RelativePath, &[u8])],
@@ -229,7 +229,7 @@ impl Store {
     /// Reads the base `identity` back and verifies it: the listing's bytes
     /// hash to the identity, and every blob of a path not in `unbased` is
     /// stored with the bytes its identity names.
-    pub(super) fn verify_base(
+    pub(crate) fn verify_base(
         &self,
         identity: &BaseIdentity,
         unbased: &BTreeSet<RelativePath>,
@@ -279,7 +279,7 @@ impl Store {
     }
 
     /// The stored bytes of `blob`.
-    pub(super) fn read_blob(&self, blob: &BlobId) -> Result<Vec<u8>, StoreError> {
+    pub(crate) fn read_blob(&self, blob: &BlobId) -> Result<Vec<u8>, StoreError> {
         let path = self.blob_path(blob);
         let bytes = read_bounded(&path, u64::MAX).map_err(|error| match error.kind() {
             io::ErrorKind::NotFound => StoreError::Missing(path.clone()),
@@ -386,7 +386,7 @@ impl Store {
     /// them. This is cleanup of content nothing refers to, so a failure
     /// leaves files that are harmless, as an interrupted removal would, and
     /// is not reported.
-    pub(super) fn discard_base(&self, base: &BaseIdentity, keep: Option<&BaseIdentity>) {
+    pub(crate) fn discard_base(&self, base: &BaseIdentity, keep: Option<&BaseIdentity>) {
         if keep == Some(base) {
             return;
         }
@@ -709,7 +709,7 @@ fn known_members(value: &Value, what: &str, members: &[&str]) -> Result<(), Jour
 }
 
 /// Creates `path` new with `bytes`, flushed.
-pub(super) fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(bytes)?;
     file.sync_all()

@@ -36,6 +36,8 @@ The term **amendment** is approved and replaces the earlier term *fragment*.
   through immutable snapshots and Git provenance. It is never replaced by
   whatever currently exists in the dependency author's working tree (see
   [registries-and-discovery.md](registries-and-discovery.md#integrity-and-snapshots--approved)).
+  In a catalog, whose units change together, the base is stored instead
+  (see [the base in a catalog](#the-base-in-a-catalog)).
 - The engine may need **format-aware adapters** and **limited explicit
   metadata** where ambiguity cannot be resolved safely.
 
@@ -81,6 +83,63 @@ of the first amendments increment.
   a change below that the copy did not touch flows through, and a change to
   what the copy changed is a conflict (see
   [across provider versions](#across-provider-versions--approved)).
+
+### The base in a catalog
+
+Decided by the owner on #128 (2026-10-27, adopting the catalog design).
+
+The units of a [catalog](units.md#catalogs--approved) change and publish
+together, so an amendment of a sibling's file has no earlier published
+version to take its base from, and the sibling as it is now is no base: a
+later edit to the sibling would be removed silently by the copy.
+
+- The base of an amendment of a sibling is **stored in the catalog**, under
+  `.assemblr/` at its top level, in the content-addressed format consumer
+  projects use for their reconciliation base. It is the file as the units
+  below the amender compose it, as for any amendment, when `unit amend`
+  takes the copy.
+- When that file changes, `unit build` merges the change into the copy with
+  three inputs, the stored base, the copy, and the file now. If the merge is
+  clean, it updates the copy and the stored base and reports it. If it
+  conflicts, it stops, leaving each conflict between markers in the copy
+  (D-41), with a diagnostic naming the file and the units involved.
+- `unit check` and `unit publish` refuse a stored base that is not the file
+  below the copy now, so a published version needs no merge across versions
+  within the catalog: its copies are on the files below them at the same
+  version.
+- A stored base is verified against its recorded identity before use, and a
+  missing or corrupt one is an explicit failure.
+- Layered amendments between siblings follow [the base](#the-base): the
+  base is the file as the units below compose it, so a unit above another
+  is rebased after it.
+
+Details:
+
+- **Provisional (D-57):** the declaration of an amendment of a sibling names
+  its base as `"catalog"`, the catalog's version, as a sibling is required:
+  `"package.json": { "unit": "@acme/node-base", "base": "catalog" }`. A
+  version as a sibling's base is an error, and so is `"catalog"` for a unit
+  of another repository or outside a catalog.
+- **Provisional (D-58):** the catalog stores one listing of every base, by
+  `<unit directory>/<amended path>`, under `.assemblr/bases/`, with each
+  base's bytes under `.assemblr/objects/`, and
+  `.assemblr/amendment-bases.json` names the listing by its identity.
+  `.assemblr/` is tracked with the catalog. The base of an amendment the
+  catalog no longer declares is removed by the next build that writes the
+  store.
+- **Provisional (D-59):** every amendment of a unit in a catalog has a
+  stored base, of a sibling's file or of a file of another repository, since
+  a sibling's copy below can be part of either. `unit amend` works in a
+  unit's directory in a catalog.
+- **Provisional (D-60):** a build at the catalog's top level rebases every
+  unit's copies; in a unit's directory, the copies of that unit and of the
+  units of the catalog below it. Each unit is rebased after the units of
+  the catalog it depends on. A clean rebase is written only once the whole
+  build validates, before `build/`; a build that fails before then leaves
+  `amendments/` and `.assemblr/` as they were, and a failure while writing
+  after it names the copies rebased. A rebase with conflicts writes every
+  rebased copy and the new bases, and builds nothing. A file whose rebase
+  conflicts is not rebased in the units above until it is resolved.
 
 ### Target
 

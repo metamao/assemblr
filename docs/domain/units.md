@@ -135,6 +135,7 @@ units/
   <name>/             one unit: manifest.jsonc, src/, amendments/, and the
                       other files of a unit's repository, except the lockfile
 assemblr-lock.json    the catalog's one lockfile
+.assemblr/            the stored bases of its amendments, tracked
 ```
 
 - `catalog.jsonc` holds `name`, an `@owner/name` identity that names the
@@ -158,8 +159,10 @@ assemblr-lock.json    the catalog's one lockfile
 - The catalog has one lockfile, at its root, for what its units depend on
   in other repositories. Read for one of its units, a published lock also
   holds the unit's siblings at the catalog's version and that commit.
-- A unit of a catalog cannot amend a sibling's file yet: that needs the
-  stored base of #128.
+- A unit amends a sibling's file with the base `"catalog"`, and the base
+  of every amendment in a catalog is stored in the catalog's `.assemblr/`
+  (see
+  [the base in a catalog](amendments-and-composition.md#the-base-in-a-catalog)).
 
 `"catalog"` is Assemblr's own requirement, unrelated to pnpm's
 `catalog:` protocol, which names a version from a shared list.

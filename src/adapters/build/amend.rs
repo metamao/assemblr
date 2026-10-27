@@ -23,18 +23,20 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+use super::bases::{self, BaseStoreError, StoredBases};
+use super::catalog::{self, Location, locate_unit};
 use super::exclusive::BuildLock;
 use super::{
-    BuildLockError, BuildProblem, MANIFEST, ManifestFileError, layer_file,
-    read_working_manifest_text, resolve_graph,
+    BuildLockError, BuildProblem, MANIFEST, ManifestFileError, Resolved, layer_file,
+    read_working_manifest_text, resolve_graph, resolve_graph_in,
 };
 use crate::adapters::git::{FILE_LIMIT, GitError, GitRepository, ReadSrcError, UnitDirectory};
 use crate::adapters::lockfile::{self, LockfileError};
-use crate::adapters::manifest::{EditError, declare_amendment, read_manifest};
+use crate::adapters::manifest::{EditError, InCatalog, declare_amendment_in, read_manifest};
 use crate::adapters::registry::{Registry, StorageError};
 use crate::domain::{
-    AmendmentDeclaration, LockChange, LockError, RelativePath, RelativePathError, ResolutionError,
-    Root, UnitContent, UnitIdentity, Version, compose,
+    AmendmentDeclaration, FileTree, LockChange, LockError, Manifest, RelativePath,
+    RelativePathError, ResolutionError, Root, UnitContent, UnitIdentity, Version, compose,
 };
 
 /// Where the edited manifest is written before it replaces `manifest.jsonc`.
@@ -52,6 +54,9 @@ pub fn amend_unit(
     file: &str,
     unit: Option<&UnitIdentity>,
 ) -> Result<Amended, AmendFailure> {
+    if let Location::CatalogUnit { catalog, directory } = locate_unit(root) {
+        return amend_in_catalog(&catalog, &directory, registry, file, unit);
+    }
     let manifest_path = root.join(MANIFEST);
     if let Err(error) = fs::symlink_metadata(&manifest_path) {
         if error.kind() == io::ErrorKind::NotFound {
@@ -170,6 +175,158 @@ pub fn amend_unit(
             changes: resolved.resolution.changes().clone(),
         }));
     }
+    amend_resolved(
+        &Target {
+            root,
+            text: &text,
+            manifest: &manifest,
+            src: &src,
+            resolved: &resolved,
+        },
+        file,
+        &wanted,
+        unit,
+        None,
+    )
+}
+
+/// `unit amend` in the directory of a unit of the catalog whose top level
+/// is `root`, under the catalog's one lockfile: the base of the new
+/// amendment is stored in the catalog (see `bases`).
+fn amend_in_catalog(
+    root: &Path,
+    directory: &str,
+    registry: &Registry,
+    file: &str,
+    unit: Option<&UnitIdentity>,
+) -> Result<Amended, AmendFailure> {
+    let build = |problems: Vec<BuildProblem>| {
+        AmendFailure::Rejected(problems.into_iter().map(AmendProblem::Build).collect())
+    };
+    let mut opened = catalog::open(root, registry).map_err(build)?;
+    let mut problems: Vec<AmendProblem> = std::mem::take(&mut opened.problems)
+        .into_iter()
+        .map(AmendProblem::Build)
+        .collect();
+    let wanted = Wanted::parse(file)
+        .map_err(|error| {
+            problems.push(AmendProblem::InvalidFile {
+                file: file.to_owned(),
+                error,
+            });
+        })
+        .ok();
+    let working = opened
+        .units
+        .values()
+        .find(|working| working.directory == directory);
+    if working.is_none() && problems.is_empty() {
+        problems.push(AmendProblem::Manifest(ManifestFileError::Missing {
+            path: root
+                .join(crate::adapters::git::UNITS)
+                .join(directory)
+                .join(MANIFEST),
+        }));
+    }
+    if opened.previous.is_none() {
+        problems.push(AmendProblem::NoLockfile);
+    }
+    let stored = StoredBases::read(root)
+        .map_err(|error| problems.push(AmendProblem::BaseStore(error)))
+        .ok();
+    let (Some(wanted), Some(working), Some(joint), Some(catalog), Some(stored)) = (
+        wanted,
+        working,
+        opened.joint.as_ref(),
+        opened.catalog.as_ref(),
+        stored,
+    ) else {
+        return Err(AmendFailure::Rejected(problems));
+    };
+    if !problems.is_empty() {
+        return Err(AmendFailure::Rejected(problems));
+    }
+    if !joint.changes.is_empty() {
+        return Err(AmendFailure::Rejected(vec![AmendProblem::LockfileStale {
+            changes: joint.changes.clone(),
+        }]));
+    }
+    let Some(src) = &working.src else {
+        return Err(AmendFailure::Rejected(problems));
+    };
+    let mut found = Vec::new();
+    let resolved = resolve_graph_in(
+        Some(working.manifest.name()),
+        working.manifest.dependencies(),
+        &joint.lock,
+        &opened.index,
+        &opened.siblings,
+        &mut found,
+    );
+    let Some(resolved) = resolved.filter(|_| found.is_empty()) else {
+        return Err(build(found));
+    };
+    amend_resolved(
+        &Target {
+            root: &working.path,
+            text: &working.text,
+            manifest: &working.manifest,
+            src,
+            resolved: &resolved,
+        },
+        file,
+        &wanted,
+        unit,
+        Some(InCatalogTarget {
+            root,
+            directory,
+            in_catalog: InCatalog::new(catalog, directory, &opened.directories),
+            stored,
+        }),
+    )
+}
+
+/// A unit whose dependencies are resolved as its lockfile records them, for
+/// `unit amend`.
+struct Target<'a> {
+    /// The unit's directory: its repository's top level, or its directory
+    /// in a catalog.
+    root: &'a Path,
+    /// The text of its manifest.
+    text: &'a str,
+    manifest: &'a Manifest,
+    src: &'a FileTree,
+    resolved: &'a Resolved,
+}
+
+/// Where the base of an amendment of a unit in a catalog is stored.
+struct InCatalogTarget<'a> {
+    /// The catalog's top level.
+    root: &'a Path,
+    /// The unit's directory, under `units/`.
+    directory: &'a str,
+    in_catalog: InCatalog<'a>,
+    stored: StoredBases,
+}
+
+/// Amends the file `wanted` names, `file` as the author gave it, of one of
+/// the dependencies of `target`, or of `unit` alone when it is given.
+fn amend_resolved(
+    target: &Target<'_>,
+    file: &str,
+    wanted: &Wanted,
+    unit: Option<&UnitIdentity>,
+    catalog: Option<InCatalogTarget<'_>>,
+) -> Result<Amended, AmendFailure> {
+    let Target {
+        root,
+        text,
+        manifest,
+        src,
+        resolved,
+    } = *target;
+    let rejected = |problem| AmendFailure::Rejected(vec![problem]);
+    let mut problems = Vec::new();
     let lock = &resolved.lock;
     if let Some(unit) = unit {
         if !lock.units().contains_key(unit) {
@@ -233,59 +390,13 @@ pub fn amend_unit(
     if !problems.is_empty() {
         return Err(AmendFailure::Rejected(problems));
     }
-    // The base: the file as the unit's dependencies compose it, which is
-    // the file as it stands in `build/` before this amendment. The unit's
-    // own amendments are no part of it, and are left out of the composition:
-    // one of them may be a copy an interrupted run left undeclared, or one
-    // with conflict markers the author has not resolved yet.
-    let units = resolved.units();
-    let bare = manifest.without_amendments();
-    let no_copies = crate::domain::FileTree::new();
-    let composition = compose(
-        resolved.resolution.graph(),
-        Root::Unit(UnitContent::new(&bare, &src, &no_copies)),
-        &units,
-    );
-    let composition = match composition {
-        Ok(composition) => composition,
-        Err(errors) => {
-            problems.extend(
-                errors
-                    .into_iter()
-                    .map(|error| AmendProblem::Build(BuildProblem::Composition(error))),
-            );
-            return Err(AmendFailure::Rejected(problems));
-        }
-    };
     let mut found_problems = Vec::new();
-    let base = layer_file(
-        &composition,
-        &found.path,
-        lock,
-        Some(manifest.name()),
-        &resolved.dependencies,
-        &mut found_problems,
-    );
+    let base = composed_bases(manifest, src, [&found.path], resolved, &mut found_problems)
+        .and_then(|mut bases| bases.remove(&found.path));
     problems.extend(found_problems.into_iter().map(AmendProblem::Build));
-    let Some(base) = base else {
+    let Some(ComposedBase { bytes: base, below }) = base else {
         return Err(AmendFailure::Rejected(problems));
     };
-    // The locked units whose amendments the copy is composed from, with
-    // their versions.
-    let below: Vec<(UnitIdentity, Version)> = composition
-        .files()
-        .get(&found.path)
-        .map(|composed| {
-            composed
-                .amendments()
-                .iter()
-                .filter_map(|amendment| {
-                    let locked = lock.units().get(amendment.amender())?;
-                    Some((amendment.amender().clone(), locked.version().clone()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     let markers = crate::adapters::layered::has_markers(&base);
     let copy_path = root
         .join(UnitDirectory::Amendments.as_str())
@@ -321,8 +432,27 @@ pub fn amend_unit(
     if !problems.is_empty() {
         return Err(AmendFailure::Rejected(problems));
     }
-    let edited = declare_amendment(&text, &manifest, &found.path, &declaration)
-        .map_err(|error| rejected(AmendProblem::ManifestEdit(error)))?;
+    let edited = declare_amendment_in(
+        text,
+        manifest,
+        &found.path,
+        &declaration,
+        catalog.as_ref().map(|catalog| &catalog.in_catalog),
+    )
+    .map_err(|error| rejected(AmendProblem::ManifestEdit(error)))?;
+    // In a catalog, the base is stored before the copy is written: a base
+    // stored for a copy that is then not completed is unused, and a later
+    // `unit amend` of the file stores it again.
+    if let Some(catalog) = &catalog {
+        let mut bases = catalog.stored.all().clone();
+        if let Some(key) = bases::key(catalog.directory, &found.path) {
+            bases.insert(key, base.clone());
+        }
+        catalog
+            .stored
+            .replace(catalog.root, &bases)
+            .map_err(|error| rejected(AmendProblem::BaseStore(error)))?;
+    }
 
     let created = if keep {
         None
@@ -359,7 +489,76 @@ pub fn amend_unit(
         kept_existing: keep,
         below,
         markers,
+        stored: catalog.is_some(),
     })
+}
+
+/// The bases of amendments of `paths` by the unit of `manifest`, whose own
+/// files are `src`, under `resolved`: each file as the unit's dependencies
+/// compose it, which is the file as it stands in `build/` before the
+/// amendment, with the locked units whose amendments of the file it is
+/// composed from, with their versions. The unit's own amendments are no
+/// part of it, and are left out of the composition: one of them may be a
+/// copy an interrupted run left undeclared, or one with conflict markers
+/// the author has not resolved yet. A path no unit below provides has no
+/// base.
+pub(super) fn composed_bases<'p>(
+    manifest: &Manifest,
+    src: &FileTree,
+    paths: impl IntoIterator<Item = &'p RelativePath>,
+    resolved: &Resolved,
+    problems: &mut Vec<BuildProblem>,
+) -> Option<BTreeMap<RelativePath, ComposedBase>> {
+    let units = resolved.units();
+    let bare = manifest.without_amendments();
+    let no_copies = FileTree::new();
+    let composition = compose(
+        resolved.resolution.graph(),
+        Root::Unit(UnitContent::new(&bare, src, &no_copies)),
+        &units,
+    );
+    let composition = match composition {
+        Ok(composition) => composition,
+        Err(errors) => {
+            problems.extend(errors.into_iter().map(BuildProblem::Composition));
+            return None;
+        }
+    };
+    let lock = &resolved.lock;
+    let mut bases = BTreeMap::new();
+    for path in paths {
+        let Some(composed) = composition.files().get(path) else {
+            continue;
+        };
+        let Some(bytes) = layer_file(
+            &composition,
+            path,
+            lock,
+            Some(manifest.name()),
+            &resolved.dependencies,
+            problems,
+        ) else {
+            continue;
+        };
+        let below = composed
+            .amendments()
+            .iter()
+            .filter_map(|amendment| {
+                let locked = lock.units().get(amendment.amender())?;
+                Some((amendment.amender().clone(), locked.version().clone()))
+            })
+            .collect();
+        bases.insert(path.clone(), ComposedBase { bytes, below });
+    }
+    Some(bases)
+}
+
+/// The base of an amendment, as [`composed_bases`] composes it.
+pub(super) struct ComposedBase {
+    pub(super) bytes: Vec<u8>,
+    /// The locked units whose amendments of the file it is composed from,
+    /// with their versions.
+    pub(super) below: Vec<(UnitIdentity, Version)>,
 }
 
 /// Checks that `amendments/` and the directories of `path` under it are
@@ -534,9 +733,16 @@ pub struct Amended {
     kept_existing: bool,
     below: Vec<(UnitIdentity, Version)>,
     markers: bool,
+    stored: bool,
 }
 
 impl Amended {
+    /// Whether the copy's base was stored in the catalog's `.assemblr/`:
+    /// the unit is in a catalog.
+    pub fn base_stored(&self) -> bool {
+        self.stored
+    }
+
     /// The amended file.
     pub fn file(&self) -> &Match {
         &self.found
@@ -740,6 +946,9 @@ pub enum AmendProblem {
     },
     /// The manifest cannot be edited safely.
     ManifestEdit(EditError),
+    /// In a catalog, the stored bases of its amendments cannot be read, or
+    /// the new one stored.
+    BaseStore(BaseStoreError),
 }
 
 impl fmt::Display for AmendProblem {
@@ -861,6 +1070,7 @@ impl fmt::Display for AmendProblem {
                  amends a dependency's file or provides its own at a path, never both"
             ),
             Self::ManifestEdit(error) => error.fmt(f),
+            Self::BaseStore(error) => error.fmt(f),
         }
     }
 }

@@ -38,6 +38,16 @@ impl Diagnosis {
         self
     }
 
+    /// Puts `before` ahead of what the diagnosis says was or was not
+    /// changed.
+    pub(super) fn noting_first(mut self, before: &str) -> Self {
+        self.note = Some(match self.note.take() {
+            Some(note) => format!("{before}; {note}"),
+            None => before.to_owned(),
+        });
+        self
+    }
+
     /// Adds what to do, when there is something.
     pub(super) fn advise_if(self, advice: Option<impl Into<String>>) -> Self {
         match advice {

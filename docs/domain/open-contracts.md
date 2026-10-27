@@ -669,9 +669,17 @@ How the status of a statement affects implementation:
   and removed together, and synchronization registers a unit that a new
   version publishes for the first time. **Provisional (D-55):** a range on
   a sibling, and `"catalog"` outside a catalog or for a unit it does not
-  have, are errors. **Deferred (D-56):** `unit add`, `unit amend`, and
-  `unit update` in a catalog. Amendments between siblings wait for #128.
-- **Origin:** #127
+  have, are errors. **Deferred (D-56):** `unit add` and `unit update` in a
+  catalog. Amendments in a catalog have a stored base (owner decision on
+  #128; see
+  [the base in a catalog](amendments-and-composition.md#the-base-in-a-catalog)):
+  **Provisional (D-57):** a sibling's base is declared as `"catalog"`.
+  **Provisional (D-58):** the store's layout under `.assemblr/`.
+  **Provisional (D-59):** every amendment in a catalog has a stored base,
+  and `unit amend` works in a unit's directory. **Provisional (D-60):**
+  which copies a build rebases, and what a failed or conflicting rebase
+  writes.
+- **Origin:** #127, #128
 - **Context:** [catalogs](units.md#catalogs--approved)
 
 ## Resolved contracts

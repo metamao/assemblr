@@ -92,8 +92,8 @@
           "description": "The direct dependency that provides the amended file."
         },
         "base": {
-          "$ref": "#/definitions/version",
-          "description": "The exact version of that dependency the copy was taken from: its locked version."
+          "anyOf": [{ "$ref": "#/definitions/version" }, { "const": "catalog" }],
+          "description": "The exact version of that dependency the copy was taken from: its locked version. In a catalog, \"catalog\" for a unit of the same catalog, whose base is stored in the catalog's .assemblr/."
         }
       }
     }

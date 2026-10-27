@@ -43,13 +43,16 @@ either is rejected with an error that explains the replacement (see
 |-------|------|
 | `dependencies` | A map from unit identities (`@owner/unit-name`) to SemVer requirement strings, or, for a sibling in a catalog, the string `"catalog"` |
 | `placeholders` | An object with two optional members: `replace`, a map from placeholders to non-empty descriptions, and `ignore`, an array of distinct placeholder-form tokens |
-| `amendments` | A map from amended paths, the file's path in the provider's `src/`, which is the copy's path under `amendments/`, to an object with `unit`, the identity of the **direct** dependency that provides the file, and `base`, the exact version the copy was taken from, as a string |
+| `amendments` | A map from amended paths, the file's path in the provider's `src/`, which is the copy's path under `amendments/`, to an object with `unit`, the identity of the **direct** dependency that provides the file, and `base`, the exact version the copy was taken from, as a string, or, for a sibling in a catalog, the string `"catalog"` |
 
 - Every `unit` of an amendment must be a key of `dependencies`, and every
   amended path follows the `src/` path rules (see
   [units.md](units.md#src-unit-files)). `base` is an exact version, not a
   requirement, and it must equal that dependency's locked version (see
   [amendments-and-composition.md](amendments-and-composition.md#layout-and-declaration)).
+  A sibling's file is amended at `"catalog"`, and its base is stored in the
+  catalog (**Provisional (D-57)**; see
+  [the base in a catalog](amendments-and-composition.md#the-base-in-a-catalog)).
 - Every key of `replace` and entry of `ignore` has the placeholder form (see
   [placeholders.md](placeholders.md#form--approved)).
 - A consumer project's `assemblr.jsonc` reuses the `dependencies`

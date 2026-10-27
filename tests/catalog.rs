@@ -392,8 +392,8 @@ fn an_invalid_catalog_file_is_reported() {
 }
 
 #[test]
-fn a_unit_cannot_amend_a_sibling_yet() {
-    let fixture = Fixture::new("sibling-amendment");
+fn a_sibling_amended_at_a_version_is_refused() {
+    let fixture = Fixture::new("sibling-version");
     let catalog = fixture.three_units();
     write(
         &catalog,
@@ -405,9 +405,307 @@ fn a_unit_cannot_amend_a_sibling_yet() {
     );
     let err = build_error(&fixture, &catalog);
     assert!(
-        err.contains("cannot amend a file of another unit of the same catalog"),
+        err.contains("the base of an amendment of its file is"),
         "{err}"
     );
+    assert!(err.contains("\"catalog\""), "{err}");
+    // And "catalog" is the base of a sibling's file only.
+    write(
+        &catalog,
+        "units/b/manifest.jsonc",
+        &unit(
+            "b",
+            r#""@acme/a": "catalog"}, "amendments": {"base.txt": {"unit": "@acme/base", "base": "catalog"}"#,
+        ),
+    );
+    let err = build_error(&fixture, &catalog);
+    assert!(err.contains("the catalog has no such unit"), "{err}");
+}
+
+impl Fixture {
+    /// The acceptance catalog, built, with `a.txt` of `@acme/a` three lines
+    /// long, and `b` amending it: its copy changes the last line.
+    fn amending(&self) -> PathBuf {
+        let catalog = self.three_units();
+        write(&catalog, "units/a/src/a.txt", "one\ntwo\nthree\n");
+        succeeds(self.run(&catalog, &["unit", "build"]));
+        let output = succeeds(self.run(&catalog.join("units/b"), &["unit", "amend", "a.txt"]));
+        assert!(
+            stdout(&output).contains("Its base is stored in the catalog's .assemblr/"),
+            "{}",
+            stdout(&output)
+        );
+        write(
+            &catalog,
+            "units/b/amendments/a.txt",
+            "one\ntwo\nthree, by b\n",
+        );
+        succeeds(self.run(&catalog, &["unit", "build"]));
+        catalog
+    }
+}
+
+/// Every file under `.assemblr/` and `amendments/` of the catalog's units,
+/// with its content.
+fn state(catalog: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut found = Vec::new();
+    for root in [catalog.join(".assemblr"), catalog.join("units")] {
+        for path in files(&root) {
+            if root.ends_with("units") && !path.contains("/amendments/") {
+                continue;
+            }
+            found.push((path.clone(), fs::read(root.join(&path)).unwrap()));
+        }
+    }
+    found
+}
+
+#[test]
+fn a_sibling_file_is_amended_with_a_stored_base() {
+    let fixture = Fixture::new("sibling-amend");
+    let catalog = fixture.amending();
+    let manifest = read(&catalog.join("units/b/manifest.jsonc"));
+    assert!(
+        manifest.contains(r#""a.txt": { "unit": "@acme/a", "base": "catalog" }"#),
+        "{manifest}"
+    );
+    assert!(catalog.join(".assemblr/amendment-bases.json").is_file());
+    assert_eq!(
+        read(&catalog.join("units/b/build/a.txt")),
+        "one\ntwo\nthree, by b\n"
+    );
+    succeeds(fixture.run(&catalog, &["unit", "check"]));
+    // At the top level, the command names no unit to amend for.
+    let err = stderr(&fails(fixture.run(&catalog, &["unit", "amend", "a.txt"])));
+    assert!(err.contains("catalog's top level"), "{err}");
+}
+
+#[test]
+fn a_change_below_a_copy_flows_into_it() {
+    let fixture = Fixture::new("sibling-rebase");
+    let catalog = fixture.amending();
+    write(&catalog, "units/a/src/a.txt", "one, by a\ntwo\nthree\n");
+    let output = succeeds(fixture.run(&catalog, &["unit", "build"]));
+    assert!(
+        stderr(&output).contains("note: rebased units/b/amendments/a.txt onto the change"),
+        "{}",
+        stderr(&output)
+    );
+    let rebased = "one, by a\ntwo\nthree, by b\n";
+    assert_eq!(read(&catalog.join("units/b/amendments/a.txt")), rebased);
+    assert_eq!(read(&catalog.join("units/b/build/a.txt")), rebased);
+    // The stored base follows: the next build has nothing to rebase.
+    let output = succeeds(fixture.run(&catalog, &["unit", "build"]));
+    assert!(!stderr(&output).contains("rebased"), "{}", stderr(&output));
+    succeeds(fixture.run(&catalog, &["unit", "check"]));
+}
+
+#[test]
+fn a_change_to_what_a_copy_changed_stops_the_build_with_markers() {
+    let fixture = Fixture::new("sibling-conflict");
+    let catalog = fixture.amending();
+    write(&catalog, "units/a/src/a.txt", "one\ntwo\nthree, by a\n");
+    let err = build_error(&fixture, &catalog);
+    assert!(
+        err.contains(
+            "units/b/amendments/a.txt: src/a.txt of @acme/a, as the units below compose it, \
+             changed"
+        ),
+        "{err}"
+    );
+    assert!(err.contains("between markers"), "{err}");
+    let copy = read(&catalog.join("units/b/amendments/a.txt"));
+    assert!(copy.contains("<<<<<<< current (your copy)"), "{copy}");
+    assert!(copy.contains("||||||| base (stored)"), "{copy}");
+    assert!(
+        copy.contains(">>>>>>> incoming (the file below the copy now)"),
+        "{copy}"
+    );
+    // Nothing is built until the markers are gone.
+    let err = build_error(&fixture, &catalog);
+    assert!(err.contains("conflict markers"), "{err}");
+    write(
+        &catalog,
+        "units/b/amendments/a.txt",
+        "one\ntwo\nthree, by a and b\n",
+    );
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+    assert_eq!(
+        read(&catalog.join("units/b/build/a.txt")),
+        "one\ntwo\nthree, by a and b\n"
+    );
+    succeeds(fixture.run(&catalog, &["unit", "check"]));
+}
+
+#[test]
+fn check_and_publish_refuse_a_stale_base() {
+    let fixture = Fixture::new("sibling-stale");
+    let catalog = fixture.amending();
+    write(&catalog, "units/a/src/a.txt", "one, by a\ntwo\nthree\n");
+    let err = stderr(&fails(fixture.run(&catalog, &["unit", "check"])));
+    assert!(err.contains("is not rebased onto the change yet"), "{err}");
+    assert!(err.contains("which rebases the copy"), "{err}");
+    let err = stderr(&fails(
+        fixture.run(&catalog.join("units/b"), &["unit", "check"]),
+    ));
+    assert!(err.contains("is not rebased onto the change yet"), "{err}");
+    git(&catalog, &["add", "-A"]);
+    git(&catalog, &["commit", "-q", "-m", "stale"]);
+    let err = stderr(&fails(fixture.run(&catalog, &["unit", "publish"])));
+    assert!(err.contains("is not rebased onto the change yet"), "{err}");
+    assert_eq!(git(&catalog, &["tag", "--list"]), "");
+    // Built and committed, the catalog publishes, and its dependents
+    // compose the copy as it was published.
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+    git(&catalog, &["add", "-A"]);
+    git(&catalog, &["commit", "-q", "-m", "rebased"]);
+    succeeds(fixture.run(&catalog, &["unit", "publish"]));
+    succeeds(fixture.run(
+        &fixture.dir,
+        &["registry", "add", catalog.to_str().unwrap()],
+    ));
+    let project = fixture.dir.join("project");
+    fs::create_dir_all(&project).unwrap();
+    succeeds(fixture.run(&project, &["init"]));
+    succeeds(fixture.run(&project, &["add", "@acme/b"]));
+    assert_eq!(
+        read(&project.join("a.txt")),
+        "one, by a\ntwo\nthree, by b\n"
+    );
+}
+
+#[test]
+fn a_corrupt_or_missing_store_fails_explicitly_and_changes_nothing() {
+    let fixture = Fixture::new("sibling-corrupt");
+    let catalog = fixture.amending();
+    write(&catalog, "units/a/src/a.txt", "one, by a\ntwo\nthree\n");
+    let objects = catalog.join(".assemblr/objects");
+    let blob = files(&objects)
+        .into_iter()
+        .map(|path| objects.join(path))
+        .next()
+        .unwrap();
+    fs::write(&blob, "tampered\n").unwrap();
+    let before = state(&catalog);
+    let err = build_error(&fixture, &catalog);
+    assert!(err.contains("does not verify"), "{err}");
+    assert!(
+        err.contains("restore .assemblr/ from version control"),
+        "{err}"
+    );
+    assert_eq!(state(&catalog), before);
+    let err = stderr(&fails(fixture.run(&catalog, &["unit", "check"])));
+    assert!(err.contains("does not verify"), "{err}");
+    // Without the store, the copy's base is unknown.
+    fs::remove_dir_all(catalog.join(".assemblr")).unwrap();
+    let err = build_error(&fixture, &catalog);
+    assert!(err.contains("has no stored base"), "{err}");
+}
+
+#[test]
+fn a_failed_build_leaves_the_copies_and_the_store_as_they_were() {
+    let fixture = Fixture::new("sibling-failed");
+    let catalog = fixture.amending();
+    write(&catalog, "units/a/src/a.txt", "one, by a\ntwo\nthree\n");
+    // Another unit fails validation once the copy is rebased in memory.
+    write(
+        &catalog,
+        "units/c/manifest.jsonc",
+        r#"{"name": "@acme/c", "description": "The c unit.",
+            "placeholders": {"replace": {"__UNUSED__": "Nowhere."}}}"#,
+    );
+    let before = state(&catalog);
+    let err = build_error(&fixture, &catalog);
+    assert!(err.contains("__UNUSED__"), "{err}");
+    assert_eq!(state(&catalog), before);
+}
+
+#[test]
+fn layered_copies_between_siblings_are_rebased_in_order() {
+    let fixture = Fixture::new("sibling-layers");
+    let catalog = fixture.amending();
+    // `c` is above `b`, and amends the file `b` amends.
+    write(
+        &catalog,
+        "units/c/manifest.jsonc",
+        &unit("c", r#""@acme/b": "catalog""#),
+    );
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+    succeeds(fixture.run(&catalog.join("units/c"), &["unit", "amend", "a.txt"]));
+    write(
+        &catalog,
+        "units/c/amendments/a.txt",
+        "one\ntwo\nthree, by b\nfour, by c\n",
+    );
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+    write(&catalog, "units/a/src/a.txt", "one, by a\ntwo\nthree\n");
+    let output = succeeds(fixture.run(&catalog.join("units/c"), &["unit", "build"]));
+    let err = stderr(&output);
+    assert!(err.contains("rebased units/b/amendments/a.txt"), "{err}");
+    assert!(err.contains("rebased units/c/amendments/a.txt"), "{err}");
+    assert_eq!(
+        read(&catalog.join("units/c/build/a.txt")),
+        "one, by a\ntwo\nthree, by b\nfour, by c\n"
+    );
+    succeeds(fixture.run(&catalog, &["unit", "check"]));
+}
+
+#[test]
+fn a_conflict_between_siblings_creates_the_pending_state_in_a_catalog() {
+    let fixture = Fixture::new("sibling-pending");
+    let catalog = fixture.three_units();
+    write(&catalog, "units/a/src/a.txt", "one\ntwo\nthree\n");
+    write(
+        &catalog,
+        "units/c/manifest.jsonc",
+        &unit("c", r#""@acme/a": "catalog""#),
+    );
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+    for (amender, copy) in [
+        ("b", "one, by b\ntwo\nthree\n"),
+        ("c", "one, by c\ntwo\nthree\n"),
+    ] {
+        succeeds(fixture.run(
+            &catalog.join("units").join(amender),
+            &["unit", "amend", "a.txt"],
+        ));
+        write(&catalog, &format!("units/{amender}/amendments/a.txt"), copy);
+    }
+    succeeds(fixture.run(&catalog, &["unit", "init", "@acme/d"]));
+    write(
+        &catalog,
+        "units/d/manifest.jsonc",
+        &unit("d", r#""@acme/b": "catalog", "@acme/c": "catalog""#),
+    );
+    write(&catalog, "units/d/src/d.txt", "d\n");
+    let err = build_error(&fixture, &catalog);
+    assert!(
+        err.contains("run `assemblr unit build` in units/d"),
+        "{err}"
+    );
+    let err = stderr(&fails(
+        fixture.run(&catalog.join("units/d"), &["unit", "build"]),
+    ));
+    assert!(
+        err.contains("the copy holds each conflict between markers"),
+        "{err}"
+    );
+    let manifest = read(&catalog.join("units/d/manifest.jsonc"));
+    assert!(
+        manifest.contains(r#""a.txt": { "unit": "@acme/a", "base": "catalog" }"#),
+        "{manifest}"
+    );
+    write(
+        &catalog,
+        "units/d/amendments/a.txt",
+        "one, by b and c\ntwo\nthree\n",
+    );
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+    assert_eq!(
+        read(&catalog.join("units/d/build/a.txt")),
+        "one, by b and c\ntwo\nthree\n"
+    );
+    succeeds(fixture.run(&catalog, &["unit", "check"]));
 }
 
 #[test]
@@ -461,11 +759,7 @@ fn publishing_needs_the_current_lockfile() {
 fn editing_commands_refuse_a_catalog() {
     let fixture = Fixture::new("refused");
     let catalog = fixture.three_units();
-    for args in [
-        &["unit", "add", "@acme/base"][..],
-        &["unit", "amend", "base.txt"],
-        &["unit", "update"],
-    ] {
+    for args in [&["unit", "add", "@acme/base"][..], &["unit", "update"]] {
         let err = stderr(&fails(fixture.run(&catalog.join("units/a"), args)));
         assert!(
             err.contains("does not work in a catalog yet"),
@@ -543,4 +837,84 @@ fn unit_init_at_a_catalog_says_where_the_unit_is() {
     ));
     assert!(out.contains("`cd units/a`"), "{out}");
     assert!(!out.contains("unit add"), "{out}");
+}
+
+#[test]
+fn a_json_change_below_a_copy_is_merged_into_it() {
+    let fixture = Fixture::new("sibling-json");
+    let catalog = fixture.three_units();
+    write(
+        &catalog,
+        "units/a/src/package.json",
+        "{\n  \"name\": \"app\",\n  \"scripts\": {\n    \"build\": \"tsc\"\n  }\n}\n",
+    );
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+    succeeds(fixture.run(&catalog.join("units/b"), &["unit", "amend", "package.json"]));
+    write(
+        &catalog,
+        "units/b/amendments/package.json",
+        "{\n  \"name\": \"app\",\n  \"scripts\": {\n    \"build\": \"tsc\",\n    \"test\": \"vitest\"\n  }\n}\n",
+    );
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+    // `a` adds a script: the copy keeps it, and its own.
+    write(
+        &catalog,
+        "units/a/src/package.json",
+        "{\n  \"name\": \"app\",\n  \"scripts\": {\n    \"build\": \"tsc\",\n    \"lint\": \"eslint\"\n  }\n}\n",
+    );
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+    let built = read(&catalog.join("units/b/build/package.json"));
+    for script in [
+        "\"build\": \"tsc\"",
+        "\"lint\": \"eslint\"",
+        "\"test\": \"vitest\"",
+    ] {
+        assert!(built.contains(script), "{built}");
+    }
+    succeeds(fixture.run(&catalog, &["unit", "check"]));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_rebased_copy_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new("sibling-mode");
+    let catalog = fixture.amending();
+    let copy = catalog.join("units/b/amendments/a.txt");
+    fs::set_permissions(&copy, fs::Permissions::from_mode(0o755)).unwrap();
+    write(&catalog, "units/a/src/a.txt", "one, by a\ntwo\nthree\n");
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+    assert_eq!(read(&copy), "one, by a\ntwo\nthree, by b\n");
+    assert_eq!(
+        fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+}
+
+#[test]
+fn a_failed_store_write_puts_the_rebased_copies_back() {
+    let fixture = Fixture::new("sibling-restore");
+    let catalog = fixture.amending();
+    write(&catalog, "units/a/src/a.txt", "one, by a\ntwo\nthree\n");
+    // The record cannot be staged: a directory holds its staging name.
+    fs::create_dir_all(catalog.join(".assemblr/amendment-bases.json.new/x")).unwrap();
+    let record = read(&catalog.join(".assemblr/amendment-bases.json"));
+    let err = build_error(&fixture, &catalog);
+    assert!(
+        err.contains("the copies and their stored bases are as they were"),
+        "{err}"
+    );
+    assert_eq!(
+        read(&catalog.join("units/b/amendments/a.txt")),
+        "one\ntwo\nthree, by b\n"
+    );
+    assert_eq!(
+        read(&catalog.join(".assemblr/amendment-bases.json")),
+        record
+    );
+    assert!(
+        !catalog
+            .join("units/b/amendments/a.txt.assemblr-rebase-new")
+            .exists()
+    );
 }

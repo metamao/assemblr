@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::bases::{self, Drift, RebasedCopy, StoredBases};
 use super::check::{CheckFailure, CheckProblem, Checked, publication_checks};
 use super::exclusive::BuildLock;
 use super::{
@@ -28,8 +29,8 @@ use crate::adapters::lockfile;
 use crate::adapters::manifest::{InCatalog, read_catalog, read_catalog_manifest};
 use crate::adapters::registry::Registry;
 use crate::domain::{
-    FileTree, LockChange, LockedUnit, Manifest, ObjectId, Provenance, RegistryIndex, RelativePath,
-    UnitIdentity, UnitLock, VersionRequirement, resolve, update_lock,
+    Catalog, FileTree, LockChange, LockedUnit, Manifest, ObjectId, Provenance, RegistryIndex,
+    RelativePath, UnitFile, UnitIdentity, UnitLock, VersionRequirement, resolve, update_lock,
 };
 
 /// Where a unit command runs, as far as catalogs go.
@@ -83,11 +84,14 @@ pub fn locate_unit(directory: &Path) -> Location {
 /// written one unit at a time, the first with the lockfile; if one fails,
 /// the failure lists the units already written.
 pub fn build_catalog(root: &Path, registry: &Registry) -> Result<Vec<Built>, BuildFailure> {
-    let opened = open(root, registry).map_err(BuildFailure::Rejected)?;
-    let mut problems = opened.problems;
-    let Some(joint) = &opened.joint else {
+    let mut opened = open(root, registry).map_err(BuildFailure::Rejected)?;
+    let mut problems = std::mem::take(&mut opened.problems);
+    let Some(joint) = opened.joint.take() else {
         return Err(BuildFailure::Rejected(problems));
     };
+    let joint = &joint;
+    let scope: BTreeSet<UnitIdentity> = opened.units.keys().cloned().collect();
+    let rebase = rebase(root, &mut opened, joint, &scope, &mut problems)?;
     let interrupted = opened.guard.interrupted().unwrap_or(false);
     let mut validated = Vec::new();
     for (index, (identity, unit)) in opened.units.iter().enumerate() {
@@ -122,6 +126,7 @@ pub fn build_catalog(root: &Path, registry: &Registry) -> Result<Vec<Built>, Bui
     if !problems.is_empty() {
         return Err(BuildFailure::Rejected(problems));
     }
+    let mut rebased = apply_rebase(root, rebase)?;
     let lockfile = lockfile_outcome(opened.previous.as_ref(), &joint.lock);
     let mut built = Vec::new();
     for (index, (identity, unit, validated)) in validated.into_iter().enumerate() {
@@ -131,7 +136,11 @@ pub fn build_catalog(root: &Path, registry: &Registry) -> Result<Vec<Built>, Bui
         } else {
             LockfileOutcome::Unchanged
         };
-        match write(root, identity, unit, validated, outcome, &opened.guard) {
+        let (own, rest) = rebased
+            .into_iter()
+            .partition(|copy: &RebasedCopy| copy.unit() == identity);
+        rebased = rest;
+        match write(root, identity, unit, validated, outcome, own, &opened.guard) {
             Ok(unit) => built.push(unit),
             Err(error) => {
                 return Err(BuildFailure::PartlyBuilt {
@@ -154,18 +163,28 @@ pub(super) fn build_in_catalog(
     directory: &str,
     registry: &Registry,
 ) -> Result<Built, BuildFailure> {
-    let opened = open(root, registry).map_err(BuildFailure::Rejected)?;
-    let mut problems = opened.problems;
-    let unit = opened
+    let mut opened = open(root, registry).map_err(BuildFailure::Rejected)?;
+    let mut problems = std::mem::take(&mut opened.problems);
+    let identity = opened
         .units
         .iter()
-        .find(|(_, unit)| unit.directory == directory);
-    let (Some(joint), Some((identity, unit))) = (&opened.joint, unit) else {
+        .find(|(_, unit)| unit.directory == directory)
+        .map(|(identity, _)| identity.clone());
+    let (Some(joint), Some(identity)) = (opened.joint.take(), identity) else {
         if problems.is_empty() {
             problems.push(not_a_unit(root, directory));
         }
         return Err(BuildFailure::Rejected(problems));
     };
+    let joint = &joint;
+    // The copies rebased are those of the unit and of the units of the
+    // catalog below it, which its build composes.
+    let scope = bases::closure(&identity, &opened.siblings);
+    let rebase = rebase(root, &mut opened, joint, &scope, &mut problems)?;
+    let Some(unit) = opened.units.get(&identity) else {
+        return Err(BuildFailure::Rejected(problems));
+    };
+    let identity = &identity;
     let interrupted = opened.guard.interrupted().unwrap_or(false);
     problems.extend(
         output::check(&unit.path, Some(root), interrupted)
@@ -178,6 +197,33 @@ pub(super) fn build_in_catalog(
         _ => return Err(BuildFailure::Rejected(problems)),
     };
     if !validated.pending.is_empty() {
+        // The copies the pending state creates are new amendments, whose
+        // bases are stored with the rebase, before them: a base stored for
+        // a copy the pending state then fails to write is unused.
+        let (mut drift, stored) = match rebase {
+            Some(rebase) => rebase,
+            None => {
+                let stored = StoredBases::read(root).map_err(|error| {
+                    BuildFailure::Rejected(vec![BuildProblem::BaseStore(error)])
+                })?;
+                let drift = Drift {
+                    copies: Vec::new(),
+                    bases: stored.all().clone(),
+                };
+                (drift, stored)
+            }
+        };
+        for pending in &validated.pending {
+            if let Some(key) = bases::key(directory, &pending.path) {
+                drift.bases.insert(key, pending.copy.clone());
+            }
+        }
+        bases::apply(root, &drift, &stored).map_err(BuildFailure::RebaseWrite)?;
+        let catalog = opened
+            .catalog
+            .as_ref()
+            .ok_or_else(|| BuildFailure::Rejected(vec![not_a_unit(root, directory)]))?;
+        let in_catalog = InCatalog::new(catalog, directory, &opened.directories);
         return Err(write_pending(
             &unit.path,
             root,
@@ -185,10 +231,142 @@ pub(super) fn build_in_catalog(
             &unit.text,
             &unit.manifest,
             validated,
+            Some(&in_catalog),
         ));
     }
+    let rebased = apply_rebase(root, rebase)?;
     let outcome = lockfile_outcome(opened.previous.as_ref(), &joint.lock);
-    write(root, identity, unit, validated, outcome, &opened.guard).map_err(BuildFailure::Publish)
+    write(
+        root,
+        identity,
+        unit,
+        validated,
+        outcome,
+        rebased,
+        &opened.guard,
+    )
+    .map_err(BuildFailure::Publish)
+}
+
+/// Rebases the copies of the units of `scope` whose stored base is not the
+/// file below them now (see `bases`), in memory: `opened` holds the rebased
+/// copies afterwards. When a rebase leaves conflicts, every rebased copy is
+/// written with the new bases, and the build stops there. Otherwise the
+/// rebase is given back, to be written once the whole build is validated;
+/// `None` when there is nothing to write, or when `problems`, which a
+/// missing or unusable stored base joins, already reject the build.
+fn rebase(
+    root: &Path,
+    opened: &mut Opened,
+    joint: &JointLock,
+    scope: &BTreeSet<UnitIdentity>,
+    problems: &mut Vec<BuildProblem>,
+) -> Result<Option<(Drift, StoredBases)>, BuildFailure> {
+    if !problems.is_empty() {
+        return Ok(None);
+    }
+    let declares = opened
+        .siblings
+        .units
+        .values()
+        .any(|sibling| !sibling.manifest.amendments().is_empty());
+    let stored = match StoredBases::read(root) {
+        Ok(stored) => stored,
+        Err(error) => {
+            // A store nothing uses is no problem of the build.
+            if declares {
+                problems.push(BuildProblem::BaseStore(error));
+            }
+            return Ok(None);
+        }
+    };
+    let mut found = Vec::new();
+    let drift = bases::drift(
+        scope,
+        &mut opened.siblings,
+        &joint.lock,
+        &opened.index,
+        &stored,
+        true,
+        &mut found,
+    );
+    if !found.is_empty() {
+        problems.extend(found);
+        return Ok(None);
+    }
+    for copy in &drift.copies {
+        let Some(amendments) = opened
+            .units
+            .get_mut(copy.unit())
+            .and_then(|unit| unit.amendments.as_mut())
+        else {
+            continue;
+        };
+        let executable = amendments
+            .get(copy.path())
+            .is_some_and(UnitFile::is_executable);
+        amendments.insert(
+            copy.path().clone(),
+            UnitFile::new(copy.copy.clone(), executable),
+        );
+    }
+    if drift.conflicts() {
+        bases::apply(root, &drift, &stored).map_err(BuildFailure::RebaseWrite)?;
+        return Err(BuildFailure::Rebased(drift.copies));
+    }
+    if drift.copies.is_empty() && drift.bases == *stored.all() {
+        return Ok(None);
+    }
+    Ok(Some((drift, stored)))
+}
+
+/// The problems of the stored bases of the amendments of the units of
+/// `scope`: a base that cannot be read, is missing, or is not the file
+/// below the copy now.
+pub(super) fn stale_bases(
+    root: &Path,
+    scope: &BTreeSet<UnitIdentity>,
+    siblings: &mut Siblings,
+    joint: &JointLock,
+    index: &RegistryIndex,
+) -> Vec<BuildProblem> {
+    let declares = scope.iter().any(|identity| {
+        siblings
+            .units
+            .get(identity)
+            .is_some_and(|sibling| !sibling.manifest.amendments().is_empty())
+    });
+    if !declares {
+        return Vec::new();
+    }
+    let stored = match StoredBases::read(root) {
+        Ok(stored) => stored,
+        Err(error) => return vec![BuildProblem::BaseStore(error)],
+    };
+    let mut problems = Vec::new();
+    bases::drift(
+        scope,
+        siblings,
+        &joint.lock,
+        index,
+        &stored,
+        false,
+        &mut problems,
+    );
+    problems
+}
+
+/// Writes `rebase`, the rebase of a validated build, and gives back the
+/// copies rebased.
+fn apply_rebase(
+    root: &Path,
+    rebase: Option<(Drift, StoredBases)>,
+) -> Result<Vec<RebasedCopy>, BuildFailure> {
+    let Some((drift, stored)) = rebase else {
+        return Ok(Vec::new());
+    };
+    bases::apply(root, &drift, &stored).map_err(BuildFailure::RebaseWrite)?;
+    Ok(drift.copies)
 }
 
 /// Checks every unit of the catalog whose top level is `root`, as
@@ -215,11 +393,10 @@ fn check(
     only: Option<&str>,
     registry: &Registry,
 ) -> Result<Vec<Checked>, CheckFailure> {
-    let opened = open(root, registry).map_err(|problems| {
+    let mut opened = open(root, registry).map_err(|problems| {
         CheckFailure::Rejected(problems.into_iter().map(CheckProblem::Build).collect())
     })?;
-    let mut problems: Vec<CheckProblem> = opened
-        .problems
+    let mut problems: Vec<CheckProblem> = std::mem::take(&mut opened.problems)
         .into_iter()
         .map(CheckProblem::Build)
         .collect();
@@ -236,6 +413,17 @@ fn check(
     let Some(joint) = &opened.joint else {
         return Err(CheckFailure::Rejected(problems));
     };
+    // Every copy checked is on the file below it now: a stale base is the
+    // next build's to rebase.
+    let scope: BTreeSet<UnitIdentity> = units
+        .iter()
+        .map(|(identity, _)| (*identity).clone())
+        .collect();
+    problems.extend(
+        stale_bases(root, &scope, &mut opened.siblings, joint, &opened.index)
+            .into_iter()
+            .map(CheckProblem::Build),
+    );
     let mut checked = Vec::new();
     let mut lockfile_reported = false;
     for (identity, unit) in units {
@@ -361,6 +549,7 @@ fn write(
     unit: &WorkingUnit,
     validated: Validated,
     lockfile: LockfileOutcome,
+    rebased: Vec<RebasedCopy>,
     guard: &BuildLock,
 ) -> Result<Built, super::PublishError> {
     let files: Vec<(&RelativePath, &crate::domain::UnitFile)> = validated
@@ -386,25 +575,30 @@ fn write(
         placeholders: validated.placeholders,
         unresolved: validated.unresolved,
         leftover: published.leftover,
+        rebased,
     })
 }
 
 /// A catalog's working tree, read for a build or a check under the lock
 /// that serializes builds of the repository.
-struct Opened {
-    guard: BuildLock,
+pub(super) struct Opened {
+    pub(super) guard: BuildLock,
+    /// The catalog's `catalog.jsonc`, when it could be read.
+    pub(super) catalog: Option<Catalog>,
+    /// Its unit directories, under `units/`.
+    pub(super) directories: BTreeSet<String>,
     /// Every unit whose manifest could be read, by identity.
-    units: BTreeMap<UnitIdentity, WorkingUnit>,
+    pub(super) units: BTreeMap<UnitIdentity, WorkingUnit>,
     /// The units whose files could be read too, as siblings.
-    siblings: Siblings,
+    pub(super) siblings: Siblings,
     /// The lockfile, when there is one.
-    previous: Option<UnitLock>,
-    index: RegistryIndex,
+    pub(super) previous: Option<UnitLock>,
+    pub(super) index: RegistryIndex,
     /// The lock the whole catalog resolves to, when every unit could be
     /// read and resolved.
-    joint: Option<JointLock>,
+    pub(super) joint: Option<JointLock>,
     /// The problems found, which reject the build or check.
-    problems: Vec<BuildProblem>,
+    pub(super) problems: Vec<BuildProblem>,
 }
 
 /// The lock a catalog's units resolve to together, without the units
@@ -415,25 +609,25 @@ pub(super) struct JointLock {
 }
 
 /// A unit of a catalog, read from the working tree.
-struct WorkingUnit {
+pub(super) struct WorkingUnit {
     /// Its directory, under `units/`.
-    directory: String,
+    pub(super) directory: String,
     /// The directory's path.
-    path: PathBuf,
+    pub(super) path: PathBuf,
     /// The text of its `manifest.jsonc`.
-    text: String,
-    manifest: Manifest,
+    pub(super) text: String,
+    pub(super) manifest: Manifest,
     /// Its `src/` files, or `None` when they could not be read.
-    src: Option<FileTree>,
+    pub(super) src: Option<FileTree>,
     /// Its amendment copies, or `None` as for `src`.
-    amendments: Option<FileTree>,
+    pub(super) amendments: Option<FileTree>,
 }
 
 /// Reads the catalog whose top level is `root` from its working tree, and
 /// resolves its units together. Only a catalog whose repository cannot be
 /// opened or locked is rejected here; every other problem is kept for the
 /// caller to report with its own.
-fn open(root: &Path, registry: &Registry) -> Result<Opened, Vec<BuildProblem>> {
+pub(super) fn open(root: &Path, registry: &Registry) -> Result<Opened, Vec<BuildProblem>> {
     let rejected = |problem| vec![problem];
     let repository =
         GitRepository::open(root).map_err(|error| rejected(BuildProblem::Repository(error)))?;
@@ -602,6 +796,8 @@ fn open(root: &Path, registry: &Registry) -> Result<Opened, Vec<BuildProblem>> {
     }
     Ok(Opened {
         guard,
+        catalog,
+        directories,
         units,
         siblings,
         previous,

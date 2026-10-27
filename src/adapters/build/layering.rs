@@ -225,8 +225,14 @@ impl<'c> Worlds<'c> {
         }
     }
 
+    /// The version of `amender` whose published content holds its copy, or
+    /// `None` when the copy is the working tree's: the unit being built,
+    /// or a unit of its catalog. A copy of the working tree is on the
+    /// composition below it here, as `unit amend` takes it and `unit build`
+    /// keeps it in a catalog by rebasing it onto its stored base's
+    /// successor (see `bases`).
     fn published_version(&self, amender: &UnitIdentity) -> Option<Version> {
-        (Some(amender) != self.built)
+        (Some(amender) != self.built && !self.dependencies.is_sibling(amender))
             .then(|| self.lock.units().get(amender))
             .flatten()
             .map(|locked| locked.version().clone())
