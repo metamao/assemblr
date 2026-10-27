@@ -216,7 +216,7 @@ For unit repositories, the checks are classified as follows:
   valid published artifact, not only a valid manifest. File sizes are not:
   registration does not fetch file contents, so a file or directory larger
   than Assemblr reads fails the first operation that reads the version
-  (**proposed in #126, awaiting the owner's decision**, see
+  (**Decided by the owner (2026-10-27, in session, #126)**, see
   [ADR 0037](../adr/0037-partial-fetch.md)).
 - **Version-level, for a newly discovered version tag with amendments:** the
   properties the version shows on its own. Its `amendments/` is read by the

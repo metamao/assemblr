@@ -48,8 +48,8 @@ manifests by id at about a third and a fifth of a full fetch.
    or directory larger than Assemblr reads is reported when the version is
    first read, and that operation fails. The same rule applies to local
    repositories, so a version is indexed or excluded the same way whatever
-   the transport. This changes an approved statement and awaits the
-   owner's decision in #126.
+   the transport. This changes an approved statement; the owner decided
+   it in session on 2026-10-27 (#126).
 5. **Servers without filters.** A server that does not support filters sends
    everything, which is still correct. Git's own `file://` transport does so
    unless the repository sets `uploadpack.allowFilter`; the tests set it.
