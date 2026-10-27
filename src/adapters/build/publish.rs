@@ -17,13 +17,13 @@
 //! points at `HEAD` is not created again, and the index update still runs,
 //! which is how a failed one is retried.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
 
-use super::catalog::{in_unit, joint_lock};
+use super::catalog::{in_unit, joint_lock, stale_bases};
 use super::check::{CheckProblem, publication_checks};
 use super::exclusive::BuildLock;
 use super::{
@@ -417,6 +417,15 @@ fn publish_catalog(root: &Path, registry: &Registry) -> Result<Published, Publis
             sibling.content.lock = Some(joint.lock.clone());
         }
     }
+    // A published copy is on the file below it at the same version, so a
+    // dependent never needs the catalog's stored bases. The working tree's
+    // store is the commit's: nothing is uncommitted.
+    let scope: BTreeSet<UnitIdentity> = siblings.units.keys().cloned().collect();
+    problems.extend(
+        stale_bases(root, &scope, &mut siblings, &joint, &index)
+            .into_iter()
+            .map(build),
+    );
     match &previous {
         None => problems.push(PublishProblem::Check(Box::new(CheckProblem::NoLockfile))),
         Some(_) if !joint.changes.is_empty() => {

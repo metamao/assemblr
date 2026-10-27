@@ -351,9 +351,14 @@ pub enum IssueKind {
     SiblingRange,
     /// `"catalog"` outside a catalog, where there are no siblings.
     SiblingOutsideCatalog,
-    /// A unit in a catalog amends a file of a sibling, which is not
-    /// supported yet.
-    SiblingAmendment,
+    /// A unit in a catalog amends a sibling's file with a version as the
+    /// base instead of `"catalog"`.
+    SiblingBase,
+    /// `"catalog"` as the base of an amendment of a unit that is not in the
+    /// same catalog.
+    CatalogBaseNotASibling,
+    /// `"catalog"` as an amendment's base outside a catalog.
+    CatalogBaseOutsideCatalog,
 }
 
 impl fmt::Display for IssueKind {
@@ -428,10 +433,20 @@ impl fmt::Display for IssueKind {
                 "\"catalog\" requires a unit of the same catalog, and only a unit in a \
                  catalog's `units/` has one; give a version requirement such as \"^1.0.0\"",
             ),
-            Self::SiblingAmendment => f.write_str(
-                "a unit in a catalog cannot amend a file of another unit of the same catalog \
-                 yet; amend a unit of another repository, or move the change into the unit \
-                 that provides the file",
+            Self::SiblingBase => f.write_str(
+                "this unit is in the same catalog: the base of an amendment of its file is \
+                 \"catalog\", since siblings have no earlier published version to amend, and \
+                 the copy's base is stored in the catalog's .assemblr/",
+            ),
+            Self::CatalogBaseNotASibling => f.write_str(
+                "\"catalog\" is the base of an amendment of another unit of the same catalog, \
+                 and the catalog has no such unit; give the exact version the copy was taken \
+                 from, such as \"1.0.0\"",
+            ),
+            Self::CatalogBaseOutsideCatalog => f.write_str(
+                "\"catalog\" is the base of an amendment of another unit of the same catalog, \
+                 and only a unit in a catalog's `units/` has one; give the exact version the \
+                 copy was taken from, such as \"1.0.0\"",
             ),
         }
     }
@@ -485,11 +500,29 @@ pub fn declare_amendment(
     path: &RelativePath,
     declaration: &AmendmentDeclaration,
 ) -> Result<String, EditError> {
+    declare_amendment_in(text, manifest, path, declaration, None)
+}
+
+/// [`declare_amendment`] for the manifest of a unit in `in_catalog` when it
+/// is given: the base of an amendment of a sibling is written as
+/// `"catalog"`, and the edited text is read with the catalog's rules.
+pub(crate) fn declare_amendment_in(
+    text: &str,
+    manifest: &Manifest,
+    path: &RelativePath,
+    declaration: &AmendmentDeclaration,
+    in_catalog: Option<&InCatalog<'_>>,
+) -> Result<String, EditError> {
+    let base = if in_catalog.is_some_and(|in_catalog| in_catalog.is_sibling(declaration.unit())) {
+        SIBLING.to_owned()
+    } else {
+        declaration.base().to_string()
+    };
     let entry = format!(
         "{}: {{ \"unit\": {}, \"base\": {} }}",
         json_string(path.as_str()),
         json_string(&declaration.unit().to_string()),
-        json_string(&declaration.base().to_string())
+        json_string(&base)
     );
     let failure = || EditError {
         action: EditAction::Add,
@@ -499,7 +532,7 @@ pub fn declare_amendment(
         .with_amendment(path.clone(), declaration.clone())
         .ok_or_else(failure)?;
     let edited = insert_amendment(text, &entry).ok_or_else(failure)?;
-    match read_manifest(&edited) {
+    match read(&edited, in_catalog) {
         Ok(manifest) if manifest == expected => Ok(edited),
         _ => Err(failure()),
     }
@@ -1109,18 +1142,36 @@ impl Reader<'_> {
         let unit = self
             .required(path, &fields, "unit")
             .and_then(|json| self.identity(&path.key("unit"), json));
+        let base_path = path.key("base");
         let base = self
             .required(path, &fields, "base")
-            .and_then(|json| self.version(&path.key("base"), json));
-        let unit = unit?;
-        if self
+            .and_then(|json| self.string(&base_path, json));
+        let (unit, base) = (unit?, base?);
+        let sibling = self
             .in_catalog
-            .is_some_and(|in_catalog| in_catalog.is_sibling(&unit))
-        {
-            self.report(path.key("unit"), IssueKind::SiblingAmendment);
-            return None;
-        }
-        Some(AmendmentDeclaration::new(unit, base?))
+            .is_some_and(|in_catalog| in_catalog.is_sibling(&unit));
+        // A sibling's file is amended at the catalog's version, and the
+        // copy's base is the one stored in the catalog, not a published
+        // version (**Provisional (D-57)**).
+        let base = match (self.in_catalog, base == SIBLING) {
+            (Some(in_catalog), true) if sibling => in_catalog.catalog.version().clone(),
+            (Some(_), true) => {
+                self.report(base_path, IssueKind::CatalogBaseNotASibling);
+                return None;
+            }
+            (None, true) => {
+                self.report(base_path, IssueKind::CatalogBaseOutsideCatalog);
+                return None;
+            }
+            (_, false) if sibling => {
+                self.report(base_path, IssueKind::SiblingBase);
+                return None;
+            }
+            (_, false) => Version::parse(base)
+                .map_err(|error| self.report(base_path, IssueKind::InvalidVersion(error)))
+                .ok()?,
+        };
+        Some(AmendmentDeclaration::new(unit, base))
     }
 }
 
@@ -1256,6 +1307,21 @@ mod tests {
                     "1.4.2".to_owned()
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn a_catalog_base_outside_a_catalog_is_refused() {
+        let text = with(
+            r#""dependencies": {"@metamao/node": "^1.0.0"},
+               "amendments": {"package.json": {"unit": "@metamao/node", "base": "catalog"}}"#,
+        );
+        assert_eq!(
+            issues(&text),
+            [(
+                r#"amendments["package.json"].base"#.to_owned(),
+                IssueKind::CatalogBaseOutsideCatalog
+            )]
         );
     }
 

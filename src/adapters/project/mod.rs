@@ -41,7 +41,8 @@ pub use status::{
 };
 
 pub use store::StoreError;
-use store::{Journal, JournalEntry, Pending, STATE_DIR, Store, write_new};
+use store::{Journal, JournalEntry, Pending};
+pub(crate) use store::{STATE_DIR, Store, write_new};
 
 use super::build::{BuildProblem, Resolved, layer_files, resolve_graph};
 use super::git::MANIFEST_LIMIT;

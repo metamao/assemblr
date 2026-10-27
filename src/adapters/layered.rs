@@ -741,22 +741,56 @@ pub(crate) fn rebase_json(
 /// base after an update, by line. Lines both sides change differently are
 /// left in the copy between `current` and `incoming` markers, and reported.
 pub(crate) fn rebase_text(base: &str, current: &str, incoming: &str) -> Rebased {
+    rebase_text_onto(
+        base,
+        current,
+        incoming,
+        [REBASE_BASE_MARK, Rebase::Incoming.marker(), "the update"],
+    )
+}
+
+/// [`rebase_text`] for a copy in a catalog whose stored base is `base`,
+/// onto `incoming`, the file as the units below the copy's unit compose it
+/// now: the markers name the stored base and the file now.
+pub(crate) fn rebase_text_on_stored(base: &str, current: &str, incoming: &str) -> Rebased {
+    rebase_text_onto(
+        base,
+        current,
+        incoming,
+        [
+            "||||||| base (stored)",
+            "incoming (the file below the copy now)",
+            "the file below",
+        ],
+    )
+}
+
+/// The rebase, with `labels`: the base section's marker, the incoming
+/// side's marker, and its name in a reported conflict.
+fn rebase_text_onto(base: &str, current: &str, incoming: &str, labels: [&str; 3]) -> Rebased {
+    let [base_mark, incoming_mark, incoming_name] = labels;
     let sides = [(Rebase::Incoming, incoming), (Rebase::Current, current)];
     let merge = merge_text(base, &sides, InsertTie::Chain);
     // The copy's side opens the marker, as editors show a diff3 conflict.
     let (text, marked) = write_marked(
         current,
         &merge,
-        REBASE_BASE_MARK,
+        base_mark,
         |left, right| right.cmp(left),
-        |side| side.marker().to_owned(),
+        |side| match side {
+            Rebase::Incoming => incoming_mark.to_owned(),
+            Rebase::Current => side.marker().to_owned(),
+        },
     );
     let conflicts = marked
         .into_iter()
         .map(|(_, base_lines, sides)| {
             let held: Vec<String> = sides
                 .iter()
-                .map(|(side, change)| format!("{side} {change}"))
+                .map(|(side, change)| match side {
+                    Rebase::Incoming => format!("{incoming_name} {change}"),
+                    Rebase::Current => format!("{side} {change}"),
+                })
                 .collect();
             format!("{}: {}", describe_lines(&base_lines), held.join("; "))
         })

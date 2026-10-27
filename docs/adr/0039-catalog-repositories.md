@@ -62,7 +62,7 @@ top level, with its own version and lockfile.
 
 - `unit add`, `unit amend`, and `unit update` are refused in a catalog for
   now (D-56), and amendments between siblings wait for a stored base
-  (#128).
+  (#128). ADR 0040 adds the stored base and `unit amend`.
 - The JSON Schema of the manifest no longer requires `version` and accepts
   `"catalog"`: one schema serves both kinds of unit, and Assemblr's own
   validation stays authoritative.

@@ -888,6 +888,13 @@ catalog design; #127). The details are **Provisional (D-53)** unless noted.
   scaffold in the unit's directory. Its identity must be the one the
   catalog gives the directory. `unit init` never writes a manifest beside
   `catalog.jsonc`.
-- **`unit add`, `unit amend`, and `unit update`** refuse to run in a
-  catalog for now, with a hint to edit the unit's manifest or copy and
-  build (**Deferred**, decision log D-56).
+- **`unit amend`** runs in a unit's directory, under the catalog's
+  lockfile, and stores the copy's base in the catalog's `.assemblr/`; the
+  base of a sibling's file is declared as `"catalog"`. **`unit build`**
+  rebases a copy whose stored base is no longer the file below it, and
+  **`unit check`** and **`unit publish`** refuse it (owner decision on
+  #128; see
+  [the base in a catalog](amendments-and-composition.md#the-base-in-a-catalog)).
+- **`unit add` and `unit update`** refuse to run in a catalog for now, with
+  a hint to edit the unit's manifest and build (**Deferred**, decision log
+  D-56).

@@ -18,6 +18,7 @@
 
 mod add;
 mod amend;
+mod bases;
 mod catalog;
 mod check;
 mod exclusive;
@@ -36,6 +37,7 @@ use std::path::{Path, PathBuf};
 
 pub use add::{AddFailure, AddProblem, DependencyAdded, add_dependency};
 pub use amend::{AmendFailure, AmendProblem, AmendState, Amended, Match, WriteError, amend_unit};
+pub use bases::{BaseStoreError, RebaseWriteError, RebasedCopy};
 pub use catalog::{Location, build_catalog, check_catalog, locate_unit};
 pub use check::{CheckFailure, CheckProblem, Checked, check_unit};
 use exclusive::BuildLock;
@@ -258,6 +260,7 @@ fn publish_validated(
             text,
             manifest,
             validated,
+            None,
         ));
     }
     let lock = validated.lock;
@@ -286,6 +289,7 @@ fn publish_validated(
         placeholders: validated.placeholders,
         unresolved: validated.unresolved,
         leftover: published.leftover,
+        rebased: Vec::new(),
     })
 }
 
@@ -294,7 +298,8 @@ fn publish_validated(
 /// sound and the conflict is a matter of content. `build/` is not touched.
 /// The copies are created first, new files only, then the manifest is
 /// replaced through its staging file, then the lockfile, in `lock_root`,
-/// through its own. `previous` is the lockfile's content before.
+/// through its own. `previous` is the lockfile's content before. In a
+/// catalog, `in_catalog` says where the manifest is read.
 fn write_pending(
     root: &Path,
     lock_root: &Path,
@@ -302,6 +307,7 @@ fn write_pending(
     text: &str,
     manifest: &Manifest,
     validated: Validated,
+    in_catalog: Option<&crate::adapters::manifest::InCatalog<'_>>,
 ) -> BuildFailure {
     let staged = root.join(amend::MANIFEST_NEW);
     let lock_staging = lock_root.join(output::LOCK_STAGING);
@@ -319,11 +325,12 @@ fn write_pending(
             pending.provider.clone(),
             pending.base.clone(),
         );
-        match crate::adapters::manifest::declare_amendment(
+        match crate::adapters::manifest::declare_amendment_in(
             &edited,
             &declared,
             &pending.path,
             &declaration,
+            in_catalog,
         ) {
             Ok(text) => edited = text,
             Err(error) => {
@@ -978,6 +985,12 @@ impl Dependencies {
         self.manifests.get(&(identity.clone(), version.clone()))
     }
 
+    /// Whether `identity` is a sibling of the unit in its catalog, whose
+    /// content is the catalog's own, not a published version's.
+    pub(super) fn is_sibling(&self, identity: &UnitIdentity) -> bool {
+        self.siblings.contains_key(identity)
+    }
+
     /// Reads every published version of every identity the unit can reach
     /// through some version's dependencies, starting from its own, at the
     /// commits `index` records. Identities without a registered source are
@@ -1360,9 +1373,17 @@ pub struct Built {
     placeholders: PlaceholderReport,
     unresolved: UnresolvedTokens,
     leftover: Option<(PathBuf, io::Error)>,
+    /// In a catalog, the copies rebased onto their bases now first.
+    rebased: Vec<RebasedCopy>,
 }
 
 impl Built {
+    /// In a catalog, the copies under `amendments/` that the build rebased
+    /// first, because the file below them changed since their stored base.
+    pub fn rebased(&self) -> &[RebasedCopy] {
+        &self.rebased
+    }
+
     /// The unit built.
     pub fn unit(&self) -> &UnitIdentity {
         &self.unit
@@ -1473,6 +1494,13 @@ pub enum BuildFailure {
         /// Why.
         error: PublishError,
     },
+    /// In a catalog, the file below some copies changed since their stored
+    /// base, and rebasing them left conflicts: every rebased copy is
+    /// written, those with conflicts between markers, with the new bases,
+    /// and nothing is built.
+    Rebased(Vec<RebasedCopy>),
+    /// Writing the rebased copies of a catalog, or their bases, failed.
+    RebaseWrite(RebaseWriteError),
 }
 
 /// The pending state a build created.
@@ -1536,6 +1564,30 @@ impl fmt::Display for BuildFailure {
             Self::PartlyBuilt {
                 directory, error, ..
             } => write!(f, "units/{directory}: {error}"),
+            Self::Rebased(copies) => {
+                let mut first = true;
+                for copy in copies.iter().filter(|copy| !copy.conflicts.is_empty()) {
+                    if !first {
+                        f.write_str("\n")?;
+                    }
+                    first = false;
+                    write!(
+                        f,
+                        "units/{}/amendments/{}: src/{} of {} changed since the copy's stored \
+                         base, in what the copy changes too, and the copy holds each conflict \
+                         between markers:",
+                        copy.unit.name(),
+                        copy.path,
+                        copy.path,
+                        copy.provider
+                    )?;
+                    for conflict in &copy.conflicts {
+                        write!(f, "\n  {conflict}")?;
+                    }
+                }
+                Ok(())
+            }
+            Self::RebaseWrite(error) => error.fmt(f),
         }
     }
 }
@@ -1703,6 +1755,33 @@ pub enum BuildProblem {
         directory: String,
         /// The copies its build would create, by path under `amendments/`.
         paths: Vec<RelativePath>,
+    },
+    /// The stored bases of a catalog's amendments cannot be used.
+    BaseStore(BaseStoreError),
+    /// A catalog stores no base for an amendment of one of its units.
+    BaseMissing {
+        /// The amended path.
+        path: RelativePath,
+        /// The unit that provides the file.
+        provider: UnitIdentity,
+    },
+    /// The file below a copy in a catalog changed since its stored base:
+    /// a build rebases the copy, a check or a publication refuses it.
+    BaseStale {
+        /// The amended path.
+        path: RelativePath,
+        /// The unit that provides the file.
+        provider: UnitIdentity,
+    },
+    /// The file below a copy in a catalog changed since its stored base,
+    /// and the copy cannot be merged with the change.
+    BaseUnmergeable {
+        /// The amended path.
+        path: RelativePath,
+        /// The unit that provides the file.
+        provider: UnitIdentity,
+        /// Why.
+        reason: String,
     },
 }
 
@@ -1872,6 +1951,27 @@ impl fmt::Display for BuildProblem {
                     paths.join(", ")
                 )
             }
+            Self::BaseStore(error) => error.fmt(f),
+            Self::BaseMissing { path, provider } => write!(
+                f,
+                "amendments/{path}, an amendment of src/{path} of {provider}, has no stored \
+                 base in the catalog's .assemblr/, so the changes the copy makes are unknown"
+            ),
+            Self::BaseStale { path, provider } => write!(
+                f,
+                "src/{path} of {provider}, as the units below compose it, changed since \
+                 amendments/{path} was taken, and the copy is not rebased onto the change yet"
+            ),
+            Self::BaseUnmergeable {
+                path,
+                provider,
+                reason,
+            } => write!(
+                f,
+                "src/{path} of {provider}, as the units below compose it, changed since \
+                 amendments/{path} was taken, and the change cannot be merged into the copy: \
+                 {reason}"
+            ),
         }
     }
 }

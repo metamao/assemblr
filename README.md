@@ -282,6 +282,13 @@ unit, and in `units/api/` only that one. `assemblr unit publish`, at the top
 level, tags the whole catalog as `v1.0.0`. Others register it once, and get
 every unit in it.
 
+A unit can amend another unit's file in the same catalog: run
+`assemblr unit amend <file>` in its directory. The copy's base is kept in
+`.assemblr/` at the top level, so commit that directory too. When the other
+unit's file changes, `assemblr unit build` merges the change into the copy,
+and stops with conflict markers in the copy when both changed the same
+lines.
+
 ## Share your units
 
 A unit is shared through its Git repository. Anyone who can read the
