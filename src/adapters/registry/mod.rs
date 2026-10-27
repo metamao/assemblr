@@ -29,13 +29,13 @@ pub use store::StorageError;
 use store::Store;
 
 use super::git::{
-    FetchError, GitError, GitRepository, HeadManifestError, InvalidVersion, ReadFileError,
-    ReadSrcError, VersionTag, fetch, fetch_objects,
+    FetchError, GitError, GitRepository, HeadManifestError, InvalidVersion, PublishedVersion,
+    ReadFileError, ReadSrcError, TagContent, fetch, fetch_objects,
 };
 use super::lockfile::{PublishedLockfileError, read_published};
 use crate::domain::{
-    Excluded, ObjectId, ObservedTag, ObservedVersion, PublishedAmendmentError, RegisteredUnit,
-    RegistryError, RegistryIndex, SourceReference, UnitIdentity, Version, declared_identity,
+    Excluded, ObjectId, ObservedTag, ObservedVersion, PublishedAmendmentError, RegistryError,
+    RegistryIndex, Removed, SourceReference, UnitIdentity, Version, declared_identities,
     published_amendments,
 };
 
@@ -172,9 +172,9 @@ impl Registry {
     ///
     /// A unit's valid published versions are indexed, after their `src/` and
     /// `amendments/` trees are validated, and invalid version tags are
-    /// excluded. With no valid version, the unit's identity comes from the
-    /// manifest committed at `HEAD`. A source already registered by the
-    /// same reference is left as it is.
+    /// excluded. A catalog registers every unit its versions publish. With no
+    /// valid version, the identities come from what is committed at `HEAD`.
+    /// A source already registered by the same reference is left as it is.
     pub fn add(&self, path: &Path) -> Result<Added, RegistryFailure> {
         let source = source_reference(path)?;
         let current = self.index()?;
@@ -189,11 +189,11 @@ impl Registry {
         })?;
         let unreadable = |error| RegistryFailure::unreadable(&source, error);
         let repository = self.open_source(&source).map_err(unreadable)?;
-        let tags = observe(&repository, None).map_err(unreadable)?;
-        let identity = match declared_identity(&source, &tags) {
-            Ok(Some(identity)) => identity,
-            Ok(None) => match repository.head_manifest() {
-                Ok(manifest) => manifest.name().clone(),
+        let tags = observe(&repository, &current, &source).map_err(unreadable)?;
+        let identities = match declared_identities(&source, &tags) {
+            Ok(identities) if !identities.is_empty() => identities,
+            Ok(_) => match repository.head_identities() {
+                Ok(identities) => identities.into_iter().collect(),
                 Err(HeadManifestError::Git(error)) => return Err(unreadable(error)),
                 Err(error) => {
                     return Err(RegistryFailure::Rejected(vec![Problem::NoIdentity {
@@ -208,7 +208,7 @@ impl Registry {
         // creates no registry state, and again under it, against the index
         // as it is then.
         current
-            .add(source.clone(), identity.clone(), tags.clone())
+            .add(source.clone(), &identities, tags.clone())
             .map_err(RegistryFailure::invalid)?;
         let lock = self.store.lock()?;
         let latest = self.index()?;
@@ -216,20 +216,14 @@ impl Registry {
             return Ok(already);
         }
         let change = latest
-            .add(source.clone(), identity.clone(), tags)
+            .add(source.clone(), &identities, tags)
             .map_err(RegistryFailure::invalid)?;
-        let versions = change
-            .index()
-            .units()
-            .get(&identity)
-            .map(|unit| unit.versions().keys().cloned().collect())
-            .unwrap_or_default();
+        let units = change.added().clone();
         let (index, excluded) = change.into_parts();
         self.store.replace(&lock, &index)?;
         Ok(Added::Registered {
-            identity,
+            units,
             source,
-            versions,
             excluded,
         })
     }
@@ -274,42 +268,34 @@ impl Registry {
     pub fn index_source(&self, source: &SourceReference) -> Result<Indexed, RegistryFailure> {
         let lock = self.store.lock()?;
         let index = self.index()?;
-        let Some((identity, unit)) = index
-            .units()
-            .iter()
-            .find(|(_, unit)| unit.source() == source)
-        else {
+        if index.identities_of(source).is_empty() {
             return Ok(Indexed::NotRegistered);
-        };
-        let identity = identity.clone();
+        }
         let tags = self
             .open_source(source)
-            .and_then(|repository| observe(&repository, Some(unit)))
+            .and_then(|repository| observe(&repository, &index, source))
             .map_err(|error| RegistryFailure::unreadable(source, error))?;
         let change = index
-            .sync(BTreeMap::from([(identity.clone(), tags)]))
+            .sync(BTreeMap::from([(source.clone(), tags)]))
             .map_err(RegistryFailure::invalid)?;
-        let added = change.added().get(&identity).cloned().unwrap_or_default();
+        let added = change.added().clone();
         let (next, excluded) = change.into_parts();
         if next != index {
             self.store.replace(&lock, &next)?;
         }
-        Ok(Indexed::Indexed {
-            identity,
-            added,
-            excluded,
-        })
+        Ok(Indexed::Indexed { added, excluded })
     }
 
-    /// Removes the registration of `identity`, and returns it. The
+    /// Removes the registration of `identity`, with every other unit of its
+    /// source when that is a catalog, and returns what was removed. The
     /// repository is not touched, and need not exist any more.
-    pub fn remove(&self, identity: &UnitIdentity) -> Result<RegisteredUnit, RegistryFailure> {
+    pub fn remove(&self, identity: &UnitIdentity) -> Result<Removed, RegistryFailure> {
         let not_registered = || RegistryFailure::NotRegistered(identity.clone());
         self.index()?.remove(identity).ok_or_else(not_registered)?;
         let lock = self.store.lock()?;
         let removed = self.index()?.remove(identity).ok_or_else(not_registered)?;
         self.store.replace(&lock, removed.index())?;
-        Ok(removed.unit().clone())
+        Ok(removed)
     }
 
     /// Reads every registered repository again, fetching each remote one
@@ -325,19 +311,21 @@ impl Registry {
         let mut problems = Vec::new();
         let mut fetched = Fetched::default();
         let mut observed = BTreeMap::new();
-        for (identity, unit) in index.units() {
-            if !self.fetch_once(unit.source(), &mut fetched, &mut problems) {
+        let sources: std::collections::BTreeSet<&SourceReference> =
+            index.units().values().map(|unit| unit.source()).collect();
+        for source in sources {
+            if !self.fetch_once(source, &mut fetched, &mut problems) {
                 continue;
             }
             let tags = self
-                .open_source(unit.source())
-                .and_then(|repository| observe(&repository, Some(unit)));
+                .open_source(source)
+                .and_then(|repository| observe(&repository, &index, source));
             match tags {
                 Ok(tags) => {
-                    observed.insert(identity.clone(), tags);
+                    observed.insert(source.clone(), tags);
                 }
                 Err(error) => problems.push(Problem::Unreadable {
-                    source: unit.source().clone(),
+                    source: source.clone(),
                     error,
                 }),
             }
@@ -374,50 +362,91 @@ struct Fetched {
 
 /// The outcome for `source` when it is registered already.
 fn already_registered(index: &RegistryIndex, source: &SourceReference) -> Option<Added> {
-    index
-        .identity_of(source)
-        .map(|identity| Added::AlreadyRegistered {
-            identity: identity.clone(),
-            source: source.clone(),
-        })
+    let identities = index.identities_of(source);
+    (!identities.is_empty()).then(|| Added::AlreadyRegistered {
+        identities: identities.into_iter().cloned().collect(),
+        source: source.clone(),
+    })
 }
 
-/// Reads the version tags of `repository`. The `src/` and `amendments/` of
-/// every valid version not indexed yet for `unit` are read too, so that a
-/// version is indexed only when its content is a valid published unit. A
-/// version with amendments must also carry a lockfile that identifies each
-/// base (see [`published_amendments`]); whether a base's content is the one
-/// this registry records is checked by the build that composes it.
+/// Reads the version tags of `repository`, registered from `source` in
+/// `index` or about to be. The `src/` and `amendments/` of every valid unit
+/// version not indexed yet are read too, so that a version is indexed only
+/// when its content is a valid published unit. A version with amendments
+/// must also carry a lockfile that identifies each base (see
+/// [`published_amendments`]); whether a base's content is the one this
+/// registry records is checked by the build that composes it. A catalog's
+/// tag publishes its units together: one invalid unit makes the tag invalid.
 pub(crate) fn observe(
     repository: &GitRepository,
-    unit: Option<&RegisteredUnit>,
+    index: &RegistryIndex,
+    source: &SourceReference,
 ) -> Result<Vec<ObservedTag<TagProblem>>, GitError> {
+    let indexed = |identity: &UnitIdentity, version: &Version| {
+        index
+            .units()
+            .get(identity)
+            .is_some_and(|unit| unit.source() == source && unit.versions().contains_key(version))
+    };
     let mut observed = Vec::new();
     for tag in repository.published_versions()? {
-        let outcome = observe_tag(repository, unit, &tag)?;
-        observed.push(ObservedTag::new(
-            tag.name().to_owned(),
-            tag.version().clone(),
-            outcome,
-        ));
+        let name = tag.name().to_owned();
+        let version = tag.version().clone();
+        let published = match tag.outcome() {
+            Ok(published) => published,
+            Err(invalid) => {
+                let problem = TagProblem::Version(invalid.clone());
+                observed.push(if tag.is_catalog() {
+                    ObservedTag::of_catalog(name, version, Err(problem))
+                } else {
+                    ObservedTag::new(name, version, Err(problem))
+                });
+                continue;
+            }
+        };
+        match published {
+            TagContent::Unit(unit) => {
+                let outcome =
+                    observe_unit(repository, unit, indexed(unit.manifest().name(), &version))?;
+                observed.push(ObservedTag::new(name, version, outcome));
+            }
+            TagContent::Catalog(catalog) => {
+                let mut units = Vec::new();
+                let mut problem = None;
+                for unit in catalog.units() {
+                    let identity = unit.manifest().name();
+                    let repository = repository.clone().for_unit(identity);
+                    match observe_unit(&repository, unit, indexed(identity, &version))? {
+                        Ok(found) => units.push(found),
+                        Err(found) => {
+                            problem = Some(TagProblem::InUnit {
+                                identity: identity.clone(),
+                                problem: Box::new(found),
+                            });
+                            break;
+                        }
+                    }
+                }
+                let outcome = match problem {
+                    Some(problem) => Err(problem),
+                    None => Ok(units),
+                };
+                observed.push(ObservedTag::of_catalog(name, version, outcome));
+            }
+        }
     }
     Ok(observed)
 }
 
-fn observe_tag(
+/// Observes `published`, a unit's valid version, read from `repository`.
+/// A version already `indexed` keeps the content first recorded for it,
+/// which was validated then, so its files are not checked again.
+fn observe_unit(
     repository: &GitRepository,
-    unit: Option<&RegisteredUnit>,
-    tag: &VersionTag,
+    published: &PublishedVersion,
+    indexed: bool,
 ) -> Result<Result<ObservedVersion, TagProblem>, GitError> {
-    let published = match tag.outcome() {
-        Ok(published) => published,
-        Err(invalid) => return Ok(Err(TagProblem::Version(invalid.clone()))),
-    };
     let provenance = published.provenance();
-    // An indexed version keeps the content first recorded for it, which was
-    // validated then. If its tag moved, that is a conflict whatever the new
-    // content is.
-    let indexed = unit.is_some_and(|unit| unit.versions().contains_key(tag.version()));
     if !indexed {
         // Only trees are checked here, since a remote copy holds no other
         // file contents (ADR 0037). The files' sizes are checked by the same
@@ -458,19 +487,18 @@ fn observe_tag(
 pub enum Added {
     /// The repository was registered.
     Registered {
-        /// The unit's identity.
-        identity: UnitIdentity,
+        /// Each unit registered, one or a catalog's, with its indexed
+        /// versions in order.
+        units: BTreeMap<UnitIdentity, Vec<Version>>,
         /// Its reference.
         source: SourceReference,
-        /// Its indexed versions, in order.
-        versions: Vec<Version>,
         /// The version tags excluded as invalid.
         excluded: Vec<Excluded<TagProblem>>,
     },
     /// The same reference was already registered, and nothing changed.
     AlreadyRegistered {
-        /// The identity it is registered for.
-        identity: UnitIdentity,
+        /// The identities it is registered for, in order.
+        identities: Vec<UnitIdentity>,
         /// The reference.
         source: SourceReference,
     },
@@ -481,10 +509,8 @@ pub enum Added {
 pub enum Indexed {
     /// The source is registered, and its versions are indexed.
     Indexed {
-        /// The identity it is registered for.
-        identity: UnitIdentity,
-        /// The newly indexed versions, in order.
-        added: Vec<Version>,
+        /// The newly indexed versions of each unit, in order.
+        added: BTreeMap<UnitIdentity, Vec<Version>>,
         /// The version tags excluded as invalid.
         excluded: Vec<Excluded<TagProblem>>,
     },
@@ -533,6 +559,14 @@ pub enum TagProblem {
     Lockfile(Arc<PublishedLockfileError>),
     /// Its amendment declarations, copies, and lockfile do not agree.
     InvalidAmendments(Vec<PublishedAmendmentError>),
+    /// A unit of the catalog the tag publishes is invalid, so the version
+    /// of every unit is.
+    InUnit {
+        /// The unit.
+        identity: UnitIdentity,
+        /// Why it is invalid.
+        problem: Box<TagProblem>,
+    },
 }
 
 impl fmt::Display for TagProblem {
@@ -542,6 +576,7 @@ impl fmt::Display for TagProblem {
             Self::Src(error) => write!(f, "invalid `src/`: {error}"),
             Self::Amendments(error) => write!(f, "invalid `amendments/`: {error}"),
             Self::Lockfile(error) => write!(f, "it declares amendments, but {error}"),
+            Self::InUnit { identity, problem } => write!(f, "{identity}: {problem}"),
             Self::InvalidAmendments(problems) => {
                 f.write_str("its amendments are invalid: ")?;
                 for (index, problem) in problems.iter().enumerate() {

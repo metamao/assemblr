@@ -966,7 +966,7 @@ fn warn_excluded(excluded: &[Excluded<TagProblem>]) {
     for excluded in excluded {
         eprintln!(
             "warning: {}: excluded tag {}, which is not indexed as a published version: {}",
-            excluded.identity(),
+            excluded.subject(),
             excluded.tag(),
             excluded.reason()
         );
@@ -1007,7 +1007,9 @@ fn publish_diagnosis(failure: &PublishFailure, root: &Path) -> Diagnosis {
         )),
         PublishProblem::Registry(errors) => errors.iter().find_map(|error| match error {
             RegistryError::Integrity { change, .. } => Some(match change {
-                IntegrityChange::TagRemoved | IntegrityChange::TagMoved { .. } => {
+                IntegrityChange::TagRemoved
+                | IntegrityChange::TagMoved { .. }
+                | IntegrityChange::UnitMissing => {
                     "published versions never change: restore the tag where it was".to_owned()
                 }
                 IntegrityChange::BecameInvalid(_) => {

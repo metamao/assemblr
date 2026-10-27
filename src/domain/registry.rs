@@ -15,7 +15,7 @@
 //! their own typed diagnostics.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use super::{Provenance, UnitIdentity, Version};
@@ -71,8 +71,8 @@ impl RegisteredUnit {
 
 /// The validated index of registered units.
 ///
-/// Every source is registered for one identity only, and no unit has two
-/// versions of equal SemVer precedence.
+/// A source is registered for one identity, or for each unit of a catalog,
+/// and no unit has two versions of equal SemVer precedence.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegistryIndex {
     units: BTreeMap<UnitIdentity, RegisteredUnit>,
@@ -100,25 +100,12 @@ impl RegistryIndex {
 
     fn broken_invariants(&self) -> Vec<InvalidIndex> {
         let mut errors = Vec::new();
-        let mut identities: BTreeMap<&SourceReference, Vec<UnitIdentity>> = BTreeMap::new();
         for (identity, unit) in &self.units {
-            identities
-                .entry(&unit.source)
-                .or_default()
-                .push(identity.clone());
             let ambiguous = ambiguous_versions(unit.versions.keys());
             if !ambiguous.is_empty() {
                 errors.push(InvalidIndex::Ambiguous {
                     identity: identity.clone(),
                     versions: ambiguous,
-                });
-            }
-        }
-        for (source, identities) in identities {
-            if identities.len() > 1 {
-                errors.push(InvalidIndex::SharedSource {
-                    source: source.clone(),
-                    identities,
                 });
             }
         }
@@ -130,160 +117,244 @@ impl RegistryIndex {
         &self.units
     }
 
-    /// The identity `source` is registered for, if it is registered.
-    pub fn identity_of(&self, source: &SourceReference) -> Option<&UnitIdentity> {
+    /// The identities `source` is registered for, in order: one for a
+    /// unit's repository, every unit's for a catalog. Empty when it is not
+    /// registered.
+    pub fn identities_of(&self, source: &SourceReference) -> Vec<&UnitIdentity> {
         self.units
             .iter()
-            .find(|(_, unit)| &unit.source == source)
+            .filter(|(_, unit)| &unit.source == source)
             .map(|(identity, _)| identity)
+            .collect()
     }
 
-    /// Registers `source` as `identity`, with the version tags read from it.
+    /// Registers `source` for `identities`, with the version tags read from
+    /// it: the identities its valid tags publish (see
+    /// [`declared_identities`]), or those committed at `HEAD` when no tag
+    /// is valid.
     ///
-    /// Valid versions are indexed and invalid ones excluded. The registration
-    /// is rejected if another source is registered for `identity`, if a
-    /// valid version declares another identity, or if two valid versions
-    /// have equal precedence. Registering a source that is already
-    /// registered changes nothing.
+    /// Each unit's valid versions are indexed, and invalid tags excluded.
+    /// The registration is rejected if another source is registered for one
+    /// of `identities`, or if two valid versions of a unit have equal
+    /// precedence. Registering a source that is already registered changes
+    /// nothing.
     pub fn add<R>(
         &self,
         source: SourceReference,
-        identity: UnitIdentity,
+        identities: &BTreeSet<UnitIdentity>,
         tags: Vec<ObservedTag<R>>,
     ) -> Result<Change<R>, Vec<RegistryError<R>>> {
-        if self.identity_of(&source).is_some() {
+        if !self.identities_of(&source).is_empty() {
             return Ok(Change::unchanged(self));
         }
         let mut errors = Vec::new();
-        if let Some(registered) = self.units.get(&identity) {
-            errors.push(RegistryError::SourceConflict {
-                identity: identity.clone(),
-                registered: registered.source.clone(),
-                given: source.clone(),
-            });
+        for identity in identities {
+            if let Some(registered) = self.units.get(identity) {
+                errors.push(RegistryError::SourceConflict {
+                    identity: identity.clone(),
+                    registered: registered.source.clone(),
+                    given: source.clone(),
+                });
+            }
         }
-        let mut versions = BTreeMap::new();
+        let mut versions: BTreeMap<UnitIdentity, BTreeMap<Version, Provenance>> = identities
+            .iter()
+            .map(|identity| (identity.clone(), BTreeMap::new()))
+            .collect();
         let mut excluded = Vec::new();
         for tag in tags {
             match tag.outcome {
-                Ok(found) if found.identity == identity => {
-                    versions.insert(tag.version, found.provenance);
+                Ok(found) => {
+                    for found in found {
+                        match versions.get_mut(&found.identity) {
+                            Some(versions) => {
+                                versions.insert(tag.version.clone(), found.provenance);
+                            }
+                            None => errors.push(RegistryError::UnexpectedIdentity {
+                                identity: identities
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or_else(|| found.identity.clone()),
+                                source: source.clone(),
+                                version: tag.version.clone(),
+                                declared: found.identity,
+                            }),
+                        }
+                    }
                 }
-                Ok(found) => errors.push(RegistryError::UnexpectedIdentity {
-                    identity: identity.clone(),
-                    source: source.clone(),
-                    version: tag.version,
-                    declared: found.identity,
-                }),
                 Err(reason) => excluded.push(Excluded {
-                    identity: identity.clone(),
+                    subject: subject(&source, identities, tag.catalog),
                     tag: tag.name,
                     version: tag.version,
                     reason,
                 }),
             }
         }
-        let ambiguous = ambiguous_versions(versions.keys());
-        if !ambiguous.is_empty() {
-            errors.push(RegistryError::AmbiguousVersions {
-                identity: identity.clone(),
-                source: source.clone(),
-                versions: ambiguous,
-            });
+        for (identity, versions) in &versions {
+            let ambiguous = ambiguous_versions(versions.keys());
+            if !ambiguous.is_empty() {
+                errors.push(RegistryError::AmbiguousVersions {
+                    identity: identity.clone(),
+                    source: source.clone(),
+                    versions: ambiguous,
+                });
+            }
         }
         if !errors.is_empty() {
             return Err(errors);
         }
         excluded.sort_by(Excluded::order);
         let mut index = self.clone();
-        let added = versions.keys().cloned().collect();
-        index
-            .units
-            .insert(identity.clone(), RegisteredUnit::new(source, versions));
+        let mut added = BTreeMap::new();
+        for (identity, versions) in versions {
+            added.insert(identity.clone(), versions.keys().cloned().collect());
+            index
+                .units
+                .insert(identity, RegisteredUnit::new(source.clone(), versions));
+        }
         Ok(Change {
             index,
-            added: BTreeMap::from([(identity, added)]),
+            added,
             excluded,
         })
     }
 
-    /// Synchronizes the registered units with the version tags read again
-    /// from their sources. Units with no entry in `observed` are kept as
-    /// they are.
+    /// Synchronizes the registered sources with the version tags read again
+    /// from them. Sources with no entry in `observed` are kept as they are.
     ///
-    /// New valid versions are indexed and new invalid ones excluded. An
-    /// indexed version whose tag has disappeared, moved, or become invalid
-    /// is an integrity conflict. Any conflict, in any unit, rejects the whole
+    /// New valid versions are indexed and new invalid tags excluded. A unit
+    /// a catalog's new version publishes for the first time is registered
+    /// from the catalog. An indexed version whose tag has disappeared,
+    /// moved, become invalid, or no longer publishes the unit is an
+    /// integrity conflict. Any conflict, in any source, rejects the whole
     /// synchronization, and every one is reported.
-    pub fn sync<R>(
+    pub fn sync<R: Clone>(
         &self,
-        observed: BTreeMap<UnitIdentity, Vec<ObservedTag<R>>>,
+        observed: BTreeMap<SourceReference, Vec<ObservedTag<R>>>,
     ) -> Result<Change<R>, Vec<RegistryError<R>>> {
         let mut errors = Vec::new();
         let mut index = self.clone();
-        let mut added = BTreeMap::new();
+        let mut added: BTreeMap<UnitIdentity, Vec<Version>> = BTreeMap::new();
         let mut excluded = Vec::new();
-        for (identity, tags) in observed {
-            let Some(unit) = index.units.get_mut(&identity) else {
+        for (source, tags) in observed {
+            let registered: BTreeSet<UnitIdentity> =
+                self.identities_of(&source).into_iter().cloned().collect();
+            if registered.is_empty() {
                 continue;
-            };
-            let mut tags: BTreeMap<Version, ObservedTag<R>> = tags
+            }
+            let catalog = registered.len() > 1 || tags.iter().any(|tag| tag.catalog);
+            let tags: BTreeMap<Version, ObservedTag<R>> = tags
                 .into_iter()
                 .map(|tag| (tag.version.clone(), tag))
                 .collect();
-            let integrity = |version: &Version, change| RegistryError::Integrity {
-                identity: identity.clone(),
-                source: unit.source.clone(),
-                version: version.clone(),
-                change,
-            };
-            for (version, recorded) in &unit.versions {
-                let change = match tags.remove(version).map(|tag| tag.outcome) {
-                    None => IntegrityChange::TagRemoved,
-                    Some(Err(reason)) => IntegrityChange::BecameInvalid(reason),
-                    Some(Ok(found)) if found.provenance == *recorded => continue,
-                    Some(Ok(found)) => IntegrityChange::TagMoved {
-                        recorded: recorded.clone(),
-                        found: found.provenance,
-                    },
+            for identity in &registered {
+                let Some(unit) = self.units.get(identity) else {
+                    continue;
                 };
-                errors.push(integrity(version, change));
-            }
-            let mut new_versions = Vec::new();
-            for (version, tag) in tags {
-                match tag.outcome {
-                    Ok(found) if found.identity == identity => {
-                        unit.versions.insert(version.clone(), found.provenance);
-                        new_versions.push(version);
-                    }
-                    Ok(found) => errors.push(RegistryError::UnexpectedIdentity {
+                for (version, recorded) in &unit.versions {
+                    let change = match tags.get(version).map(|tag| &tag.outcome) {
+                        None => IntegrityChange::TagRemoved,
+                        Some(Err(reason)) => IntegrityChange::BecameInvalid(reason.clone()),
+                        Some(Ok(found)) => {
+                            match found.iter().find(|found| &found.identity == identity) {
+                                Some(found) if found.provenance == *recorded => continue,
+                                Some(found) => IntegrityChange::TagMoved {
+                                    recorded: recorded.clone(),
+                                    found: found.provenance.clone(),
+                                },
+                                None => IntegrityChange::UnitMissing,
+                            }
+                        }
+                    };
+                    errors.push(RegistryError::Integrity {
                         identity: identity.clone(),
-                        source: unit.source.clone(),
-                        version,
-                        declared: found.identity,
-                    }),
-                    Err(reason) => excluded.push(Excluded {
-                        identity: identity.clone(),
-                        tag: tag.name,
-                        version,
-                        reason,
-                    }),
+                        source: source.clone(),
+                        version: version.clone(),
+                        change,
+                    });
                 }
             }
+            let indexed = |version: &Version| {
+                registered.iter().any(|identity| {
+                    self.units
+                        .get(identity)
+                        .is_some_and(|unit| unit.versions.contains_key(version))
+                })
+            };
+            for (version, tag) in tags {
+                let found = match tag.outcome {
+                    Ok(found) => found,
+                    Err(_) if indexed(&version) => continue,
+                    Err(reason) => {
+                        excluded.push(Excluded {
+                            subject: subject(&source, &registered, catalog),
+                            tag: tag.name,
+                            version,
+                            reason,
+                        });
+                        continue;
+                    }
+                };
+                for found in found {
+                    match index.units.get_mut(&found.identity) {
+                        Some(unit) if unit.source == source => {
+                            if unit.versions.contains_key(&version) {
+                                continue;
+                            }
+                            unit.versions.insert(version.clone(), found.provenance);
+                        }
+                        Some(unit) => {
+                            errors.push(RegistryError::SourceConflict {
+                                identity: found.identity,
+                                registered: unit.source.clone(),
+                                given: source.clone(),
+                            });
+                            continue;
+                        }
+                        None if catalog => {
+                            index.units.insert(
+                                found.identity.clone(),
+                                RegisteredUnit::new(
+                                    source.clone(),
+                                    BTreeMap::from([(version.clone(), found.provenance)]),
+                                ),
+                            );
+                        }
+                        None => {
+                            errors.push(RegistryError::UnexpectedIdentity {
+                                identity: registered
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or_else(|| found.identity.clone()),
+                                source: source.clone(),
+                                version: version.clone(),
+                                declared: found.identity,
+                            });
+                            continue;
+                        }
+                    }
+                    added
+                        .entry(found.identity)
+                        .or_default()
+                        .push(version.clone());
+                }
+            }
+        }
+        for (identity, unit) in &index.units {
             let ambiguous = ambiguous_versions(unit.versions.keys());
-            if !ambiguous.is_empty() {
+            if !ambiguous.is_empty() && self.units.get(identity) != Some(unit) {
                 errors.push(RegistryError::AmbiguousVersions {
                     identity: identity.clone(),
                     source: unit.source.clone(),
                     versions: ambiguous,
                 });
             }
-            if !new_versions.is_empty() {
-                added.insert(identity, new_versions);
-            }
         }
         if !errors.is_empty() {
             return Err(errors);
+        }
+        for versions in added.values_mut() {
+            versions.sort();
         }
         excluded.sort_by(Excluded::order);
         Ok(Change {
@@ -293,12 +364,40 @@ impl RegistryIndex {
         })
     }
 
-    /// Removes the registration of `identity`. `None` if it is not
+    /// Removes the registration of `identity`, and of every other unit
+    /// registered from its source: a catalog's units are registered and
+    /// removed together (**Provisional (D-54)**). `None` if it is not
     /// registered.
     pub fn remove(&self, identity: &UnitIdentity) -> Option<Removed> {
+        let source = self.units.get(identity)?.source.clone();
         let mut index = self.clone();
-        let unit = index.units.remove(identity)?;
-        Some(Removed { index, unit })
+        let mut units = BTreeMap::new();
+        index.units.retain(|identity, unit| {
+            if unit.source == source {
+                units.insert(identity.clone(), unit.clone());
+                false
+            } else {
+                true
+            }
+        });
+        Some(Removed {
+            index,
+            source,
+            units,
+        })
+    }
+}
+
+/// What an invalid tag of `source` is reported for: its one unit, or the
+/// catalog, whose tags publish all its units at once.
+fn subject(
+    source: &SourceReference,
+    identities: &BTreeSet<UnitIdentity>,
+    catalog: bool,
+) -> Subject {
+    match identities.first() {
+        Some(identity) if identities.len() == 1 && !catalog => Subject::Unit(identity.clone()),
+        _ => Subject::Catalog(source.clone()),
     }
 }
 
@@ -306,7 +405,8 @@ impl RegistryIndex {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Removed {
     index: RegistryIndex,
-    unit: RegisteredUnit,
+    source: SourceReference,
+    units: BTreeMap<UnitIdentity, RegisteredUnit>,
 }
 
 impl Removed {
@@ -315,37 +415,52 @@ impl Removed {
         &self.index
     }
 
-    /// The registration as it was.
-    pub fn unit(&self) -> &RegisteredUnit {
-        &self.unit
+    /// The source whose units were removed.
+    pub fn source(&self) -> &SourceReference {
+        &self.source
+    }
+
+    /// The registrations as they were, by identity: one, or every unit of a
+    /// catalog.
+    pub fn units(&self) -> &BTreeMap<UnitIdentity, RegisteredUnit> {
+        &self.units
     }
 }
 
-/// The identity the valid tags of `source` declare, or `None` if no tag is
-/// valid. Tags that declare different identities reject the source.
-pub fn declared_identity<R>(
+/// The identities the valid tags of `source` publish: its one unit's, or
+/// every unit any version of a catalog publishes. Empty if no tag is valid.
+/// Tags that each publish one unit but declare different identities reject
+/// the source: a unit's repository publishes one unit.
+pub fn declared_identities<R>(
     source: &SourceReference,
     tags: &[ObservedTag<R>],
-) -> Result<Option<UnitIdentity>, Vec<RegistryError<R>>> {
-    let mut identities: BTreeMap<UnitIdentity, Vec<Version>> = BTreeMap::new();
+) -> Result<BTreeSet<UnitIdentity>, Vec<RegistryError<R>>> {
+    let mut identities = BTreeSet::new();
+    let mut single: BTreeMap<UnitIdentity, Vec<Version>> = BTreeMap::new();
     for tag in tags {
-        if let Ok(found) = &tag.outcome {
-            identities
-                .entry(found.identity.clone())
-                .or_default()
-                .push(tag.version.clone());
+        let Ok(found) = &tag.outcome else {
+            continue;
+        };
+        for found in found {
+            identities.insert(found.identity.clone());
+            if !tag.catalog {
+                single
+                    .entry(found.identity.clone())
+                    .or_default()
+                    .push(tag.version.clone());
+            }
         }
     }
-    if identities.len() > 1 {
-        for versions in identities.values_mut() {
+    if single.len() > 1 {
+        for versions in single.values_mut() {
             versions.sort();
         }
         return Err(vec![RegistryError::ConflictingIdentities {
             source: source.clone(),
-            identities,
+            identities: single,
         }]);
     }
-    Ok(identities.into_keys().next())
+    Ok(identities)
 }
 
 /// The versions in groups of two or more with equal SemVer precedence, such
@@ -376,16 +491,35 @@ fn ambiguous_versions<'a>(versions: impl Iterator<Item = &'a Version>) -> Vec<Ve
 pub struct ObservedTag<R> {
     name: String,
     version: Version,
-    outcome: Result<ObservedVersion, R>,
+    outcome: Result<Vec<ObservedVersion>, R>,
+    /// Whether the tag is a catalog's, which publishes all its units.
+    catalog: bool,
 }
 
 impl<R> ObservedTag<R> {
-    /// The tag `name`, which names `version`, and what reading it found.
+    /// The tag `name` of a unit's repository, which names `version`, and
+    /// what reading it found.
     pub fn new(name: String, version: Version, outcome: Result<ObservedVersion, R>) -> Self {
         Self {
             name,
             version,
+            outcome: outcome.map(|found| vec![found]),
+            catalog: false,
+        }
+    }
+
+    /// The tag `name` of a catalog, which names `version`, and what reading
+    /// it found: the version of every unit in the catalog.
+    pub fn of_catalog(
+        name: String,
+        version: Version,
+        outcome: Result<Vec<ObservedVersion>, R>,
+    ) -> Self {
+        Self {
+            name,
+            version,
             outcome,
+            catalog: true,
         }
     }
 
@@ -394,9 +528,10 @@ impl<R> ObservedTag<R> {
         &self.version
     }
 
-    /// The valid version, or why the tag does not publish one.
-    pub fn outcome(&self) -> Result<&ObservedVersion, &R> {
-        self.outcome.as_ref()
+    /// The valid versions it publishes, one for each unit, or why the tag
+    /// does not publish any.
+    pub fn outcome(&self) -> Result<&[ObservedVersion], &R> {
+        self.outcome.as_deref()
     }
 }
 
@@ -475,7 +610,7 @@ impl<R> Change<R> {
 /// A version tag excluded from the index because it is invalid.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Excluded<R> {
-    identity: UnitIdentity,
+    subject: Subject,
     tag: String,
     version: Version,
     reason: R,
@@ -483,12 +618,12 @@ pub struct Excluded<R> {
 
 impl<R> Excluded<R> {
     fn order(a: &Self, b: &Self) -> Ordering {
-        (&a.identity, &a.version, &a.tag).cmp(&(&b.identity, &b.version, &b.tag))
+        (&a.subject, &a.version, &a.tag).cmp(&(&b.subject, &b.version, &b.tag))
     }
 
-    /// The unit the tag belongs to.
-    pub fn identity(&self) -> &UnitIdentity {
-        &self.identity
+    /// The unit the tag belongs to, or the catalog.
+    pub fn subject(&self) -> &Subject {
+        &self.subject
     }
 
     /// The tag's name.
@@ -499,6 +634,25 @@ impl<R> Excluded<R> {
     /// Why the tag publishes no valid version.
     pub fn reason(&self) -> &R {
         &self.reason
+    }
+}
+
+/// What a tag belongs to: a unit's repository, or a catalog, whose tags
+/// publish every unit in it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Subject {
+    /// The unit.
+    Unit(UnitIdentity),
+    /// The catalog registered from this source.
+    Catalog(SourceReference),
+}
+
+impl fmt::Display for Subject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unit(identity) => identity.fmt(f),
+            Self::Catalog(source) => write!(f, "the catalog {source}"),
+        }
     }
 }
 
@@ -569,6 +723,8 @@ pub enum IntegrityChange<R> {
     },
     /// The tag no longer publishes a valid version, for this reason.
     BecameInvalid(R),
+    /// The tag, a catalog's, no longer publishes the unit.
+    UnitMissing,
 }
 
 impl<R: fmt::Display> fmt::Display for RegistryError<R> {
@@ -637,6 +793,11 @@ impl<R: fmt::Display> fmt::Display for RegistryError<R> {
                     IntegrityChange::BecameInvalid(reason) => {
                         write!(f, "tag v{version} is no longer valid: {reason}")
                     }
+                    IntegrityChange::UnitMissing => write!(
+                        f,
+                        "tag v{version} no longer publishes it; a published version never \
+                         changes"
+                    ),
                 }
             }
         }
@@ -648,13 +809,6 @@ impl<R: fmt::Debug + fmt::Display> std::error::Error for RegistryError<R> {}
 /// Why a stored index breaks the index's invariants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidIndex {
-    /// One source is registered for several identities.
-    SharedSource {
-        /// The source.
-        source: SourceReference,
-        /// The identities.
-        identities: Vec<UnitIdentity>,
-    },
     /// A unit has versions of equal precedence.
     Ambiguous {
         /// The unit.
@@ -667,13 +821,6 @@ pub enum InvalidIndex {
 impl fmt::Display for InvalidIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SharedSource { source, identities } => {
-                write!(f, "{source} is registered for several identities:")?;
-                for identity in identities {
-                    write!(f, " {identity}")?;
-                }
-                Ok(())
-            }
             Self::Ambiguous { identity, versions } => write!(
                 f,
                 "{identity} has versions of equal precedence: {}",
@@ -695,16 +842,20 @@ fn list(versions: &[Version]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::{
         Change, IntegrityChange, ObservedTag, ObservedVersion, RegisteredUnit, RegistryError,
-        RegistryIndex, SourceReference, declared_identity,
+        RegistryIndex, SourceReference, declared_identities,
     };
     use crate::domain::{ObjectId, Provenance, UnitIdentity, Version};
 
     fn id(text: &str) -> UnitIdentity {
         UnitIdentity::parse(text).unwrap()
+    }
+
+    fn ids(texts: &[&str]) -> BTreeSet<UnitIdentity> {
+        texts.iter().map(|text| id(text)).collect()
     }
 
     fn version(text: &str) -> Version {
@@ -769,7 +920,7 @@ mod tests {
         let change = RegistryIndex::new()
             .add(
                 source("/units/node"),
-                id("@acme/node"),
+                &ids(&["@acme/node"]),
                 vec![
                     valid("@acme/node", "1.1.0", 'b'),
                     invalid("1.2.0", "the manifest declares version 1.3.0"),
@@ -800,7 +951,7 @@ mod tests {
         let change = RegistryIndex::new()
             .add(
                 source("/units/node"),
-                id("@acme/node"),
+                &ids(&["@acme/node"]),
                 vec![invalid("1.0.0", "no manifest")],
             )
             .unwrap();
@@ -816,7 +967,7 @@ mod tests {
         let change = before
             .add(
                 source("/units/node"),
-                id("@acme/node"),
+                &ids(&["@acme/node"]),
                 vec![valid("@acme/node", "2.0.0", 'b')],
             )
             .unwrap();
@@ -832,7 +983,7 @@ mod tests {
         let errors = before
             .add(
                 source("/elsewhere/node"),
-                id("@acme/node"),
+                &ids(&["@acme/node"]),
                 vec![valid("@acme/node", "1.0.0", 'a')],
             )
             .unwrap_err();
@@ -852,7 +1003,7 @@ mod tests {
         let errors = RegistryIndex::new()
             .add(
                 source("/units/node"),
-                id("@acme/node"),
+                &ids(&["@acme/node"]),
                 vec![
                     valid("@acme/node", "1.0.0+b", 'b'),
                     valid("@acme/node", "1.0.0+a", 'a'),
@@ -875,18 +1026,18 @@ mod tests {
     fn the_identity_comes_from_the_valid_versions_which_must_agree() {
         let reference = source("/units/node");
         assert_eq!(
-            declared_identity(
+            declared_identities(
                 &reference,
                 &[invalid("0.1.0", "bad"), valid("@acme/node", "1.0.0", 'a')]
             ),
-            Ok(Some(id("@acme/node")))
+            Ok(ids(&["@acme/node"]))
         );
         assert_eq!(
-            declared_identity(&reference, &[invalid("0.1.0", "bad")]),
-            Ok(None)
+            declared_identities(&reference, &[invalid("0.1.0", "bad")]),
+            Ok(BTreeSet::new())
         );
 
-        let error = declared_identity(
+        let error = declared_identities(
             &reference,
             &[
                 valid("@acme/node", "2.0.0", 'c'),
@@ -912,7 +1063,7 @@ mod tests {
         let errors = RegistryIndex::new()
             .add(
                 source("/units/node"),
-                id("@acme/node"),
+                &ids(&["@acme/node"]),
                 vec![valid("@acme/other", "1.0.0", 'a')],
             )
             .unwrap_err();
@@ -929,7 +1080,7 @@ mod tests {
 
         let change = before
             .sync(BTreeMap::from([(
-                id("@acme/node"),
+                source("/units/node"),
                 vec![
                     valid("@acme/node", "1.0.0", 'a'),
                     invalid("1.1.0", "no manifest"),
@@ -949,7 +1100,7 @@ mod tests {
 
         let change = before
             .sync(BTreeMap::from([(
-                id("@acme/node"),
+                source("/units/node"),
                 vec![valid("@acme/node", "1.0.0", 'a')],
             )]))
             .unwrap();
@@ -968,7 +1119,7 @@ mod tests {
 
         let errors = before
             .sync(BTreeMap::from([(
-                id("@acme/node"),
+                source("/units/node"),
                 vec![
                     valid("@acme/node", "1.1.0", 'd'),
                     invalid("1.2.0", "no manifest"),
@@ -1014,13 +1165,13 @@ mod tests {
         let errors = before
             .sync(BTreeMap::from([
                 (
-                    id("@acme/node"),
+                    source("/units/node"),
                     vec![
                         valid("@acme/node", "1.0.0", 'a'),
                         valid("@acme/node", "2.0.0", 'c'),
                     ],
                 ),
-                (id("@acme/web"), vec![]),
+                (source("/units/web"), vec![]),
             ]))
             .unwrap_err();
 
@@ -1037,7 +1188,7 @@ mod tests {
 
         let errors = before
             .sync(BTreeMap::from([(
-                id("@acme/node"),
+                source("/units/node"),
                 vec![
                     valid("@acme/node", "1.0.0+a", 'a'),
                     valid("@acme/node", "1.0.0+b", 'b'),
@@ -1072,8 +1223,8 @@ mod tests {
         };
         let expected = before
             .sync(BTreeMap::from([
-                (id("@acme/node"), tags()),
-                (id("@acme/web"), vec![invalid("1.0.0", "three")]),
+                (source("/units/node"), tags()),
+                (source("/units/web"), vec![invalid("1.0.0", "three")]),
             ]))
             .unwrap();
 
@@ -1083,8 +1234,8 @@ mod tests {
             shuffled.swap(0, 3);
             let change = before
                 .sync(BTreeMap::from([
-                    (id("@acme/node"), shuffled),
-                    (id("@acme/web"), vec![invalid("1.0.0", "three")]),
+                    (source("/units/node"), shuffled),
+                    (source("/units/web"), vec![invalid("1.0.0", "three")]),
                 ]))
                 .unwrap();
             assert_eq!(change, expected);
@@ -1100,7 +1251,7 @@ mod tests {
 
         let removed = before.remove(&id("@acme/node")).unwrap();
 
-        assert_eq!(removed.unit().source(), &source("/units/node"));
+        assert_eq!(removed.source(), &source("/units/node"));
         assert_eq!(removed.index(), &index(&[("@acme/web", "/units/web", &[])]));
         assert_eq!(before.remove(&id("@acme/missing")), None);
     }
@@ -1126,6 +1277,7 @@ mod tests {
 
         let errors = RegistryIndex::from_units(units).unwrap_err();
 
-        assert_eq!(errors.len(), 2, "{errors:?}");
+        // A catalog registers several units from one source.
+        assert_eq!(errors.len(), 1, "{errors:?}");
     }
 }

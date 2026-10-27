@@ -199,16 +199,16 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
     // one it will index; that is checked now, so that a tag is never
     // created that the registry then rejects.
     let registration = match local_reference(root) {
-        Ok(source) => match index.identity_of(&source) {
-            Some(registered) if *registered == identity => Registration::Here { source },
-            Some(registered) => {
+        Ok(source) => match index.identities_of(&source).as_slice() {
+            [registered] if **registered == identity => Registration::Here { source },
+            [registered, ..] => {
                 problems.push(PublishProblem::RegisteredAs {
-                    source,
-                    registered: registered.clone(),
+                    source: source.clone(),
+                    registered: (*registered).clone(),
                 });
                 Registration::None
             }
-            None => match index.units().get(&identity) {
+            [] => match index.units().get(&identity) {
                 Some(unit) => Registration::Elsewhere {
                     source: unit.source().clone(),
                 },
@@ -220,8 +220,8 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
             Registration::None
         }
     };
-    if let (Registration::Here { .. }, Some(unit)) = (&registration, index.units().get(&identity)) {
-        match observe(&repository, Some(unit)) {
+    if let Registration::Here { source } = &registration {
+        match observe(&repository, &index, source) {
             Ok(mut observed) => {
                 if !already {
                     observed.push(ObservedTag::new(
@@ -230,7 +230,7 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
                         Ok(ObservedVersion::new(identity.clone(), provenance.clone())),
                     ));
                 }
-                if let Err(errors) = index.sync(BTreeMap::from([(identity.clone(), observed)])) {
+                if let Err(errors) = index.sync(BTreeMap::from([(source.clone(), observed)])) {
                     problems.push(PublishProblem::Registry(errors));
                 }
             }
@@ -269,7 +269,10 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
         Ok(Indexed::Indexed {
             added, excluded, ..
         }) => {
-            published.index = if added.contains(&published.version) {
+            let indexed = added
+                .get(&published.unit)
+                .is_some_and(|versions| versions.contains(&published.version));
+            published.index = if indexed {
                 IndexOutcome::Indexed { excluded }
             } else {
                 IndexOutcome::AlreadyIndexed { excluded }

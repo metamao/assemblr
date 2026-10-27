@@ -267,7 +267,10 @@ fn describe(
         identity: identity.clone(),
         error: Box::new(error),
     };
-    let repository = registry.open_source(unit.source()).map_err(source_error)?;
+    let repository = registry
+        .open_source(unit.source())
+        .map_err(source_error)?
+        .for_unit(identity);
     let outcome = repository
         .read_published(&[provenance.commit()])
         .map_err(source_error)?

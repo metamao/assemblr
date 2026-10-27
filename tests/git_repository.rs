@@ -242,7 +242,7 @@ fn outcomes(tags: &[VersionTag]) -> Vec<(&str, Result<&Version, &InvalidVersion>
         .map(|tag| {
             let outcome = tag
                 .outcome()
-                .map(|published| published.manifest().version());
+                .map(|published| published.units()[0].manifest().version());
             (tag.name(), outcome)
         })
         .collect()
@@ -254,7 +254,7 @@ fn read_src(repo: &Repo, commit: &str) -> Result<FileTree, ReadSrcError> {
     let tags = repo.versions();
     let published = tags
         .iter()
-        .filter_map(|tag| tag.outcome().ok())
+        .filter_map(|tag| tag.outcome().ok().map(|published| &published.units()[0]))
         .find(|published| published.provenance().commit().as_str() == commit)
         .expect("the commit is a published version");
     repo.open().read_src(published.provenance().commit())
@@ -286,7 +286,7 @@ fn lightweight_annotated_and_nested_tags_publish_versions() {
         ]
     );
     for (tag, commit) in tags.iter().zip([first, second, third]) {
-        let provenance = tag.outcome().unwrap().provenance();
+        let provenance = tag.outcome().unwrap().units()[0].provenance();
         assert_eq!(provenance.commit().as_str(), commit);
         assert_eq!(
             provenance.tree().as_str(),
@@ -692,7 +692,7 @@ fn sha256_repositories_are_read() {
     repo.tag("v1.0.0", &commit);
 
     let tags = repo.versions();
-    let provenance = tags[0].outcome().unwrap().provenance();
+    let provenance = tags[0].outcome().unwrap().units()[0].provenance();
     assert_eq!(provenance.commit().as_str().len(), 64);
     assert_eq!(
         read_src(&repo, &commit).unwrap(),
@@ -731,7 +731,7 @@ fn reading_leaves_the_working_tree_index_and_head_unchanged() {
     let before = checkout_state(&repo);
 
     let tags = repo.versions();
-    let commit = tags[0].outcome().unwrap().provenance().commit();
+    let commit = tags[0].outcome().unwrap().units()[0].provenance().commit();
     let files = repo.open().read_src(commit).unwrap();
 
     assert_eq!(checkout_state(&repo), before);
@@ -873,7 +873,7 @@ fn missing_objects_are_never_fetched() {
         "{error}"
     );
     let tags = source.versions();
-    let commit_id = tags[0].outcome().unwrap().provenance().commit();
+    let commit_id = tags[0].outcome().unwrap().units()[0].provenance().commit();
     assert!(clone.open().read_src(commit_id).is_err());
     let manifest_blob = clone.git(&["rev-parse", &format!("{commit}:manifest.jsonc")]);
     let present = git_command(&clone.path)
@@ -1090,7 +1090,7 @@ fn repositories_open_by_relative_path() {
     assert_eq!(opened.path(), relative);
     let tags = opened.published_versions().unwrap();
     assert_eq!(outcomes(&tags), [("v1.0.0", Ok(&version("1.0.0")))]);
-    let commit = tags[0].outcome().unwrap().provenance().commit();
+    let commit = tags[0].outcome().unwrap().units()[0].provenance().commit();
     assert_eq!(opened.read_src(commit).unwrap(), FileTree::new());
 }
 

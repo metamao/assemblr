@@ -31,9 +31,9 @@ pub use build::{
 };
 pub use git::{
     Discovered, FetchError, FetchErrorKind, GitError, GitErrorKind, GitRepository,
-    HeadManifestError, InvalidVersion, ObjectTooLarge, PublishedVersion, ReadFileError,
-    ReadSrcError, SrcEntryError, SrcEntryErrorReason, UnitDirectory, VersionTag,
-    discover_repository, init_repository,
+    HeadManifestError, InvalidVersion, ObjectTooLarge, PublishedCatalog, PublishedVersion,
+    ReadFileError, ReadSrcError, SrcEntryError, SrcEntryErrorReason, TagContent, UnitDirectory,
+    VersionTag, discover_repository, init_repository,
 };
 pub use init::{FileOutcome, GitOutcome, InitFailure, Initialized, Step as InitStep, init_unit};
 pub use jsonc::SyntaxError;

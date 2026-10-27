@@ -952,7 +952,7 @@ impl Dependencies {
                 .map(|provenance| provenance.commit())
                 .collect();
             let repository = match Registry::open_registered(unit.source(), &commits) {
-                Ok(repository) => repository,
+                Ok(repository) => repository.for_unit(&identity),
                 Err(error) => {
                     problems.push(unreadable(error));
                     continue;

@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use super::identity::UnitIdentity;
+use super::identity::{IdentityError, UnitIdentity};
 use super::path::RelativePath;
 use super::placeholder::Placeholders;
 use super::version::{Version, VersionRequirement};
@@ -197,6 +197,39 @@ impl Manifest {
     /// `src/`, which is also the copy's path under `amendments/`.
     pub fn amendments(&self) -> &BTreeMap<RelativePath, AmendmentDeclaration> {
         &self.amendments
+    }
+}
+
+/// A catalog's `catalog.jsonc`: a repository whose units, one in each
+/// directory of its `units/`, are published together at one version (see
+/// `docs/domain/units.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Catalog {
+    name: UnitIdentity,
+    version: Version,
+}
+
+impl Catalog {
+    /// The catalog `name`, publishing its units at `version`.
+    pub fn new(name: UnitIdentity, version: Version) -> Self {
+        Self { name, version }
+    }
+
+    /// The catalog's name, `@owner/name`, which is not a unit's identity.
+    pub fn name(&self) -> &UnitIdentity {
+        &self.name
+    }
+
+    /// The version of every unit in the catalog.
+    pub fn version(&self) -> &Version {
+        &self.version
+    }
+
+    /// The identity of the unit in `units/<directory>`: the catalog's owner
+    /// and the directory's name (**Provisional (D-52)**). An error when the
+    /// directory's name is not a unit name.
+    pub fn unit_identity(&self, directory: &str) -> Result<UnitIdentity, IdentityError> {
+        UnitIdentity::parse(&format!("@{}/{directory}", self.name.owner()))
     }
 }
 

@@ -122,6 +122,20 @@ impl VersionRequirement {
         Ok(Self(requirement))
     }
 
+    /// The requirement that only `version` satisfies, as a unit in a
+    /// catalog requires a sibling, at the catalog's version.
+    pub fn exactly(version: &Version) -> Self {
+        Self(semver::VersionReq {
+            comparators: vec![semver::Comparator {
+                op: semver::Op::Exact,
+                major: version.0.major,
+                minor: Some(version.0.minor),
+                patch: Some(version.0.patch),
+                pre: version.0.pre.clone(),
+            }],
+        })
+    }
+
     /// Whether `version` satisfies this requirement.
     ///
     /// As in Cargo, a pre-release satisfies a requirement only when one of

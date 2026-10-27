@@ -9,7 +9,7 @@ use std::fmt;
 
 use super::jsonc::{self, Json, SyntaxError};
 use crate::domain::{
-    self, AmendmentDeclaration, BlankDescription, Description, IdentityError, Manifest,
+    self, AmendmentDeclaration, BlankDescription, Catalog, Description, IdentityError, Manifest,
     ManifestError, PlaceholderName, PlaceholderNameError, Placeholders, Project, RelativePath,
     RelativePathError, RequirementError, UnitIdentity, Version, VersionError, VersionRequirement,
 };
@@ -24,6 +24,10 @@ pub(crate) const MANIFEST_FIELDS: &[&str] = &[
     "amendments",
 ];
 const PROJECT_FIELDS: &[&str] = &["$schema", "dependencies"];
+const CATALOG_FIELDS: &[&str] = &["$schema", "name", "version"];
+/// The dependency value that requires a sibling in the same catalog, at the
+/// catalog's version.
+const SIBLING: &str = "catalog";
 const PLACEHOLDER_FIELDS: &[&str] = &["replace", "ignore"];
 const AMENDMENT_FIELDS: &[&str] = &["unit", "base"];
 /// The fields of parameters and options, reported as removed rather than
@@ -35,14 +39,80 @@ const REMOVED_FIELDS: &[&str] = &["params", "options"];
 /// Syntax errors stop reading and are reported alone. Otherwise every
 /// validation problem is reported, sorted by field path.
 pub fn read_manifest(text: &str) -> Result<Manifest, ReadManifestError> {
+    read(text, None)
+}
+
+/// Reads and validates the text of the `manifest.jsonc` of a unit in a
+/// catalog, as [`read_manifest`] does with the catalog's rules: the unit
+/// declares no `version`, since it is the catalog's, it is named after its
+/// directory, and it requires each sibling it depends on as `"catalog"`,
+/// the sibling at the same version.
+pub(crate) fn read_catalog_manifest(
+    text: &str,
+    in_catalog: &InCatalog<'_>,
+) -> Result<Manifest, ReadManifestError> {
+    read(text, Some(in_catalog))
+}
+
+fn read(text: &str, in_catalog: Option<&InCatalog<'_>>) -> Result<Manifest, ReadManifestError> {
     let json = jsonc::parse(text).map_err(ReadManifestError::Syntax)?;
-    let mut reader = Reader::default();
+    let mut reader = Reader {
+        issues: Vec::new(),
+        in_catalog,
+    };
     let manifest = reader.manifest(&json);
     let mut issues = reader.issues;
     issues.sort_by(|a, b| a.path.cmp(&b.path));
     match manifest {
         Some(manifest) if issues.is_empty() => Ok(manifest),
         _ => Err(ReadManifestError::Invalid(issues)),
+    }
+}
+
+/// Reads and validates the text of a catalog's `catalog.jsonc`: its `name`,
+/// with the syntax of a unit identity, and the `version` all its units are
+/// published at.
+pub(crate) fn read_catalog(text: &str) -> Result<Catalog, ReadManifestError> {
+    let json = jsonc::parse(text).map_err(ReadManifestError::Syntax)?;
+    let mut reader = Reader::default();
+    let catalog = reader.catalog(&json);
+    let mut issues = reader.issues;
+    issues.sort_by(|a, b| a.path.cmp(&b.path));
+    match catalog {
+        Some(catalog) if issues.is_empty() => Ok(catalog),
+        _ => Err(ReadManifestError::Invalid(issues)),
+    }
+}
+
+/// Where the manifest of a unit in a catalog is read: the catalog, the
+/// unit's directory under `units/`, and every unit directory there.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InCatalog<'a> {
+    catalog: &'a Catalog,
+    directory: &'a str,
+    directories: &'a BTreeSet<String>,
+}
+
+impl<'a> InCatalog<'a> {
+    /// The unit in `units/<directory>` of `catalog`, whose unit directories
+    /// are `directories`, its own included.
+    pub(crate) fn new(
+        catalog: &'a Catalog,
+        directory: &'a str,
+        directories: &'a BTreeSet<String>,
+    ) -> Self {
+        Self {
+            catalog,
+            directory,
+            directories,
+        }
+    }
+
+    /// Whether `identity` is another unit of the catalog.
+    fn is_sibling(&self, identity: &UnitIdentity) -> bool {
+        identity.owner() == self.catalog.name().owner()
+            && identity.name() != self.directory
+            && self.directories.contains(identity.name())
     }
 }
 
@@ -262,6 +332,25 @@ pub enum IssueKind {
     Removed(RemovedField),
     /// The manifest's fields are inconsistent with each other.
     Inconsistent(ManifestError),
+    /// A unit in a catalog declares a `version`, which is the catalog's.
+    VersionInCatalog,
+    /// A unit in a catalog is not named after its directory: holds the
+    /// identity the catalog gives it.
+    NotTheDirectoryName(UnitIdentity),
+    /// The directory of a unit in a catalog is not a unit name.
+    InvalidDirectory {
+        /// The directory's name, under `units/`.
+        directory: String,
+        /// Why it is not a unit name.
+        error: IdentityError,
+    },
+    /// `"catalog"` requires a unit that is not in the same catalog.
+    NotASibling,
+    /// A unit in a catalog requires a sibling with a version requirement
+    /// instead of `"catalog"`.
+    SiblingRange,
+    /// `"catalog"` outside a catalog, where there are no siblings.
+    SiblingOutsideCatalog,
 }
 
 impl fmt::Display for IssueKind {
@@ -309,6 +398,33 @@ impl fmt::Display for IssueKind {
             Self::BlankDescription(error) => error.fmt(f),
             Self::Removed(removed) => removed.fmt(f),
             Self::Inconsistent(error) => error.fmt(f),
+            Self::VersionInCatalog => f.write_str(
+                "a unit in a catalog has no version of its own: every unit is published at \
+                 the `version` in `catalog.jsonc`; remove this field",
+            ),
+            Self::NotTheDirectoryName(expected) => write!(
+                f,
+                "a unit in a catalog is named after its directory, with the catalog's owner: \
+                 this one is {expected}"
+            ),
+            Self::InvalidDirectory { directory, error } => write!(
+                f,
+                "a unit in a catalog is named after its directory, and `units/{directory}` is \
+                 not a unit name: {error}"
+            ),
+            Self::NotASibling => f.write_str(
+                "\"catalog\" requires another unit of the same catalog, at the catalog's \
+                 version, and the catalog has no such unit; give a version requirement such as \
+                 \"^1.0.0\" for a unit of another repository",
+            ),
+            Self::SiblingRange => f.write_str(
+                "this unit is in the same catalog: require it as \"catalog\", which is the \
+                 catalog's version, since the units of a catalog are published together",
+            ),
+            Self::SiblingOutsideCatalog => f.write_str(
+                "\"catalog\" requires a unit of the same catalog, and only a unit in a \
+                 catalog's `units/` has one; give a version requirement such as \"^1.0.0\"",
+            ),
         }
     }
 }
@@ -578,11 +694,13 @@ struct Dependencies {
 
 /// Walks a parsed manifest, collecting issues and the valid parts.
 #[derive(Default)]
-struct Reader {
+struct Reader<'c> {
     issues: Vec<ManifestIssue>,
+    /// The catalog the manifest's unit is in, if it is in one.
+    in_catalog: Option<&'c InCatalog<'c>>,
 }
 
-impl Reader {
+impl Reader<'_> {
     fn report(&mut self, path: FieldPath, kind: IssueKind) {
         self.issues.push(ManifestIssue { path, kind });
     }
@@ -602,9 +720,20 @@ impl Reader {
         let name = self
             .required(&root, &fields, "name")
             .and_then(|json| self.identity(&root.key("name"), json));
-        let version = self
-            .required(&root, &fields, "version")
-            .and_then(|json| self.version(&root.key("version"), json));
+        let version = match self.in_catalog {
+            None => self
+                .required(&root, &fields, "version")
+                .and_then(|json| self.version(&root.key("version"), json)),
+            Some(in_catalog) => {
+                if fields.contains_key("version") {
+                    self.report(root.key("version"), IssueKind::VersionInCatalog);
+                }
+                if let Some(name) = &name {
+                    self.catalog_name(name, in_catalog);
+                }
+                Some(in_catalog.catalog.version().clone())
+            }
+        };
         let description = self
             .required(&root, &fields, "description")
             .and_then(|json| self.description(&root.key("description"), json));
@@ -645,6 +774,38 @@ impl Reader {
             amendments,
         )
         .ok()
+    }
+
+    /// Checks that `name` is the identity the catalog gives the unit's
+    /// directory.
+    fn catalog_name(&mut self, name: &UnitIdentity, in_catalog: &InCatalog<'_>) {
+        let path = FieldPath::default().key("name");
+        match in_catalog.catalog.unit_identity(in_catalog.directory) {
+            Ok(expected) if expected == *name => {}
+            Ok(expected) => self.report(path, IssueKind::NotTheDirectoryName(expected)),
+            Err(error) => self.report(
+                path,
+                IssueKind::InvalidDirectory {
+                    directory: in_catalog.directory.to_owned(),
+                    error,
+                },
+            ),
+        }
+    }
+
+    fn catalog(&mut self, json: &Json) -> Option<Catalog> {
+        let root = FieldPath::default();
+        let fields = self.fields(&root, json, CATALOG_FIELDS)?;
+        if let Some(schema) = fields.get("$schema") {
+            self.string(&root.key("$schema"), schema);
+        }
+        let name = self
+            .required(&root, &fields, "name")
+            .and_then(|json| self.identity(&root.key("name"), json));
+        let version = self
+            .required(&root, &fields, "version")
+            .and_then(|json| self.version(&root.key("version"), json));
+        Some(Catalog::new(name?, version?))
     }
 
     fn project(&mut self, json: &Json) -> Option<Project> {
@@ -782,13 +943,9 @@ impl Reader {
         for (key, value) in members {
             let path = path.key(key);
             let identity = self.identity_key(&path, key);
-            let requirement = self.string(&path, value).and_then(|text| {
-                VersionRequirement::parse(text)
-                    .map_err(|error| {
-                        self.report(path.clone(), IssueKind::InvalidRequirement(error))
-                    })
-                    .ok()
-            });
+            let requirement = self
+                .string(&path, value)
+                .and_then(|text| self.requirement(&path, identity.as_ref(), text));
             if let Some(identity) = identity {
                 if let Some(requirement) = requirement {
                     dependencies
@@ -799,6 +956,58 @@ impl Reader {
             }
         }
         Some(dependencies)
+    }
+
+    /// The requirement `text` gives the dependency `identity`, when it is
+    /// valid: a version requirement, or `"catalog"` for a sibling in the
+    /// same catalog, which is the catalog's version exactly.
+    fn requirement(
+        &mut self,
+        path: &FieldPath,
+        identity: Option<&UnitIdentity>,
+        text: &str,
+    ) -> Option<VersionRequirement> {
+        let sibling = match (self.in_catalog, identity) {
+            (Some(in_catalog), Some(identity)) => in_catalog.is_sibling(identity),
+            _ => false,
+        };
+        if text == SIBLING {
+            return match self.in_catalog {
+                None => {
+                    self.report(path.clone(), IssueKind::SiblingOutsideCatalog);
+                    None
+                }
+                Some(in_catalog) if sibling => {
+                    Some(VersionRequirement::exactly(in_catalog.catalog.version()))
+                }
+                // A dependency on the unit itself is reported as such.
+                Some(in_catalog)
+                    if identity.is_some_and(|identity| {
+                        in_catalog
+                            .catalog
+                            .unit_identity(in_catalog.directory)
+                            .as_ref()
+                            == Ok(identity)
+                    }) =>
+                {
+                    Some(VersionRequirement::exactly(in_catalog.catalog.version()))
+                }
+                Some(_) => {
+                    if identity.is_some() {
+                        self.report(path.clone(), IssueKind::NotASibling);
+                    }
+                    None
+                }
+            };
+        }
+        let requirement = VersionRequirement::parse(text)
+            .map_err(|error| self.report(path.clone(), IssueKind::InvalidRequirement(error)))
+            .ok()?;
+        if sibling {
+            self.report(path.clone(), IssueKind::SiblingRange);
+            return None;
+        }
+        Some(requirement)
     }
 
     /// `placeholders`: the placeholders to replace, each with its

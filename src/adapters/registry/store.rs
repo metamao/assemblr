@@ -423,12 +423,14 @@ mod tests {
                 "invalid `commit`",
             ),
             (
-                serde_json::json!({"format": 1, "units": {
-                    "@acme/node": {"source": source, "versions": {}},
-                    "@acme/web": {"source": source, "versions": {}},
-                }})
+                serde_json::json!({"format": 1, "units": {"@acme/node": {
+                    "source": source, "versions": {
+                        "1.0.0+a": {"commit": "a".repeat(40), "tree": "b".repeat(40)},
+                        "1.0.0+b": {"commit": "c".repeat(40), "tree": "d".repeat(40)},
+                    }
+                }}})
                 .to_string(),
-                "several identities",
+                "equal precedence",
             ),
         ];
         for (json, expected) in cases {

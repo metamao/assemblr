@@ -55,8 +55,13 @@ impl GitRepository {
 
     fn read_working_files(&self, directory: UnitDirectory) -> Result<FileTree, ReadSrcError> {
         let root = self.work_tree()?;
-        let listing = self.listing(&root, directory.as_str())?;
-        let prefix = format!("{directory}/");
+        // In a catalog, the unit's directory holds its own.
+        let location = match &self.unit {
+            Some(unit) => format!("{}/{unit}/{directory}", super::catalog::UNITS),
+            None => directory.as_str().to_owned(),
+        };
+        let listing = self.listing(&root, &location)?;
+        let prefix = format!("{location}/");
         let entry_error = |path: &str, reason| SrcEntryError {
             directory,
             path: path.to_owned(),
@@ -111,7 +116,7 @@ impl GitRepository {
             });
         }
 
-        let src = root.join(directory.as_str());
+        let src = root.join(&location);
         let mut checked = Directories::default();
         let mut files = Vec::new();
         let mut total: u64 = 0;
