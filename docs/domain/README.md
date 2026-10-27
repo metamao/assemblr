@@ -108,9 +108,11 @@ Details that are still open are listed in
 | **Owner** | The individual or organization namespace in a unit identity (`@owner`). |
 | **Identity** | The pair `@owner/unit-name`. It uniquely identifies a logical unit and implies nothing about dependencies or repository location. |
 | **Manifest** | `manifest.jsonc`, the declaration of a unit's identity, version, description, dependencies, placeholders, and amendments. |
-| **Unit repository** | The Git repository that holds exactly one unit's authoring sources and history. Every unit has one. |
+| **Unit repository** | The Git repository that holds a unit's authoring sources and history: the unit's own, with its manifest at the top level, or a catalog. Every unit has one. |
+| **Catalog** | A Git repository with `catalog.jsonc` at its top level and one unit in each directory of `units/`, whose units are versioned and published together with one tag. |
+| **Sibling** | Another unit of the same catalog, required and amended as `"catalog"`, the catalog's version. |
 | **Working tree** | The author's editable checkout of a unit repository. Mutable, and never a published version. |
-| **Published version** | A unit version established by `unit publish` as a `v<version>` Git tag whose manifest declares exactly that version. Immutable. |
+| **Published version** | A unit version established by `unit publish` as a `v<version>` Git tag whose manifest, or in a catalog whose `catalog.jsonc`, declares exactly that version. Immutable. |
 | **Unit file** | A file in `src/`, introduced by the unit. |
 | **Amendment** | An editable full-file copy of a file provided by a dependency, modified by the amending unit. Replaces the earlier term *fragment*. |
 | **Base** | The exact historical version of a dependency file that an amendment was copied from. |

@@ -1040,3 +1040,27 @@ fn a_project_may_hold_its_own_catalog_jsonc() {
     succeeds(fixture.run(&project, &["compose"]));
     succeeds(fixture.run(&project, &["status"]));
 }
+
+#[test]
+fn a_catalog_unit_s_content_identity_is_the_root_tree() {
+    let fixture = Fixture::new("root-tree");
+    let catalog = fixture.three_units();
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+    git(&catalog, &["add", "-A"]);
+    git(&catalog, &["commit", "-q", "-m", "1.0.0"]);
+    succeeds(fixture.run(&catalog, &["unit", "publish"]));
+    succeeds(fixture.run(
+        &fixture.dir,
+        &["registry", "add", catalog.to_str().unwrap()],
+    ));
+    // The root tree holds the lockfile and the stored bases, which a
+    // dependent's composition reads, so it is every unit's identity.
+    let root = git(&catalog, &["rev-parse", "v1.0.0^{tree}"]);
+    let output = succeeds(fixture.run(&fixture.dir, &["registry", "list", "--json"]));
+    let list: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let units = list["units"].as_array().unwrap();
+    for name in ["@acme/a", "@acme/b", "@acme/c"] {
+        let unit = units.iter().find(|unit| unit["identity"] == name).unwrap();
+        assert_eq!(unit["versions"][0]["tree"], root.as_str(), "{name}");
+    }
+}

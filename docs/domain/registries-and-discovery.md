@@ -415,7 +415,8 @@ Rules:
   commit, and the commit is its provenance. The tree covers the entire
   repository snapshot at that commit, not only the files that contribute to a
   composition, so a change to any file in the repository, such as a README,
-  gives a different identity (see
+  gives a different identity. This holds for every unit of a catalog too,
+  which shares the root tree of the catalog's tag (see
   [ADR 0006](../adr/0006-reading-git-repositories.md)).
 - Lock state is verified against the registry by content identity: a locked
   version agrees with the registry's record when both name the same tree.
@@ -749,7 +750,8 @@ several unit repositories, maintained by the user. That model is retired:
 - explicit registration of unit repositories replaces configured
   locations and the discovery of units inside grouping directories;
 - CLI-managed state replaces user-maintained registry configuration;
-- one Git repository per unit is mandatory, not preferred.
+- one Git repository per unit is mandatory, not preferred, unless the unit
+  is published with others in a catalog.
 
 The Local Directory registry let a unit under development resolve dependencies
 from other units' uncommitted working trees. That capability is **not**

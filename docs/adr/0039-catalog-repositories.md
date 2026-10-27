@@ -1,6 +1,7 @@
 # 0039: Catalog repositories
 
-- **Status:** Accepted
+- **Status:** Accepted, points 1 to 3 revised by the owner on 2026-10-27:
+  a catalog unit's content identity is the commit's root tree
 - **Date:** 2026-10-27
 
 ## Context
@@ -16,20 +17,27 @@ top level, with its own version and lockfile.
 ## Decision
 
 1. **A unit inside a commit.** Reading a version takes a unit directory.
-   When the commit has `catalog.jsonc`, the unit's manifest, files, and
-   tree are those of `units/<name>`, and its manifest is read with the
+   When the commit has `catalog.jsonc`, the unit's manifest and files are
+   those of `units/<name>`, its tree the commit's root tree (see point 2),
+   and its manifest is read with the
    catalog's rules: no `version`, the name the directory gives it, and
    `"catalog"` turned into `=<catalog version>`. A catalog tag is valid only
    when every unit in it is: they are published together.
-2. **Content identity is the unit's directory tree.** The provenance of a
+2. **Content identity is the unit's directory tree.** *(Revised: the
+   post-redesign audit found that the root lockfile, which fixes the
+   versions a published amender's base is reconstructed at, lay outside
+   that tree, so a rewritten tag that changed only the lockfile verified as
+   the same content. The owner chose the commit's root tree instead, as
+   for a unit in its own repository; the rest of this point no longer
+   applies.)* The provenance of a
    catalog unit's version is the tagged commit and the tree of
    `units/<name>`, so an unchanged unit keeps its tree from one catalog
    version to the next, and the lock's integrity checks work unchanged.
 3. **One lockfile, without the siblings.** The lockfile at the root records
    what the units depend on in other repositories. Read for one unit of a
    published commit, the lock is completed with its siblings at the
-   catalog's version, with that commit and their directory trees, which is
-   what the registry indexes for them. So a dependent composes a published
+   catalog's version, with that commit and its root tree, which is what
+   the registry indexes for them. So a dependent composes a published
    catalog unit with the same verification as any other.
 4. **Siblings from the given content, through the index.** A build, check,
    or publication gives the resolution the siblings' manifests and content,

@@ -738,8 +738,10 @@ For Alpha:
 ## Publication — Approved
 
 Publication always goes through Assemblr's CLI, for consistency. A published
-version is a Git tag, `v<manifest.version>`, in the unit's own repository. The
-tag version must match the manifest version at the tagged commit exactly (see
+version is a Git tag, `v<manifest.version>`, in the unit's own repository, or
+`v<version>` of `catalog.jsonc` in a catalog (see
+[authoring a catalog](#authoring-a-catalog--approved)). The
+tag version must match the declared version at the tagged commit exactly (see
 [registries-and-discovery.md](registries-and-discovery.md#units-are-git-repositories--approved)).
 
 `unit publish`:
