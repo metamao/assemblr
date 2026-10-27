@@ -638,7 +638,11 @@ How the status of a statement affects implementation:
   fetches it, including `update` and the dependencies read by `unit build`,
   `unit check`, `unit update`, and `unit amend`; fetching the content of an indexed commit is not read as
   fetching remote changes, since it cannot change the index or a
-  resolution.
+  resolution. For remote unit repositories, the catalog design the owner
+  adopted (2026-10-27, in session, #126) replaces the full copy of D-35:
+  registration and synchronization fetch commits, trees, and the metadata
+  files only, and a version's files are fetched when it is first read,
+  under the same rule as D-39 ([ADR 0037](../adr/0037-partial-fetch.md)).
 - **Origin:** Consumer
 - **Context:** [metadata and
   content](registries-and-discovery.md#metadata-and-content--approved)

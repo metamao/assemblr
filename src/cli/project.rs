@@ -13,9 +13,9 @@ use std::process::ExitCode;
 
 use assemblr::adapters::{
     BuildProblem, ComposeFailure, ComposeProblem, ComposeRecovery, Composed, DeclarationChange,
-    FileChange, GitErrorKind, InitProjectFailure, ProjectStatus, Registry, StoreError, WriteStep,
-    abort_compose, add_unit, compose_project, continue_compose, init_project, project_status,
-    remove_unit, update_units,
+    FileChange, GitErrorKind, InitProjectFailure, ProjectStatus, PublishedProblem, Registry,
+    StoreError, WriteStep, abort_compose, add_unit, compose_project, continue_compose,
+    init_project, project_status, remove_unit, update_units,
 };
 use assemblr::domain::{LockChange, LockError, PlaceholderReport, ResolutionError, UnitIdentity};
 use clap::Args;
@@ -799,6 +799,16 @@ fn build_advice(problem: &BuildProblem) -> Option<String> {
                                         `assemblr registry remove <identity>` removes its \
                                         registration"
             .to_owned(),
+        // Content is checked when a version is first read (ADR 0037), and a
+        // version once indexed stays indexed, so synchronizing cannot help.
+        BuildProblem::Published {
+            unit,
+            problem: PublishedProblem::Src(_) | PublishedProblem::Amendments(_),
+            ..
+        } => format!(
+            "this version cannot be used: select another version of {unit}, or ask its author \
+             to publish a fixed one"
+        ),
         BuildProblem::Published { .. } => {
             "run `assemblr registry sync` to check the registered repositories again".to_owned()
         }
