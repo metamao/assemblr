@@ -104,10 +104,10 @@ impl Repo {
 
 const GUIDE: &str = "# Agent instructions\n\nRead the README first.\n\n## Rules\n\n- Keep changes small.\n- Run the checks.\n\n## Reporting\n\nSay what you observed.\n";
 
-/// A provider `@acme/guide` 1.0.0 with `AGENTS.md`, a template `NOTES.md`,
-/// and a CRLF `WIN.txt`, registered; and one published amender per entry of
-/// `amenders`, each depending on it and amending the files given, all
-/// registered in the order listed.
+/// A provider `@acme/guide` 1.0.0 with `AGENTS.md`, `NOTES.md` holding a
+/// placeholder, and a CRLF `WIN.txt`, registered; and one published amender
+/// per entry of `amenders`, each depending on it and amending the files
+/// given, all registered in the order listed.
 fn scenario(fixture: &Fixture, amenders: &[(&str, &[(&str, &str)])]) -> Repo {
     let guide = fixture.repo("guide");
     guide.write(
@@ -116,13 +116,13 @@ fn scenario(fixture: &Fixture, amenders: &[(&str, &[(&str, &str)])]) -> Repo {
             "@acme/guide",
             "1.0.0",
             &[],
-            r#", "params": {"project": {"type": "string", "description": "The project.", "default": "demo"}}"#,
+            r#", "placeholders": {"replace": {"__PROJECT__": "The project's name."}}"#,
         ),
     );
     guide.write("src/AGENTS.md", GUIDE);
     guide.write(
-        "src/NOTES.md.assemblr.tmpl",
-        "# Notes for {{ project }}\n\nFirst.\n\nSecond.\n\nThird.\n",
+        "src/NOTES.md",
+        "# Notes for __PROJECT__\n\nFirst.\n\nSecond.\n\nThird.\n",
     );
     guide.write("src/WIN.txt", "one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n");
     guide.publish("1.0.0");
@@ -384,30 +384,24 @@ fn changes_to_the_same_lines_are_a_conflict_that_names_the_lines_and_the_units()
 }
 
 #[test]
-fn rendered_templates_are_merged_after_rendering_and_crlf_files_keep_their_endings() {
-    let fixture = Fixture::new("rendered");
-    let notes_a = "# Notes for {{ project }}\n\nFirst, as amended by a.\n\nSecond.\n\nThird.\n";
-    let notes_b = "# Notes for {{ project }}\n\nFirst.\n\nSecond.\n\nThird, as amended by b.\n";
+fn files_with_placeholders_merge_by_line_and_crlf_files_keep_their_endings() {
+    let fixture = Fixture::new("placeholders");
+    let notes_a = "# Notes for __PROJECT__\n\nFirst, as amended by a.\n\nSecond.\n\nThird.\n";
+    let notes_b = "# Notes for __PROJECT__\n\nFirst.\n\nSecond.\n\nThird, as amended by b.\n";
     let win_a = "ONE\r\ntwo\r\nthree\r\nfour\r\nfive\r\n";
     let win_b = "one\r\ntwo\r\nthree\r\nfour\r\nFIVE\r\n";
     scenario(
         &fixture,
         &[
-            (
-                "a",
-                &[("NOTES.md.assemblr.tmpl", notes_a), ("WIN.txt", win_a)],
-            ),
-            (
-                "b",
-                &[("NOTES.md.assemblr.tmpl", notes_b), ("WIN.txt", win_b)],
-            ),
+            ("a", &[("NOTES.md", notes_a), ("WIN.txt", win_a)]),
+            ("b", &[("NOTES.md", notes_b), ("WIN.txt", win_b)]),
         ],
     );
     let app = app(&fixture, &["a", "b"]);
     succeeds(fixture.build(&app));
     assert_eq!(
         app.read("build/NOTES.md"),
-        "# Notes for demo\n\nFirst, as amended by a.\n\nSecond.\n\nThird, as amended by b.\n"
+        "# Notes for __PROJECT__\n\nFirst, as amended by a.\n\nSecond.\n\nThird, as amended by b.\n"
     );
     assert_eq!(
         fs::read(app.path.join("build/WIN.txt")).unwrap(),
@@ -457,7 +451,7 @@ fn a_consumer_composes_the_same_guidance_file_and_a_conflict_is_left_for_the_con
     git(&project, &["init", "-q"]);
     fs::write(
         project.join("assemblr.jsonc"),
-        "{\n  \"dependencies\": {\"@acme/neon\": \"^1\", \"@acme/docker\": \"^1\"},\n  \"options\": {}\n}\n",
+        "{\n  \"dependencies\": {\"@acme/neon\": \"^1\", \"@acme/docker\": \"^1\"}\n}\n",
     )
     .unwrap();
     succeeds(fixture.assemblr(&project, &["compose"]));
@@ -499,7 +493,7 @@ fn a_consumer_composes_the_same_guidance_file_and_a_conflict_is_left_for_the_con
     fs::remove_file(project.join("AGENTS.md")).unwrap();
     fs::write(
         project.join("assemblr.jsonc"),
-        "{\n  \"dependencies\": {\"@acme/neon\": \"^1\", \"@acme/docker\": \"^1\"},\n  \"options\": {}\n}\n",
+        "{\n  \"dependencies\": {\"@acme/neon\": \"^1\", \"@acme/docker\": \"^1\"}\n}\n",
     )
     .unwrap();
     let output = fails(clash.assemblr(&project, &["compose"]));
@@ -752,7 +746,7 @@ fn a_consumer_is_warned_about_chained_insertions_only_when_the_file_is_written()
     git(&project, &["init", "-q"]);
     fs::write(
         project.join("assemblr.jsonc"),
-        "{\n  \"dependencies\": {\"@acme/neon\": \"^1\", \"@acme/docker\": \"^1\"},\n  \"options\": {}\n}\n",
+        "{\n  \"dependencies\": {\"@acme/neon\": \"^1\", \"@acme/docker\": \"^1\"}\n}\n",
     )
     .unwrap();
     let chained = "AGENTS.md of @acme/guide: @acme/docker, @acme/neon each add lines after line 12";

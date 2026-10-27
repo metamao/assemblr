@@ -79,25 +79,51 @@ fn publish(machine: &Machine<'_>, dir: &Path, message: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// A committed project in `dir` that selects `units`, each with its options
-/// as `name=value`.
+/// A committed project in `dir` that selects `units`, with each
+/// `(placeholder, value)` of `values` replaced in the composed files, as
+/// its consumer would.
 pub(crate) fn project(
     machine: &Machine<'_>,
     dir: &Path,
-    units: &[(&str, &[&str])],
+    units: &[&str],
+    values: &[(&str, &str)],
     message: &str,
 ) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
     machine.git(dir, &["init", "-q"])?;
     machine.assemblr(dir, &["init"])?;
-    for (unit, options) in units {
-        let mut args = vec!["add", unit];
-        for option in *options {
-            args.extend(["--option", option]);
-        }
-        machine.assemblr(dir, &args)?;
+    for unit in units {
+        machine.assemblr(dir, &["add", unit])?;
+    }
+    for (placeholder, value) in values {
+        replace(dir, placeholder, value)?;
     }
     commit(machine, dir, message)
+}
+
+/// Replaces `old` with `new` in every file under `dir`, outside Git's and
+/// Assemblr's own state.
+pub(crate) fn replace(dir: &Path, old: &str, new: &str) -> Result<(), String> {
+    let entries =
+        fs::read_dir(dir).map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
+    paths.sort();
+    for path in paths {
+        if path.is_dir() {
+            if !path.ends_with(".git") && !path.ends_with(".assemblr") {
+                replace(&path, old, new)?;
+            }
+        } else if let Ok(text) = fs::read_to_string(&path) {
+            if text.contains(old) {
+                fs::write(&path, text.replace(old, new))
+                    .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn commit(machine: &Machine<'_>, dir: &Path, message: &str) -> Result<(), String> {

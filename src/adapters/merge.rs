@@ -4,9 +4,8 @@
 //! `docs/domain/amendments-and-composition.md` and
 //! `docs/adr/0015-value-merge.md`).
 //!
-//! The inputs are rendered text: the provider's file and each amender's
-//! copy, both rendered with the same provider values, the copy with the
-//! amender's own as `own`. Each copy is derived against the base, the
+//! The inputs are text: the provider's file and each amender's copy. Each
+//! copy is derived against the base, the
 //! operations are combined and planned against the provider's file, and the
 //! edits are applied to its text. Then:
 //!
@@ -31,8 +30,8 @@ use crate::domain::{
 #[cfg(test)]
 use crate::domain::{InsertTie, merge_text};
 
-/// Composes `copies`, each amender's rendered copy, onto `base`, the
-/// provider's rendered file. The amenders are ordered by identity, whatever
+/// Composes `copies`, each amender's copy, onto `base`, the provider's
+/// file. The amenders are ordered by identity, whatever
 /// order `copies` lists them in.
 #[cfg(test)]
 pub(crate) fn merge_json(
@@ -47,8 +46,7 @@ pub(crate) fn merge_json(
 }
 
 /// [`merge_json`] where each copy has its own base: the provider's file at
-/// the version the copy was taken from, rendered with the same context as
-/// the copy. Each amender's operations are derived against its own base and
+/// the version the copy was taken from. Each amender's operations are derived against its own base and
 /// planned against `provider`, the file at the resolved version, so that
 /// the provider's own changes between the two stay and a change that
 /// collides with an amender's is a conflict.
@@ -104,8 +102,8 @@ pub(crate) fn merge_json_from(
     Ok(Merged { text, notes })
 }
 
-/// Composes `copies`, each amender's rendered copy of a text file, onto
-/// `base`, the provider's rendered file, by a line-level three-way merge
+/// Composes `copies`, each amender's copy of a text file, onto `base`, the
+/// provider's file, by a line-level three-way merge
 /// (see [`merge_text`]). Changes in different places are all kept,
 /// identical changes are one change, insertions at one position are all
 /// kept in the order of the amenders' identities, and overlapping or
@@ -260,8 +258,8 @@ impl fmt::Display for TextConflictReport {
     }
 }
 
-/// What the value model cannot carry from `copy`, an amender's rendered
-/// copy of `base`: the order of members it changes and the comments it
+/// What the value model cannot carry from `copy`, an amender's copy of
+/// `base`: the order of members it changes and the comments it
 /// adds. They are reported, never dropped in silence.
 pub(super) fn not_carried(
     amender: &UnitIdentity,
@@ -294,8 +292,8 @@ pub(super) fn not_carried(
     notes
 }
 
-/// What a merge would not carry from `copy`, the rendered copy of
-/// `amender` of `base`, if another unit amended the same file too. A copy
+/// What a merge would not carry from `copy`, the copy of `amender` of
+/// `base`, if another unit amended the same file too. A copy
 /// alone takes the file's place byte for byte, so nothing is lost until a
 /// second amender joins; the unit's author hears of it early, from their
 /// own build or check, rather than only when a consumer composes. Sides

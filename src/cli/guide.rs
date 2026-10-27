@@ -86,7 +86,7 @@ mod tests {
         let text = "Run `assemblr frobnicate`, `assemblr unit shrink`, \
                     `assemblr compose --resume`, `assemblr compose continue`, \
                     `assemblr compose -c`, `assemblr unit build --continue`, \
-                    `assemblr add @acme/web --option a=b`, `assemblr registry add <path or URL>`, \
+                    `assemblr status --files`, `assemblr registry add <path or URL>`, \
                     `assemblr add`, and `assemblr <command> --help`.";
         assert_eq!(
             unknown_commands(text, &Cli::command()),
@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn the_guide_is_printed_as_plain_text() {
-        // The guide is printed as it is; a template marker would show.
+        // The guide is printed as it is; markup to expand would show.
         assert!(!GUIDE.contains("{{"), "{GUIDE}");
         assert!(GUIDE.ends_with('\n'));
     }

@@ -201,9 +201,12 @@ impl AddFailure {
     /// A build rejection, which leaves nothing changed, as this command's.
     fn rejected(failure: BuildFailure) -> Self {
         match failure {
-            BuildFailure::Rejected(problems) => {
-                Self::Rejected(problems.into_iter().map(AddProblem::Build).collect())
-            }
+            BuildFailure::Rejected(problems) => Self::Rejected(
+                problems
+                    .into_iter()
+                    .map(|problem| AddProblem::Build(Box::new(problem)))
+                    .collect(),
+            ),
             failure => Self::Build(Box::new(failure)),
         }
     }
@@ -235,7 +238,7 @@ impl std::error::Error for AddFailure {}
 #[derive(Debug)]
 pub enum AddProblem {
     /// A problem a build reports too.
-    Build(BuildProblem),
+    Build(Box<BuildProblem>),
     /// The unit was named as its own dependency.
     Itself(UnitIdentity),
     /// The requirement is not a SemVer requirement.
@@ -275,6 +278,6 @@ impl std::error::Error for AddProblem {}
 
 impl From<ManifestFileError> for AddProblem {
     fn from(error: ManifestFileError) -> Self {
-        Self::Build(BuildProblem::Manifest(error))
+        Self::Build(Box::new(BuildProblem::Manifest(error)))
     }
 }

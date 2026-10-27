@@ -370,71 +370,23 @@ fn a_rejected_build_reports_every_problem_and_changes_nothing() {
             "@acme/app",
             "0.1.0",
             &[("@acme/node", "^1")],
-            r#", "params": {"appName": {"type": "string", "description": "The name."}}"#,
+            r#", "placeholders": {"replace": {"__UNUSED__": "Never used."}}"#,
         ),
     );
     let output = fails(fixture.build(&app));
     let stderr = stderr(&output);
     for expected in [
         "amendments/node/node.txt is not declared in the manifest",
-        "@acme/app declares required parameters without defaults or examples: `appName`",
-        "an `example` on the parameter supplies one",
+        "placeholders.replace declares __UNUSED__, but no file of the unit contains it",
+        "remove it from manifest.jsonc, or add it where the consumer must set the value",
         "path collision: node.txt from @acme/app, node.txt from @acme/node",
         "note: build/ and assemblr-lock.json were not changed",
         "remove one of the dependencies from the manifest",
     ] {
         assert!(stderr.contains(expected), "{expected:?} in {stderr}");
     }
-    // The missing value is reported once, as a development value.
-    assert!(!stderr.contains("has no value and no default"), "{stderr}");
     assert_eq!(app.read("assemblr-lock.json"), lockfile);
     assert_eq!(app.build_files(), build);
-}
-
-#[test]
-fn dependency_parameters_set_through_options_build() {
-    let fixture = Fixture::new("options");
-    let node = fixture.repo("node");
-    node.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/node",
-            "1.0.0",
-            &[],
-            r#", "params": {"port": {"type": "integer", "description": "The port."}}"#,
-        ),
-    );
-    node.publish("1.0.0");
-    fixture.register(&node);
-    let app = fixture.repo("app");
-    app.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/app",
-            "0.1.0",
-            &[("@acme/node", "^1")],
-            r#", "options": {"@acme/node": {"port": 8080}},
-                "params": {"title": {"type": "string", "description": "A title.", "default": "x"}}"#,
-        ),
-    );
-    succeeds(fixture.build(&app));
-
-    // Without the option, the dependency's parameter has no value.
-    app.write(
-        "manifest.jsonc",
-        &manifest("@acme/app", "0.1.0", &[("@acme/node", "^1")], ""),
-    );
-    let stderr = stderr(&fails(fixture.build(&app)));
-    assert!(
-        stderr.contains("@acme/node 1.0.0 needs a value for `port`"),
-        "{stderr}"
-    );
-    // The hint offers a mapping, not only a literal value.
-    assert!(
-        stderr.contains(r#"as in `"port": {"from": "port"}`, or set a value"#),
-        "{stderr}"
-    );
-    assert!(!stderr.contains("development values"), "{stderr}");
 }
 
 #[test]
@@ -929,307 +881,27 @@ fn the_build_and_lockfile_do_not_depend_on_registration_or_declaration_order() {
     assert_eq!(outcomes[0], outcomes[1]);
 }
 
-// Templates (I7).
-
-/// A registered `@acme/node` 1.0.0 with a required `port`, a defaulted
-/// `name`, a template, and a plain file that looks like one.
-fn node_with_template(fixture: &Fixture) -> Repo {
-    let node = fixture.repo("node");
-    node.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/node",
-            "1.0.0",
-            &[],
-            r#", "params": {
-                "port": {"type": "integer", "description": "The port."},
-                "name": {"type": "string", "description": "The name.", "default": "node"},
-                "env": {"type": "string", "description": "The environment.",
-                        "allowed": ["dev", "prod"], "default": "dev"}
-            }"#,
-        ),
-    );
-    node.write(
-        "src/config.json.assemblr.tmpl",
-        "{\"port\": {{ port }}, \"name\": \"{{ name }}\", \"env\": \"{{ env }}\", \
-         \"tmpl\": \"{{ \"{{\" }} x }}\"}\n",
-    );
-    node.write("src/plain.txt", "{{ port }} stays as it is\n");
-    node.publish("1.0.0");
-    fixture.register(&node);
-    node
-}
-
 #[test]
-fn templates_render_with_their_unit_s_values_and_other_files_are_delivered_as_they_are() {
-    let fixture = Fixture::new("templates");
-    node_with_template(&fixture);
-    let app = fixture.repo("app");
-    app.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/app",
-            "0.1.0",
-            &[("@acme/node", "^1")],
-            r#", "options": {"@acme/node": {"port": 8080}},
-                "params": {
-                    "title": {"type": "string", "description": "A title.", "default": "Demo \"app\""},
-                    "motto": {"type": "string", "description": "Lines.", "default": "one\ntwo"},
-                    "ssr": {"type": "boolean", "description": "Server-side.", "default": true},
-                    "workers": {"type": "integer", "description": "Workers.", "default": -2}
-                }"#,
-        ),
-    );
-    app.write(
-        "src/index.html.assemblr.tmpl",
-        "<h1>{{ title }}</h1>\n<p>{{motto}}</p>\nssr={{ ssr }} workers={{\n  workers }}\r\n",
-    );
-    // Angular templates and workflows are delivered intact without the suffix.
-    app.write("src/app.component.html", "<span>{{ value }}</span>\n");
-    app.write(
-        "src/.github/workflows/ci.yml",
-        "runs-on: ${{ matrix.os }}\n{% raw %}\n",
-    );
-    app.write("src/notes.tmpl", "{{ title }} is not rendered here\n");
-    let output = succeeds(fixture.build(&app));
-    assert_eq!(
-        stdout(&output).trim(),
-        "Built @acme/app 0.1.0 into build/: 6 files, with 1 dependency."
-    );
-    assert_eq!(
-        app.build_files(),
-        pairs(&[
-            (
-                ".github/workflows/ci.yml",
-                "runs-on: ${{ matrix.os }}\n{% raw %}\n"
-            ),
-            ("app.component.html", "<span>{{ value }}</span>\n"),
-            (
-                "config.json",
-                "{\"port\": 8080, \"name\": \"node\", \"env\": \"dev\", \"tmpl\": \"{{ x }}\"}\n"
-            ),
-            (
-                "index.html",
-                "<h1>Demo \"app\"</h1>\n<p>one\ntwo</p>\nssr=true workers=-2\r\n"
-            ),
-            ("notes.tmpl", "{{ title }} is not rendered here\n"),
-            ("plain.txt", "{{ port }} stays as it is\n"),
-        ])
-    );
-}
-
-#[test]
-fn rendering_problems_reject_the_build_and_change_nothing() {
-    let fixture = Fixture::new("template-errors");
-    let app = fixture.repo("app");
-    app.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/app",
-            "0.1.0",
-            &[],
-            r#", "params": {"title": {"type": "string", "description": "A title.", "default": "Demo"}}"#,
-        ),
-    );
-    app.write("src/index.html.assemblr.tmpl", "<h1>{{ title }}</h1>\n");
-    succeeds(fixture.build(&app));
-    let before = (app.build_files(), app.read("assemblr-lock.json"));
-
-    app.write(
-        "src/index.html.assemblr.tmpl",
-        "<h1>{{ title }}</h1>\n  {{ titel }}\n{% if title %}x{% endif %}\n{{ own.title }}\n{{ title",
-    );
-    app.write("src/b.txt.assemblr.tmpl", "{{ title | upper }}\n");
-    let stderr = stderr(&fails(fixture.build(&app)));
-    let lines: Vec<&str> = stderr
-        .lines()
-        .filter(|line| line.starts_with("error: template "))
-        .collect();
-    assert_eq!(
-        lines,
-        [
-            "error: template src/b.txt.assemblr.tmpl of @acme/app, line 1, column 1: unknown \
-             filter `upper`; the filters are `tojson`, which writes a JSON literal, and `e`, \
-             which escapes HTML",
-            "error: template src/index.html.assemblr.tmpl of @acme/app, line 2, column 3: \
-             undefined reference `titel`; the unit's parameters are `title`",
-            "error: template src/index.html.assemblr.tmpl of @acme/app, line 3, column 1: \
-             unsupported template construct \"{% if title %}\"; only `{{ name }}` references, \
-             optionally through one filter as in `{{ name | tojson }}`, and the escape \
-             `{{ \"{{\" }}` are supported",
-            "error: template src/index.html.assemblr.tmpl of @acme/app, line 3, column 16: \
-             unsupported template construct \"{% endif %}\"; only `{{ name }}` references, \
-             optionally through one filter as in `{{ name | tojson }}`, and the escape \
-             `{{ \"{{\" }}` are supported",
-            "error: template src/index.html.assemblr.tmpl of @acme/app, line 4, column 1: \
-             undefined reference `own.title`; `own` is defined only when an amendment copy is \
-             rendered, and a unit's own files refer to its parameters by name",
-            "error: template src/index.html.assemblr.tmpl of @acme/app, line 5, column 1: `{{` \
-             is never closed",
-        ],
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("note: build/ and assemblr-lock.json were not changed"),
-        "{stderr}"
-    );
-    assert_eq!((app.build_files(), app.read("assemblr-lock.json")), before);
-}
-
-#[test]
-fn a_dependency_s_template_sees_only_the_dependency_s_values() {
-    let fixture = Fixture::new("template-context");
-    let node = fixture.repo("node");
-    node.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/node",
-            "1.0.0",
-            &[],
-            r#", "params": {"port": {"type": "integer", "description": "The port.", "default": 80}}"#,
-        ),
-    );
-    node.write(
-        "src/server.txt.assemblr.tmpl",
-        "{{ port }} for {{ title }}\n",
-    );
-    node.publish("1.0.0");
-    fixture.register(&node);
-    let app = fixture.repo("app");
-    app.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/app",
-            "0.1.0",
-            &[("@acme/node", "^1")],
-            r#", "params": {"title": {"type": "string", "description": "A title.", "default": "Demo"}}"#,
-        ),
-    );
-    let stderr = stderr(&fails(fixture.build(&app)));
-    assert!(
-        stderr.contains(
-            "template src/server.txt.assemblr.tmpl of @acme/node, line 1, column 16: undefined \
-             reference `title`; the unit's parameters are `port`"
-        ),
-        "{stderr}"
-    );
-}
-
-#[test]
-fn a_template_that_is_not_utf_8_is_rejected_while_other_files_are_opaque_bytes() {
-    let fixture = Fixture::new("template-bytes");
+fn a_file_that_is_not_utf_8_is_delivered_as_its_bytes_and_never_scanned() {
+    let fixture = Fixture::new("binary");
     let app = fixture.repo("app");
     app.write("manifest.jsonc", &manifest("@acme/app", "0.1.0", &[], ""));
     let binary = [
-        0xff, 0xfe, b'{', b'{', b' ', b'x', b' ', b'}', b'}', 0x00, b'\r', b'\n',
+        0xff, 0xfe, b'_', b'_', b'N', b'A', b'M', b'E', b'_', b'_', 0x00, b'\r', b'\n',
     ];
     app.write_bytes("src/logo.bin", &binary);
-    succeeds(fixture.build(&app));
+    let output = succeeds(fixture.build(&app));
     assert_eq!(app.read_bytes("build/logo.bin"), binary);
-
-    app.write_bytes("src/bad.txt.assemblr.tmpl", &binary);
-    let stderr = stderr(&fails(fixture.build(&app)));
-    assert!(
-        stderr.contains(
-            "template src/bad.txt.assemblr.tmpl of @acme/app is not UTF-8 text; a template is \
-             rendered as text, and a file that is not text must not end in `.assemblr.tmpl`"
-        ),
-        "{stderr}"
-    );
+    assert!(!stderr(&output).contains("__NAME__"), "{}", stderr(&output));
 }
 
-#[test]
-fn a_template_and_an_ordinary_file_delivered_at_the_same_path_collide() {
-    let fixture = Fixture::new("template-collision");
-    let node = fixture.repo("node");
-    node.write("manifest.jsonc", &manifest("@acme/node", "1.0.0", &[], ""));
-    node.write("src/package.json", "{}\n");
-    node.publish("1.0.0");
-    fixture.register(&node);
-    let app = fixture.repo("app");
-    app.write(
-        "manifest.jsonc",
-        &manifest("@acme/app", "0.1.0", &[("@acme/node", "^1")], ""),
-    );
-    app.write("src/package.json.assemblr.tmpl", "{}\n");
-    let stderr = stderr(&fails(fixture.build(&app)));
-    assert!(
-        stderr.contains(
-            "path collision: package.json from @acme/node, package.json.assemblr.tmpl from \
-             @acme/app (delivered as package.json); no unit takes precedence"
-        ),
-        "{stderr}"
-    );
-    assert!(!app.path.join("build").exists());
-}
-
-#[test]
-fn own_is_not_a_parameter_name() {
-    let fixture = Fixture::new("own-parameter");
-    let app = fixture.repo("app");
-    app.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/app",
-            "0.1.0",
-            &[],
-            r#", "params": {"own": {"type": "string", "description": "Reserved.", "default": "x"}}"#,
-        ),
-    );
-    let stderr = stderr(&fails(fixture.build(&app)));
-    assert!(
-        stderr.contains("invalid parameter name \"own\": `own` is reserved"),
-        "{stderr}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_rendered_template_keeps_its_executable_bit() {
-    use std::os::unix::fs::PermissionsExt;
-    let fixture = Fixture::new("template-executable");
-    let app = fixture.repo("app");
-    app.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/app",
-            "0.1.0",
-            &[],
-            r#", "params": {"shell": {"type": "string", "description": "The shell.", "default": "/bin/sh"}}"#,
-        ),
-    );
-    app.write("src/run.sh.assemblr.tmpl", "#!{{ shell }}\n");
-    let source = app.path.join("src/run.sh.assemblr.tmpl");
-    let mut permissions = fs::metadata(&source).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&source, permissions).unwrap();
-    succeeds(fixture.build(&app));
-    let built = app.path.join("build/run.sh");
-    assert_eq!(fs::read_to_string(&built).unwrap(), "#!/bin/sh\n");
-    assert_ne!(
-        fs::metadata(&built).unwrap().permissions().mode() & 0o100,
-        0
-    );
-}
-
-/// A registered `@acme/node` 1.0.0 with a parameter, a template, a plain
+/// A registered `@acme/node` 1.0.0 with a configuration file and a plain
 /// file in a directory, and an executable script, and an unpublished
 /// `@acme/app` depending on it, built once so that it has a lockfile.
 fn app_amending_node(fixture: &Fixture) -> (Repo, Repo) {
     let node = fixture.repo("node");
-    node.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/node",
-            "1.0.0",
-            &[],
-            r#", "params": {"port": {"type": "integer", "description": "The port.", "default": 80}}"#,
-        ),
-    );
-    node.write(
-        "src/config/app.yaml.assemblr.tmpl",
-        "port: {{ port }}\nname: node\n",
-    );
+    node.write("manifest.jsonc", &manifest("@acme/node", "1.0.0", &[], ""));
+    node.write("src/config/app.yaml", "port: 80\nname: node\n");
     node.write("src/config/README.md", "node config\n");
     node.write("src/README.md", "node\n");
     node.write("src/bin/run", "#!/bin/sh\necho node\n");
@@ -1247,12 +919,7 @@ fn app_amending_node(fixture: &Fixture) -> (Repo, Repo) {
     let app = fixture.repo("app");
     app.write(
         "manifest.jsonc",
-        &manifest(
-            "@acme/app",
-            "0.1.0",
-            &[("@acme/node", "^1")],
-            r#", "params": {"title": {"type": "string", "description": "A title.", "default": "Demo"}}"#,
-        ),
+        &manifest("@acme/app", "0.1.0", &[("@acme/node", "^1")], ""),
     );
     app.write("src/app.txt", "app");
     succeeds(fixture.build(&app));
@@ -1273,29 +940,25 @@ fn an_amendment_is_created_declared_and_built() {
     let output = succeeds(amend(&fixture, &app, &["app.yaml"]));
     assert_eq!(
         stdout(&output).trim(),
-        "Amended src/config/app.yaml.assemblr.tmpl of @acme/node 1.0.0: created \
-         amendments/config/app.yaml.assemblr.tmpl and declared it in manifest.jsonc."
+        "Amended src/config/app.yaml of @acme/node 1.0.0: created \
+         amendments/config/app.yaml and declared it in manifest.jsonc."
     );
     assert_eq!(
-        app.read("amendments/config/app.yaml.assemblr.tmpl"),
-        "port: {{ port }}\nname: node\n"
+        app.read("amendments/config/app.yaml"),
+        "port: 80\nname: node\n"
     );
     let manifest = app.read("manifest.jsonc");
     assert!(
         manifest.contains(
-            r#""amendments": { "config/app.yaml.assemblr.tmpl": { "unit": "@acme/node", "base": "1.0.0" } }"#
+            r#""amendments": { "config/app.yaml": { "unit": "@acme/node", "base": "1.0.0" } }"#
         ),
         "{manifest}"
     );
     succeeds(amend(&fixture, &app, &["bin/run"]));
 
     // The copies are edited, and the build delivers them in the provider's
-    // place: the template with the provider's values and the author's as
-    // `own`, the script with the provider's executable bit.
-    app.write(
-        "amendments/config/app.yaml.assemblr.tmpl",
-        "port: {{ port }}\nname: {{ own.title }}\n",
-    );
+    // place, the script with the provider's executable bit.
+    app.write("amendments/config/app.yaml", "port: 80\nname: app\n");
     app.write("amendments/bin/run", "#!/bin/sh\necho amended\n");
     let output = succeeds(fixture.build(&app));
     assert!(stdout(&output).contains("5 files"), "{}", stdout(&output));
@@ -1306,7 +969,7 @@ fn an_amendment_is_created_declared_and_built() {
             ("app.txt", "app"),
             ("bin/run", "#!/bin/sh\necho amended\n"),
             ("config/README.md", "node config\n"),
-            ("config/app.yaml", "port: 80\nname: Demo\n"),
+            ("config/app.yaml", "port: 80\nname: app\n"),
         ])
     );
     #[cfg(unix)]
@@ -1336,20 +999,16 @@ fn amend_finds_files_by_name_or_path_and_reports_ambiguity() {
     assert!(err.contains("note: nothing was changed"), "{err}");
     assert!(!app.path.join("amendments").exists());
 
-    // A path, with or without the template suffix, is exact.
+    // A path is exact.
     succeeds(amend(&fixture, &app, &["config/README.md"]));
     succeeds(amend(&fixture, &app, &["config/app.yaml"]));
-    assert!(
-        app.path
-            .join("amendments/config/app.yaml.assemblr.tmpl")
-            .is_file()
-    );
+    assert!(app.path.join("amendments/config/app.yaml").is_file());
     let err = stderr(&fails(amend(&fixture, &app, &["config/missing.md"])));
     assert!(
         err.contains("no file matches \"config/missing.md\" in the `src/` of @acme/node"),
         "{err}"
     );
-    assert!(err.contains("with or without `.assemblr.tmpl`"), "{err}");
+    assert!(err.contains("a path is matched exactly"), "{err}");
 
     // `--unit` restricts the search, and must name a dependency, direct or
     // transitive.
@@ -1531,21 +1190,22 @@ fn amend_keeps_the_manifest_s_comments_and_formatting() {
     let (_node, app) = app_amending_node(&fixture);
     let text = "{\n  // The unit.\n  \"name\": \"@acme/app\",\n  \"version\": \"0.1.0\",\n  \
                 \"description\": \"An app.\",\n  \"dependencies\": {\n    \"@acme/node\": \"^1\", // node\n  },\n  \
-                \"params\": {\n    \"title\": { \"type\": \"string\", \"description\": \"A title.\", \"default\": \"Demo\" },\n  },\n}\n";
+                \"placeholders\": {\n    \"ignore\": [\"__DEV__\"], // a define\n  },\n}\n";
     app.write("manifest.jsonc", text);
+    app.write("src/define.js", "if (__DEV__) {}\n");
     succeeds(amend(&fixture, &app, &["bin/run"]));
     assert_eq!(
         app.read("manifest.jsonc"),
         "{\n  // The unit.\n  \"name\": \"@acme/app\",\n  \"version\": \"0.1.0\",\n  \
          \"description\": \"An app.\",\n  \"dependencies\": {\n    \"@acme/node\": \"^1\", // node\n  },\n  \
-         \"params\": {\n    \"title\": { \"type\": \"string\", \"description\": \"A title.\", \"default\": \"Demo\" },\n  },\n  \
+         \"placeholders\": {\n    \"ignore\": [\"__DEV__\"], // a define\n  },\n  \
          \"amendments\": {\n    \"bin/run\": { \"unit\": \"@acme/node\", \"base\": \"1.0.0\" }\n  },\n}\n"
     );
     succeeds(amend(&fixture, &app, &["app.yaml"]));
     assert!(
         app.read("manifest.jsonc").contains(
             "  \"amendments\": {\n    \"bin/run\": { \"unit\": \"@acme/node\", \"base\": \"1.0.0\" },\n    \
-             \"config/app.yaml.assemblr.tmpl\": { \"unit\": \"@acme/node\", \"base\": \"1.0.0\" }\n  },\n}\n"
+             \"config/app.yaml\": { \"unit\": \"@acme/node\", \"base\": \"1.0.0\" }\n  },\n}\n"
         ),
         "{}",
         app.read("manifest.jsonc")
@@ -1646,24 +1306,20 @@ fn every_amendment_problem_rejects_the_build_and_changes_nothing() {
             "0.1.0",
             &[("@acme/node", "^1")],
             r#", "amendments": {
-                "config/app.yaml": {"unit": "@acme/node", "base": "1.0.0"},
-                "bin/run.assemblr.tmpl": {"unit": "@acme/node", "base": "1.0.0"},
+                "config/app.yml": {"unit": "@acme/node", "base": "1.0.0"},
                 "missing.txt": {"unit": "@acme/node", "base": "1.0.0"},
                 "README.md": {"unit": "@acme/node", "base": "1.0.0"}
             }"#,
         ),
     );
-    app.write("amendments/config/app.yaml", "port: 1\n");
-    app.write("amendments/bin/run.assemblr.tmpl", "");
+    app.write("amendments/config/app.yml", "port: 1\n");
     app.write("amendments/missing.txt", "");
     app.write("amendments/stray.txt", "");
     let err = stderr(&fails(fixture.build(&app)));
     for expected in [
         "amendments/README.md does not exist",
-        "amendments/bin/run.assemblr.tmpl amends a file that @acme/node 1.0.0 does not provide: \
-         it has no src/bin/run.assemblr.tmpl; its file is src/bin/run, which is not a template",
-        "amendments/config/app.yaml amends a file that @acme/node 1.0.0 does not provide: it has \
-         no src/config/app.yaml; its file is the template src/config/app.yaml.assemblr.tmpl",
+        "amendments/config/app.yml amends a file that @acme/node 1.0.0 does not provide: it has \
+         no src/config/app.yml",
         "amendments/missing.txt amends a file that @acme/node 1.0.0 does not provide: it has no \
          src/missing.txt",
         "amendments/stray.txt is not declared in the manifest",
@@ -1698,12 +1354,7 @@ fn every_amendment_problem_rejects_the_build_and_changes_nothing() {
     fs::remove_file(app.path.join("amendments/README.md")).unwrap();
     #[cfg(unix)]
     {
-        for path in [
-            "config/app.yaml",
-            "bin/run.assemblr.tmpl",
-            "missing.txt",
-            "stray.txt",
-        ] {
+        for path in ["config/app.yml", "missing.txt", "stray.txt"] {
             app.remove(&format!("amendments/{path}"));
         }
         std::os::unix::fs::symlink("../src/app.txt", app.path.join("amendments/README.md"))
@@ -1716,43 +1367,13 @@ fn every_amendment_problem_rejects_the_build_and_changes_nothing() {
     }
 }
 
-#[test]
-fn an_amended_template_s_errors_name_the_copy_and_the_provider() {
-    let fixture = Fixture::new("amend-render");
-    let (_node, app) = app_amending_node(&fixture);
-    succeeds(amend(&fixture, &app, &["app.yaml"]));
-    app.write(
-        "amendments/config/app.yaml.assemblr.tmpl",
-        "port: {{ port }}\nname: {{ own.name }} {{ title }}\n{% if x %}\n",
-    );
-    let err = stderr(&fails(fixture.build(&app)));
-    assert!(
-        err.contains(
-            "amendments/config/app.yaml.assemblr.tmpl of @acme/app (a copy of template \
-             src/config/app.yaml.assemblr.tmpl of @acme/node), line 2, column 7: undefined \
-             reference `own.name`; the amending unit's parameters are `own.title`"
-        ),
-        "{err}"
-    );
-    assert!(
-        err.contains(
-            "line 2, column 22: undefined reference `title`; the unit's parameters are `port`"
-        ),
-        "{err}"
-    );
-    assert!(
-        err.contains("line 3, column 1: unsupported template construct"),
-        "{err}"
-    );
-}
-
 /// `@acme/app` 0.1.0 published and registered, amending `config/app.yaml`
-/// (with `copy` as the template copy) and `bin/run` of `@acme/node` 1.0.0.
+/// (with `copy` as the copy) and `bin/run` of `@acme/node` 1.0.0.
 fn published_amender(fixture: &Fixture, copy: &str) -> (Repo, Repo) {
     let (node, app) = app_amending_node(fixture);
     succeeds(amend(fixture, &app, &["app.yaml"]));
     succeeds(amend(fixture, &app, &["bin/run"]));
-    app.write("amendments/config/app.yaml.assemblr.tmpl", copy);
+    app.write("amendments/config/app.yaml", copy);
     app.write("amendments/bin/run", "#!/bin/sh\necho amended\n");
     app.publish("0.1.0");
     fixture.register(&app);
@@ -1774,7 +1395,7 @@ fn consumer(fixture: &Fixture, name: &str, dependencies: &[(&str, &str)], extra:
 #[test]
 fn a_dependent_builds_with_the_amendments_a_transitive_dependency_publishes() {
     let fixture = Fixture::new("published-amendments");
-    let (node, app) = published_amender(&fixture, "port: {{ port }}\nname: {{ own.title }}\n");
+    let (node, app) = published_amender(&fixture, "port: 80\nname: Demo\n");
     // A later version of the amender holds a copy it does not declare.
     app.write(
         "manifest.jsonc",
@@ -1793,14 +1414,7 @@ fn a_dependent_builds_with_the_amendments_a_transitive_dependency_publishes() {
     );
 
     // The consumer depends on the amender only; the provider is transitive.
-    // The amended template is rendered with the provider's values and the
-    // amender's values in this composition as `own`.
-    let consumer = consumer(
-        &fixture,
-        "consumer",
-        &[("@acme/app", "^0.1")],
-        r#", "options": {"@acme/app": {"title": "Consumer"}}"#,
-    );
+    let consumer = consumer(&fixture, "consumer", &[("@acme/app", "^0.1")], "");
     let output = succeeds(fixture.build(&consumer));
     assert!(stdout(&output).contains("6 files"), "{}", stdout(&output));
     assert_eq!(
@@ -1810,7 +1424,7 @@ fn a_dependent_builds_with_the_amendments_a_transitive_dependency_publishes() {
             ("app.txt", "app"),
             ("bin/run", "#!/bin/sh\necho amended\n"),
             ("config/README.md", "node config\n"),
-            ("config/app.yaml", "port: 80\nname: Consumer\n"),
+            ("config/app.yaml", "port: 80\nname: Demo\n"),
             ("consumer.txt", "consumer"),
         ])
     );
@@ -1828,14 +1442,7 @@ fn a_dependent_builds_with_the_amendments_a_transitive_dependency_publishes() {
     // fresh dependent resolves to the newest one, and the amender's
     // contributions are applied to it without the amender being published
     // again.
-    let node_manifest = |version: &str| {
-        manifest(
-            "@acme/node",
-            version,
-            &[],
-            r#", "params": {"port": {"type": "integer", "description": "The port.", "default": 80}}"#,
-        )
-    };
+    let node_manifest = |version: &str| manifest("@acme/node", version, &[], "");
     // 1.1.0 changes a file nobody amends.
     node.write("manifest.jsonc", &node_manifest("1.1.0"));
     node.write("src/README.md", "node v2\n");
@@ -1857,14 +1464,11 @@ fn a_dependent_builds_with_the_amendments_a_transitive_dependency_publishes() {
     assert!(fresh.read("assemblr-lock.json").contains("\"1.1.0\""));
 
     // 1.2.0 changes a line of `bin/run` that the amender changed too, which
-    // collides, and adds a line to the YAML template next to the line the
+    // collides, and adds a line to the YAML file next to the line the
     // amender changed, which the line merge reports too. Nothing is built.
     node.write("manifest.jsonc", &node_manifest("1.2.0"));
     node.write("src/bin/run", "#!/bin/sh\necho node v3\n");
-    node.write(
-        "src/config/app.yaml.assemblr.tmpl",
-        "port: {{ port }}\nname: node\nowner: node\n",
-    );
+    node.write("src/config/app.yaml", "port: 80\nname: node\nowner: node\n");
     node.publish("1.2.0");
     succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
     let clash = self::consumer(&fixture, "clash", &[("@acme/app", "^0.1")], "");
@@ -1914,7 +1518,7 @@ fn a_dependent_builds_with_the_amendments_a_transitive_dependency_publishes() {
 #[test]
 fn an_amendment_above_another_is_composed_from_it_and_may_override_it() {
     let fixture = Fixture::new("layered-amenders");
-    let (_node, _app) = published_amender(&fixture, "port: {{ port }}\n");
+    let (_node, _app) = published_amender(&fixture, "port: 80\n");
     let consumer = consumer(
         &fixture,
         "consumer",
@@ -1970,7 +1574,7 @@ fn an_amendment_above_another_is_composed_from_it_and_may_override_it() {
 #[test]
 fn siblings_that_conflict_leave_a_marked_copy_for_the_unit_above_to_resolve() {
     let fixture = Fixture::new("sibling-conflict");
-    let (_node, _app) = published_amender(&fixture, "port: {{ port }}\n");
+    let (_node, _app) = published_amender(&fixture, "port: 80\n");
     let other = fixture.repo("other");
     other.write(
         "manifest.jsonc",
@@ -2086,7 +1690,7 @@ fn siblings_that_conflict_leave_a_marked_copy_for_the_unit_above_to_resolve() {
 #[test]
 fn files_of_distinct_providers_with_the_same_name_are_amended_independently() {
     let fixture = Fixture::new("same-name-providers");
-    let (_node, _app) = published_amender(&fixture, "port: {{ port }}\n");
+    let (_node, _app) = published_amender(&fixture, "port: 80\n");
     let tools = fixture.repo("tools");
     tools.write("manifest.jsonc", &manifest("@acme/tools", "1.0.0", &[], ""));
     tools.write("src/tools/run", "#!/bin/sh\necho tools\n");
@@ -2168,22 +1772,6 @@ fn a_base_the_amender_s_lockfile_misidentifies_is_an_integrity_conflict() {
     }
     assert!(!consumer.path.join("build").exists());
     assert!(!consumer.path.join("assemblr-lock.json").exists());
-}
-
-#[test]
-fn a_published_amender_s_template_errors_name_its_version() {
-    let fixture = Fixture::new("published-render");
-    let (_node, _app) = published_amender(&fixture, "port: {{ port }}\nname: {{ own.nope }}\n");
-    let consumer = consumer(&fixture, "consumer", &[("@acme/app", "^0.1")], "");
-    let err = stderr(&fails(fixture.build(&consumer)));
-    assert!(
-        err.contains(
-            "amendments/config/app.yaml.assemblr.tmpl of @acme/app 0.1.0 (a copy of template \
-             src/config/app.yaml.assemblr.tmpl of @acme/node), line 2, column 7: undefined \
-             reference `own.nope`; the amending unit's parameters are `own.title`"
-        ),
-        "{err}"
-    );
 }
 
 fn update(fixture: &Fixture, repo: &Repo, args: &[&str]) -> Output {
@@ -2365,8 +1953,7 @@ fn app_with_edited_amendment(fixture: &Fixture) -> (Repo, Repo) {
             "@acme/app",
             "0.1.0",
             &[("@acme/node", "^1")],
-            ", \"params\": {\"title\": {\"type\": \"string\", \"description\": \"A title.\", \
-             \"default\": \"Demo\"}},\n  // The files this unit amends.\n  \"amendments\": {\n    \
+            ",\n  // The files this unit amends.\n  \"amendments\": {\n    \
              \"config/README.md\": { \"unit\": \"@acme/node\", \"base\": \"1.0.0\" }, // why\n  }",
         ),
     );
@@ -2527,13 +2114,8 @@ fn an_amendment_whose_file_vanished_refuses_the_update_and_a_collision_is_marked
 #[test]
 fn a_published_amender_does_not_block_updating_its_provider() {
     let fixture = Fixture::new("update-published-amender");
-    let (node, app) = published_amender(&fixture, "port: {{ port }}\nname: {{ own.title }}\n");
-    let consumer = consumer(
-        &fixture,
-        "consumer",
-        &[("@acme/app", "^0.1")],
-        r#", "options": {"@acme/app": {"title": "Consumer"}}"#,
-    );
+    let (node, app) = published_amender(&fixture, "port: 80\nname: Demo\n");
+    let consumer = consumer(&fixture, "consumer", &[("@acme/app", "^0.1")], "");
     succeeds(fixture.build(&consumer));
     // The amended files are unchanged in the provider's next version.
     publish_node(&fixture, &node, "1.0.0", "1.1.0", |node| {
@@ -2560,7 +2142,7 @@ fn a_published_amender_does_not_block_updating_its_provider() {
     assert!(
         built.contains(&(
             "config/app.yaml".to_owned(),
-            "port: 80\nname: Consumer\n".to_owned()
+            "port: 80\nname: Demo\n".to_owned()
         )),
         "{built:?}"
     );
@@ -2571,7 +2153,7 @@ fn a_published_amender_does_not_block_updating_its_provider() {
     assert!(
         stdout(&output).contains(
             "Carried over, in manifest.jsonc: amendments/bin/run from @acme/node 1.0.0 to 1.1.0, \
-             amendments/config/app.yaml.assemblr.tmpl from @acme/node 1.0.0 to 1.1.0."
+             amendments/config/app.yaml from @acme/node 1.0.0 to 1.1.0."
         ),
         "{}",
         stdout(&output)
@@ -2694,11 +2276,7 @@ fn an_interrupted_update_is_completed_at_each_write_boundary_and_never_overwrite
         err.contains("an update of this unit was interrupted and not completed"),
         "{err}"
     );
-    assert!(
-        !app.path
-            .join("amendments/config/app.yaml.assemblr.tmpl")
-            .exists()
-    );
+    assert!(!app.path.join("amendments/config/app.yaml").exists());
     let output = succeeds(update(&fixture, &app, &[]));
     assert!(
         stderr(&output).contains(
@@ -2824,39 +2402,5 @@ fn update_does_not_depend_on_declaration_order() {
     assert_eq!(
         outputs[0].trim(),
         "Updated assemblr-lock.json: @acme/a 1.0.0 -> 1.1.0, @acme/b 1.0.0 -> 1.1.0."
-    );
-}
-
-#[test]
-fn filters_write_a_value_that_holds_quotes_safely_for_the_file_s_format() {
-    // A title that is valid for the user and would break a quoted literal
-    // inserted raw (#120).
-    let fixture = Fixture::new("template-filters");
-    let app = fixture.repo("app");
-    app.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/app",
-            "0.1.0",
-            &[],
-            r#", "params": {"title": {"type": "string", "description": "A title.", "example": "Bob's <App>"}}"#,
-        ),
-    );
-    app.write(
-        "src/app-title.ts.assemblr.tmpl",
-        "export const APP_NAME = {{ title | tojson }};\n",
-    );
-    app.write(
-        "src/index.html.assemblr.tmpl",
-        "<title>{{ title | e }}</title>\n",
-    );
-    succeeds(fixture.build(&app));
-    let ts = app.read("build/app-title.ts");
-    assert!(ts.starts_with("export const APP_NAME = \"Bob"), "{ts}");
-    assert!(!ts.contains('\''), "{ts}");
-    assert!(!ts.contains('<'), "{ts}");
-    assert_eq!(
-        app.read("build/index.html"),
-        "<title>Bob&#39;s &lt;App&gt;</title>\n"
     );
 }

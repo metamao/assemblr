@@ -823,16 +823,16 @@ mod tests {
 
     #[test]
     fn a_value_inserted_into_a_one_line_object_stays_on_its_line() {
-        let text = "{\n  \"params\": { \"a\": { \"type\": \"string\" } }\n}\n";
+        let text = "{\n  \"amendments\": { \"a\": { \"unit\": \"@acme/a\" } }\n}\n";
         let value = Value::Object(vec![
-            ("type".to_owned(), s("string")),
-            ("allowed".to_owned(), Value::Array(vec![s("x"), s("y")])),
+            ("unit".to_owned(), s("@acme/b")),
+            ("tags".to_owned(), Value::Array(vec![s("x"), s("y")])),
         ]);
-        let result = edited(text, &[insert("/params", "b", value, Some("a"))]);
+        let result = edited(text, &[insert("/amendments", "b", value, Some("a"))]);
         assert_eq!(
             result,
-            "{\n  \"params\": { \"a\": { \"type\": \"string\" }, \"b\": { \"type\": \"string\", \
-             \"allowed\": [\"x\", \"y\"] } }\n}\n"
+            "{\n  \"amendments\": { \"a\": { \"unit\": \"@acme/a\" }, \"b\": { \"unit\": \
+             \"@acme/b\", \"tags\": [\"x\", \"y\"] } }\n}\n"
         );
     }
 

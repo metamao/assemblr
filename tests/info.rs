@@ -57,22 +57,19 @@ impl Repo {
     }
 }
 
-/// `@acme/node` 1.0.0 and 1.1.0-beta.1, and `@acme/web` 1.0.0 with a
-/// dependency, an option, parameters of each type, and an amendment of
-/// node's template.
+/// `@acme/node` 1.0.0 and 1.1.0-beta.1 with a placeholder, and `@acme/web`
+/// 1.0.0 with a dependency, placeholders of its own, a token that is not
+/// one, and an amendment of node's file.
 fn units(fixture: &Fixture) -> (Repo, Repo) {
     let node = fixture.repo("node");
     let node_manifest = |version: &str| {
         format!(
             r#"{{"name": "@acme/node", "version": "{version}", "description": "The Node runtime.",
-                "params": {{"port": {{"type": "integer", "description": "The port.", "default": 3000}}}}}}"#
+                "placeholders": {{"replace": {{"__PORT__": "The port the server listens on."}}}}}}"#
         )
     };
     node.write("manifest.jsonc", &node_manifest("1.0.0"));
-    node.write(
-        "src/config/app.json.assemblr.tmpl",
-        "{\n  \"port\": {{ port }}\n}\n",
-    );
+    node.write("src/config/app.json", "{\n  \"port\": \"__PORT__\"\n}\n");
     node.publish("1.0.0");
     node.write("manifest.jsonc", &node_manifest("1.1.0-beta.1"));
     node.publish("1.1.0-beta.1");
@@ -85,18 +82,16 @@ fn units(fixture: &Fixture) -> (Repo, Repo) {
   "version": "1.0.0",
   "description": "A web front end.",
   "dependencies": {"@acme/node": "=1.0.0"},
-  "options": {"@acme/node": {"port": 8080}},
-  "params": {
-    "title": {"type": "string", "description": "The page title."},
-    "debug": {"type": "boolean", "description": "Verbose output.", "default": false},
-    "mode": {"type": "string", "description": "The build mode.", "allowed": ["dev", "prod"], "default": "dev"}
+  "placeholders": {
+    "replace": {"__TITLE__": "The page title.", "__API_URL__": "The API's base URL."},
+    "ignore": ["__DEV__"]
   },
-  "amendments": {"config/app.json.assemblr.tmpl": {"unit": "@acme/node", "base": "1.0.0"}}
+  "amendments": {"config/app.json": {"unit": "@acme/node", "base": "1.0.0"}}
 }"#,
     );
     web.write(
-        "amendments/config/app.json.assemblr.tmpl",
-        "{\n  \"port\": {{ port }},\n  \"web\": true\n}\n",
+        "amendments/config/app.json",
+        "{\n  \"port\": \"__PORT__\",\n  \"api\": \"__API_URL__\"\n}\n",
     );
     web.write(
         "assemblr-lock.json",
@@ -107,7 +102,10 @@ fn units(fixture: &Fixture) -> (Repo, Repo) {
             node.git(&["rev-parse", "v1.0.0^{tree}"])
         ),
     );
-    web.write("src/web.txt", "web\n");
+    web.write(
+        "src/index.html",
+        "<title>__TITLE__</title>\n<script>__DEV__</script>\n",
+    );
     web.publish("1.0.0");
     fixture.register(&web);
     (node, web)
@@ -123,11 +121,9 @@ fn info_describes_what_a_consumer_needs_to_configure_a_unit() {
         "description: A web front end.",
         "published versions: 1.0.0",
         "@acme/node =1.0.0",
-        "title (string; required): The page title.",
-        "debug (boolean; default false): Verbose output.",
-        "mode (string; default \"dev\"; one of \"dev\", \"prod\"): The build mode.",
-        "@acme/node: port = 8080",
-        "config/app.json.assemblr.tmpl of @acme/node 1.0.0",
+        "  placeholders:\n    __API_URL__: The API's base URL.\n    __TITLE__: The page title.\n",
+        "not placeholders: __DEV__",
+        "config/app.json of @acme/node 1.0.0",
     ] {
         assert!(out.contains(expected), "{expected:?} in {out}");
     }
@@ -135,17 +131,12 @@ fn info_describes_what_a_consumer_needs_to_configure_a_unit() {
         out.contains(&format!("source: {}", web.path.display())),
         "{out}"
     );
-    // Parameters are listed by name, whatever order the manifest used.
-    let (debug, mode, title) = (
-        out.find("debug (").unwrap(),
-        out.find("mode (").unwrap(),
-        out.find("title (").unwrap(),
-    );
-    assert!(debug < mode && mode < title, "{out}");
+    // A dependency's placeholders are its own: `info @acme/node` lists them.
+    assert!(!out.contains("__PORT__"), "{out}");
 }
 
 #[test]
-fn a_unit_without_parameters_or_dependencies_says_none() {
+fn a_unit_without_placeholders_or_dependencies_says_none() {
     let fixture = Fixture::new("none");
     let bare = fixture.repo("bare");
     bare.write(
@@ -155,9 +146,10 @@ fn a_unit_without_parameters_or_dependencies_says_none() {
     bare.publish("0.1.0");
     fixture.register(&bare);
     let out = stdout(&succeeds(fixture.assemblr(&["info", "@acme/bare"])));
-    for section in ["dependencies", "parameters", "options", "amendments"] {
+    for section in ["dependencies", "placeholders", "amendments"] {
         assert!(out.contains(&format!("{section}: none")), "{out}");
     }
+    assert!(!out.contains("not placeholders"), "{out}");
 }
 
 #[test]
@@ -187,17 +179,17 @@ fn json_carries_the_same_facts_in_a_stable_shape() {
     assert_eq!(json["description"], "A web front end.");
     assert_eq!(json["versions"], serde_json::json!(["1.0.0"]));
     assert_eq!(json["dependencies"]["@acme/node"], "=1.0.0");
-    assert_eq!(json["options"]["@acme/node"]["port"], 8080);
-    assert_eq!(json["params"]["title"]["required"], true);
-    assert_eq!(json["params"]["title"].get("default"), None);
-    assert_eq!(json["params"]["debug"]["default"], false);
     assert_eq!(
-        json["params"]["mode"]["allowed"],
-        serde_json::json!(["dev", "prod"])
+        json["placeholders"],
+        serde_json::json!({
+            "replace": {"__API_URL__": "The API's base URL.", "__TITLE__": "The page title."},
+            "ignore": ["__DEV__"]
+        })
     );
-    assert_eq!(json["params"]["mode"]["type"], "string");
+    assert_eq!(json.get("params"), None);
+    assert_eq!(json.get("options"), None);
     assert_eq!(
-        json["amendments"]["config/app.json.assemblr.tmpl"],
+        json["amendments"]["config/app.json"],
         serde_json::json!({"unit": "@acme/node", "base": "1.0.0"})
     );
     assert_eq!(json["commit"], web.git(&["rev-parse", "v1.0.0"]));

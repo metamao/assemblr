@@ -1,4 +1,4 @@
-FROM oven/bun:{{ bunVersion }}
+FROM oven/bun:1.2
 WORKDIR /app
 COPY . .
 RUN bun install

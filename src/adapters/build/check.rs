@@ -319,19 +319,30 @@ impl fmt::Display for CheckProblem {
                 version,
                 tokens,
             } => {
-                let count = tokens.len();
-                write!(
-                    f,
-                    "{unit} {version} has {count} {} that {} like a placeholder but {} not \
-                     declared:",
-                    if count == 1 { "token" } else { "tokens" },
-                    if count == 1 { "looks" } else { "look" },
-                    if count == 1 { "is" } else { "are" },
-                )?;
+                if tokens.len() == 1 {
+                    write!(
+                        f,
+                        "{unit} {version} has 1 token that looks like a placeholder but is not \
+                         declared:"
+                    )?;
+                } else {
+                    write!(
+                        f,
+                        "{unit} {version} has {} tokens that look like placeholders but are \
+                         not declared:",
+                        tokens.len()
+                    )?;
+                }
                 for (token, locations) in tokens {
                     write!(f, "\n\n  {token}")?;
+                    // One row per line, as `unit build` lists them.
+                    let mut previous = None;
                     for location in locations {
-                        write!(f, "\n      {location}")?;
+                        let row = location.to_string();
+                        if previous.as_ref() != Some(&row) {
+                            write!(f, "\n      {row}")?;
+                        }
+                        previous = Some(row);
                     }
                 }
                 Ok(())

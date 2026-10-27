@@ -16,8 +16,7 @@
 //!
 //! Every input is text: the provider's file, each copy, and, for an amender
 //! whose locked versions differ from the composition's, its base as
-//! reconstructed at those versions. A unit build renders templates before
-//! layering; `unit amend` and `unit update` layer the sources.
+//! reconstructed at those versions.
 
 use std::collections::{BTreeMap, BTreeSet};
 

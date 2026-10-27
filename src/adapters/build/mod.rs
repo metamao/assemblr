@@ -1422,7 +1422,7 @@ pub enum BuildProblem {
         /// The amenders whose copy was taken from another version of the
         /// provider than the one resolved, with that version.
         crossed: Vec<(UnitIdentity, Version)>,
-        /// Why, or `None` when a rendered side is not UTF-8 text.
+        /// Why, or `None` when a side is not UTF-8 text.
         failure: Option<super::merge::MergeFailure>,
     },
     /// Copies under `amendments/` that still hold conflict markers.
@@ -1533,7 +1533,7 @@ impl fmt::Display for BuildProblem {
                 )?;
                 match failure {
                     Some(failure) => failure.fmt(f),
-                    None => f.write_str("a rendered side is not UTF-8 text"),
+                    None => f.write_str("a side is not UTF-8 text"),
                 }?;
                 for (amender, base) in crossed {
                     write!(

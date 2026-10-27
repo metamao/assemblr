@@ -237,8 +237,6 @@ impl std::error::Error for ManifestError {}
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::{AmendmentDeclaration, Description, Manifest, ManifestError};
     use crate::domain::{Placeholders, RelativePath, UnitIdentity, Version, VersionRequirement};
 

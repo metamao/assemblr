@@ -995,10 +995,6 @@ mod tests {
         input.parse().unwrap()
     }
 
-    fn unit(name: &str, resolved: &str) -> Requirer {
-        Requirer::Unit(identity(name), version(resolved))
-    }
-
     /// A unit for a test: its manifest fields and its `src/` files.
     #[derive(Clone)]
     struct Spec {
@@ -1333,11 +1329,11 @@ mod tests {
     #[test]
     fn file_bytes_and_the_executable_bit_are_preserved_without_interpolation() {
         let binary = vec![0, 159, 146, 150, 255, b'\r', b'\n'];
-        let template = b"name: __TITLE__ {{ title }}\nrun: ${{ matrix.os }}\n".to_vec();
+        let text = b"name: __TITLE__ {{ title }}\nrun: ${{ matrix.os }}\n".to_vec();
         let units = [Spec::new("@metamao/tools", "1.0.0")
             .declares("__TITLE__")
             .file_with("bin/run", binary.clone(), true)
-            .file_with("ci.yml", template.clone(), false)];
+            .file_with("ci.yml", text.clone(), false)];
         let composed = run(&project(&[("@metamao/tools", "^1")]), &units).unwrap();
         assert_eq!(
             composed.files,
@@ -1351,7 +1347,7 @@ mod tests {
                 (
                     "ci.yml".to_owned(),
                     "@metamao/tools".to_owned(),
-                    template,
+                    text,
                     false
                 ),
             ]

@@ -16,7 +16,7 @@
 //! - **Application**: use cases that plan work and coordinate external
 //!   capabilities.
 //! - **Adapters** ([`adapters`]): Git, filesystem, local registries,
-//!   serialization, template rendering, caching, and other integrations.
+//!   serialization, caching, and other integrations.
 //!
 //! The CLI layer (argument parsing, dispatch, diagnostics, output formatting)
 //! belongs to the binary target, not to this library.

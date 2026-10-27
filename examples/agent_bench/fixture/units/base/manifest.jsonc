@@ -3,11 +3,9 @@
   "name": "@acme/base",
   "version": "1.0.0",
   "description": "Minimal project base: README, .gitignore and package.json.",
-  "params": {
-    "projectName": {
-      "type": "string",
-      "description": "The project name, used in package.json and the README.",
-      "example": "my-app"
+  "placeholders": {
+    "replace": {
+      "__PROJECT_NAME__": "The project's name, in kebab-case: the package name, the README title, and the deployment names."
     }
   }
 }

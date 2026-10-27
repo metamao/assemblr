@@ -104,28 +104,29 @@ impl Repo {
 const PACKAGE: &str = "{\n  \"name\": \"worker\",\n  \"scripts\": {\n    \"dev\": \"wrangler dev\",\n    \"deploy\": \"wrangler deploy\"\n  },\n  \"dependencies\": {\n    \"hono\": \"^4\"\n  }\n}\n";
 
 const WRANGLER: &str =
-    "{\n  \"name\": \"{{ name }}\",\n  \"compatibility_date\": \"2026-01-01\"\n}\n";
+    "{\n  \"name\": \"__WORKER_NAME__\",\n  \"compatibility_date\": \"2026-01-01\"\n}\n";
 
 const GUIDE: &str = "# Agent instructions\n\nRead the README first.\n\n## Rules\n\n- Keep changes small.\n- Run the checks.\n\n## Reporting\n\nSay what you observed.\n";
 
-fn worker_manifest(version: &str, params: &str) -> String {
+fn worker_manifest(version: &str, placeholder: &str) -> String {
     manifest(
         "@acme/worker",
         version,
         &[],
-        &format!(", \"params\": {{{params}}}"),
+        &format!(
+            ", \"placeholders\": {{\"replace\": {{\"{placeholder}\": \"The worker's name.\"}}}}"
+        ),
     )
 }
 
-const NAME_PARAM: &str =
-    r#""name": {"type": "string", "description": "The name.", "default": "worker"}"#;
+const NAME: &str = "__WORKER_NAME__";
 
 /// The provider `@acme/worker` 1.0.0, registered.
 fn worker(fixture: &Fixture) -> Repo {
     let worker = fixture.repo("worker");
-    worker.write("manifest.jsonc", &worker_manifest("1.0.0", NAME_PARAM));
+    worker.write("manifest.jsonc", &worker_manifest("1.0.0", NAME));
     worker.write("src/package.json", PACKAGE);
-    worker.write("src/wrangler.jsonc.assemblr.tmpl", WRANGLER);
+    worker.write("src/wrangler.jsonc", WRANGLER);
     worker.write("src/AGENTS.md", GUIDE);
     worker.write("src/README.md", "worker\n");
     worker.publish("1.0.0");
@@ -138,10 +139,10 @@ fn release(
     fixture: &Fixture,
     worker: &Repo,
     version: &str,
-    params: &str,
+    placeholder: &str,
     change: impl FnOnce(&Repo),
 ) {
-    worker.write("manifest.jsonc", &worker_manifest(version, params));
+    worker.write("manifest.jsonc", &worker_manifest(version, placeholder));
     change(worker);
     worker.publish(version);
     succeed(&fixture.assemblr(&fixture.dir, &["registry", "sync"]));
@@ -210,8 +211,7 @@ fn project(fixture: &Fixture, name: &str, declaration: &str) -> PathBuf {
     project
 }
 
-const BOTH: &str =
-    "{\n  \"dependencies\": {\"@acme/db\": \"^1\", \"@acme/api\": \"^1\"},\n  \"options\": {}\n}\n";
+const BOTH: &str = "{\n  \"dependencies\": {\"@acme/db\": \"^1\", \"@acme/api\": \"^1\"}\n}\n";
 
 fn json(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
@@ -258,7 +258,7 @@ fn provider_releases_that_change_other_files_and_values_need_no_new_amender_vers
 
     // 1.1.0 adds a script and raises a dependency, which nobody amended, and
     // changes a file nobody amends.
-    release(&fixture, &worker, "1.1.0", NAME_PARAM, |worker| {
+    release(&fixture, &worker, "1.1.0", NAME, |worker| {
         worker.write(
             "src/package.json",
             &PACKAGE
@@ -290,7 +290,7 @@ fn provider_releases_that_change_other_files_and_values_need_no_new_amender_vers
 
     // 1.2.0 changes only files the amenders did not touch: the guidance
     // file nobody amends, and the template.
-    release(&fixture, &worker, "1.2.0", NAME_PARAM, |worker| {
+    release(&fixture, &worker, "1.2.0", NAME, |worker| {
         worker.write("src/AGENTS.md", &GUIDE.replace("# Agent", "# Coding agent"));
         worker.write(
             "src/package.json",
@@ -328,7 +328,7 @@ fn a_provider_change_to_a_value_an_amender_changed_is_a_collision_and_changes_no
     succeed(&fixture.assemblr(&shop, &["compose"]));
     let before = tree(&shop);
 
-    release(&fixture, &worker, "1.1.0", NAME_PARAM, |worker| {
+    release(&fixture, &worker, "1.1.0", NAME, |worker| {
         worker.write(
             "src/package.json",
             &PACKAGE.replace(
@@ -391,14 +391,14 @@ fn amenders_taken_from_different_versions_stay_independent_and_the_result_is_det
             if name == "db" {
                 amender(&fixture, &worker, "db", "1.0.0", &[("package.json", &db)]);
             } else {
-                release(&fixture, &worker, "1.1.0", NAME_PARAM, |worker| {
+                release(&fixture, &worker, "1.1.0", NAME, |worker| {
                     worker.write("src/package.json", &changed);
                 });
                 amender(&fixture, &worker, "api", "1.1.0", &[("package.json", &api)]);
             }
         }
         // 1.2.0 is what the consumer resolves; both amendments follow it.
-        release(&fixture, &worker, "1.2.0", NAME_PARAM, |worker| {
+        release(&fixture, &worker, "1.2.0", NAME, |worker| {
             worker.write("src/README.md", "worker 1.2\n");
         });
         let shop = project(&fixture, "shop", BOTH);
@@ -417,9 +417,8 @@ fn amenders_taken_from_different_versions_stay_independent_and_the_result_is_det
 }
 
 #[test]
-fn templated_amendments_follow_the_composition_s_values_and_stop_when_a_parameter_changes_meaning()
-{
-    let fixture = Fixture::new("templated");
+fn placeholders_in_an_amended_file_follow_the_provider_s_version() {
+    let fixture = Fixture::new("placeholders");
     let worker = worker(&fixture);
     let wrangler = WRANGLER.replace(
         "  \"compatibility_date\"",
@@ -430,97 +429,63 @@ fn templated_amendments_follow_the_composition_s_values_and_stop_when_a_paramete
         &worker,
         "db",
         "1.0.0",
-        &[("wrangler.jsonc.assemblr.tmpl", &wrangler)],
+        &[("wrangler.jsonc", &wrangler)],
     );
-    // 1.1.0 keeps the parameter and changes the template elsewhere.
-    release(&fixture, &worker, "1.1.0", NAME_PARAM, |worker| {
+    // 1.1.0 keeps the placeholder and changes the file elsewhere: the
+    // amendment applies, and the provider's placeholder is reported in the
+    // composed file.
+    release(&fixture, &worker, "1.1.0", NAME, |worker| {
         worker.write(
-            "src/wrangler.jsonc.assemblr.tmpl",
+            "src/wrangler.jsonc",
             &WRANGLER.replace("2026-01-01", "2026-06-01"),
         );
     });
     let shop = project(
         &fixture,
         "shop",
-        "{\n  \"dependencies\": {\"@acme/db\": \"^1\", \"@acme/worker\": \"^1\"},\n  \"options\": {\"@acme/worker\": {\"name\": \"acme\"}}\n}\n",
+        "{\n  \"dependencies\": {\"@acme/db\": \"^1\", \"@acme/worker\": \"^1\"}\n}\n",
     );
-    succeed(&fixture.assemblr(&shop, &["compose"]));
+    let output = fixture.assemblr(&shop, &["compose"]);
+    succeed(&output);
     let wrangler = json(&shop.join("wrangler.jsonc"));
-    assert_eq!(wrangler["name"], "acme");
+    assert_eq!(wrangler["name"], "__WORKER_NAME__");
     assert_eq!(wrangler["compatibility_date"], "2026-06-01");
     assert_eq!(wrangler["main"], "./dist/server.mjs");
+    let out = stdout(&output);
+    for expected in [
+        "1 placeholder to replace, in 1 file:",
+        "  __WORKER_NAME__\n\n    @acme/worker: The worker's name.\n      wrangler.jsonc:2\n",
+    ] {
+        assert!(out.contains(expected), "{expected:?} in {out}");
+    }
 
-    // 1.2.0 renames the parameter, so the amendment's template names one the
-    // resolved version no longer declares: a failure that says so, not a
-    // fallback to an old default.
-    release(
+    // 1.2.0 renames the placeholder on a line the amendment did not change:
+    // the composed file holds the new name, and only the new declaration
+    // is in scope.
+    release(&fixture, &worker, "1.2.0", "__NAME__", |worker| {
+        worker.write(
+            "src/wrangler.jsonc",
+            &WRANGLER
+                .replace("2026-01-01", "2026-06-01")
+                .replace("__WORKER_NAME__", "__NAME__"),
+        );
+    });
+    let site = project(
         &fixture,
-        &worker,
-        "1.2.0",
-        r#""title": {"type": "string", "description": "The name.", "default": "worker"}"#,
-        |worker| {
-            worker.write(
-                "src/wrangler.jsonc.assemblr.tmpl",
-                &WRANGLER
-                    .replace("2026-01-01", "2026-06-01")
-                    .replace("{{ name }}", "{{ title }}"),
-            );
-        },
+        "site",
+        "{\n  \"dependencies\": {\"@acme/db\": \"^1\", \"@acme/worker\": \"^1.2\"}\n}\n",
     );
-    // The consumer drops the option the renamed parameter replaced.
-    fs::write(
-        shop.join("assemblr.jsonc"),
-        "{\n  \"dependencies\": {\"@acme/db\": \"^1\", \"@acme/worker\": \"^1.2\"},\n  \"options\": {}\n}\n",
-    )
-    .unwrap();
-    let before = tree(&shop);
-    let err = failure(&fixture.assemblr(&shop, &["compose"]));
+    let output = fixture.assemblr(&site, &["compose"]);
+    succeed(&output);
+    assert_eq!(json(&site.join("wrangler.jsonc"))["name"], "__NAME__");
+    let out = stdout(&output);
     assert!(
-        err.contains("it names parameter `name`, which is declared as a string in @acme/worker 1.0.0 and not declared in @acme/worker 1.2.0"),
-        "{err}"
+        out.contains(
+            "  __NAME__\n\n    @acme/worker: The worker's name.\n      wrangler.jsonc:2\n"
+        ),
+        "{out}"
     );
-    assert_eq!(tree(&shop), before);
-
-    // A parameter that keeps its name and changes kind fails the same way.
-    let retyped = Fixture::new("retyped");
-    let worker = self::worker(&retyped);
-    amender(
-        &retyped,
-        &worker,
-        "db",
-        "1.0.0",
-        &[("wrangler.jsonc.assemblr.tmpl", &wrangler_text())],
-    );
-    release(
-        &retyped,
-        &worker,
-        "1.1.0",
-        r#""name": {"type": "integer", "description": "The name.", "default": 1}"#,
-        |worker| {
-            worker.write(
-                "src/wrangler.jsonc.assemblr.tmpl",
-                &WRANGLER.replace("2026-01-01", "2026-06-01"),
-            );
-        },
-    );
-    let shop = project(
-        &retyped,
-        "shop",
-        "{\n  \"dependencies\": {\"@acme/db\": \"^1\"},\n  \"options\": {}\n}\n",
-    );
-    let err = failure(&retyped.assemblr(&shop, &["compose"]));
-    assert!(
-        err.contains("declared as an integer in @acme/worker 1.1.0") || err.contains("integer"),
-        "{err}"
-    );
-    assert!(!shop.join("wrangler.jsonc").exists());
-}
-
-fn wrangler_text() -> String {
-    WRANGLER.replace(
-        "  \"compatibility_date\"",
-        "  \"main\": \"./dist/server.mjs\",\n  \"compatibility_date\"",
-    )
+    assert!(!out.contains("__WORKER_NAME__"), "{out}");
 }
 
 #[test]
@@ -534,13 +499,13 @@ fn the_declared_range_decides_which_provider_versions_are_eligible() {
         "1.0.0",
         &[("package.json", &db_package())],
     );
-    release(&fixture, &worker, "2.0.0", NAME_PARAM, |_| {});
+    release(&fixture, &worker, "2.0.0", NAME, |_| {});
     // The amender accepts ^1, so a consumer that needs the provider at ^2
     // gets a resolution error, not an amendment applied outside its range.
     let shop = project(
         &fixture,
         "shop",
-        "{\n  \"dependencies\": {\"@acme/db\": \"^1\", \"@acme/worker\": \"^2\"},\n  \"options\": {}\n}\n",
+        "{\n  \"dependencies\": {\"@acme/db\": \"^1\", \"@acme/worker\": \"^2\"}\n}\n",
     );
     let err = failure(&fixture.assemblr(&shop, &["compose"]));
     assert!(err.contains("@acme/worker"), "{err}");
@@ -558,7 +523,7 @@ fn a_base_the_amender_s_lockfile_misidentifies_is_still_an_integrity_conflict_ac
         "1.0.0",
         &[("package.json", &db_package())],
     );
-    release(&fixture, &worker, "1.1.0", NAME_PARAM, |worker| {
+    release(&fixture, &worker, "1.1.0", NAME, |worker| {
         worker.write("src/README.md", "worker 1.1\n");
     });
     // The amender is published again with a lockfile that names other
@@ -578,7 +543,7 @@ fn a_base_the_amender_s_lockfile_misidentifies_is_still_an_integrity_conflict_ac
     let shop = project(
         &fixture,
         "shop",
-        "{\n  \"dependencies\": {\"@acme/db\": \"^1.0.1\"},\n  \"options\": {}\n}\n",
+        "{\n  \"dependencies\": {\"@acme/db\": \"^1.0.1\"}\n}\n",
     );
     let err = failure(&fixture.assemblr(&shop, &["compose"]));
     assert!(err.contains("integrity conflict"), "{err}");
@@ -593,7 +558,7 @@ fn a_yaml_file_that_changed_is_merged_by_line_across_versions() {
         "src/compose.yaml",
         "name: shop\nservices:\n  web:\n    image: app\n",
     );
-    worker.write("manifest.jsonc", &worker_manifest("1.0.1", NAME_PARAM));
+    worker.write("manifest.jsonc", &worker_manifest("1.0.1", NAME));
     worker.publish("1.0.1");
     succeed(&fixture.assemblr(&fixture.dir, &["registry", "sync"]));
     amender(
@@ -606,7 +571,7 @@ fn a_yaml_file_that_changed_is_merged_by_line_across_versions() {
             "name: shop\nservices:\n  web:\n    image: app\n  db:\n    image: postgres\n",
         )],
     );
-    release(&fixture, &worker, "1.1.0", NAME_PARAM, |worker| {
+    release(&fixture, &worker, "1.1.0", NAME, |worker| {
         worker.write(
             "src/compose.yaml",
             "name: store\nservices:\n  web:\n    image: app\n",
@@ -615,7 +580,7 @@ fn a_yaml_file_that_changed_is_merged_by_line_across_versions() {
     let shop = project(
         &fixture,
         "shop",
-        "{\n  \"dependencies\": {\"@acme/db\": \"^1\"},\n  \"options\": {}\n}\n",
+        "{\n  \"dependencies\": {\"@acme/db\": \"^1\"}\n}\n",
     );
     succeed(&fixture.assemblr(&shop, &["compose"]));
     assert_eq!(
@@ -629,7 +594,7 @@ fn a_file_that_changed_without_a_merge_is_refused_explicitly() {
     let fixture = Fixture::new("refused-xml");
     let worker = worker(&fixture);
     worker.write("src/pom.xml", "<a>1</a>\n");
-    worker.write("manifest.jsonc", &worker_manifest("1.0.1", NAME_PARAM));
+    worker.write("manifest.jsonc", &worker_manifest("1.0.1", NAME));
     worker.publish("1.0.1");
     succeed(&fixture.assemblr(&fixture.dir, &["registry", "sync"]));
     amender(
@@ -639,13 +604,13 @@ fn a_file_that_changed_without_a_merge_is_refused_explicitly() {
         "1.0.1",
         &[("pom.xml", "<a>1</a>\n<b>2</b>\n")],
     );
-    release(&fixture, &worker, "1.1.0", NAME_PARAM, |worker| {
+    release(&fixture, &worker, "1.1.0", NAME, |worker| {
         worker.write("src/pom.xml", "<a>2</a>\n");
     });
     let shop = project(
         &fixture,
         "shop",
-        "{\n  \"dependencies\": {\"@acme/db\": \"^1\"},\n  \"options\": {}\n}\n",
+        "{\n  \"dependencies\": {\"@acme/db\": \"^1\"}\n}\n",
     );
     let err = failure(&fixture.assemblr(&shop, &["compose"]));
     assert!(
@@ -667,13 +632,13 @@ fn a_file_the_provider_no_longer_has_is_refused_with_a_way_out() {
         "1.0.0",
         &[("AGENTS.md", &GUIDE.replace("# Agent", "# Mine"))],
     );
-    release(&fixture, &worker, "1.1.0", NAME_PARAM, |worker| {
+    release(&fixture, &worker, "1.1.0", NAME, |worker| {
         fs::remove_file(worker.path.join("src/AGENTS.md")).unwrap();
     });
     let shop = project(
         &fixture,
         "shop",
-        "{\n  \"dependencies\": {\"@acme/db\": \"^1\"},\n  \"options\": {}\n}\n",
+        "{\n  \"dependencies\": {\"@acme/db\": \"^1\"}\n}\n",
     );
     let err = failure(&fixture.assemblr(&shop, &["compose"]));
     assert!(
@@ -728,14 +693,14 @@ fn a_provider_section_and_an_amender_section_added_at_one_place_are_both_kept_pr
         &[("AGENTS.md", &database)],
     );
     let security = format!("{GUIDE}\n## Security\n\nNever commit secrets.\n");
-    release(&fixture, &worker, "1.1.0", NAME_PARAM, |worker| {
+    release(&fixture, &worker, "1.1.0", NAME, |worker| {
         worker.write("src/AGENTS.md", &security);
     });
     let expected = format!("{security}\n## Database\n\nUse DATABASE_URL.\n");
 
     // A consumer composes the release without a new amender version, and
     // nothing is reported for the order the rule fixes.
-    let declaration = "{\n  \"dependencies\": {\"@acme/db\": \"^1\"},\n  \"options\": {}\n}\n";
+    let declaration = "{\n  \"dependencies\": {\"@acme/db\": \"^1\"}\n}\n";
     let shop = project(&fixture, "shop", declaration);
     let output = fixture.assemblr(&shop, &["compose"]);
     succeed(&output);
@@ -793,7 +758,7 @@ fn a_provider_section_and_an_amender_section_added_at_one_place_are_both_kept_pr
     );
 
     // A change to a line the provider changed still collides.
-    release(&fixture, &worker, "1.2.0", NAME_PARAM, |worker| {
+    release(&fixture, &worker, "1.2.0", NAME, |worker| {
         worker.write(
             "src/AGENTS.md",
             &security.replace("Keep changes small.", "Keep changes tiny."),
@@ -812,7 +777,7 @@ fn a_provider_section_and_an_amender_section_added_at_one_place_are_both_kept_pr
     let clash = project(
         &fixture,
         "clash",
-        "{\n  \"dependencies\": {\"@acme/editor\": \"^1\"},\n  \"options\": {}\n}\n",
+        "{\n  \"dependencies\": {\"@acme/editor\": \"^1\"}\n}\n",
     );
     let err = failure(&fixture.assemblr(&clash, &["compose"]));
     assert!(

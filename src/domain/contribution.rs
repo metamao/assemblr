@@ -12,10 +12,7 @@
 //!
 //! An amendment whose copy is the provider's file byte for byte is
 //! redundant: it changes nothing at its base and claims the file for no
-//! reason, which keeps every other unit from amending it. An option equal
-//! to the parameter's default at the locked version is not reported: it
-//! pins the value for the other versions a consumer may resolve the
-//! dependency to, whose defaults may differ.
+//! reason, which keeps every other unit from amending it.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -107,8 +104,8 @@ mod tests {
 
     use super::{ContributionError, contribution_problems};
     use crate::domain::{
-        AmendmentDeclaration, Description, FileTree, Manifest, RelativePath, UnitFile,
-        UnitIdentity, Version,
+        AmendmentDeclaration, Description, FileTree, Manifest, Placeholders, RelativePath,
+        UnitFile, UnitIdentity, Version,
     };
 
     fn identity(input: &str) -> UnitIdentity {
@@ -144,9 +141,7 @@ mod tests {
                 .iter()
                 .map(|unit| (identity(unit), "^1".parse().unwrap()))
                 .collect(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
+            Placeholders::default(),
             amendments
                 .iter()
                 .map(|(file, unit, base)| {

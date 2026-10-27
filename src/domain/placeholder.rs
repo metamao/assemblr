@@ -512,16 +512,20 @@ impl fmt::Display for PlaceholderError {
             Self::Redeclared { placeholder, units } => {
                 write!(f, "placeholders.replace declares {placeholder}, which ")?;
                 write_units(f, units)?;
-                f.write_str(" already declares")?;
-                if units.len() > 1 {
-                    f.write_str(" each")?;
-                }
-                Ok(())
+                f.write_str(if units.len() > 1 {
+                    " each declare already"
+                } else {
+                    " declares already"
+                })
             }
             Self::IgnoresDeclared { placeholder, units } => {
                 write!(f, "placeholders.ignore lists {placeholder}, which ")?;
                 write_units(f, units)?;
-                f.write_str(" declares as a placeholder")
+                f.write_str(if units.len() > 1 {
+                    " declare as a placeholder"
+                } else {
+                    " declares as a placeholder"
+                })
             }
             Self::Unused { placeholder, list } => {
                 let verb = match list {
@@ -979,18 +983,18 @@ mod tests {
                     units: vec![identity("@acme/base")],
                 },
                 PlaceholderError::Unused {
-                    placeholder: name("__UNUSED__"),
-                    list: PlaceholderList::Replace,
-                },
-                PlaceholderError::Unused {
                     placeholder: name("__GONE__"),
                     list: PlaceholderList::Ignore,
+                },
+                PlaceholderError::Unused {
+                    placeholder: name("__UNUSED__"),
+                    list: PlaceholderList::Replace,
                 },
             ]
         );
         let messages: Vec<String> = result.problems.iter().map(ToString::to_string).collect();
         assert!(
-            messages[2].contains("which @acme/base and @acme/other already declares each"),
+            messages[2].contains("which @acme/base and @acme/other each declare already"),
             "{}",
             messages[2]
         );
@@ -1000,9 +1004,9 @@ mod tests {
             messages[3]
         );
         assert!(
-            messages[4].contains("placeholders.replace declares __UNUSED__, but no file"),
+            messages[5].contains("placeholders.replace declares __UNUSED__, but no file"),
             "{}",
-            messages[4]
+            messages[5]
         );
     }
 

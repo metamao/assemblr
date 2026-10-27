@@ -20,7 +20,7 @@ use assemblr::adapters::{
 };
 use assemblr::domain::{
     ContributionError, Excluded, IntegrityChange, LockChange, LockError, PlaceholderError,
-    RegistryError, RelativePath, ResolutionError, UnitIdentity,
+    PlaceholderList, RegistryError, RelativePath, ResolutionError, UnitIdentity,
 };
 use clap::{Args, Subcommand};
 
@@ -710,7 +710,12 @@ fn add_diagnosis(failure: &AddFailure, root: &Path) -> Diagnosis {
     };
     let advice = distinct(problems.iter().filter_map(|problem| {
         match problem {
-            AddProblem::Build(BuildProblem::Manifest(ManifestFileError::Missing { .. })) => {
+            AddProblem::Build(problem)
+                if matches!(
+                    **problem,
+                    BuildProblem::Manifest(ManifestFileError::Missing { .. })
+                ) =>
+            {
                 Some(format!(
                     "{} is not a unit repository's top level; run `assemblr unit add` in the \
                  directory that holds `manifest.jsonc`",
@@ -787,9 +792,15 @@ fn report_built(built: &Built) {
     let tokens = built.unresolved();
     if !tokens.is_empty() {
         eprintln!(
-            "warning: {} like placeholders but {} not declared:",
-            count(tokens.len(), "token looks", "tokens look"),
-            if tokens.len() == 1 { "is" } else { "are" }
+            "warning: {}",
+            if tokens.len() == 1 {
+                "1 token looks like a placeholder but is not declared:".to_owned()
+            } else {
+                format!(
+                    "{} tokens look like placeholders but are not declared:",
+                    tokens.len()
+                )
+            }
         );
         for line in placeholders::tokens_body(tokens) {
             eprintln!("{line}");
@@ -1177,10 +1188,15 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
             "run `assemblr registry sync` to check the registered repositories again".to_owned()
         }
         BuildProblem::Placeholder(error) => match error {
-            PlaceholderError::Unused { .. } => {
-                "remove it from manifest.jsonc, or add it where the consumer must set the value"
-                    .to_owned()
-            }
+            PlaceholderError::Unused {
+                list: PlaceholderList::Replace,
+                ..
+            } => "remove it from manifest.jsonc, or add it where the consumer must set the value"
+                .to_owned(),
+            PlaceholderError::Unused {
+                list: PlaceholderList::Ignore,
+                ..
+            } => "remove it from \"placeholders.ignore\"".to_owned(),
             PlaceholderError::Redeclared { .. } => {
                 "remove it from \"placeholders.replace\": the dependency's declaration and \
                  description apply to the files of this unit too"

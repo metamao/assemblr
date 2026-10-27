@@ -5,9 +5,12 @@
 //! Each block is separated by a blank line: the placeholder, then each
 //! declaration in scope, `<unit>: <description>`, indented once more, then
 //! its locations once more again, one `path:line` per row so that terminals
-//! and editors can link it. Nothing is truncated.
+//! and editors can link it, a line that holds the placeholder twice listed
+//! once. Nothing is truncated.
 
-use assemblr::domain::{PlaceholderReport, UnresolvedTokens};
+use std::collections::BTreeSet;
+
+use assemblr::domain::{Location, PlaceholderReport, UnresolvedTokens};
 use serde_json::{Value, json};
 
 use super::diagnostic::count;
@@ -34,12 +37,7 @@ pub(super) fn body(report: &PlaceholderReport) -> Vec<String> {
         for (unit, remaining) in declarations {
             lines.push(String::new());
             lines.push(format!("    {unit}: {}", remaining.description()));
-            lines.extend(
-                remaining
-                    .locations()
-                    .iter()
-                    .map(|location| format!("      {location}")),
-            );
+            lines.extend(location_lines(remaining.locations()));
         }
     }
     lines
@@ -89,8 +87,18 @@ pub(super) fn tokens_body(tokens: &UnresolvedTokens) -> Vec<String> {
     for (token, locations) in tokens {
         lines.push(String::new());
         lines.push(format!("  {token}"));
-        lines.extend(locations.iter().map(|location| format!("      {location}")));
+        lines.extend(location_lines(locations));
     }
+    lines
+}
+
+/// One row per `path:line`, in order.
+fn location_lines(locations: &BTreeSet<Location>) -> Vec<String> {
+    let mut lines: Vec<String> = locations
+        .iter()
+        .map(|location| format!("      {location}"))
+        .collect();
+    lines.dedup();
     lines
 }
 
