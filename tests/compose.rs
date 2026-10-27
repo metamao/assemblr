@@ -818,7 +818,7 @@ fn conflicts_are_refused_before_anything_is_written() {
         err.contains("disagree at 3 path(s)")
             && err.contains(
                 "error:   README.md: the project and the composition change the same lines, in 1 \
-             place(s)\nerror:   bin/run: the project deleted it, and the composition \
+             place\nerror:   bin/run: the project deleted it, and the composition \
              changes it\nerror:   config/app.json: the project and the composition change the \
              same values:\nerror:     /port: the project changes 3000 to 9000; the composition \
              changes 3000 to 8080"
@@ -1813,6 +1813,10 @@ fn a_file_assemblr_did_not_write_is_a_conflict_the_consumer_resolves() {
     let output = fails(add(&fixture, &project, "@acme/node"));
     let out = stdout(&output);
     assert!(out.contains("  conflict README.md"), "{out}");
+    assert!(
+        out.contains("README.md: the project already holds a file Assemblr did not write there"),
+        "{out}"
+    );
     assert!(out.contains("  created bin/run"), "{out}");
     assert!(
         !out.contains("config/app.json"),
@@ -2099,6 +2103,14 @@ fn value_conflicts_in_json_are_marked_with_the_text_ones() {
     assert!(out.contains("but 2 files have conflicts"), "{out}");
     assert!(out.contains("  conflict README.md"), "{out}");
     assert!(out.contains("  conflict config/app.json"), "{out}");
+    // Each conflict says what collides, not only where (#139).
+    for expected in [
+        "README.md: the project and the composition change the same lines, in 1 place",
+        "config/app.json: the project and the composition change the same values:",
+        "/port: the project changes 3000 to 9000; the composition changes 3000 to 8080",
+    ] {
+        assert!(out.contains(expected), "{expected:?} in {out}");
+    }
     let json = read(&project.join("config/app.json"));
     assert!(json.contains("9000") && json.contains("8080"), "{json}");
     assert!(json.contains("<<<<<<< current"), "{json}");
@@ -2113,6 +2125,35 @@ fn value_conflicts_in_json_are_marked_with_the_text_ones() {
     assert_eq!(
         lockfile(&project)["units"]["@acme/node"]["version"],
         "1.1.0"
+    );
+}
+
+/// A merge that cannot be done says why, which tells it apart from values
+/// that collide (#139).
+#[test]
+fn a_json_merge_that_cannot_be_done_says_why() {
+    let fixture = Fixture::new("pending-json-unreadable");
+    let (node, _) = registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/node", "^1")]);
+    succeeds(fixture.compose(&project));
+    fs::write(
+        project.join("config/app.json"),
+        "{\n  \"port\": 9000,,\n}\n",
+    )
+    .unwrap();
+    node.write("src/config/app.json", "{\n  \"port\": 8080\n}\n");
+    publish_node(&fixture, &node, "1.1.0", "node\n", "#!/bin/sh\necho run\n");
+    declare(&project, &[("@acme/node", "^1.1")]);
+
+    let output = fails(fixture.compose(&project));
+    let out = stdout(&output);
+    assert!(out.contains("  conflict config/app.json"), "{out}");
+    assert!(
+        out.contains(
+            "config/app.json: the project and the composition both changed it, and the changes \
+             could not be merged: the project's file cannot be read as JSON"
+        ),
+        "{out}"
     );
 }
 
