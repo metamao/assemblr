@@ -652,7 +652,8 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "fixtures are valid by construction")]
 
     use super::{
-        MergeFailure, MergeNote, merge_json, merge_text_files, merge_text_files_from, round_trip,
+        MergeFailure, MergeNote, merge_json, merge_text_files, merge_text_files_from,
+        reconcile_json, round_trip,
     };
     use crate::adapters::jsonc_edit::parse_value;
     use crate::domain::{UnitIdentity, derive};
@@ -693,6 +694,38 @@ mod tests {
         // The order the copies are given in changes nothing.
         let again = merge_json(BASE, &[(&db_id, &db), (&api_id, &api)]).unwrap();
         assert_eq!(again, merged);
+    }
+
+    #[test]
+    fn a_new_object_whose_members_are_not_sorted_is_written_in_its_order() {
+        // A copy that adds an object whose keys are out of alphabetical
+        // order, as a lockfile entry's are (#138).
+        let copy = BASE.replace(
+            "  }\n}\n",
+            "  },\n  \"engines\": {\n    \"node\": \">=22\",\n    \"bun\": \"1\",\n    \
+             \"deno\": \"2\"\n  }\n}\n",
+        );
+
+        let merged = merge_json(BASE, &[(&identity("@acme/a"), &copy)]).unwrap();
+
+        assert_eq!(merged.text(), copy);
+    }
+
+    #[test]
+    fn reconciling_writes_a_new_object_whose_members_are_not_sorted() {
+        // The project renamed itself; the composition adds a lockfile-like
+        // entry whose `license` follows `dev` (#138).
+        let base = "{\n  \"name\": \"P\",\n  \"packages\": {\n    \"a\": {\n      \
+                    \"version\": \"1\"\n    }\n  }\n}\n";
+        let current = base.replace("\"P\"", "\"demo\"");
+        let entry = "    \"b\": {\n      \"version\": \"2\",\n      \"resolved\": \"u\",\n      \
+                     \"integrity\": \"s\",\n      \"dev\": true,\n      \"license\": \"MIT\"\n    }\n";
+        let incoming = base.replace("    }\n  }", &format!("    }},\n{entry}  }}"));
+
+        let reconciled = reconcile_json(base, &current, &incoming).unwrap();
+
+        assert_eq!(reconciled.text, incoming.replace("\"P\"", "\"demo\""));
+        assert!(reconciled.notes.is_empty());
     }
 
     #[test]

@@ -617,7 +617,7 @@ fn compose_with(
                 first: false,
                 declaration: planned_declaration.map(|planned| planned.change),
                 pending: BTreeSet::new(),
-                consumer_conflicts: BTreeSet::new(),
+                consumer_conflicts: BTreeMap::new(),
                 unit_conflicts: Vec::new(),
                 placeholders: Some(placeholders),
             });
@@ -742,6 +742,8 @@ fn compose_with(
     // in the file, marked, for the consumer to resolve; a composition
     // with any other kind of conflict is refused whole.
     let mut marked: BTreeSet<RelativePath> = BTreeSet::new();
+    // What each marked conflict with the project is, for the report.
+    let mut consumer_conflicts: BTreeMap<RelativePath, String> = BTreeMap::new();
     let marks: Vec<Option<Change>> = conflicts
         .iter()
         .map(|conflict| pending::marked_change(&store, &base, &current, &files, conflict))
@@ -750,6 +752,7 @@ fn compose_with(
         for (conflict, change) in conflicts.drain(..).zip(marks) {
             if let Some(change) = change {
                 marked.insert(conflict.path.clone());
+                consumer_conflicts.insert(conflict.path.clone(), conflict.to_string());
                 changes.insert(conflict.path, change);
             }
         }
@@ -764,7 +767,6 @@ fn compose_with(
     // does, where the reconciliation has nothing to write. A conflict the
     // consumer resolved before, which the composition keeps, is not
     // theirs to resolve again.
-    let mut consumer_conflicts = marked.clone();
     unit_conflicts.retain(|(path, _)| {
         let written = matches!(
             changes.get(path),
@@ -833,7 +835,12 @@ fn compose_with(
             Some(change) => {
                 changes.insert(path.clone(), change);
                 marked.insert(path.clone());
-                consumer_conflicts.insert(path.clone());
+                consumer_conflicts.insert(
+                    path.clone(),
+                    format!(
+                        "{path}: the project already holds a file Assemblr did not write there"
+                    ),
+                );
                 false
             }
             None => true,
@@ -2139,7 +2146,7 @@ pub struct Composed {
     first: bool,
     declaration: Option<DeclarationChange>,
     pending: BTreeSet<RelativePath>,
-    consumer_conflicts: BTreeSet<RelativePath>,
+    consumer_conflicts: BTreeMap<RelativePath, String>,
     unit_conflicts: Vec<(RelativePath, String)>,
     placeholders: Option<PlaceholderReport>,
 }
@@ -2163,8 +2170,10 @@ impl Composed {
 
     /// The pending files that hold a conflict between the consumer's
     /// changes and the composition, between `current`, `base`, and
-    /// `incoming` markers. A file can hold both kinds.
-    pub fn consumer_conflicts(&self) -> &BTreeSet<RelativePath> {
+    /// `incoming` markers, each with the report of what conflicts: the
+    /// values or lines both sides change, or why the merge could not be
+    /// done. A file can hold both kinds.
+    pub fn consumer_conflicts(&self) -> &BTreeMap<RelativePath, String> {
         &self.consumer_conflicts
     }
 
@@ -2544,7 +2553,8 @@ impl fmt::Display for FileConflict {
             }
             FileConflictKind::Lines { places } => write!(
                 f,
-                "the project and the composition change the same lines, in {places} place(s)"
+                "the project and the composition change the same lines, in {places} {}",
+                if *places == 1 { "place" } else { "places" }
             ),
             FileConflictKind::Values(conflicts) => {
                 f.write_str("the project and the composition change the same values:")?;
