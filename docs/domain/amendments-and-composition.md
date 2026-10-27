@@ -138,7 +138,8 @@ of the first amendments increment.
   with the composer's own registry record for that unit and version. They
   agree when they record the same tree, the version's content identity; the
   commit is provenance, so the same tree under another commit, as a pull
-  request's merge commit gives, agrees. If they agree, the base is verified.
+  request's merge commit gives, agrees (owner decision on #123). If they
+  agree, the base is verified.
   If any tree differs, that is an **integrity conflict**: the composition
   fails and changes nothing (see
   [registries-and-discovery.md](registries-and-discovery.md#integrity-and-snapshots--approved)).

@@ -581,9 +581,9 @@ Rules:
   version agrees with the registry's record when both name the same tree.
   The locked commit is kept as provenance; a different commit with the same
   tree, as a pull request's merge commit gives, is the same content and
-  leaves the lock unchanged. Moving a version's tag is still an integrity
-  conflict at registration and synchronization, whatever tree the new
-  commit holds.
+  leaves the lock unchanged (owner decision on #123). Moving a version's tag
+  is still an integrity conflict at registration and synchronization,
+  whatever tree the new commit holds.
 - Snapshots and provenance preserve what is needed to reconstruct the exact
   historical files that amendments are based on (see
   [amendments-and-composition.md](amendments-and-composition.md#amendments--approved)).
