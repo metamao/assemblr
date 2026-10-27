@@ -48,7 +48,9 @@ D) is evidence for the approach, not code that was adopted.
    amender added is not in another's base, so a second amender setting it
    differently is a conflict of two additions.
 4. **Determinism.** Amenders are keyed by identity; operations are planned
-   parents first, then by anchor, first amender, and key; conflicts are
+   parents first, then by anchor, first amender, and key, except that an
+   addition anchored to another addition follows it, since a new object's
+   members are each anchored to the one before them (#138); conflicts are
    sorted. Members added after one anchor by several amenders are chained
    in amender order, each inserted after the one before it, so the editor
    needs no position arithmetic and the result does not depend on the order
