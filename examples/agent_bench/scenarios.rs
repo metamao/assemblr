@@ -73,6 +73,7 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
                 tree_contains(&project.join("src"), "/health"),
             );
             report.check("echo_route", tree_contains(&project.join("src"), "/echo"));
+            report.check("no_placeholders_left", no_placeholders(&agent, &project));
             report.check("compose_noop", nothing_to_compose(&agent, &project));
             report.check(
                 "code_survives_compose",
@@ -526,6 +527,7 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
                 "worker_name",
                 contains(&project.join("wrangler.toml"), "name = \"orders-api\""),
             );
+            report.check("no_placeholders_left", no_placeholders(&agent, project));
             Ok(())
         },
     },
@@ -641,6 +643,13 @@ fn succeeds_program(machine: &Machine<'_>, dir: &Path, program: &str, args: &[&s
 /// The command's output, or nothing when it fails.
 fn output(machine: &Machine<'_>, dir: &Path, program: &str, args: &[&str]) -> String {
     machine.run(dir, program, args).unwrap_or_default()
+}
+
+/// Whether `assemblr status` reports no placeholder left to replace.
+fn no_placeholders(machine: &Machine<'_>, project: &Path) -> bool {
+    let status = output(machine, project, "assemblr", &["status", "--json"]);
+    serde_json::from_str::<serde_json::Value>(&status)
+        .is_ok_and(|status| status["placeholders"] == serde_json::json!([]))
 }
 
 fn nothing_to_compose(machine: &Machine<'_>, project: &Path) -> bool {
