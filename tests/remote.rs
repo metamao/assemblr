@@ -418,3 +418,40 @@ fn a_file_too_large_to_read_fails_the_first_read_of_its_version() {
     );
     assert!(!project.join("node.txt").exists());
 }
+
+#[test]
+fn an_indexed_commit_no_tag_names_now_is_read_from_a_new_copy() {
+    let fixture = Fixture::new("partial_moved");
+    let remote = fixture.remote("node", &["1.0.0"]);
+    remote.serve_filters();
+    succeeds(fixture.assemblr(&["registry", "add", &remote.url()]));
+
+    // The tag moves forward, so the indexed commit is still on the remote
+    // but no tag names it, and the copy is fetched again from scratch.
+    fs::write(
+        remote.path.join("manifest.jsonc"),
+        r#"{"name": "@acme/node", "version": "1.0.0", "description": "Moved."}"#,
+    )
+    .unwrap();
+    remote.git(&["add", "-A"]);
+    remote.git(&["commit", "-q", "-m", "moved"]);
+    remote.git(&["tag", "-f", "v1.0.0"]);
+    fs::remove_dir_all(fixture.data.join("sources")).unwrap();
+
+    let project = fixture.dir.join("app");
+    succeeds(
+        fixture
+            .command(&fixture.dir, &["init", "app"])
+            .output()
+            .unwrap(),
+    );
+    let output = fixture
+        .command(&project, &["add", "@acme/node"])
+        .output()
+        .unwrap();
+    succeeds(output);
+    assert_eq!(
+        fs::read_to_string(project.join("node.txt")).unwrap(),
+        "node 1.0.0\n"
+    );
+}

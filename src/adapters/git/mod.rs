@@ -164,6 +164,28 @@ impl GitRepository {
         }
     }
 
+    /// Fetches the metadata files of `commits` that the copy lacks, when
+    /// this is the copy of a remote. Registration fetches them only at the
+    /// current tags, so an indexed commit no tag names now can lack them.
+    fn retrieve_metadata(&self, commits: &[&ObjectId]) -> Result<(), GitError> {
+        let Some(reference) = &self.remote else {
+            return Ok(());
+        };
+        let mut objects = self.objects()?;
+        let mut present = BTreeSet::new();
+        for &commit in commits {
+            if let Some(header) = objects.header(commit.as_str())? {
+                if header.kind == "commit" {
+                    present.insert(header.id);
+                }
+            }
+        }
+        objects.finish()?;
+        let missing = self.metadata_missing_at(&present)?;
+        fetch_objects(reference, &self.git_dir, &missing)
+            .map_err(|error| GitError::unretrievable(PathBuf::from(reference), error.to_string()))
+    }
+
     /// The repository's Git directory, absolute. For a linked worktree or a
     /// submodule, whose `.git` is a file, this is the directory it names.
     pub fn git_directory(&self) -> Result<PathBuf, GitError> {
@@ -271,8 +293,17 @@ impl GitRepository {
                 }
             }
         }
+        objects.finish()?;
+        self.metadata_missing_at(&commits)
+    }
+
+    /// The top-level [`METADATA_FILES`] of `commits` that the repository
+    /// lacks, by blob id, sorted. Each of `commits` must be a commit the
+    /// repository has.
+    fn metadata_missing_at(&self, commits: &BTreeSet<ObjectId>) -> Result<Vec<ObjectId>, GitError> {
+        let mut objects = self.objects()?;
         let mut metadata = BTreeSet::new();
-        for commit in &commits {
+        for commit in commits {
             let root = match self.root_entries(&mut objects, commit) {
                 Ok(root) => root,
                 Err(RootError::Git(error)) => return Err(error),
@@ -387,6 +418,7 @@ impl GitRepository {
         &self,
         commits: &[&ObjectId],
     ) -> Result<Vec<Result<PublishedVersion, InvalidVersion>>, GitError> {
+        self.retrieve_metadata(commits)?;
         let mut objects = self.objects()?;
         let mut versions = Vec::with_capacity(commits.len());
         for &commit in commits {
