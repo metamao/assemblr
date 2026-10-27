@@ -61,7 +61,8 @@ with any of them:
   description;
 - a token in `ignore` that a unit of the resolved graph declares in
   `replace`: it would hide the placeholder from consumers;
-- an entry of `replace` or `ignore` that no file of the unit contains.
+- an entry of `replace` that no file of the unit contains, or of `ignore`
+  that no file holds as a token (delimited as below).
 
 A token of the placeholder form in the unit's files, delimited as an
 identifier (by characters other than ASCII letters, digits, and `_`), is
@@ -75,8 +76,8 @@ how many files, in name order.
 
 ## Consumer report — Approved
 
-After `compose`, `add`, `update`, and `remove`, and in `status`, Assemblr
-reports the declared placeholders that remain in the project's managed
+After `compose`, `add`, `update`, and `remove`, after `compose --continue`
+finishes a composition, and in `status`, Assemblr reports the declared placeholders that remain in the project's managed
 files, with each declaration's description and every location. The report
 is informational: it never stops a composition and never changes an exit
 code. It is hidden while a composition waits for the consumer or was
@@ -115,8 +116,8 @@ interrupted, as `status` hides edits then.
 
 ## Output — Approved
 
-`compose`, `add`, `update`, and `remove` print, after their summary and only
-when a placeholder remains:
+`compose`, `add`, `update`, `remove`, and `compose --continue` print, after
+their summary and only when a placeholder remains:
 
 ```text
 2 placeholders to replace, in 3 files:

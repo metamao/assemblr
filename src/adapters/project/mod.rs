@@ -26,6 +26,7 @@ mod pending;
 mod status;
 mod store;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -590,7 +591,7 @@ fn compose_with(
                 existing_file(root, path, false)
                     .ok()
                     .flatten()
-                    .map(|(bytes, _)| bytes)
+                    .map(|(bytes, _)| Cow::Owned(bytes))
             });
             return Ok(Composed {
                 units: resolved.lock.units().len(),
@@ -1009,14 +1010,15 @@ fn compose_with(
     let placeholders = marked.is_empty().then(|| {
         remaining_placeholders(&scopes, |path| match changes.get(path) {
             Some(Change::Create(file) | Change::Modify { file, .. }) => {
-                Some(file.contents().to_vec())
+                Some(Cow::Borrowed(file.contents()))
             }
             Some(Change::Remove { .. }) => None,
             None => match current.get(path) {
-                Some(held) => matches!(held.compared, Current::File(_)).then(|| held.bytes.clone()),
+                Some(held) => matches!(held.compared, Current::File(_))
+                    .then(|| Cow::Borrowed(held.bytes.as_slice())),
                 None if base.files().contains_key(path) => None,
                 // A created path that already held the composed content.
-                None => files.get(path).map(|file| file.contents().to_vec()),
+                None => files.get(path).map(|file| Cow::Borrowed(file.contents())),
             },
         })
     });
@@ -1052,17 +1054,17 @@ fn compose_with(
 /// The declared placeholders that remain in the project: each path of
 /// `scopes`, with the bytes `content` gives for it, searched for the
 /// placeholders in its scope. A path without content is not searched.
-fn remaining_placeholders(
+fn remaining_placeholders<'c>(
     scopes: &BTreeMap<RelativePath, Vec<PlaceholderDeclaration>>,
-    content: impl Fn(&RelativePath) -> Option<Vec<u8>>,
+    content: impl Fn(&RelativePath) -> Option<Cow<'c, [u8]>>,
 ) -> PlaceholderReport {
-    let held: Vec<(&RelativePath, Vec<u8>, &[PlaceholderDeclaration])> = scopes
+    let held: Vec<_> = scopes
         .iter()
         .filter_map(|(path, scope)| content(path).map(|bytes| (path, bytes, scope.as_slice())))
         .collect();
     PlaceholderReport::find(
         held.iter()
-            .map(|(path, bytes, scope)| (*path, bytes.as_slice(), *scope)),
+            .map(|(path, bytes, scope)| (*path, bytes.as_ref(), *scope)),
     )
 }
 
@@ -1179,9 +1181,9 @@ fn plan(
     let scopes = scopes
         .into_iter()
         .filter(|(path, scope)| {
-            files.get(path).is_some_and(|file| {
-                !PlaceholderReport::find([(path, file.contents(), scope.as_slice())]).is_empty()
-            })
+            files
+                .get(path)
+                .is_some_and(|file| PlaceholderReport::holds(file.contents(), scope))
         })
         .collect();
     Ok(Planned {

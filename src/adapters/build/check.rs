@@ -22,7 +22,9 @@ use super::{BuildProblem, Inputs, MANIFEST, ManifestFileError, read_working_mani
 use crate::adapters::git::{GitRepository, ReadSrcError};
 use crate::adapters::lockfile;
 use crate::adapters::registry::Registry;
-use crate::domain::{ContributionError, LockChange, UnitIdentity, UnresolvedTokens, Version};
+use crate::domain::{
+    ContributionError, LockChange, UnitIdentity, UnresolvedTokens, Version, first_on_each_line,
+};
 
 /// Checks the unit whose repository's top level is `root`, resolving its
 /// dependencies from `registry`.
@@ -336,13 +338,8 @@ impl fmt::Display for CheckProblem {
                 for (token, locations) in tokens {
                     write!(f, "\n\n  {token}")?;
                     // One row per line, as `unit build` lists them.
-                    let mut previous = None;
-                    for location in locations {
-                        let row = location.to_string();
-                        if previous.as_ref() != Some(&row) {
-                            write!(f, "\n      {row}")?;
-                        }
-                        previous = Some(row);
+                    for location in first_on_each_line(locations) {
+                        write!(f, "\n      {location}")?;
                     }
                 }
                 Ok(())

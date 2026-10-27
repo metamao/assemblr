@@ -270,6 +270,18 @@ impl fmt::Display for Location {
     }
 }
 
+/// The first of `locations` on each line, in order: the rows that list a
+/// placeholder once per line, as text output does.
+pub fn first_on_each_line(locations: &BTreeSet<Location>) -> impl Iterator<Item = &Location> {
+    let mut previous: Option<&Location> = None;
+    locations.iter().filter(move |location| {
+        let same = previous
+            .is_some_and(|before| before.path == location.path && before.line == location.line);
+        previous = Some(location);
+        !same
+    })
+}
+
 /// The line and column of byte offsets into one text.
 struct Lines<'t> {
     text: &'t str,
@@ -304,10 +316,15 @@ impl<'t> Lines<'t> {
     }
 }
 
-/// Where `placeholder` occurs in `text`, by its exact text.
-fn occurrences(path: &RelativePath, text: &str, placeholder: &PlaceholderName) -> Vec<Location> {
-    let lines = Lines::new(text);
-    text.match_indices(placeholder.as_str())
+/// Where `placeholder` occurs in the text of `lines`, by its exact text.
+fn occurrences(
+    path: &RelativePath,
+    lines: &Lines<'_>,
+    placeholder: &PlaceholderName,
+) -> Vec<Location> {
+    lines
+        .text
+        .match_indices(placeholder.as_str())
         .map(|(at, _)| lines.locate(path, at))
         .collect()
 }
@@ -392,11 +409,15 @@ impl PlaceholderReport {
             let Some(text) = scanned(bytes) else {
                 continue;
             };
+            // Lines are counted once per file, and only in a file that holds
+            // a placeholder.
+            let mut lines = None;
             for declaration in declarations {
-                let locations = occurrences(path, text, &declaration.placeholder);
-                if locations.is_empty() {
+                if !text.contains(declaration.placeholder.as_str()) {
                     continue;
                 }
+                let lines = lines.get_or_insert_with(|| Lines::new(text));
+                let locations = occurrences(path, lines, &declaration.placeholder);
                 report
                     .found
                     .entry(declaration.placeholder.clone())
@@ -411,6 +432,16 @@ impl PlaceholderReport {
             }
         }
         report
+    }
+
+    /// Whether `bytes` holds one of `declarations`' placeholders where
+    /// [`find`](Self::find) would report it, without locating it.
+    pub fn holds(bytes: &[u8], declarations: &[PlaceholderDeclaration]) -> bool {
+        scanned(bytes).is_some_and(|text| {
+            declarations
+                .iter()
+                .any(|declaration| text.contains(declaration.placeholder.as_str()))
+        })
     }
 
     /// Whether no declared placeholder remains.
@@ -658,10 +689,19 @@ pub fn check_placeholders<'m>(
             });
         }
     }
-    let used = |placeholder: &PlaceholderName| {
-        texts
+    // A placeholder is used wherever its text occurs, as the consumer's
+    // report finds it; an ignored token only where it is a token, the only
+    // place where ignoring it changes anything.
+    let found: Vec<(PlaceholderName, Location)> = texts
+        .iter()
+        .flat_map(|(path, text)| tokens(path, text))
+        .collect();
+    let words: BTreeSet<&PlaceholderName> = found.iter().map(|(token, _)| token).collect();
+    let used = |placeholder: &PlaceholderName, list: PlaceholderList| match list {
+        PlaceholderList::Replace => texts
             .iter()
-            .any(|(_, text)| text.contains(placeholder.as_str()))
+            .any(|(_, text)| text.contains(placeholder.as_str())),
+        PlaceholderList::Ignore => words.contains(placeholder),
     };
     let entries = own
         .replace()
@@ -673,7 +713,7 @@ pub fn check_placeholders<'m>(
                 .map(|placeholder| (placeholder, PlaceholderList::Ignore)),
         );
     let mut unused: Vec<(&PlaceholderName, PlaceholderList)> = entries
-        .filter(|(placeholder, _)| !used(placeholder))
+        .filter(|(placeholder, list)| !used(placeholder, *list))
         .collect();
     unused.sort();
     check.problems.extend(
@@ -693,11 +733,9 @@ pub fn check_placeholders<'m>(
                     || unit.placeholders().ignore().contains(token)
             })
     };
-    for (path, text) in texts {
-        for (token, location) in tokens(path, text) {
-            if !resolved(&token) {
-                check.unresolved.entry(token).or_default().insert(location);
-            }
+    for (token, location) in found {
+        if !resolved(&token) {
+            check.unresolved.entry(token).or_default().insert(location);
         }
     }
     check
@@ -710,8 +748,9 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::{
-        PlaceholderCheck, PlaceholderDeclaration, PlaceholderError, PlaceholderList,
-        PlaceholderName, PlaceholderReport, Placeholders, check_placeholders, occurrences, tokens,
+        Lines, PlaceholderCheck, PlaceholderDeclaration, PlaceholderError, PlaceholderList,
+        PlaceholderName, PlaceholderReport, Placeholders, check_placeholders, first_on_each_line,
+        occurrences, tokens,
     };
     use crate::domain::{
         Description, FileTree, Manifest, RelativePath, UnitFile, UnitIdentity, Version,
@@ -843,11 +882,14 @@ mod tests {
             found("é __A__\r\n__B__"),
             [("__A__".to_owned(), 1, 3), ("__B__".to_owned(), 2, 1)]
         );
-        let at: Vec<(usize, usize)> =
-            occurrences(&path("a"), "api-__N__\n__N___db", &name("__N__"))
-                .iter()
-                .map(|location| (location.line(), location.column()))
-                .collect();
+        let at: Vec<(usize, usize)> = occurrences(
+            &path("a"),
+            &Lines::new("api-__N__\n__N___db"),
+            &name("__N__"),
+        )
+        .iter()
+        .map(|location| (location.line(), location.column()))
+        .collect();
         assert_eq!(at, [(1, 5), (2, 1)]);
     }
 
@@ -1025,6 +1067,39 @@ mod tests {
                 placeholder: name("__NAME__"),
                 list: PlaceholderList::Replace,
             }]
+        );
+    }
+
+    #[test]
+    fn rows_list_each_line_once() {
+        let lines = Lines::new("__N__ __N__\n__N__\n");
+        let mut locations: BTreeSet<_> = occurrences(&path("a"), &lines, &name("__N__"))
+            .into_iter()
+            .collect();
+        locations.extend(occurrences(&path("b"), &lines, &name("__N__")));
+        let rows: Vec<String> = first_on_each_line(&locations)
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(rows, ["a:1", "a:2", "b:1", "b:2"]);
+    }
+
+    #[test]
+    fn an_ignored_token_inside_a_longer_word_is_unused() {
+        let unit = manifest("@acme/app", &[], &["__DEBUG__"]);
+        let src = tree(&[("flags.js", "MY__DEBUG__ = 1;\n")]);
+        let result = check_placeholders(&unit, &src, &tree(&[]), []);
+        assert_eq!(
+            result.problems,
+            [PlaceholderError::Unused {
+                placeholder: name("__DEBUG__"),
+                list: PlaceholderList::Ignore,
+            }]
+        );
+        let src = tree(&[("flags.js", "if (__DEBUG__) {}\n")]);
+        assert!(
+            check_placeholders(&unit, &src, &tree(&[]), [])
+                .problems
+                .is_empty()
         );
     }
 

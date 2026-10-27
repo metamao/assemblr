@@ -534,6 +534,63 @@ fn a_catalog_whose_index_does_not_describe_its_units_is_rejected() {
 }
 
 #[test]
+fn a_version_written_for_parameters_is_left_out_by_a_refresh() {
+    let fixture = Fixture::new("parameters");
+    let node = fixture.unit("node", "@acme/node", &["1.0.0"]);
+    let catalog = fixture.catalog(&format!(r#""@acme/node": "{}""#, url(&node)));
+    commit_refresh(&fixture, &catalog);
+
+    // An index an earlier version wrote, with a manifest that still has
+    // `params`: the catalog cannot be used until it is refreshed.
+    let mut listed = index(&catalog);
+    listed["units"]["@acme/node"]["versions"]["1.0.0"]["manifest"]["params"] =
+        serde_json::json!({});
+    fs::write(
+        catalog.join("registry-index.json"),
+        serde_json::to_string_pretty(&listed).unwrap(),
+    )
+    .unwrap();
+    git(
+        &catalog,
+        &["commit", "-q", "-am", "Index of an earlier version"],
+    );
+    let rejected = fails(fixture.assemblr(&fixture.dir, &["registry", "add", &url(&catalog)]));
+    let err = stderr(&rejected);
+    assert!(
+        err.contains(
+            "lists a manifest for @acme/node 1.0.0 that this version of Assemblr does not accept"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("hint: the catalog's maintainer runs `assemblr catalog refresh`"),
+        "{err}"
+    );
+
+    // A refresh leaves out the version whose manifest has `params` and
+    // keeps the others.
+    fs::write(
+        node.join("manifest.jsonc"),
+        r#"{"name": "@acme/node", "version": "1.1.0", "description": "Node.",
+            "params": {"port": {"type": "integer", "description": "The port."}}}"#,
+    )
+    .unwrap();
+    git(&node, &["commit", "-q", "-am", "1.1.0"]);
+    git(&node, &["tag", "v1.1.0"]);
+    publish(&node, "@acme/node", "1.2.0");
+    git(&catalog, &["reset", "-q", "--hard", "HEAD~1"]);
+    commit_refresh(&fixture, &catalog);
+    let versions: Vec<String> = index(&catalog)["units"]["@acme/node"]["versions"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(versions, ["1.0.0", "1.2.0"]);
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "add", &url(&catalog)]));
+}
+
+#[test]
 fn a_local_catalog_is_read_as_committed() {
     let fixture = Fixture::new("local");
     let node = fixture.unit("node", "@acme/node", &["1.0.0"]);

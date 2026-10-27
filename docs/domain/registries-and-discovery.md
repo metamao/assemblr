@@ -779,7 +779,10 @@ assemblr catalog refresh [--no-commit]
   registered from a path or a URL.
 - Registering or synchronizing a catalog reads only the catalog, never its
   units' repositories. Each manifest its index lists must be valid and
-  declare the listed unit and version. A unit only catalogs declare is
+  declare the listed unit and version. One this version of Assemblr does
+  not accept, such as a manifest with `params` that an earlier version
+  indexed, is refused with a hint to run `catalog refresh`, which leaves
+  that version out ([placeholders](placeholders.md#removed)). A unit only catalogs declare is
   indexed with the versions their indexes list, with the listed commit and
   tree; a unit also registered directly is indexed from its own tags, and a
   catalog that lists another commit for one of its versions is rejected. Any

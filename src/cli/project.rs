@@ -13,10 +13,11 @@ use std::process::ExitCode;
 
 use assemblr::adapters::{
     BuildProblem, ComposeFailure, ComposeProblem, ComposeRecovery, Composed, DeclarationChange,
-    FileChange, GitErrorKind, InitProjectFailure, Registry, StoreError, WriteStep, abort_compose,
-    add_unit, compose_project, continue_compose, init_project, remove_unit, update_units,
+    FileChange, GitErrorKind, InitProjectFailure, ProjectStatus, Registry, StoreError, WriteStep,
+    abort_compose, add_unit, compose_project, continue_compose, init_project, project_status,
+    remove_unit, update_units,
 };
-use assemblr::domain::{LockChange, LockError, ResolutionError, UnitIdentity};
+use assemblr::domain::{LockChange, LockError, PlaceholderReport, ResolutionError, UnitIdentity};
 use clap::Args;
 
 #[derive(Debug, Args)]
@@ -182,7 +183,9 @@ pub(super) struct ComposeArgs {
 
 pub(super) fn compose(args: &ComposeArgs) -> ExitCode {
     if args.resume {
-        return settle(|root| continue_compose(root).map(|continued| report_continued(&continued)));
+        return settle(|root| {
+            continue_compose(root).map(|continued| report_continued(root, &continued))
+        });
     }
     if args.abort {
         return settle(|root| abort_compose(root).map(|recovery| report_aborted(&recovery)));
@@ -207,17 +210,26 @@ fn settle(operation: impl FnOnce(&Path) -> Result<(), ComposeFailure>) -> ExitCo
     }
 }
 
-fn report_continued(continued: &assemblr::adapters::Continued) {
+fn report_continued(root: &Path, continued: &assemblr::adapters::Continued) {
     if continued.completed() {
         println!("The composition was already finished; removed its journal.");
-        return;
+    } else {
+        println!(
+            "Resolved {} and finished the composition; assemblr-lock.json is updated.",
+            count(continued.files().len(), "file", "files")
+        );
+        for path in continued.files() {
+            println!("  resolved {path}");
+        }
     }
-    println!(
-        "Resolved {} and finished the composition; assemblr-lock.json is updated.",
-        count(continued.files().len(), "file", "files")
-    );
-    for path in continued.files() {
-        println!("  resolved {path}");
+    // The placeholders were hidden while the composition waited. The
+    // report is informational, so a registry that cannot be read only
+    // leaves it out; `assemblr status` says why.
+    let status = Registry::locate()
+        .ok()
+        .and_then(|registry| project_status(root, &registry).ok());
+    if let Some(report) = status.as_ref().and_then(ProjectStatus::placeholders) {
+        report_placeholders(report);
     }
 }
 
@@ -384,15 +396,23 @@ fn report(composed: &Composed, named: Option<&[UnitIdentity]>, verbose: bool) {
     summarize(composed, named);
     // The placeholders are hidden while the composition waits, as `status`
     // hides the edits then.
-    if let Some(report) = composed.placeholders().filter(|report| !report.is_empty()) {
-        println!();
-        println!("{}", placeholders::heading(report));
-        for line in placeholders::body(report) {
-            println!("{line}");
-        }
-        eprintln!();
-        eprintln!("hint: {}", placeholders::HINT);
+    if let Some(report) = composed.placeholders() {
+        report_placeholders(report);
     }
+}
+
+/// The placeholders that remain, after a composition's summary.
+fn report_placeholders(report: &PlaceholderReport) {
+    if report.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}", placeholders::heading(report));
+    for line in placeholders::body(report) {
+        println!("{line}");
+    }
+    eprintln!();
+    eprintln!("hint: {}", placeholders::HINT);
 }
 
 /// The result of a composition that does not wait for the consumer.

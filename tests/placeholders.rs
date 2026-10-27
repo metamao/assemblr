@@ -268,6 +268,36 @@ fn add_reports_the_placeholders_of_the_composition_it_writes() {
 }
 
 #[test]
+fn the_report_waits_for_the_conflicts_and_comes_with_continue() {
+    let fixture = Fixture::new("continue");
+    publish_units(&fixture, [0, 1, 2]);
+    let shop = project(&fixture, "shop", "");
+    // A README the consumer had already: the unit's conflicts with it.
+    fs::write(shop.join("README.md"), "# Notes\n").unwrap();
+    let output = fixture.assemblr(&shop, &["add", "@acme/app"]);
+    let out = stdout(&output);
+    assert!(out.contains("README.md"), "{out}");
+    assert!(!out.contains("placeholder"), "{out}");
+    assert_eq!(status_json(&fixture, &shop)["placeholders"], json!(null));
+
+    fs::write(shop.join("README.md"), "# __APP_NAME__\n\nNotes.\n").unwrap();
+    let output = succeeds(fixture.assemblr(&shop, &["compose", "--continue"]));
+    let out = stdout(&output);
+    assert!(
+        out.contains(
+            "1 placeholder to replace, in 2 files:\n\n  __APP_NAME__\n\n    @acme/app: The \
+             application's name, in kebab-case.\n      README.md:1\n      package.json:2\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        stderr(&output).contains("hint: replace each placeholder"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn the_report_does_not_depend_on_registration_or_declaration_order() {
     let outputs: Vec<(String, Value)> = [([0, 1, 2], true), ([2, 1, 0], false)]
         .into_iter()

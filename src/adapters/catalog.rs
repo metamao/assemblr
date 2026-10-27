@@ -25,7 +25,7 @@ use super::git::{
 };
 use super::jsonc::{self, Json, SyntaxError};
 use super::jsonc_edit::apply;
-use super::manifest::read_manifest;
+use super::manifest::{ReadManifestError, read_manifest};
 use super::registry::{
     Problem, ReferenceError, Registry, TagProblem, catalog_reference, observe_tags,
 };
@@ -1020,8 +1020,15 @@ pub(crate) fn read_catalog_at(
                     "the manifest it lists for {identity} {version} {detail}"
                 ))
             };
-            let manifest = read_manifest(&listed.to_string())
-                .map_err(|error| invalid(format!("is invalid: {error}")))?;
+            // Such as one written for parameters, which a refresh by this
+            // version leaves out with the version.
+            let manifest = read_manifest(&listed.to_string()).map_err(|error| {
+                CatalogProblem::UnreadableManifest {
+                    unit: identity.clone(),
+                    version: version.clone(),
+                    error: Box::new(error),
+                }
+            })?;
             if manifest.name() != identity {
                 return Err(invalid(format!("declares {}", manifest.name())));
             }
@@ -1138,6 +1145,16 @@ pub enum CatalogProblem {
     InvalidIndex(String),
     /// The committed index is not the one for the committed declaration.
     StaleIndex(String),
+    /// The index lists a manifest this version of Assemblr does not accept,
+    /// such as one an earlier version indexed.
+    UnreadableManifest {
+        /// The unit.
+        unit: UnitIdentity,
+        /// The version.
+        version: Version,
+        /// Why the manifest is not accepted.
+        error: Box<ReadManifestError>,
+    },
     /// A declared reference cannot be a repository reference.
     Reference {
         /// The unit.
@@ -1151,7 +1168,10 @@ impl CatalogProblem {
     /// Whether running `catalog refresh` in the catalog, and committing and
     /// pushing the result, is what fixes it.
     pub fn needs_refresh(&self) -> bool {
-        matches!(self, Self::NoIndex | Self::StaleIndex(_))
+        matches!(
+            self,
+            Self::NoIndex | Self::StaleIndex(_) | Self::UnreadableManifest { .. }
+        )
     }
 }
 
@@ -1171,6 +1191,15 @@ impl fmt::Display for CatalogProblem {
             Self::StaleIndex(detail) => write!(
                 f,
                 "its {CATALOG_INDEX} does not match its {CATALOG_MANIFEST}: {detail}"
+            ),
+            Self::UnreadableManifest {
+                unit,
+                version,
+                error,
+            } => write!(
+                f,
+                "its {CATALOG_INDEX} lists a manifest for {unit} {version} that this version of \
+                 Assemblr does not accept: {error}"
             ),
             Self::Reference { unit, error } => write!(f, "{unit}: {error}"),
         }

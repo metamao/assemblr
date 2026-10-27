@@ -62,7 +62,7 @@ use super::identity::UnitIdentity;
 use super::manifest::{AmendmentDeclaration, Manifest};
 use super::merge::MergeFormat;
 use super::path::RelativePath;
-use super::placeholder::{PlaceholderDeclaration, declarations};
+use super::placeholder::{PlaceholderDeclaration, PlaceholderName, declarations};
 use super::resolution::{Requirer, ResolvedGraph};
 use super::text_merge::is_text;
 use super::version::Version;
@@ -247,8 +247,9 @@ impl<'a> ComposedFile<'a> {
 
     /// The placeholder declarations in the file's scope: those of its
     /// provider, of its amenders, and of the units each of them depends on,
-    /// sorted by placeholder and then unit. Only these placeholders are
-    /// reported in the file.
+    /// except the tokens the provider or an amender ignores, sorted by
+    /// placeholder and then unit. Only these placeholders are reported in
+    /// the file.
     pub fn placeholders(&self) -> &[PlaceholderDeclaration] {
         &self.placeholders
     }
@@ -884,13 +885,23 @@ fn compose_files<'a>(
                         .collect()
                 })
                 .unwrap_or_default();
-            let contributors = std::iter::once(member.identity).chain(
-                copies
-                    .into_iter()
-                    .flatten()
-                    .map(|(_, amender, _, _)| *amender),
-            );
-            let placeholders = declarations(contributors.flat_map(reach));
+            let contributors: Vec<&UnitIdentity> = std::iter::once(member.identity)
+                .chain(
+                    copies
+                        .into_iter()
+                        .flatten()
+                        .map(|(_, amender, _, _)| *amender),
+                )
+                .collect();
+            // A token a contributor ignores is not a placeholder in this
+            // file, whoever else declares it.
+            let ignored: BTreeSet<&PlaceholderName> = contributors
+                .iter()
+                .filter_map(|unit| members.get(*unit))
+                .flat_map(|member| member.manifest.placeholders().ignore())
+                .collect();
+            let mut placeholders = declarations(contributors.iter().copied().flat_map(reach));
+            placeholders.retain(|declaration| !ignored.contains(declaration.placeholder()));
             files.insert(
                 path.clone(),
                 ComposedFile {
@@ -1003,6 +1014,8 @@ mod tests {
         dependencies: Vec<(&'static str, &'static str)>,
         /// Declared placeholders.
         placeholders: Vec<&'static str>,
+        /// Tokens listed in `ignore`.
+        ignored: Vec<&'static str>,
         files: Vec<(&'static str, Vec<u8>, bool)>,
         /// Declared amendments: path, provider, and base version.
         amendments: Vec<(&'static str, &'static str, &'static str)>,
@@ -1017,6 +1030,7 @@ mod tests {
                 version,
                 dependencies: Vec::new(),
                 placeholders: Vec::new(),
+                ignored: Vec::new(),
                 files: Vec::new(),
                 amendments: Vec::new(),
                 copies: Vec::new(),
@@ -1057,6 +1071,12 @@ mod tests {
             self
         }
 
+        /// Lists `token` in `ignore`.
+        fn ignores(mut self, token: &'static str) -> Self {
+            self.ignored.push(token);
+            self
+        }
+
         /// Adds a file whose contents name the unit and the path.
         fn file(self, file: &'static str) -> Self {
             let contents = format!("{} {file}", self.name).into_bytes();
@@ -1079,7 +1099,10 @@ mod tests {
                         )
                     })
                     .collect(),
-                Default::default(),
+                self.ignored
+                    .iter()
+                    .map(|token| PlaceholderName::parse(token).unwrap())
+                    .collect(),
             )
             .unwrap();
             Manifest::new(
@@ -2261,6 +2284,40 @@ mod tests {
     }
 
     #[test]
+    fn a_token_a_contributor_ignores_is_out_of_the_file_s_scope() {
+        // The bundler unit's define is not a placeholder in its file, even
+        // when an amender brings a unit that declares the same token.
+        let units = vec![
+            Spec::new("@acme/vite", "1.0.0")
+                .ignores("__DEV__")
+                .file_with("vite.config.ts", b"define: __DEV__".to_vec(), false)
+                .file("index.html"),
+            Spec::new("@acme/flags", "1.0.0")
+                .declares("__DEV__")
+                .file("flags.json"),
+            Spec::new("@acme/app", "1.0.0")
+                .depends("@acme/vite", "^1")
+                .depends("@acme/flags", "^1")
+                .amends("vite.config.ts", "@acme/vite", "1.0.0")
+                .copy("vite.config.ts", "define: __DEV__, app")
+                .amends("index.html", "@acme/vite", "1.0.0")
+                .copy("index.html", "__DEV__"),
+        ];
+        let composed = run(&project(&[("@acme/app", "^1")]), &units).unwrap();
+        let scope = |file: &str| -> Vec<&str> {
+            composed
+                .placeholders
+                .iter()
+                .filter(|(path, _, _)| path == file)
+                .map(|(_, placeholder, _)| placeholder.as_str())
+                .collect()
+        };
+        assert!(scope("vite.config.ts").is_empty());
+        assert!(scope("index.html").is_empty());
+        assert_eq!(scope("flags.json"), ["__DEV__"]);
+    }
+
+    #[test]
     fn declaration_and_enumeration_order_never_change_the_outcome() {
         let succeeding = (
             project(&[("@metamao/bun-app", "^1"), ("@metamao/node", "^1")]),
@@ -2283,6 +2340,7 @@ mod tests {
                 let mut spec = spec.clone();
                 spec.dependencies.reverse();
                 spec.placeholders.reverse();
+                spec.ignored.reverse();
                 spec.files.reverse();
                 spec.amendments.reverse();
                 spec.copies.reverse();

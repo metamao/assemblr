@@ -43,7 +43,7 @@ pub use path::{RelativePath, RelativePathError, RelativePathErrorReason};
 pub use placeholder::{
     Location, PlaceholderCheck, PlaceholderDeclaration, PlaceholderError, PlaceholderList,
     PlaceholderName, PlaceholderNameError, PlaceholderReport, Placeholders, Remaining,
-    UnresolvedTokens, check_placeholders, declarations,
+    UnresolvedTokens, check_placeholders, declarations, first_on_each_line,
 };
 pub use project::{Project, ReconciliationState};
 pub use provenance::{ObjectId, Provenance};

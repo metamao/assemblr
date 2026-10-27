@@ -10,6 +10,7 @@
 //! from the lock in effect: the lockfile, or the one a composition waiting
 //! for its conflicts keeps.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -185,7 +186,7 @@ pub fn project_status(root: &Path, registry: &Registry) -> Result<ProjectStatus,
     let verified = current.is_some();
     // The managed files were read for the edits already; the ones whose
     // planned content holds a placeholder are searched. Without a stored
-    // listing to bound it, nothing else is read (Provisional (D-n)).
+    // listing to bound it, nothing else is read (Provisional (D-50)).
     let placeholders = current
         .as_ref()
         .zip(planned.as_ref())
@@ -194,7 +195,7 @@ pub fn project_status(root: &Path, registry: &Registry) -> Result<ProjectStatus,
                 current
                     .get(path)
                     .filter(|held| matches!(held.compared, Current::File(_)))
-                    .map(|held| held.bytes.clone())
+                    .map(|held| Cow::Borrowed(held.bytes.as_slice()))
             })
         });
     let up_to_date = match (&state, &effective, &planned) {

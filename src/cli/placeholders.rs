@@ -10,7 +10,7 @@
 
 use std::collections::BTreeSet;
 
-use assemblr::domain::{Location, PlaceholderReport, UnresolvedTokens};
+use assemblr::domain::{Location, PlaceholderReport, UnresolvedTokens, first_on_each_line};
 use serde_json::{Value, json};
 
 use super::diagnostic::count;
@@ -94,12 +94,9 @@ pub(super) fn tokens_body(tokens: &UnresolvedTokens) -> Vec<String> {
 
 /// One row per `path:line`, in order.
 fn location_lines(locations: &BTreeSet<Location>) -> Vec<String> {
-    let mut lines: Vec<String> = locations
-        .iter()
+    first_on_each_line(locations)
         .map(|location| format!("      {location}"))
-        .collect();
-    lines.dedup();
-    lines
+        .collect()
 }
 
 /// The hint for tokens a build or a publication finds undeclared.
