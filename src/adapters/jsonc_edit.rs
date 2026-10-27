@@ -791,18 +791,18 @@ mod tests {
     #[test]
     fn a_file_with_trailing_commas_gets_them_in_what_is_inserted() {
         // As Prettier writes JSONC by default.
-        let text = "{\n  \"dependencies\": {},\n  \"options\": {},\n}\n";
+        let text = "{\n  \"dependencies\": {},\n  \"amendments\": {},\n}\n";
         let object = Value::Object(vec![("name".to_owned(), s("a"))]);
         let result = edited(
             text,
             &[
                 insert("/dependencies", "@acme/a", s("^1.0.0"), None),
-                insert("/options", "@acme/a", object.clone(), None),
+                insert("/amendments", "@acme/a", object.clone(), None),
             ],
         );
         assert_eq!(
             result,
-            "{\n  \"dependencies\": {\n    \"@acme/a\": \"^1.0.0\",\n  },\n  \"options\": {\n    \
+            "{\n  \"dependencies\": {\n    \"@acme/a\": \"^1.0.0\",\n  },\n  \"amendments\": {\n    \
              \"@acme/a\": {\n      \"name\": \"a\",\n    },\n  },\n}\n"
         );
         // After a last member that has no comma of its own, in a file that

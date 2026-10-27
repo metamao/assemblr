@@ -207,7 +207,7 @@ output, and subprocess output as **untrusted**.
 ## 6. Errors and diagnostics
 
 - **Domain errors are typed.** Use enums that describe what went wrong in
-  domain terms, for example a source conflict, an options conflict, or a
+  domain terms, for example a source conflict, a path collision, or a
   dependency cycle, carrying the data needed to explain them.
 - **Infrastructure failures carry context**: which file, repository, or
   operation failed, and why.

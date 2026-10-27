@@ -1,6 +1,6 @@
 # 0014: `unit init`: repository discovery and initialization, the scaffold's writes, and the embedded manifest schema
 
-- **Status:** Accepted, point 3 amended by #115 and #120
+- **Status:** Accepted, point 3 amended by #115 and #120, the parameter rules of points 4 and 5 replaced by placeholders in [0036](0036-placeholders.md)
 - **Date:** 2026-10-21
 
 ## Context

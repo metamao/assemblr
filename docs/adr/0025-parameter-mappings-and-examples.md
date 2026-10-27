@@ -1,6 +1,6 @@
 # 0025: Parameter mappings and examples: option values as a union, values decided from dependents to dependencies, and development values
 
-- **Status:** Accepted
+- **Status:** Superseded by [0036](0036-placeholders.md)
 - **Date:** 2026-10-22
 
 ## Context

@@ -10,8 +10,8 @@ defines what a diagnostic must contain; this file defines how it reads.
 1. **Write for someone who has not read `docs/domain/`.** Use plain words
    and sentences of 20 words or fewer, 25 at most. One idea per sentence.
 2. **Use one term per concept, from the user glossary:** unit, project,
-   registry, version, requirement, option, parameter, amendment, conflict,
-   build, lockfile. Internal terms stay internal: reconciliation base,
+   registry, version, requirement, placeholder, amendment, conflict, build,
+   lockfile. Internal terms stay internal: reconciliation base,
    explicit selection, the root, requirer, declared composition. An argument
    that names a unit is a "unit" (`<UNIT>`), never an "identity".
 3. **Write errors in three parts, as rustc and Git do.**
@@ -49,7 +49,6 @@ A unit test in `src/cli/mod.rs` checks rule 6 for every command summary.
 | --- | --- | --- |
 | `compose` summary | Compose the consumer project in the current directory from the units its assemblr.jsonc declares, or settle a composition that left conflicts in files with --continue or --abort | Compose the project from assemblr.jsonc |
 | Below the project | `error: …/app/sub/assemblr.jsonc does not exist` and a hint suggesting `assemblr init` | `error: no assemblr.jsonc in …/app/sub`, `note: nothing was changed`, `hint: the project is in …/app; run the command there` |
-| A required value | `error: required parameter appName of @acme/base 1.0.0 has no value and no default; it must be supplied by the root` | `error: @acme/base 1.0.0 needs a value for appName, which has no default; …`, `hint: run assemblr add @acme/base --option appName=<value>, …` |
 | Compose result | `Reconciled the project with 1 unit (2 file(s)): created 2, modified 0, merged 0, removed 0; the reconciliation base sha256-v1:… is stored in .assemblr/.` | `Composed 1 unit into 2 files: 2 created.` |
 
 ## Sources

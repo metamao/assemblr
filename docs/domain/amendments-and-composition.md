@@ -106,11 +106,11 @@ of the first amendments increment.
   The declaration is a member of the top-level **`amendments`** map, keyed by
   the path, whose value names the provider as `unit` and the base as `base`
   (see
-  [manifest.md](manifest.md#serialization-of-dependencies-options-params-and-amendments--approved)):
+  [manifest.md](manifest.md#serialization-of-dependencies-placeholders-and-amendments--approved)):
 
   ```jsonc
   "amendments": {
-    "wrangler.toml.assemblr.tmpl": { "unit": "@metamao/cloudflare-worker", "base": "2.1.0" }
+    "wrangler.toml": { "unit": "@metamao/cloudflare-worker", "base": "2.1.0" }
   }
   ```
 
@@ -166,61 +166,6 @@ composition error, not a pending-resolution state (**OC-47**), except a
 conflict between sibling amendments, which the owner reopened on #101: it is
 left in the project for the consumer to resolve, **Provisional (D-44)** (see
 [pending-resolution details](consumer-projects.md#pending-resolution-details--approved-d-18-sibling-conflicts-provisional-d-44)).
-
-## Template contexts — Approved
-
-Research established that values belonging to the original dependency must be
-kept distinct from values owned by the amending unit.
-
-- A file is rendered as a deterministic function of its source and its
-  **context**. A unit file's context is the resolved parameter values of the
-  unit that provides it (see
-  [parameters-and-options.md](parameters-and-options.md#rendering--approved)).
-- The namespace **`own.*`** is reserved for the amending author's **own**
-  context. `own` is not a valid parameter name, and it is defined only when an
-  amendment copy is rendered. Rendering unit files needs only that
-  reservation; the behavior below is a requirement on amendment composition.
-- An amendment copy is rendered with its base's context, the provider's
-  resolved parameter values, plus `own`: the amending unit's own resolved
-  parameter values, the same values its `src/` files see.
-- The original copy and the amended copy are rendered against **compatible
-  base contexts** before changes are derived, so that the derived changes
-  reflect the author's edits and not differences between contexts. Expressions
-  inherited from the provider render identically on both sides; what remains
-  is the author's edit, with the composition's `own` values.
-- An amendment copy is rendered exactly when its base file is. A template is
-  selected by the `.assemblr.tmpl` suffix of the provider's file (see
-  [units.md](units.md#templates)), and the copy at `amendments/<path>` keeps
-  that path, suffix included, so it inherits the outcome.
-- **Composing and updating are distinct operations.** A composition derives
-  and applies changes on **rendered** content, with the composition's own
-  contexts. `unit update` reconciles the **source templates**, the base at the
-  old version, the copy, and the base at the new version, so that the copy
-  keeps its template expressions, including `own.*` and content inside
-  template conditions that a particular composition disables.
-
-**Across provider versions — decided by the owner (#59).** When the resolved
-version of the provider is not the base, the copy's contribution is derived
-from the **base file** and the copy, both rendered with **one** context: the
-parameter values the composition gives the provider, with `own` as above. The
-contribution is then applied to the provider's file at the resolved version,
-rendered with the same context. Because the base and the copy are rendered
-alike, what is derived is the author's edit, and a difference between the two
-versions of the provider is the provider's own change. A parameter that a
-template names (the base file or the copy) must be declared at the resolved
-version with the same kind of value (string, integer, or boolean) as at the
-base; otherwise the composition fails, naming the amender, the parameter, and
-both versions, because the contribution cannot be told from the provider's
-change. Assemblr does not fall back to a default the base version declared:
-that would be a guess dressed as compatibility. A parameter whose meaning
-changes while its name and kind stay is not detected.
-
-Open:
-
-- Whether template constructs beyond references, such as conditional
-  content, are ever supported (see
-  [parameters-and-options.md](parameters-and-options.md#rendering--approved)).
-  **OC-5.**
 
 ## Merge semantics — Approved
 
@@ -332,8 +277,8 @@ such as `AGENTS.md`, could not be composed. The details are **Provisional
   another case, stay refused with several amenders (**Provisional (D-37)**).
   A file or copy that is not text stays refused. A single amender's copy
   keeps taking the file's place whole.
-- **Method.** The provider's file and each copy are rendered as for any
-  amendment, compared line by line (a line keeps its terminator), and each
+- **Method.** The provider's file and each copy are compared, as they
+  are, line by line (a line keeps its terminator), and each
   copy's changes against the verified base are combined. The result is the
   base with every amender's changes applied.
 - **Compatible changes.** Changes in different places are all kept. An
@@ -424,8 +369,7 @@ recorded in the decision log:
 - A copy whose derived operations do not reproduce its value when replayed
   on its base is not a formatting matter but a defect in the derivation, and
   it is an error naming the amender, never a warning.
-- The format is recognized by the delivered file's extension, after the
-  template suffix is removed: `.json` or `.jsonc` is JSON; `.xml` and
+- The format is recognized by the delivered file's extension: `.json` or `.jsonc` is JSON; `.xml` and
   `.json` or `.jsonc` in another case are structured formats without an
   adapter; any other path, `.yaml`, `.yml`, `.toml`, and `.ini` included, is
   text. A consumer's reconciliation still treats YAML, TOML, and INI as
@@ -455,9 +399,8 @@ file are layered: the composition of a set of amenders is the composition of
 those below the set's maximal amenders, with the maximal amenders' changes
 derived against their own bases and combined on it, by [the merge
 engine](#the-merge-engine--approved) for a JSON or JSONC file and by line for
-text, with the provider's file and each copy rendered with the provider's
-values, the copy with its amender's as `own`. One amender whose base is the
-composition below it takes the file's place with its rendered copy, whatever
+text, on the files and copies as they are. One amender whose base is the
+composition below it takes the file's place with its copy, whatever
 the format, and no change is derived. A conflict between siblings is marked
 in the composition, and resolved by a unit above both that replaces the
 marker; a marker no amender above resolves is a conflict of the composition
@@ -473,7 +416,7 @@ unit gets the marked copy as its own amendment and resolves it. The other
 cases that cannot be applied fail explicitly, naming each amender, its
 version, the provider, the base, and the resolved version, and change
 nothing (standing default D2): a copy whose base cannot be reconstructed, a
-parameter that changed meaning, a path the provider no longer has, a
+path the provider no longer has, a
 provider file in a structured format without an adapter or that is not text
 that changed between the two versions, and such a file that siblings amend.
 `unit update` reconciles a unit's own amendments with their bases before and
@@ -541,16 +484,14 @@ until each amender had published again:
   bytes at the base and at the resolved version. YAML, TOML, and INI files are
   text here (owner decision on #92). Otherwise the
   composition is refused, with no fallback and no replacement.
-- **Rendering.** As described under
-  [template contexts](#template-contexts--approved).
 - **The unit's own build** keeps its rule: the declared base is the version the
   unit is locked to (`unit amend`, `unit build`). Only dependents' builds and
   consumer compositions apply across versions.
 - **Verification.** Every lockfile entry a base depends on is verified
   against the registry's record, as approved above, and every base file and
   copy is read from its immutable version. Results depend on the published
-  files and copies at the versions involved, the unit's own copies, and the
-  composition's values only, so they are deterministic.
+  files and copies at the versions involved and the unit's own copies only,
+  so they are deterministic.
 - **Visibility.** A successful cross-version application is an ordinary
   successful operation: it adds no note to a composition. A merge that is
   clean shows structural compatibility, not that the result is correct for the
@@ -559,19 +500,18 @@ until each amender had published again:
   each amendment applied to another version of its provider than its base,
   whether or not the composition writes the file (**Provisional (D-31)**).
 - **`unit update`.** For each of the unit's own amendments, the base before
-  the update and the base after it are composed on the source templates. An
+  the update and the base after it are composed. An
   unchanged base carries the copy over untouched, its declared base following
   the lock. A base that changed, because the provider moved or a unit below
   did, **rebases** the copy: the base before, the copy, and the base after are
-  merged three ways, by value for a JSON or JSONC file that is not a template
-  and by line otherwise, neither side taking precedence, except that
+  merged three ways, by value for a JSON or JSONC file and by line
+  otherwise, neither side taking precedence, except that
   insertions both make at one position are both kept with the base's first,
   as in a composition. What both the copy and the update change is left in
   the copy between markers, `current` for the copy and `incoming` for the
   base after the update, and reported; the declared base, the copy, and the
   lock change together, and the author resolves the markers before the next
-  build. Source templates are merged as text, never as structured documents,
-  since a template need not be one before it is rendered. For a file with no
+  build. For a file with no
   merge or that is not text whose base changed, the update writes nothing and
   says so.
 
@@ -602,4 +542,3 @@ to avoid them, and implementations must not reintroduce them:
 - Format-preserving writers can produce documents that are syntactically valid
   but semantically wrong.
 - Several changes to the same code expression may conflict intrinsically.
-- Changes hidden by disabled template conditions can silently disappear.

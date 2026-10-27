@@ -129,29 +129,10 @@ same conceptual lifecycle. There are **no** author-facing file classes such as
 the former `derived` and `scaffold` distinction, and they must not be
 reintroduced.
 
-Unit file contents may be customized by the unit's parameters through template
-interpolation. Parameters never change file paths or file existence (see
-[parameters-and-options.md](parameters-and-options.md#what-parameters-must-not-do--approved)).
-
-#### Templates
-
-- A `src/` file whose name ends in **`.assemblr.tmpl`** is a template. It is
-  delivered at its path without that suffix, `src/package.json.assemblr.tmpl`
-  as `package.json`, with its parameter references rendered (see
-  [parameters-and-options.md](parameters-and-options.md#rendering--approved)).
-  Every other file is delivered byte for byte, whatever it contains. A name
-  ending in `.tmpl` alone, or containing the suffix anywhere but at the end,
-  is an ordinary file.
-- The suffix is matched exactly and case-sensitively, at the end of the
-  file's name only. The delivered path must itself be a valid path under the
-  rules below: a bare `.assemblr.tmpl`, or a template whose delivered name
-  would end in a dot, is rejected.
-- The suffix is a rendering switch, not a file class. A template follows the
-  same lifecycle as every other unit file, and in a consumer project its
-  delivered file is a starting point like any other.
-- An amendment copy of a template keeps the provider's path, suffix
-  included, so it is rendered exactly when its base is (see
-  [amendments-and-composition.md](amendments-and-composition.md#template-contexts--approved)).
+Every unit file is delivered byte for byte: Assemblr never renders or
+substitutes anything in it. A value each project sets stays in the file as
+a declared **placeholder** that the consumer replaces (see
+[placeholders.md](placeholders.md)).
 
 In a consumer project, files delivered from `src/` are starting points that
 the consumer may modify. They are reconciled like every other contribution
@@ -180,9 +161,6 @@ Path collisions:
 - If two different units in one composition deliver a file at the same path
   from their `src/` directories, composition fails with an explicit **path
   collision** error that names both units and the path.
-- Collisions are checked on **delivered** paths: `package.json` from one unit
-  and `package.json.assemblr.tmpl` from another collide, and the error names
-  both source paths.
 - This holds whether the units are independent or one depends on the other.
   Neither unit wins by declaration order, dependency order, or any other
   priority, and the two files are never merged automatically.
@@ -238,7 +216,7 @@ low-level merge operations. Assemblr derives the changes. See
   file, and never changes its executable bit.
 - Each amendment is declared in the manifest's `amendments` map, under its
   path, with the dependency's identity and the exact base version (see
-  [manifest.md](manifest.md#serialization-of-dependencies-options-params-and-amendments--approved)).
+  [manifest.md](manifest.md#serialization-of-dependencies-placeholders-and-amendments--approved)).
   A copy that is not declared, and a declaration without a copy, are both
   errors: an undeclared copy has no base.
 - `unit amend` creates the copy and the declaration (see

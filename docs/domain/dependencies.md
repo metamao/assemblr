@@ -9,7 +9,7 @@
   layout, catalog membership, or registry structure.
 
 `dependencies` is a map from identity to SemVer requirement (see
-[manifest.md](manifest.md#serialization-of-dependencies-options-params-and-amendments--approved)).
+[manifest.md](manifest.md#serialization-of-dependencies-placeholders-and-amendments--approved)).
 
 ## Resolution — Approved
 

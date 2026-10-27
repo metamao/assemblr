@@ -257,8 +257,9 @@ fn report_aborted(recovery: &ComposeRecovery) {
 }
 
 /// Runs `operation` on the project in the current directory and reports
-/// it. `unit` is the unit `add` or `remove` was given; `named` holds the units `update` was asked to update, which
-/// the report tells apart from the ones that moved with them; and `verbose`
+/// it. `unit` is the unit `add` or `remove` was given; `named` holds the
+/// units `update` was asked to update, which the report tells apart from the
+/// ones that moved with them; and `verbose`
 /// says whether `--verbose` was given.
 fn run_with(
     unit: Option<&UnitIdentity>,

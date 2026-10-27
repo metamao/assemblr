@@ -89,11 +89,11 @@ Every other service that uses the unit gets the same update the same way.
 | --- | --- |
 | **Unit** | A Git repository with a `manifest.jsonc` and the files to deliver under `src/`. Its name looks like `@owner/name`. |
 | **Version** | A published state of a unit, stored as a Git tag such as `v1.1.0`. It never changes once published. |
-| **Project** | Any directory with an `assemblr.jsonc` that lists the units it uses and their options. |
+| **Project** | Any directory with an `assemblr.jsonc` that lists the units it uses. |
 | **Registry** | The list of units this machine knows, kept on this machine. |
 | **Catalog** | A Git repository that lists units, so one command registers all of them. |
 | **Amendment** | A unit's change to a file that one of the units it builds on delivers. |
-| **Option** | A value a project sets for a unit's parameter, such as `name=orders-api`. |
+| **Placeholder** | A token such as `__APP_NAME__` that a unit's files hold for a value each project sets. The project replaces it in its own files. |
 
 **There is no hosted registry or package manager.** Assemblr only knows the
 units in your local registry, and you decide what goes in it. Assemblr gives
@@ -205,7 +205,7 @@ To upgrade, run `git pull` in the clone and repeat step 2.
 
 ## Create a unit
 
-The examples use the placeholder owner `acme`. Replace the names and URLs with
+The examples use the owner `acme`. Replace the names and URLs with
 your own.
 
 1. **Create it.** This makes a `rust-service/` directory with a manifest, a
@@ -219,15 +219,19 @@ your own.
 2. **Add your files** under `src/`. Each file is delivered to projects at the
    same path, so `src/Dockerfile` becomes the project's `Dockerfile`.
 
-   To fill in a value per project, add the `.assemblr.tmpl` suffix, as in
-   `src/Dockerfile.assemblr.tmpl`, and write `{{ name }}` where the value
-   goes. Declare the parameter in `manifest.jsonc`:
+   A value each project sets, such as the binary's name, stays in the file
+   as a placeholder like `__BINARY_NAME__`. Declare it in `manifest.jsonc`
+   with a description of the value to write:
 
    ```jsonc
-   "params": {
-     "name": { "type": "string", "description": "The binary name.", "example": "my-service" }
+   "placeholders": {
+     "replace": { "__BINARY_NAME__": "The binary's name, in kebab-case." }
    }
    ```
+
+   Assemblr never fills a placeholder in. It delivers the file as it is and
+   tells each project which placeholders it still has to replace. Put them
+   in values, never in file names or JSON keys.
 
 3. **Build on other units** (optional). Add a unit from your registry as a
    dependency, such as `@acme/rust-base`, then copy one of its files to
@@ -330,7 +334,7 @@ the version with `assemblr registry sync`.
    ```
 
    Then `assemblr search rust` and `assemblr info @acme/rust-service` show
-   what is available and which options a unit needs.
+   what is available and which placeholders a unit's files hold.
 
 2. **Create the project in a new, empty directory:**
 
@@ -351,11 +355,13 @@ the version with `assemblr registry sync`.
    builds on, into the project:
 
    ```sh
-   assemblr add @acme/rust-service --option name=orders-api
+   assemblr add @acme/rust-service
    ```
 
-   If the unit needs a value you did not give, the error says which one and
-   shows the command to run.
+   The result lists each placeholder left to replace, with its description
+   and where it is, such as `__BINARY_NAME__` in `Dockerfile`. Replace each
+   one with your value, such as `orders-api`. `assemblr status` shows the
+   ones that remain.
 
 4. **Commit** the files, including `assemblr-lock.json` and `.assemblr/`.
    From here on, edit the delivered files freely: they are yours.
@@ -395,7 +401,7 @@ Assemblr is designed so that coding agents can use it as well as people can.
 | `assemblr unit` | Create, build, check, amend, update, and publish units |
 | `assemblr catalog` | Create a catalog and add, remove, or refresh its units |
 | `assemblr registry` | Register, list, sync, and remove units and catalogs |
-| `assemblr search` / `info` | Find units and show their versions and parameters |
+| `assemblr search` / `info` | Find units and show their versions and placeholders |
 | `assemblr init` | Create a project's `assemblr.jsonc` |
 | `assemblr add` / `remove` | Add or remove a unit and compose the project |
 | `assemblr update` | Move units to the newest versions allowed |

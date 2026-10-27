@@ -1,6 +1,6 @@
 # 0016: The first consumer `compose`: the project root, the lockfile's reconciliation state, the stored base, ignore rules, and the journal
 
-- **Status:** Accepted, points 7 and 9 extended by 0017, point 6 revised by 0018, point 8 extended by 0019
+- **Status:** Accepted, points 7 and 9 extended by 0017, point 6 revised by 0018, point 8 extended by 0019, the options of points 1 and 2 removed by [0036](0036-placeholders.md)
 - **Date:** 2026-10-21
 
 ## Context

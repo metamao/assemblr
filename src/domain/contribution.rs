@@ -3,11 +3,10 @@
 //! `docs/domain/authoring-workflow.md`).
 //!
 //! A unit contributes through the files it introduces, the dependencies it
-//! aggregates, the amendments it makes to its dependencies' files, and the
-//! options it sets on them. Aggregation counts: a unit whose purpose is to
-//! compose other units into one reusable dependency contributes that
-//! composition, whatever its size. Since amendments and options presuppose a
-//! dependency, a unit is without contribution exactly when it delivers no
+//! aggregates, and the amendments it makes to its dependencies' files.
+//! Aggregation counts: a unit whose purpose is to compose other units into
+//! one reusable dependency contributes that composition, whatever its size.
+//! Since amendments presuppose a dependency, a unit is without contribution exactly when it delivers no
 //! file and declares no dependency.
 //!
 //! An amendment whose copy is the provider's file byte for byte is
