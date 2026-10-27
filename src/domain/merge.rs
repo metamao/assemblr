@@ -33,7 +33,7 @@
 //! operations, and conflicts are ordered, never taken in the order they were
 //! read.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use super::identity::UnitIdentity;
@@ -564,8 +564,8 @@ pub enum Edit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     /// The edits, in the order they apply: parents before their members,
-    /// and members added after one anchor in amender order, each after the
-    /// one before it.
+    /// an added member before the ones added after it, and members added
+    /// after one anchor in amender order, each after the one before it.
     pub edits: Vec<Edit>,
     /// The value the edited file must hold.
     pub result: Value,
@@ -593,6 +593,7 @@ pub fn plan<A: Ord + Clone>(
         };
         key(a).cmp(&key(b))
     });
+    let operations = anchors_first(operations);
     let mut result = target.clone();
     let mut edits = Vec::new();
     let mut conflicts = Vec::new();
@@ -697,6 +698,59 @@ pub fn plan<A: Ord + Clone>(
         conflicts.sort();
         Err(conflicts)
     }
+}
+
+/// Moves each addition anchored to another addition right after it. The
+/// members of a new object are each anchored to the one before them, and
+/// the sort orders by the anchor's name, not by its place in the copy: an
+/// addition that came before its anchor would be planned after a member
+/// the file does not hold yet (#138). Everything else keeps its sorted
+/// place, so the order still never depends on the order of derivation.
+fn anchors_first<A>(operations: Vec<Combined<A>>) -> Vec<Combined<A>> {
+    let anchor_of = |entry: &Combined<A>| {
+        let (_, parent) = entry.operation.path.split_last()?;
+        let after = entry.operation.after.as_ref()?;
+        let mut anchor = parent.to_vec();
+        anchor.push(after.clone());
+        Some(anchor)
+    };
+    // The additions not yet placed: an operation anchored to one of them
+    // waits for it.
+    let mut unplaced: BTreeSet<Path> = operations
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.operation.change,
+                ValueChange::Ensure | ValueChange::Add(_)
+            )
+        })
+        .map(|entry| entry.operation.path.clone())
+        .collect();
+    let mut waiting: BTreeMap<Path, Vec<Combined<A>>> = BTreeMap::new();
+    let mut ordered = Vec::with_capacity(operations.len());
+    for entry in operations {
+        match anchor_of(&entry) {
+            Some(anchor) if unplaced.contains(&anchor) => {
+                waiting.entry(anchor).or_default().push(entry);
+            }
+            _ => {
+                // Placing an addition releases the ones anchored to it, in
+                // their sorted order, each followed by its own.
+                let mut next = vec![entry];
+                while let Some(entry) = next.pop() {
+                    unplaced.remove(&entry.operation.path);
+                    if let Some(released) = waiting.remove(&entry.operation.path) {
+                        next.extend(released.into_iter().rev());
+                    }
+                    ordered.push(entry);
+                }
+            }
+        }
+    }
+    // Only additions anchored to each other in a cycle are left: they come
+    // last, in a fixed order, and the editor refuses them as before.
+    ordered.extend(waiting.into_values().flatten());
+    ordered
 }
 
 /// Why amendments cannot be combined, at one path.
@@ -992,6 +1046,52 @@ mod tests {
             ]
         );
         assert!(derived.reordered.is_empty());
+    }
+
+    #[test]
+    fn a_new_object_s_members_are_planned_after_the_members_they_follow() {
+        // Out of alphabetical order, as in a lockfile entry: sorting the
+        // additions by their anchor's name would plan `license` before
+        // `dev`, the member it follows (#138).
+        let base = package();
+        let entry = object(&[
+            ("version", s("2")),
+            ("resolved", s("u")),
+            ("integrity", s("s")),
+            ("dev", Value::Bool(true)),
+            ("license", s("MIT")),
+        ]);
+        let copy = with(&base, |members| {
+            members_mut(members, "dependencies").push(("zod".to_owned(), entry.clone()));
+        });
+        let sets = BTreeMap::from([(identity("@acme/a"), derive(&base, &copy).operations)]);
+        let combined = combine(&sets, Lists::Union).unwrap();
+
+        let planned = plan(&base, combined.clone()).unwrap();
+
+        assert_eq!(planned.result, copy);
+        let mut placed: Vec<Path> = Vec::new();
+        for edit in &planned.edits {
+            if let Edit::Insert {
+                parent, key, after, ..
+            } = edit
+            {
+                if let Some(after) = after {
+                    let mut anchor = parent.clone();
+                    anchor.push(after.clone());
+                    assert!(
+                        base.at(&anchor).is_some() || placed.contains(&anchor),
+                        "{key} is planned before {after}, the member it follows"
+                    );
+                }
+                let mut member = parent.clone();
+                member.push(key.clone());
+                placed.push(member);
+            }
+        }
+        // The order the operations come in changes nothing.
+        let reversed = plan(&base, combined.into_iter().rev().collect()).unwrap();
+        assert_eq!(reversed, planned);
     }
 
     #[test]
