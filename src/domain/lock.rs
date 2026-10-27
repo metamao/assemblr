@@ -616,8 +616,8 @@ mod tests {
     };
     use crate::domain::{
         AmendmentDeclaration, AvailableVersions, Dependencies, Description, Manifest, ObjectId,
-        Provenance, RegisteredUnit, RegistryIndex, RelativePath, SourceReference, UnitIdentity,
-        Version, resolve,
+        Placeholders, Provenance, RegisteredUnit, RegistryIndex, RelativePath, SourceReference,
+        UnitIdentity, Version, resolve,
     };
 
     fn identity(input: &str) -> UnitIdentity {
@@ -754,9 +754,7 @@ mod tests {
             version("0.1.0"),
             Description::new("An app.").unwrap(),
             requirements(range),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
+            Placeholders::default(),
             BTreeMap::from([(
                 "node.txt".parse().unwrap(),
                 AmendmentDeclaration::new(identity("@acme/node"), version(base)),
@@ -871,9 +869,7 @@ mod tests {
             version("0.1.0"),
             Description::new("An app.").unwrap(),
             requirements("^1"),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
+            Placeholders::default(),
             amendments,
         )
         .unwrap()
@@ -881,9 +877,9 @@ mod tests {
 
     #[test]
     fn consistent_published_amendments_have_no_problem() {
-        let manifest = amender(&["bin/run", "package.json.assemblr.tmpl"]);
+        let manifest = amender(&["bin/run", "package.json"]);
         let lock = lock(&[("@acme/node", "1.0.0", provenance('1', '2'))]);
-        let copies = [path("package.json.assemblr.tmpl"), path("bin/run")];
+        let copies = [path("package.json"), path("bin/run")];
         assert_eq!(
             published_amendments(&manifest, copies.iter(), Some(&lock)),
             []
@@ -943,7 +939,7 @@ mod tests {
     #[test]
     fn a_base_is_verified_against_the_registry_record() {
         let index = index(&provenance('1', '2'));
-        let manifest = amender(&["bin/run", "package.json.assemblr.tmpl"]);
+        let manifest = amender(&["bin/run", "package.json"]);
         let agreeing = lock(&[("@acme/node", "1.0.0", provenance('1', '2'))]);
         assert_eq!(
             verify_bases(
@@ -976,10 +972,7 @@ mod tests {
             published: provenance('5', '6'),
             recorded: provenance('1', '2'),
         };
-        assert_eq!(
-            errors,
-            [expected("bin/run"), expected("package.json.assemblr.tmpl")]
-        );
+        assert_eq!(errors, [expected("bin/run"), expected("package.json")]);
         let message = errors[0].to_string();
         for part in [
             "integrity conflict",

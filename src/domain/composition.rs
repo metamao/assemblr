@@ -1,38 +1,27 @@
-//! Composition of a resolved graph: the effective parameter values of every
-//! unit and the file tree the units' `src/` files compose into.
+//! Composition of a resolved graph: the file tree the units' `src/` files
+//! compose into.
 //!
 //! [`compose`] works on plain data: the resolved graph, each resolved unit's
-//! manifest and `src/` files, the root, and the values the root supplies. It
-//! either returns the composition or every problem that prevents it.
-//!
-//! # Parameter values
-//!
-//! A unit's parameter receives requirements from the `options` of the units
-//! that depend on it directly and, for an explicit selection, from the root.
-//! Each requirement must name a parameter the resolved version declares and
-//! satisfy its type. Identical requirements are compatible. Different ones
-//! are an options conflict: no requirer takes precedence, whatever its depth
-//! or declaration order. A parameter without requirements takes its default.
-//! One without a default is required, and the error names who must supply
-//! it: the units that depend on it directly, and the root when it is an
-//! explicit selection or the unit being built. A unit never configures a
-//! transitive dependency, and neither does the root.
+//! manifest and `src/` files, and the root. It either returns the
+//! composition or every problem that prevents it.
 //!
 //! # Files
 //!
 //! The composed file tree is the union of the units' `src/` files, each
-//! recording the unit that contributed it, keyed by the path the file is
-//! **delivered** at. A file whose name ends in [`TEMPLATE_SUFFIX`] is a
-//! template: it is delivered at its path without the suffix, and rendered
-//! with its unit's parameter values when the composition is written. Every
-//! other file is opaque bytes with an executable bit, delivered unchanged.
-//! Two files collide when their delivered paths are equal or differ only in
-//! case or in Unicode normalization, which some file systems cannot keep
-//! apart, or when one file's delivered path is a directory of another's
+//! recording the unit that contributed it, keyed by its path. Every file is
+//! opaque bytes with an executable bit, delivered unchanged: nothing is
+//! rendered or substituted. Two files collide when their paths are equal or
+//! differ only in case or in Unicode normalization, which some file systems
+//! cannot keep apart, or when one file's path is a directory of another's
 //! under the same comparison. Case is compared one character at a time, by
 //! simple (one-to-one) case mappings, as case-insensitive file systems
 //! compare it (see `collision_key`). Every collision is reported, whether
 //! the units are independent or one depends on the other, and no unit wins.
+//!
+//! Each composed file also records the placeholder declarations in its
+//! scope: those of the units that contribute it, its provider and its
+//! amenders, and of the units each of them depends on, directly or
+//! transitively (see `docs/domain/placeholders.md`).
 //!
 //! # Amendments
 //!
@@ -41,25 +30,25 @@
 //! unit from its published version. Its manifest declares each amended path
 //! with the provider and the exact base version, and the edited copy lives
 //! at `amendments/<path>` (see `docs/domain/amendments-and-composition.md`).
-//! The copy takes the place of the provider's file, at the provider's
-//! delivered path and with the provider's executable bit, and it is a
-//! template exactly when the provider's file is. An amendment's base is
-//! layered: the provider's file as the amenders below the amender, those
-//! in its dependency closure, compose it. The composition records, for each
+//! The copy takes the place of the provider's file, at the provider's path
+//! and with the provider's executable bit. An amendment's base is layered:
+//! the provider's file as the amenders below the amender, those in its
+//! dependency closure, compose it. The composition records, for each
 //! amendment, which other amenders of the file lie below its amender
-//! ([`Amendment::below`]); layering the copies is the composer's business. A member's copy is taken from the provider version
-//! its declaration names; when the provider resolves to another, the
-//! composer applies the copy's changes to the file at the resolved version
-//! ([`Amendment::base`] says which version the copy was taken from), except
-//! for the unit being built, whose declared base must be the version it is
-//! locked to. A declaration whose copy is missing, a copy that is not
-//! declared, and a copy of a file the provider does not have at the version
-//! resolved are errors. Several members may amend one file of one provider
-//! when the composer can combine their copies (JSON and JSONC by value, other
-//! text by line): their copies are carried with their bases, and the
-//! combining is the composer's business. When it cannot (a structured format
-//! without a merge, or content that is not text), none is applied and the
-//! members are reported together. Whether a base is the content the registry
+//! ([`Amendment::below`]); layering the copies is the composer's business.
+//! A member's copy is taken from the provider version its declaration
+//! names; when the provider resolves to another, the composer applies the
+//! copy's changes to the file at the resolved version ([`Amendment::base`]
+//! says which version the copy was taken from), except for the unit being
+//! built, whose declared base must be the version it is locked to. A
+//! declaration whose copy is missing, a copy that is not declared, and a
+//! copy of a file the provider does not have at the version resolved are
+//! errors. Several members may amend one file of one provider when the
+//! composer can combine their copies (JSON and JSONC by value, other text
+//! by line): their copies are carried with their bases, and the combining
+//! is the composer's business. When it cannot (a structured format without
+//! a merge, or content that is not text), none is applied and the members
+//! are reported together. Whether a base is the content the registry
 //! records is verified by the build, not here.
 //!
 //! Every problem is reported, in the order [`compose`] documents.
@@ -70,42 +59,16 @@ use std::fmt;
 use unicode_normalization::UnicodeNormalization;
 
 use super::identity::UnitIdentity;
-use super::manifest::{
-    AmendmentDeclaration, InheritanceError, Manifest, OptionValue, OptionValues,
-};
+use super::manifest::{AmendmentDeclaration, Manifest};
 use super::merge::MergeFormat;
-use super::parameter::{
-    ParameterDefinition, ParameterName, ParameterType, ParameterValue, ParameterValueError,
-};
-use super::path::{RelativePath, RelativePathError};
+use super::path::RelativePath;
+use super::placeholder::{PlaceholderDeclaration, PlaceholderName, declarations};
 use super::resolution::{Requirer, ResolvedGraph};
 use super::text_merge::is_text;
 use super::version::Version;
 
 /// A unit's `src/` files, by path relative to `src/`.
 pub type FileTree = BTreeMap<RelativePath, UnitFile>;
-
-/// The suffix that selects a `src/` file for template rendering. It is
-/// matched exactly, case-sensitively, at the end of the file's name, and it
-/// is removed from the delivered path: `package.json.assemblr.tmpl` is
-/// delivered as `package.json`. A name ending in `.tmpl` alone is an
-/// ordinary file.
-pub const TEMPLATE_SUFFIX: &str = ".assemblr.tmpl";
-
-/// Where a `src/` file is delivered: `Ok(None)` for an ordinary file, at its
-/// own path; `Ok(Some(path))` for a template, at its path without
-/// [`TEMPLATE_SUFFIX`]; and an error when removing the suffix leaves a name
-/// that is not a valid path, such as a bare `.assemblr.tmpl`, or
-/// `notes..assemblr.tmpl`, whose delivered name would end in a dot.
-pub fn delivered_path(source: &RelativePath) -> Result<Option<RelativePath>, RelativePathError> {
-    match source.as_str().strip_suffix(TEMPLATE_SUFFIX) {
-        None => Ok(None),
-        Some(delivered) => RelativePath::parse(delivered).map(Some),
-    }
-}
-
-/// The effective value of each of a unit's parameters.
-pub type ParameterValues = BTreeMap<ParameterName, ParameterValue>;
 
 /// One file of a unit: its bytes and whether it is executable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,55 +122,39 @@ impl<'a> UnitContent<'a> {
 /// What the resolved graph is composed for.
 #[derive(Debug, Clone, Copy)]
 pub enum Root<'a> {
-    /// A consumer project. Its explicit selections are the graph's root
-    /// requirements, and its values may configure only them.
+    /// A consumer project, whose explicit selections are the graph's root
+    /// requirements.
     Project,
     /// A unit built from its working tree. Its manifest declares the graph's
-    /// root requirements, it is composed with its dependencies, and the
-    /// root's values may configure only it.
+    /// root requirements, and it is composed with its dependencies.
     Unit(UnitContent<'a>),
 }
 
 /// Composes `graph` for `root`.
 ///
 /// `units` holds the content of every resolved unit at its resolved version;
-/// entries for identities outside the graph are ignored. `root_values` holds
-/// the values the root supplies, by the unit they configure: the project's
-/// `options` for a consumer project, or the values a unit build receives for
-/// the unit being built. On failure every problem is reported: each cause
-/// once, in this order, each kind sorted by unit, parameter or path, and then
-/// requirer:
+/// entries for identities outside the graph are ignored. On failure every
+/// problem is reported: each cause once, in this order, each kind sorted by
+/// unit or path, and then by amender:
 ///
 /// 1. content that does not match the resolved graph;
-/// 2. root values for a unit the root may not configure;
-/// 3. requirements naming undeclared parameters or holding invalid values;
-/// 4. options conflicts;
-/// 5. missing required values;
-/// 6. provider files that several members amend, by provider and path;
-/// 7. amendments that cannot be applied, and copies that are not declared,
+/// 2. provider files that several members amend, by provider and path;
+/// 3. amendments that cannot be applied, and copies that are not declared,
 ///    by amender and then path;
-/// 8. templates whose delivered path is invalid;
-/// 9. path collisions.
+/// 4. path collisions.
 ///
-/// A parameter whose requirements are invalid is not also reported as
-/// missing or conflicting, and a declaration of a provider file that
-/// several members amend is not also checked on its own. An amendment that
-/// cannot be applied leaves the provider's file in place, so collisions are
-/// still found.
+/// A declaration of a provider file that several members amend is not also
+/// checked on its own. An amendment that cannot be applied leaves the
+/// provider's file in place, so collisions are still found.
 pub fn compose<'a>(
     graph: &ResolvedGraph,
     root: Root<'a>,
     units: &BTreeMap<UnitIdentity, UnitContent<'a>>,
-    root_values: &BTreeMap<UnitIdentity, OptionValues>,
 ) -> Result<Composition<'a>, Vec<CompositionError>> {
     let members = members(graph, root, units)?;
-    let mut errors = root_target_errors(graph, root, &members, root_values);
-    let (values, parameter_errors) = parameter_values(graph, root, &members, root_values);
-    errors.extend(parameter_errors);
-    let (files, collisions) = compose_files(&members);
-    errors.extend(collisions);
+    let (files, errors) = compose_files(&members);
     if errors.is_empty() {
-        Ok(Composition { values, files })
+        Ok(Composition { files })
     } else {
         Err(errors)
     }
@@ -216,18 +163,11 @@ pub fn compose<'a>(
 /// The result of composing a resolved graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Composition<'a> {
-    values: BTreeMap<UnitIdentity, ParameterValues>,
     files: BTreeMap<RelativePath, ComposedFile<'a>>,
 }
 
 impl<'a> Composition<'a> {
-    /// The effective parameter values of every composed unit, including the
-    /// unit being built. A unit without parameters has an empty entry.
-    pub fn values(&self) -> &BTreeMap<UnitIdentity, ParameterValues> {
-        &self.values
-    }
-
-    /// The composed file tree, by delivered path.
+    /// The composed file tree, by path.
     pub fn files(&self) -> &BTreeMap<RelativePath, ComposedFile<'a>> {
         &self.files
     }
@@ -237,13 +177,13 @@ impl<'a> Composition<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposedFile<'a> {
     unit: &'a UnitIdentity,
-    source: &'a RelativePath,
     contents: &'a [u8],
     executable: bool,
-    template: bool,
     /// The copies that amend the file, by amender, in requirer order: the
     /// unit being built first, then by identity.
     amendments: Vec<Amendment<'a>>,
+    /// The placeholder declarations in the file's scope.
+    placeholders: Vec<PlaceholderDeclaration>,
 }
 
 /// One amender's copy of a provider's file, with the version the copy was
@@ -286,16 +226,8 @@ impl<'a> ComposedFile<'a> {
         self.unit
     }
 
-    /// The file's path in that unit's `src/`. For a template it ends in
-    /// [`TEMPLATE_SUFFIX`], which the delivered path does not. For an
-    /// amended file it is also the copy's path under `amendments/`.
-    pub fn source(&self) -> &'a RelativePath {
-        self.source
-    }
-
-    /// The provider's bytes: the bytes to deliver, or, for a template, the
-    /// source to render with the providing unit's parameter values. An
-    /// amended file's copies are [`amendments`](Self::amendments).
+    /// The provider's bytes. An amended file's copies are
+    /// [`amendments`](Self::amendments).
     pub fn contents(&self) -> &'a [u8] {
         self.contents
     }
@@ -306,56 +238,20 @@ impl<'a> ComposedFile<'a> {
         self.executable
     }
 
-    /// Whether the file is a template, to be rendered before delivery.
-    pub fn is_template(&self) -> bool {
-        self.template
-    }
-
     /// The copies that amend the file, with their amenders, in a fixed
     /// order. One copy takes the file's place; several are combined by the
-    /// merge, on rendered content, by the composer. A copy of a template is
-    /// rendered with its amender's values as `own`, in addition to the
-    /// provider's.
+    /// merge, by the composer.
     pub fn amendments(&self) -> &[Amendment<'a>] {
         &self.amendments
     }
-}
 
-/// A value required for a parameter and who requires it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OptionRequirement {
-    requirer: Requirer,
-    value: ParameterValue,
-    /// The requirer's own parameter the value is mapped from, if it is a
-    /// mapping.
-    from: Option<ParameterName>,
-}
-
-impl OptionRequirement {
-    /// Who requires the value: the root, or a unit through its `options`.
-    pub fn requirer(&self) -> &Requirer {
-        &self.requirer
-    }
-
-    /// The required value.
-    pub fn value(&self) -> &ParameterValue {
-        &self.value
-    }
-
-    /// The requirer's own parameter the value is mapped from, when the
-    /// requirement is a mapping.
-    pub fn from(&self) -> Option<&ParameterName> {
-        self.from.as_ref()
-    }
-}
-
-impl fmt::Display for OptionRequirement {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} from {}", self.value, self.requirer)?;
-        if let Some(source) = &self.from {
-            write!(f, " (mapped from its `{source}`)")?;
-        }
-        Ok(())
+    /// The placeholder declarations in the file's scope: those of its
+    /// provider, of its amenders, and of the units each of them depends on,
+    /// except the tokens the provider or an amender ignores, sorted by
+    /// placeholder and then unit. Only these placeholders are reported in
+    /// the file.
+    pub fn placeholders(&self) -> &[PlaceholderDeclaration] {
+        &self.placeholders
     }
 }
 
@@ -365,7 +261,6 @@ impl fmt::Display for OptionRequirement {
 pub struct ContributedPath {
     path: RelativePath,
     unit: UnitIdentity,
-    delivered: RelativePath,
 }
 
 impl ContributedPath {
@@ -378,35 +273,12 @@ impl ContributedPath {
     pub fn unit(&self) -> &UnitIdentity {
         &self.unit
     }
-
-    /// The path the file is delivered at: its own path, or, for a template,
-    /// that path without [`TEMPLATE_SUFFIX`].
-    pub fn delivered(&self) -> &RelativePath {
-        &self.delivered
-    }
 }
 
 impl fmt::Display for ContributedPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} from {}", self.path, self.unit)?;
-        if self.delivered != self.path {
-            write!(f, " (delivered as {})", self.delivered)?;
-        }
-        Ok(())
+        write!(f, "{} from {}", self.path, self.unit)
     }
-}
-
-/// Why the root may not configure a unit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RootTargetReason {
-    /// The unit is not part of the composition.
-    NotComposed,
-    /// The unit is part of the composition only as a dependency of other
-    /// units, not as an explicit selection.
-    Transitive,
-    /// A unit build's values configure only the unit being built, and this
-    /// is another unit.
-    NotTheBuiltUnit,
 }
 
 /// A problem that prevents composition.
@@ -421,97 +293,11 @@ pub enum CompositionError {
         /// The version the graph resolved, or the built unit's own version.
         version: Version,
     },
-    /// The root supplies values for a unit it may not configure.
-    RootTarget {
-        /// The unit the values target.
-        unit: UnitIdentity,
-        /// Why the root may not configure it.
-        reason: RootTargetReason,
-    },
-    /// A requirement sets a parameter that the unit's resolved version does
-    /// not declare.
-    UndeclaredParameter {
-        /// The unit the requirement targets.
-        unit: UnitIdentity,
-        /// Its resolved version.
-        version: Version,
-        /// The parameter it does not declare.
-        parameter: ParameterName,
-        /// Who sets the parameter.
-        requirer: Requirer,
-        /// The parameters the unit declares, sorted.
-        declared: Vec<ParameterName>,
-    },
-    /// A requirement's value does not satisfy the parameter's type or
-    /// allowed values.
-    InvalidValue {
-        /// The unit the requirement targets.
-        unit: UnitIdentity,
-        /// Its resolved version.
-        version: Version,
-        /// The parameter.
-        parameter: ParameterName,
-        /// The invalid requirement.
-        requirement: OptionRequirement,
-        /// Why the value is invalid.
-        error: ParameterValueError,
-    },
-    /// Requirements set different values for the same parameter.
-    OptionsConflict {
-        /// The unit whose parameter is in conflict.
-        unit: UnitIdentity,
-        /// Its resolved version.
-        version: Version,
-        /// The parameter.
-        parameter: ParameterName,
-        /// Every requirement on the parameter, ordered by requirer.
-        requirements: Vec<OptionRequirement>,
-    },
-    /// A mapping connects parameters that cannot hold the same values.
-    MappingIncompatible {
-        /// The unit that writes the mapping.
-        unit: UnitIdentity,
-        /// Its resolved version.
-        version: Version,
-        /// The unit's own parameter the mapping reads.
-        source: ParameterName,
-        /// The dependency the mapping configures.
-        target: UnitIdentity,
-        /// The dependency's parameter.
-        parameter: ParameterName,
-        /// Why they are incompatible.
-        reason: String,
-    },
-    /// A parameter the unit inherits has no definition in the composed
-    /// version of the dependency it names.
-    InheritedParameter {
-        /// The unit that inherits it.
-        unit: UnitIdentity,
-        /// Its resolved version.
-        version: Version,
-        /// The parameter, and the unit that should declare it.
-        error: InheritanceError,
-    },
-    /// A required parameter receives no value.
-    MissingValue {
-        /// The unit whose parameter has no value.
-        unit: UnitIdentity,
-        /// Its resolved version.
-        version: Version,
-        /// The required parameter.
-        parameter: ParameterName,
-        /// Who may supply the value: the units that depend on this one
-        /// directly, and the root when it may configure this unit.
-        responsible: Vec<Requirer>,
-        /// The parameter's authoring-time example, which only suggests a
-        /// value: it is never used as one.
-        example: Option<ParameterValue>,
-    },
     /// Several members amend the same file of the same provider, and the
     /// file is not one whose amendments can be combined (JSON, JSONC, and
     /// UTF-8 text, including YAML, TOML, and INI, are; XML is not, and
-    /// neither is a file or copy that is not text). No amender takes precedence, so none
-    /// is applied.
+    /// neither is a file or copy that is not text). No amender takes
+    /// precedence, so none is applied.
     SeveralAmenders {
         /// The amended path.
         path: RelativePath,
@@ -559,10 +345,6 @@ pub enum CompositionError {
         unit: UnitIdentity,
         /// Its resolved version.
         version: Version,
-        /// A file the provider does have at that delivered path: the
-        /// template the path names without its suffix, or the plain file
-        /// the path names with a suffix it does not have.
-        similar: Option<RelativePath>,
     },
     /// A declared amendment has no copy under `amendments/`.
     AmendmentMissingCopy {
@@ -581,24 +363,14 @@ pub enum CompositionError {
         /// The copy's path under `amendments/`.
         path: RelativePath,
     },
-    /// A template whose path without [`TEMPLATE_SUFFIX`] is not a valid
-    /// path, so it cannot be delivered.
-    InvalidDeliveredPath {
-        /// The template's path in its unit's `src/`.
-        path: RelativePath,
-        /// The unit that contributes it.
-        unit: UnitIdentity,
-        /// Why the delivered path is invalid.
-        error: RelativePathError,
-    },
-    /// Files whose delivered paths are equal or differ only in case or in
-    /// Unicode normalization.
+    /// Files whose paths are equal or differ only in case or in Unicode
+    /// normalization.
     PathCollision {
         /// Every colliding file, ordered by path and then unit.
         files: Vec<ContributedPath>,
     },
-    /// A file's delivered path is a directory of other files' delivered
-    /// paths, compared ignoring case and Unicode normalization.
+    /// A file's path is a directory of other files' paths, compared
+    /// ignoring case and Unicode normalization.
     NestedPathCollision {
         /// The file whose path the others need as a directory.
         file: ContributedPath,
@@ -615,106 +387,6 @@ impl fmt::Display for CompositionError {
                 "internal error: the content supplied for {unit} {version} does not match \
                  the resolved dependency graph"
             ),
-            Self::RootTarget { unit, reason } => match reason {
-                RootTargetReason::NotComposed => write!(
-                    f,
-                    "values are supplied for {unit}, which is not part of the composition; \
-                     values may configure only explicitly selected units"
-                ),
-                RootTargetReason::Transitive => write!(
-                    f,
-                    "values are supplied for {unit}, which is only a dependency of other \
-                     units; values may configure only explicitly selected units, and the units \
-                     that depend on {unit} configure it through their `options`"
-                ),
-                RootTargetReason::NotTheBuiltUnit => write!(
-                    f,
-                    "values are supplied for {unit}, which is not the unit being built; the \
-                     unit configures its dependencies through its `options`"
-                ),
-            },
-            Self::UndeclaredParameter {
-                unit,
-                version,
-                parameter,
-                requirer,
-                declared,
-            } => {
-                write!(
-                    f,
-                    "{requirer} sets parameter `{parameter}` of {unit} {version}, which does \
-                     not declare it; "
-                )?;
-                if declared.is_empty() {
-                    f.write_str("it declares no parameters")
-                } else {
-                    f.write_str("its parameters are ")?;
-                    write_list(f, declared.iter().map(|name| format!("`{name}`")))
-                }
-            }
-            Self::InvalidValue {
-                unit,
-                version,
-                parameter,
-                requirement,
-                error,
-            } => write!(
-                f,
-                "{} sets parameter `{parameter}` of {unit} {version} to {}: {error}",
-                requirement.requirer, requirement.value
-            ),
-            Self::OptionsConflict {
-                unit,
-                version,
-                parameter,
-                requirements,
-            } => {
-                write!(
-                    f,
-                    "options conflict on parameter `{parameter}` of {unit} {version}: "
-                )?;
-                write_list(f, requirements)?;
-                f.write_str("; no requirement takes precedence, so they must agree")
-            }
-            Self::MappingIncompatible {
-                unit,
-                version,
-                source,
-                target,
-                parameter,
-                reason,
-            } => write!(
-                f,
-                "{unit} {version} maps its parameter `{source}` to `{parameter}` of {target}, \
-                 but {reason}"
-            ),
-            Self::InheritedParameter {
-                unit,
-                version,
-                error,
-            } => write!(f, "in {unit} {version}, {error}"),
-            Self::MissingValue {
-                unit,
-                version,
-                parameter,
-                responsible,
-                example,
-            } => {
-                write!(
-                    f,
-                    "{unit} {version} needs a value for `{parameter}`, which has no default"
-                )?;
-                // The root is whoever runs the command, and the advice says
-                // where they set it; other units are named.
-                if responsible.as_slice() != [Requirer::Root] {
-                    f.write_str("; it must be set by ")?;
-                    write_list(f, responsible)?;
-                }
-                if let Some(example) = example {
-                    write!(f, " (example: {example})")?;
-                }
-                Ok(())
-            }
             Self::SeveralAmenders {
                 path,
                 unit,
@@ -769,34 +441,18 @@ impl fmt::Display for CompositionError {
                 path,
                 unit,
                 version,
-                similar,
-            } => {
-                match amender {
-                    Requirer::Root => write!(
-                        f,
-                        "amendments/{path} amends a file that {unit} {version} does not \
-                         provide: it has no src/{path}"
-                    )?,
-                    Requirer::Unit(..) => write!(
-                        f,
-                        "amendments/{path} of {amender} amends a file that {unit} {version} \
-                         does not provide: it has no src/{path}"
-                    )?,
-                }
-                match similar {
-                    Some(similar) if similar.as_str().ends_with(TEMPLATE_SUFFIX) => write!(
-                        f,
-                        "; its file is the template src/{similar}, and a copy keeps the \
-                         provider's path, suffix included"
-                    ),
-                    Some(similar) => write!(
-                        f,
-                        "; its file is src/{similar}, which is not a template, and a copy keeps \
-                         the provider's path"
-                    ),
-                    None => Ok(()),
-                }
-            }
+            } => match amender {
+                Requirer::Root => write!(
+                    f,
+                    "amendments/{path} amends a file that {unit} {version} does not provide: it \
+                     has no src/{path}"
+                ),
+                Requirer::Unit(..) => write!(
+                    f,
+                    "amendments/{path} of {amender} amends a file that {unit} {version} does not \
+                     provide: it has no src/{path}"
+                ),
+            },
             Self::AmendmentMissingCopy {
                 amender,
                 path,
@@ -827,18 +483,13 @@ impl fmt::Display for CompositionError {
                      base is unknown"
                 ),
             },
-            Self::InvalidDeliveredPath { path, unit, error } => write!(
-                f,
-                "{path} from {unit} is a template, but without `{TEMPLATE_SUFFIX}` its path is \
-                 invalid: {error}"
-            ),
             Self::PathCollision { files } => {
                 f.write_str("path collision: ")?;
                 write_list(f, files)?;
-                let first = files.first().map(ContributedPath::delivered);
+                let first = files.first().map(ContributedPath::path);
                 let first_unit = files.first().map(ContributedPath::unit);
                 let one_unit = files.iter().all(|file| Some(file.unit()) == first_unit);
-                if files.iter().any(|file| Some(file.delivered()) != first) {
+                if files.iter().any(|file| Some(file.path()) != first) {
                     f.write_str(
                         "; these paths differ only in case or in Unicode normalization, which \
                          some file systems cannot keep apart",
@@ -893,7 +544,7 @@ struct Member<'a> {
     files: &'a FileTree,
     /// The unit's copies under `amendments/`.
     amendments: &'a FileTree,
-    /// How the unit appears as the requirer of its `options`.
+    /// How the unit is named as an amender.
     requirer: Requirer,
 }
 
@@ -960,407 +611,6 @@ fn members<'a>(
     }
 }
 
-/// Whether the root may configure `unit`, and if not, why.
-fn root_target(
-    graph: &ResolvedGraph,
-    root: Root<'_>,
-    members: &BTreeMap<&UnitIdentity, Member<'_>>,
-    unit: &UnitIdentity,
-) -> Result<(), RootTargetReason> {
-    match root {
-        Root::Unit(content) if content.manifest.name() == unit => Ok(()),
-        Root::Unit(_) => Err(RootTargetReason::NotTheBuiltUnit),
-        Root::Project if graph.root().contains_key(unit) => Ok(()),
-        Root::Project if members.contains_key(unit) => Err(RootTargetReason::Transitive),
-        Root::Project => Err(RootTargetReason::NotComposed),
-    }
-}
-
-fn root_target_errors(
-    graph: &ResolvedGraph,
-    root: Root<'_>,
-    members: &BTreeMap<&UnitIdentity, Member<'_>>,
-    root_values: &BTreeMap<UnitIdentity, OptionValues>,
-) -> Vec<CompositionError> {
-    root_values
-        .keys()
-        .filter_map(|unit| {
-            root_target(graph, root, members, unit).err().map(|reason| {
-                CompositionError::RootTarget {
-                    unit: unit.clone(),
-                    reason,
-                }
-            })
-        })
-        .collect()
-}
-
-/// A requirement on one parameter, held while the values are decided.
-#[derive(Debug, Clone)]
-struct Requested {
-    requirer: Requirer,
-    value: ParameterValue,
-    /// The requirer's own parameter the value is mapped from, if it is.
-    from: Option<ParameterName>,
-}
-
-/// The members in the order their values can be decided: every unit before
-/// the units it depends on, since a unit's value is set by what depends on
-/// it. Ties go by identity, so the order is deterministic.
-fn dependents_first<'a>(members: &BTreeMap<&'a UnitIdentity, Member<'a>>) -> Vec<&'a UnitIdentity> {
-    let mut waiting: BTreeMap<&UnitIdentity, usize> =
-        members.keys().map(|unit| (*unit, 0)).collect();
-    for member in members.values() {
-        for dependency in member.manifest.dependencies().keys() {
-            if let Some(count) = waiting.get_mut(dependency) {
-                *count += 1;
-            }
-        }
-    }
-    let mut ready: BTreeSet<&UnitIdentity> = waiting
-        .iter()
-        .filter(|(_, count)| **count == 0)
-        .map(|(unit, _)| *unit)
-        .collect();
-    let mut order = Vec::with_capacity(members.len());
-    while let Some(unit) = ready.pop_first() {
-        order.push(unit);
-        for dependency in members[unit].manifest.dependencies().keys() {
-            if let Some(count) = waiting.get_mut(dependency) {
-                *count -= 1;
-                if *count == 0 {
-                    ready.insert(
-                        members
-                            .get_key_value(dependency)
-                            .map_or(dependency, |(key, _)| *key),
-                    );
-                }
-            }
-        }
-    }
-    // A cycle cannot come out of resolution; if one did, the rest are
-    // decided in identity order rather than lost.
-    for unit in members.keys() {
-        if !order.contains(unit) {
-            order.push(*unit);
-        }
-    }
-    order
-}
-
-/// Why a parameter cannot be mapped to a dependency's parameter, if it
-/// cannot: only known incompatibilities, never a coercion.
-pub(crate) fn mapping_problem(
-    source: &ParameterDefinition,
-    target: &ParameterDefinition,
-) -> Option<String> {
-    match (source.parameter_type(), target.parameter_type()) {
-        (ParameterType::Integer, ParameterType::Integer)
-        | (ParameterType::Boolean, ParameterType::Boolean)
-        | (ParameterType::String | ParameterType::EnumeratedString(_), ParameterType::String) => {
-            None
-        }
-        (ParameterType::EnumeratedString(own), ParameterType::EnumeratedString(accepted)) => {
-            let outside: Vec<&String> = own
-                .as_slice()
-                .iter()
-                .filter(|value| !accepted.contains(value))
-                .collect();
-            if outside.is_empty() {
-                None
-            } else {
-                Some(format!(
-                    "it allows {}, which the dependency's parameter does not",
-                    outside
-                        .iter()
-                        .map(|value| format!("{value:?}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))
-            }
-        }
-        (ParameterType::String, ParameterType::EnumeratedString(_)) => Some(
-            "a free string may hold values the dependency's parameter does not allow".to_owned(),
-        ),
-        (own, accepted) => Some(format!(
-            "it is {}, and the dependency's parameter is {}",
-            own.value_kind(),
-            accepted.value_kind()
-        )),
-    }
-}
-
-/// The effective parameter values of every member, and the errors that
-/// prevent some of them, in the documented order.
-///
-/// Values are decided from the dependents to the dependencies: what the
-/// root and a unit's `options` require of a unit is known before its own
-/// value is decided, and a mapping carries that decided value on to the
-/// units below. No ordering rule settles a conflict.
-fn parameter_values(
-    graph: &ResolvedGraph,
-    root: Root<'_>,
-    members: &BTreeMap<&UnitIdentity, Member<'_>>,
-    root_values: &BTreeMap<UnitIdentity, OptionValues>,
-) -> (
-    BTreeMap<UnitIdentity, ParameterValues>,
-    Vec<CompositionError>,
-) {
-    // Every requirement on each parameter of each unit, from the root
-    // values the root may supply and, as the units are decided, from their
-    // `options`.
-    let mut requested: BTreeMap<(UnitIdentity, ParameterName), Vec<Requested>> = BTreeMap::new();
-    for (target, values) in root_values {
-        if root_target(graph, root, members, target).is_ok() {
-            for (parameter, value) in values {
-                requested
-                    .entry((target.clone(), parameter.clone()))
-                    .or_default()
-                    .push(Requested {
-                        requirer: Requirer::Root,
-                        value: value.clone(),
-                        from: None,
-                    });
-            }
-        }
-    }
-
-    // Each error with the unit and parameter it belongs to, to be reported
-    // in that order whatever the order the units were decided in.
-    type Keyed = ((UnitIdentity, ParameterName), CompositionError);
-    let mut invalid: Vec<Keyed> = Vec::new();
-    let mut conflicts: Vec<Keyed> = Vec::new();
-    let mut missing: Vec<Keyed> = Vec::new();
-    let mut values = BTreeMap::new();
-    // Parameters a mapping would set, whose source has no value: the source
-    // is the one reported.
-    let mut awaiting: BTreeSet<(UnitIdentity, ParameterName)> = BTreeSet::new();
-    // Each member's parameters, the inherited ones with the definition
-    // they take from the composed versions.
-    let mut params: BTreeMap<&UnitIdentity, BTreeMap<ParameterName, ParameterDefinition>> =
-        BTreeMap::new();
-    for (identity, member) in members {
-        let (resolved, errors) = member
-            .manifest
-            .resolved_params(|unit| members.get(unit).map(|member| member.manifest));
-        // A chain that breaks further down is reported once, by the
-        // member whose own `from` names the unit that lacks it.
-        for error in errors
-            .into_iter()
-            .filter(|error| member.manifest.inherited().get(&error.parameter) == Some(&error.unit))
-        {
-            invalid.push((
-                (identity.to_owned().clone(), error.parameter.clone()),
-                CompositionError::InheritedParameter {
-                    unit: identity.to_owned().clone(),
-                    version: member.manifest.version().clone(),
-                    error,
-                },
-            ));
-        }
-        params.insert(identity, resolved);
-    }
-    for identity in dependents_first(members) {
-        let member = &members[identity];
-        let version = member.manifest.version();
-        let own = &params[identity];
-        let mut effective = ParameterValues::new();
-        // Requirements on parameters the unit does not declare.
-        let declared: Vec<ParameterName> = own.keys().cloned().collect();
-        // An inherited parameter without a definition is reported as such.
-        for ((unit, parameter), requirements) in &requested {
-            if unit != identity
-                || own.contains_key(parameter)
-                || member.manifest.inherited().contains_key(parameter)
-            {
-                continue;
-            }
-            let mut requirements = requirements.clone();
-            requirements.sort_by(|left, right| left.requirer.cmp(&right.requirer));
-            for requirement in requirements {
-                invalid.push((
-                    (unit.clone(), parameter.clone()),
-                    CompositionError::UndeclaredParameter {
-                        unit: unit.clone(),
-                        version: version.clone(),
-                        parameter: parameter.clone(),
-                        requirer: requirement.requirer,
-                        declared: declared.clone(),
-                    },
-                ));
-            }
-        }
-        for (parameter, definition) in own {
-            let key = (identity.clone(), parameter.clone());
-            let mut requirements = requested.get(&key).cloned().unwrap_or_default();
-            requirements.sort_by(|left, right| left.requirer.cmp(&right.requirer));
-            let invalid_values: Vec<Keyed> = requirements
-                .iter()
-                .filter_map(|requirement| {
-                    definition.check(&requirement.value).err().map(|error| {
-                        CompositionError::InvalidValue {
-                            unit: identity.clone(),
-                            version: version.clone(),
-                            parameter: parameter.clone(),
-                            requirement: requirement_of(requirement),
-                            error,
-                        }
-                    })
-                })
-                .map(|error| (key.clone(), error))
-                .collect();
-            match requirements.first() {
-                _ if !invalid_values.is_empty() => invalid.extend(invalid_values),
-                Some(first)
-                    if requirements
-                        .iter()
-                        .all(|requirement| requirement.value == first.value) =>
-                {
-                    effective.insert(parameter.clone(), first.value.clone());
-                }
-                Some(_) => conflicts.push((
-                    key,
-                    CompositionError::OptionsConflict {
-                        unit: identity.clone(),
-                        version: version.clone(),
-                        parameter: parameter.clone(),
-                        requirements: requirements.iter().map(requirement_of).collect(),
-                    },
-                )),
-                None => match definition.default() {
-                    Some(default) => {
-                        effective.insert(parameter.clone(), default.clone());
-                    }
-                    None if awaiting.contains(&key) => {}
-                    None => missing.push((
-                        key,
-                        CompositionError::MissingValue {
-                            unit: identity.clone(),
-                            version: version.clone(),
-                            parameter: parameter.clone(),
-                            responsible: responsible(graph, root, members, identity),
-                            example: definition.example().cloned(),
-                        },
-                    )),
-                },
-            }
-        }
-
-        // What this unit requires of its dependencies, now that its own
-        // values are decided. An inherited parameter is mapped to the
-        // dependency's parameter it takes its definition from.
-        let inherited = member
-            .manifest
-            .inherited()
-            .iter()
-            .map(|(parameter, target)| (target, parameter, OptionValue::From(parameter.clone())));
-        let required: Vec<(&UnitIdentity, &ParameterName, OptionValue)> = member
-            .manifest
-            .options()
-            .iter()
-            .flat_map(|(target, options)| {
-                options
-                    .iter()
-                    .map(move |(parameter, option)| (target, parameter, option.clone()))
-            })
-            .chain(inherited)
-            .collect();
-        for (target, parameter, option) in &required {
-            let (target, parameter) = (*target, *parameter);
-            {
-                let key = (target.clone(), parameter.clone());
-                let value = match option {
-                    OptionValue::Literal(value) => value.clone(),
-                    OptionValue::From(source) => {
-                        let Some(source_definition) = own.get(source) else {
-                            continue;
-                        };
-                        let Some(target_definition) =
-                            params.get(target).and_then(|target| target.get(parameter))
-                        else {
-                            // The dependency does not declare it: reported
-                            // once, with the dependency's other undeclared
-                            // parameters, by the value path below.
-                            if let Some(value) = effective.get(source) {
-                                requested.entry(key).or_default().push(Requested {
-                                    requirer: member.requirer.clone(),
-                                    value: value.clone(),
-                                    from: Some(source.clone()),
-                                });
-                            }
-                            continue;
-                        };
-                        if let Some(reason) = mapping_problem(source_definition, target_definition)
-                        {
-                            invalid.push((
-                                key,
-                                CompositionError::MappingIncompatible {
-                                    unit: identity.clone(),
-                                    version: version.clone(),
-                                    source: source.clone(),
-                                    target: target.clone(),
-                                    parameter: parameter.clone(),
-                                    reason,
-                                },
-                            ));
-                            continue;
-                        }
-                        // A source that has no value is reported as such.
-                        let Some(value) = effective.get(source) else {
-                            awaiting.insert(key);
-                            continue;
-                        };
-                        value.clone()
-                    }
-                };
-                requested.entry(key).or_default().push(Requested {
-                    requirer: member.requirer.clone(),
-                    value,
-                    from: match option {
-                        OptionValue::From(source) => Some(source.clone()),
-                        OptionValue::Literal(_) => None,
-                    },
-                });
-            }
-        }
-        values.insert(identity.clone(), effective);
-    }
-
-    let mut errors = Vec::new();
-    for mut group in [invalid, conflicts, missing] {
-        group.sort_by(|left, right| left.0.cmp(&right.0));
-        errors.extend(group.into_iter().map(|(_, error)| error));
-    }
-    (values, errors)
-}
-
-fn requirement_of(requested: &Requested) -> OptionRequirement {
-    OptionRequirement {
-        requirer: requested.requirer.clone(),
-        value: requested.value.clone(),
-        from: requested.from.clone(),
-    }
-}
-
-/// Who may supply a value for `unit`'s parameters: the members that depend
-/// on it directly, and the root when it may configure the unit.
-fn responsible(
-    graph: &ResolvedGraph,
-    root: Root<'_>,
-    members: &BTreeMap<&UnitIdentity, Member<'_>>,
-    unit: &UnitIdentity,
-) -> Vec<Requirer> {
-    let mut responsible: BTreeSet<Requirer> = members
-        .values()
-        .filter(|member| member.manifest.dependencies().contains_key(unit))
-        .map(|member| member.requirer.clone())
-        .collect();
-    if root_target(graph, root, members, unit).is_ok() {
-        responsible.insert(Requirer::Root);
-    }
-    responsible.into_iter().collect()
-}
-
 /// The amendments that apply: for each provider's file, the amending units
 /// and their copies, in requirer order.
 type Applied<'a> = BTreeMap<
@@ -1420,7 +670,6 @@ fn amendments<'a>(
         // where each copy is taken on top of the one below it. Anything
         // else could only be combined by letting one amender win, so none
         // applies.
-        let delivered = delivered_path(path).ok().flatten();
         let chain = || {
             let mut identities: Vec<&UnitIdentity> = members
                 .values()
@@ -1447,7 +696,7 @@ fn amendments<'a>(
                         .all(|copy| is_text(copy.contents()))
                 })
         };
-        let combinable = match MergeFormat::of_path(delivered.as_ref().unwrap_or(path)) {
+        let combinable = match MergeFormat::of_path(path) {
             MergeFormat::Json => true,
             MergeFormat::Text => all_text(),
             MergeFormat::Unsupported => false,
@@ -1564,18 +813,11 @@ fn amendment<'a>(
         });
     }
     if !provider.files.contains_key(path) {
-        let with_suffix = RelativePath::parse(&format!("{path}{TEMPLATE_SUFFIX}")).ok();
-        let without_suffix = delivered_path(path).ok().flatten();
-        let similar = [with_suffix, without_suffix]
-            .into_iter()
-            .flatten()
-            .find(|candidate| provider.files.contains_key(candidate));
         return Some(CompositionError::AmendmentNotProvided {
             amender: member.requirer.clone(),
             path: path.clone(),
             unit: provider.identity.clone(),
             version: resolved.clone(),
-            similar,
         });
     }
     let Some(copy) = member.amendments.get(path) else {
@@ -1602,30 +844,27 @@ fn compose_files<'a>(
     Vec<CompositionError>,
 ) {
     let (applied, closure, mut errors) = amendments(members);
-    // Files by the collision key of their delivered path.
+    // The declarations a file's contributor brings into its scope: its own
+    // and those of every unit below it.
+    let reach = |unit: &'a UnitIdentity| {
+        std::iter::once(unit)
+            .chain(closure.get(unit).into_iter().flatten().copied())
+            .filter_map(|unit| members.get(unit).map(|member| member.manifest))
+    };
+    // Files by the collision key of their path.
     let mut folded: BTreeMap<String, Vec<ContributedPath>> = BTreeMap::new();
     let mut files = BTreeMap::new();
-    let mut invalid = Vec::new();
     for member in members.values() {
         for (path, file) in member.files {
-            let (delivered, template) = match delivered_path(path) {
-                Ok(None) => (path.clone(), false),
-                Ok(Some(delivered)) => (delivered, true),
-                Err(error) => {
-                    invalid.push((path.clone(), member.identity.clone(), error));
-                    continue;
-                }
-            };
             folded
-                .entry(collision_key(&delivered))
+                .entry(collision_key(path))
                 .or_default()
                 .push(ContributedPath {
                     path: path.clone(),
                     unit: member.identity.clone(),
-                    delivered: delivered.clone(),
                 });
-            let amendments = applied
-                .get(&(member.identity, path))
+            let copies = applied.get(&(member.identity, path));
+            let amendments = copies
                 .map(|copies| {
                     copies
                         .iter()
@@ -1646,26 +885,37 @@ fn compose_files<'a>(
                         .collect()
                 })
                 .unwrap_or_default();
+            let contributors: Vec<&UnitIdentity> = std::iter::once(member.identity)
+                .chain(
+                    copies
+                        .into_iter()
+                        .flatten()
+                        .map(|(_, amender, _, _)| *amender),
+                )
+                .collect();
+            // A token a contributor ignores is not a placeholder in this
+            // file, whoever else declares it.
+            let ignored: BTreeSet<&PlaceholderName> = contributors
+                .iter()
+                .filter_map(|unit| members.get(*unit))
+                .flat_map(|member| member.manifest.placeholders().ignore())
+                .collect();
+            let mut placeholders = declarations(contributors.iter().copied().flat_map(reach));
+            placeholders.retain(|declaration| !ignored.contains(declaration.placeholder()));
             files.insert(
-                delivered,
+                path.clone(),
                 ComposedFile {
                     unit: member.identity,
-                    source: path,
                     contents: file.contents(),
                     executable: file.is_executable(),
-                    template,
                     amendments,
+                    placeholders,
                 },
             );
         }
     }
 
-    invalid.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
-    let mut collisions: Vec<CompositionError> = invalid
-        .into_iter()
-        .map(|(path, unit, error)| CompositionError::InvalidDeliveredPath { path, unit, error })
-        .collect();
-    let groups: Vec<CompositionError> = folded
+    let mut collisions: Vec<CompositionError> = folded
         .values()
         .filter(|group| group.len() > 1)
         .map(|group| {
@@ -1674,7 +924,6 @@ fn compose_files<'a>(
             CompositionError::PathCollision { files }
         })
         .collect();
-    collisions.extend(groups);
 
     let mut nested: BTreeMap<&ContributedPath, Vec<ContributedPath>> = BTreeMap::new();
     for (key, group) in &folded {
@@ -1738,14 +987,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        CompositionError, ContributedPath, FileTree, OptionRequirement, Root, RootTargetReason,
-        TEMPLATE_SUFFIX, UnitContent, UnitFile, compose, delivered_path,
+        CompositionError, ContributedPath, FileTree, Root, UnitContent, UnitFile, compose,
     };
     use crate::domain::{
-        AllowedValues, AmendmentDeclaration, AvailableVersions, Dependencies, Description, Lock,
-        Manifest, OptionValue, OptionValues, ParameterDefinition, ParameterName, ParameterType,
-        ParameterValue, ParameterValueError, RelativePath, Requirer, UnitIdentity,
-        UnitOptionValues, ValueKind, Version, resolve,
+        AmendmentDeclaration, AvailableVersions, Dependencies, Description, Lock, Manifest,
+        PlaceholderName, Placeholders, RelativePath, Requirer, UnitIdentity, Version, resolve,
     };
 
     fn identity(input: &str) -> UnitIdentity {
@@ -1756,44 +1002,8 @@ mod tests {
         input.parse().unwrap()
     }
 
-    fn name(input: &str) -> ParameterName {
-        input.parse().unwrap()
-    }
-
     fn path(input: &str) -> RelativePath {
         input.parse().unwrap()
-    }
-
-    fn text(value: &str) -> ParameterValue {
-        ParameterValue::String(value.to_owned())
-    }
-
-    fn unit(name: &str, resolved: &str) -> Requirer {
-        Requirer::Unit(identity(name), version(resolved))
-    }
-
-    fn required(parameter_type: ParameterType) -> ParameterDefinition {
-        ParameterDefinition::new(
-            parameter_type,
-            Description::new("A parameter.").unwrap(),
-            None,
-        )
-        .unwrap()
-    }
-
-    fn optional(parameter_type: ParameterType, default: ParameterValue) -> ParameterDefinition {
-        ParameterDefinition::new(
-            parameter_type,
-            Description::new("A parameter.").unwrap(),
-            Some(default),
-        )
-        .unwrap()
-    }
-
-    fn enumerated(values: &[&str]) -> ParameterType {
-        ParameterType::EnumeratedString(
-            AllowedValues::new(values.iter().map(|value| (*value).to_owned()).collect()).unwrap(),
-        )
     }
 
     /// A unit for a test: its manifest fields and its `src/` files.
@@ -1802,12 +1012,10 @@ mod tests {
         name: &'static str,
         version: &'static str,
         dependencies: Vec<(&'static str, &'static str)>,
-        options: Vec<(&'static str, &'static str, ParameterValue)>,
-        /// Mapped options: dependency, its parameter, and the unit's own.
-        mappings: Vec<(&'static str, &'static str, &'static str)>,
-        params: Vec<(&'static str, ParameterDefinition)>,
-        /// Inherited parameters: name and the dependency it comes from.
-        inherited: Vec<(&'static str, &'static str)>,
+        /// Declared placeholders.
+        placeholders: Vec<&'static str>,
+        /// Tokens listed in `ignore`.
+        ignored: Vec<&'static str>,
         files: Vec<(&'static str, Vec<u8>, bool)>,
         /// Declared amendments: path, provider, and base version.
         amendments: Vec<(&'static str, &'static str, &'static str)>,
@@ -1821,10 +1029,8 @@ mod tests {
                 name,
                 version,
                 dependencies: Vec::new(),
-                options: Vec::new(),
-                mappings: Vec::new(),
-                params: Vec::new(),
-                inherited: Vec::new(),
+                placeholders: Vec::new(),
+                ignored: Vec::new(),
                 files: Vec::new(),
                 amendments: Vec::new(),
                 copies: Vec::new(),
@@ -1859,35 +1065,15 @@ mod tests {
             self
         }
 
-        /// Maps the unit's own parameter `source` to `parameter` of `target`.
-        fn map(
-            mut self,
-            target: &'static str,
-            parameter: &'static str,
-            source: &'static str,
-        ) -> Self {
-            self.mappings.push((target, parameter, source));
+        /// Declares `placeholder` for the consumer to replace.
+        fn declares(mut self, placeholder: &'static str) -> Self {
+            self.placeholders.push(placeholder);
             self
         }
 
-        fn option(
-            mut self,
-            target: &'static str,
-            parameter: &'static str,
-            value: ParameterValue,
-        ) -> Self {
-            self.options.push((target, parameter, value));
-            self
-        }
-
-        fn param(mut self, parameter: &'static str, definition: ParameterDefinition) -> Self {
-            self.params.push((parameter, definition));
-            self
-        }
-
-        /// Declares `parameter` as inherited from `from`.
-        fn inherits(mut self, parameter: &'static str, from: &'static str) -> Self {
-            self.inherited.push((parameter, from));
+        /// Lists `token` in `ignore`.
+        fn ignores(mut self, token: &'static str) -> Self {
+            self.ignored.push(token);
             self
         }
 
@@ -1903,33 +1089,28 @@ mod tests {
         }
 
         fn manifest(&self) -> Manifest {
-            let mut options: BTreeMap<UnitIdentity, UnitOptionValues> = BTreeMap::new();
-            for (target, parameter, value) in &self.options {
-                options
-                    .entry(identity(target))
-                    .or_default()
-                    .insert(name(parameter), OptionValue::Literal(value.clone()));
-            }
-            for (target, parameter, source) in &self.mappings {
-                options
-                    .entry(identity(target))
-                    .or_default()
-                    .insert(name(parameter), OptionValue::From(name(source)));
-            }
+            let placeholders = Placeholders::new(
+                self.placeholders
+                    .iter()
+                    .map(|placeholder| {
+                        (
+                            PlaceholderName::parse(placeholder).unwrap(),
+                            Description::new(&format!("{placeholder} of {}.", self.name)).unwrap(),
+                        )
+                    })
+                    .collect(),
+                self.ignored
+                    .iter()
+                    .map(|token| PlaceholderName::parse(token).unwrap())
+                    .collect(),
+            )
+            .unwrap();
             Manifest::new(
                 identity(self.name),
                 version(self.version),
                 Description::new("A unit.").unwrap(),
                 dependencies(&self.dependencies),
-                options,
-                self.params
-                    .iter()
-                    .map(|(parameter, definition)| (name(parameter), definition.clone()))
-                    .collect(),
-                self.inherited
-                    .iter()
-                    .map(|(parameter, from)| (name(parameter), identity(from)))
-                    .collect(),
+                placeholders,
                 self.amendments
                     .iter()
                     .map(|(file, provider, base)| {
@@ -1977,25 +1158,19 @@ mod tests {
     /// A composition with owned, comparable parts.
     #[derive(Debug, PartialEq, Eq)]
     struct Composed {
-        values: Vec<(String, Vec<(String, ParameterValue)>)>,
-        /// Delivered path, unit, contents, and executable bit.
+        /// Path, unit, contents, and executable bit.
         files: Vec<(String, String, Vec<u8>, bool)>,
-        /// The templates: delivered path and source path.
-        templates: Vec<(String, String)>,
-        /// The amended files: delivered path and amending unit.
+        /// The amended files: path and amending unit.
         amended: Vec<(String, String)>,
-        /// The base version of each amendment: delivered path and version.
+        /// The base version of each amendment: path and version.
         bases: Vec<(String, String)>,
+        /// The placeholder declarations in each file's scope: path,
+        /// placeholder, and declaring unit.
+        placeholders: Vec<(String, String, String)>,
     }
 
-    type RootValue = (&'static str, &'static str, ParameterValue);
-
     /// Resolves `published` for `root` and composes the result.
-    fn run(
-        root: &For,
-        published: &[Spec],
-        root_values: &[RootValue],
-    ) -> Result<Composed, Vec<CompositionError>> {
+    fn run(root: &For, published: &[Spec]) -> Result<Composed, Vec<CompositionError>> {
         let contents: Vec<(Manifest, FileTree, FileTree)> = published
             .iter()
             .map(|spec| (spec.manifest(), spec.tree(), spec.copies()))
@@ -2045,27 +1220,7 @@ mod tests {
             }
             None => Root::Project,
         };
-        let mut values: BTreeMap<UnitIdentity, OptionValues> = BTreeMap::new();
-        for (target, parameter, value) in root_values {
-            values
-                .entry(identity(target))
-                .or_default()
-                .insert(name(parameter), value.clone());
-        }
-        compose(resolution.graph(), root, &units, &values).map(|composition| Composed {
-            values: composition
-                .values()
-                .iter()
-                .map(|(unit, values)| {
-                    (
-                        unit.to_string(),
-                        values
-                            .iter()
-                            .map(|(parameter, value)| (parameter.to_string(), value.clone()))
-                            .collect(),
-                    )
-                })
-                .collect(),
+        compose(resolution.graph(), root, &units).map(|composition| Composed {
             files: composition
                 .files()
                 .iter()
@@ -2083,12 +1238,6 @@ mod tests {
                         composed.is_executable(),
                     )
                 })
-                .collect(),
-            templates: composition
-                .files()
-                .iter()
-                .filter(|(_, composed)| composed.is_template())
-                .map(|(file, composed)| (file.to_string(), composed.source().to_string()))
                 .collect(),
             amended: composition
                 .files()
@@ -2110,47 +1259,26 @@ mod tests {
                         .map(|amendment| (file.to_string(), amendment.base().to_string()))
                 })
                 .collect(),
+            placeholders: composition
+                .files()
+                .iter()
+                .flat_map(|(file, composed)| {
+                    composed.placeholders().iter().map(|declaration| {
+                        (
+                            file.to_string(),
+                            declaration.placeholder().to_string(),
+                            declaration.unit().to_string(),
+                        )
+                    })
+                })
+                .collect(),
         })
-    }
-
-    fn values_of(composed: &Composed, target: &str) -> Vec<(String, ParameterValue)> {
-        composed
-            .values
-            .iter()
-            .find(|(unit, _)| unit == target)
-            .map(|(_, values)| values.clone())
-            .unwrap()
-    }
-
-    fn values(entries: &[(&str, ParameterValue)]) -> Vec<(String, ParameterValue)> {
-        entries
-            .iter()
-            .map(|(parameter, value)| ((*parameter).to_owned(), value.clone()))
-            .collect()
-    }
-
-    fn requirement(requirer: Requirer, value: ParameterValue) -> OptionRequirement {
-        OptionRequirement {
-            requirer,
-            value,
-            from: None,
-        }
     }
 
     fn contributed(file: &str, contributor: &str) -> ContributedPath {
         ContributedPath {
             path: path(file),
             unit: identity(contributor),
-            delivered: path(file),
-        }
-    }
-
-    /// A template, delivered at its path without the suffix.
-    fn templated(file: &str, contributor: &str) -> ContributedPath {
-        ContributedPath {
-            path: path(file),
-            unit: identity(contributor),
-            delivered: path(file.strip_suffix(TEMPLATE_SUFFIX).unwrap()),
         }
     }
 
@@ -2160,424 +1288,6 @@ mod tests {
 
     fn node() -> Spec {
         Spec::new("@metamao/node", "1.0.0")
-            .param(
-                "packageManager",
-                optional(enumerated(&["npm", "pnpm", "bun"]), text("npm")),
-            )
-            .param(
-                "version",
-                optional(ParameterType::Integer, ParameterValue::Integer(22)),
-            )
-    }
-
-    // Parameter values.
-
-    #[test]
-    fn defaults_apply_when_nothing_is_required() {
-        let composed = run(&project(&[("@metamao/node", "^1")]), &[node()], &[]).unwrap();
-        assert_eq!(
-            values_of(&composed, "@metamao/node"),
-            values(&[
-                ("packageManager", text("npm")),
-                ("version", ParameterValue::Integer(22)),
-            ])
-        );
-    }
-
-    #[test]
-    fn every_composed_unit_has_values_even_without_parameters() {
-        let units = [
-            Spec::new("@metamao/app", "1.0.0").depends("@metamao/plain", "^1"),
-            Spec::new("@metamao/plain", "1.0.0"),
-        ];
-        let composed = run(&project(&[("@metamao/app", "^1")]), &units, &[]).unwrap();
-        let listed: Vec<&str> = composed
-            .values
-            .iter()
-            .map(|(unit, _)| unit.as_str())
-            .collect();
-        assert_eq!(listed, ["@metamao/app", "@metamao/plain"]);
-        assert!(composed.values.iter().all(|(_, values)| values.is_empty()));
-    }
-
-    #[test]
-    fn a_dependent_s_options_override_a_default() {
-        let units = [
-            Spec::new("@metamao/bun-app", "1.0.0")
-                .depends("@metamao/node", "^1")
-                .option("@metamao/node", "packageManager", text("bun")),
-            node(),
-        ];
-        let composed = run(&project(&[("@metamao/bun-app", "^1")]), &units, &[]).unwrap();
-        assert_eq!(
-            values_of(&composed, "@metamao/node"),
-            values(&[
-                ("packageManager", text("bun")),
-                ("version", ParameterValue::Integer(22)),
-            ])
-        );
-    }
-
-    #[test]
-    fn consumer_values_configure_explicit_selections() {
-        let composed = run(
-            &project(&[("@metamao/node", "^1")]),
-            &[node()],
-            &[("@metamao/node", "version", ParameterValue::Integer(24))],
-        )
-        .unwrap();
-        assert_eq!(
-            values_of(&composed, "@metamao/node"),
-            values(&[
-                ("packageManager", text("npm")),
-                ("version", ParameterValue::Integer(24)),
-            ])
-        );
-    }
-
-    #[test]
-    fn identical_requirements_are_compatible() {
-        let units = [
-            Spec::new("@metamao/api", "1.0.0")
-                .depends("@metamao/node", "^1")
-                .option("@metamao/node", "packageManager", text("pnpm")),
-            Spec::new("@metamao/web", "1.0.0")
-                .depends("@metamao/node", "^1")
-                .option("@metamao/node", "packageManager", text("pnpm")),
-            node(),
-        ];
-        let composed = run(
-            &project(&[
-                ("@metamao/api", "^1"),
-                ("@metamao/web", "^1"),
-                ("@metamao/node", "^1"),
-            ]),
-            &units,
-            &[("@metamao/node", "packageManager", text("pnpm"))],
-        )
-        .unwrap();
-        assert_eq!(
-            values_of(&composed, "@metamao/node")[0],
-            ("packageManager".to_owned(), text("pnpm"))
-        );
-    }
-
-    #[test]
-    fn different_requirements_are_an_options_conflict_naming_every_requirer() {
-        let units = [
-            Spec::new("@metamao/api", "1.0.0")
-                .depends("@metamao/node", "^1")
-                .option("@metamao/node", "packageManager", text("pnpm")),
-            Spec::new("@metamao/web", "1.0.0")
-                .depends("@metamao/node", "^1")
-                .option("@metamao/node", "packageManager", text("bun")),
-            node(),
-        ];
-        let errors = run(
-            &project(&[
-                ("@metamao/api", "^1"),
-                ("@metamao/web", "^1"),
-                ("@metamao/node", "^1"),
-            ]),
-            &units,
-            &[("@metamao/node", "packageManager", text("npm"))],
-        )
-        .unwrap_err();
-        assert_eq!(
-            errors,
-            [CompositionError::OptionsConflict {
-                unit: identity("@metamao/node"),
-                version: version("1.0.0"),
-                parameter: name("packageManager"),
-                requirements: vec![
-                    requirement(Requirer::Root, text("npm")),
-                    requirement(unit("@metamao/api", "1.0.0"), text("pnpm")),
-                    requirement(unit("@metamao/web", "1.0.0"), text("bun")),
-                ],
-            }]
-        );
-        let message = errors[0].to_string();
-        for expected in [
-            "options conflict",
-            "`packageManager` of @metamao/node 1.0.0",
-            "\"npm\" from the root",
-            "\"pnpm\" from @metamao/api 1.0.0",
-            "\"bun\" from @metamao/web 1.0.0",
-            "no requirement takes precedence",
-        ] {
-            assert!(message.contains(expected), "{message}");
-        }
-    }
-
-    #[test]
-    fn a_default_never_conflicts_with_a_requirement() {
-        let units = [
-            Spec::new("@metamao/api", "1.0.0")
-                .depends("@metamao/node", "^1")
-                .option("@metamao/node", "packageManager", text("pnpm")),
-            Spec::new("@metamao/web", "1.0.0").depends("@metamao/node", "^1"),
-            node(),
-        ];
-        let composed = run(
-            &project(&[("@metamao/api", "^1"), ("@metamao/web", "^1")]),
-            &units,
-            &[],
-        )
-        .unwrap();
-        assert_eq!(
-            values_of(&composed, "@metamao/node")[0],
-            ("packageManager".to_owned(), text("pnpm"))
-        );
-    }
-
-    #[test]
-    fn a_requirement_must_name_a_parameter_the_resolved_version_declares() {
-        let units = [
-            Spec::new("@metamao/app", "1.0.0")
-                .depends("@metamao/node", "^1")
-                .option("@metamao/node", "packageManager", text("pnpm")),
-            node(),
-            // The resolved version no longer declares `packageManager`.
-            Spec::new("@metamao/node", "1.1.0")
-                .param(
-                    "version",
-                    optional(ParameterType::Integer, ParameterValue::Integer(22)),
-                )
-                .param("runtime", optional(ParameterType::String, text("node"))),
-        ];
-        let errors = run(&project(&[("@metamao/app", "^1")]), &units, &[]).unwrap_err();
-        assert_eq!(
-            errors,
-            [CompositionError::UndeclaredParameter {
-                unit: identity("@metamao/node"),
-                version: version("1.1.0"),
-                parameter: name("packageManager"),
-                requirer: unit("@metamao/app", "1.0.0"),
-                declared: vec![name("runtime"), name("version")],
-            }]
-        );
-        let message = errors[0].to_string();
-        for expected in [
-            "@metamao/app 1.0.0 sets parameter `packageManager` of @metamao/node 1.1.0",
-            "does not declare it",
-            "`runtime`, `version`",
-        ] {
-            assert!(message.contains(expected), "{message}");
-        }
-    }
-
-    #[test]
-    fn an_undeclared_parameter_of_a_unit_without_parameters_says_so() {
-        let errors = run(
-            &project(&[("@metamao/plain", "^1")]),
-            &[Spec::new("@metamao/plain", "1.0.0")],
-            &[("@metamao/plain", "anything", ParameterValue::Boolean(true))],
-        )
-        .unwrap_err();
-        let message = errors[0].to_string();
-        assert!(
-            message.contains("the root sets parameter `anything`"),
-            "{message}"
-        );
-        assert!(message.contains("it declares no parameters"), "{message}");
-    }
-
-    #[test]
-    fn values_must_match_the_parameter_type_and_allowed_values() {
-        let units = [
-            Spec::new("@metamao/app", "1.0.0")
-                .depends("@metamao/node", "^1")
-                .option("@metamao/node", "packageManager", text("yarn")),
-            node(),
-        ];
-        let errors = run(
-            &project(&[("@metamao/app", "^1"), ("@metamao/node", "^1")]),
-            &units,
-            &[("@metamao/node", "version", text("22"))],
-        )
-        .unwrap_err();
-        assert_eq!(
-            errors,
-            [
-                CompositionError::InvalidValue {
-                    unit: identity("@metamao/node"),
-                    version: version("1.0.0"),
-                    parameter: name("packageManager"),
-                    requirement: requirement(unit("@metamao/app", "1.0.0"), text("yarn")),
-                    error: ParameterValueError::NotAllowed {
-                        value: "yarn".to_owned(),
-                        allowed: AllowedValues::new(vec![
-                            "npm".to_owned(),
-                            "pnpm".to_owned(),
-                            "bun".to_owned(),
-                        ])
-                        .unwrap(),
-                    },
-                },
-                CompositionError::InvalidValue {
-                    unit: identity("@metamao/node"),
-                    version: version("1.0.0"),
-                    parameter: name("version"),
-                    requirement: requirement(Requirer::Root, text("22")),
-                    error: ParameterValueError::TypeMismatch {
-                        expected: ValueKind::Integer,
-                        found: ValueKind::String,
-                    },
-                },
-            ]
-        );
-        let message = errors[1].to_string();
-        assert!(
-            message.contains("the root sets parameter `version` of @metamao/node 1.0.0 to \"22\""),
-            "{message}"
-        );
-        assert!(message.contains("expected an integer"), "{message}");
-    }
-
-    #[test]
-    fn an_invalid_requirement_is_reported_once_not_also_as_missing_or_conflicting() {
-        let units = [
-            Spec::new("@metamao/api", "1.0.0")
-                .depends("@metamao/db", "^1")
-                .option("@metamao/db", "port", text("5432")),
-            Spec::new("@metamao/web", "1.0.0")
-                .depends("@metamao/db", "^1")
-                .option("@metamao/db", "port", ParameterValue::Integer(6543)),
-            Spec::new("@metamao/db", "1.0.0").param("port", required(ParameterType::Integer)),
-        ];
-        let errors = run(
-            &project(&[("@metamao/api", "^1"), ("@metamao/web", "^1")]),
-            &units,
-            &[],
-        )
-        .unwrap_err();
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(matches!(errors[0], CompositionError::InvalidValue { .. }));
-    }
-
-    #[test]
-    fn a_missing_value_for_an_explicit_selection_is_the_root_s_to_supply() {
-        let units = [Spec::new("@metamao/worker", "1.0.0")
-            .param("accountId", required(ParameterType::String))];
-        let errors = run(&project(&[("@metamao/worker", "^1")]), &units, &[]).unwrap_err();
-        assert_eq!(
-            errors,
-            [CompositionError::MissingValue {
-                unit: identity("@metamao/worker"),
-                version: version("1.0.0"),
-                parameter: name("accountId"),
-                responsible: vec![Requirer::Root],
-                example: None,
-            }]
-        );
-        let message = errors[0].to_string();
-        for expected in [
-            "@metamao/worker 1.0.0 needs a value for `accountId`",
-            "no default",
-        ] {
-            assert!(message.contains(expected), "{message}");
-        }
-        // The project or the built unit is not named "the root".
-        assert!(!message.contains("root"), "{message}");
-    }
-
-    #[test]
-    fn a_missing_transitive_value_is_attributed_to_the_units_that_depend_on_it() {
-        let units = [
-            Spec::new("@metamao/app", "1.0.0").depends("@metamao/api", "^1"),
-            Spec::new("@metamao/api", "1.0.0").depends("@metamao/db", "^1"),
-            Spec::new("@metamao/admin", "1.0.0").depends("@metamao/db", "^1"),
-            Spec::new("@metamao/db", "1.0.0").param("url", required(ParameterType::String)),
-        ];
-        let errors = run(
-            &project(&[("@metamao/app", "^1"), ("@metamao/admin", "^1")]),
-            &units,
-            &[],
-        )
-        .unwrap_err();
-        assert_eq!(
-            errors,
-            [CompositionError::MissingValue {
-                unit: identity("@metamao/db"),
-                version: version("1.0.0"),
-                parameter: name("url"),
-                responsible: vec![
-                    unit("@metamao/admin", "1.0.0"),
-                    unit("@metamao/api", "1.0.0"),
-                ],
-                example: None,
-            }]
-        );
-        let message = errors[0].to_string();
-        assert!(!message.contains("the root"), "{message}");
-        assert!(
-            message.contains("set by @metamao/admin 1.0.0, @metamao/api 1.0.0"),
-            "{message}"
-        );
-    }
-
-    #[test]
-    fn a_dependent_satisfies_a_required_parameter_through_its_options() {
-        let units = [
-            Spec::new("@metamao/api", "1.0.0")
-                .depends("@metamao/db", "^1")
-                .option("@metamao/db", "url", text("postgres://db")),
-            Spec::new("@metamao/db", "1.0.0").param("url", required(ParameterType::String)),
-        ];
-        let composed = run(&project(&[("@metamao/api", "^1")]), &units, &[]).unwrap();
-        assert_eq!(
-            values_of(&composed, "@metamao/db"),
-            values(&[("url", text("postgres://db"))])
-        );
-    }
-
-    #[test]
-    fn consumer_values_on_a_transitive_unit_are_rejected() {
-        let units = [
-            Spec::new("@metamao/app", "1.0.0").depends("@metamao/node", "^1"),
-            node(),
-        ];
-        let errors = run(
-            &project(&[("@metamao/app", "^1")]),
-            &units,
-            &[("@metamao/node", "packageManager", text("bun"))],
-        )
-        .unwrap_err();
-        assert_eq!(
-            errors,
-            [CompositionError::RootTarget {
-                unit: identity("@metamao/node"),
-                reason: RootTargetReason::Transitive,
-            }]
-        );
-        let message = errors[0].to_string();
-        assert!(
-            message.contains("only a dependency of other units"),
-            "{message}"
-        );
-        assert!(message.contains("explicitly selected units"), "{message}");
-    }
-
-    #[test]
-    fn consumer_values_on_a_unit_outside_the_composition_are_rejected() {
-        let errors = run(
-            &project(&[("@metamao/node", "^1")]),
-            &[node()],
-            &[("@metamao/absent", "anything", ParameterValue::Boolean(true))],
-        )
-        .unwrap_err();
-        assert_eq!(
-            errors,
-            [CompositionError::RootTarget {
-                unit: identity("@metamao/absent"),
-                reason: RootTargetReason::NotComposed,
-            }]
-        );
-        assert!(
-            errors[0]
-                .to_string()
-                .contains("not part of the composition")
-        );
     }
 
     // Unit builds.
@@ -2586,23 +1296,8 @@ mod tests {
     fn a_unit_build_composes_the_built_unit_with_its_dependencies() {
         let built = Spec::new("@metamao/bun-app", "0.1.0")
             .depends("@metamao/node", "^1")
-            .option("@metamao/node", "packageManager", text("bun"))
-            .param("title", required(ParameterType::String))
             .file("index.ts");
-        let composed = run(
-            &For::Build(built),
-            &[node().file("package.json")],
-            &[("@metamao/bun-app", "title", text("Demo"))],
-        )
-        .unwrap();
-        assert_eq!(
-            values_of(&composed, "@metamao/bun-app"),
-            values(&[("title", text("Demo"))])
-        );
-        assert_eq!(
-            values_of(&composed, "@metamao/node")[0],
-            ("packageManager".to_owned(), text("bun"))
-        );
+        let composed = run(&For::Build(built), &[node().file("package.json")]).unwrap();
         let files: Vec<(&str, &str)> = composed
             .files
             .iter()
@@ -2613,53 +1308,6 @@ mod tests {
             [
                 ("index.ts", "@metamao/bun-app"),
                 ("package.json", "@metamao/node")
-            ]
-        );
-    }
-
-    #[test]
-    fn a_unit_build_s_values_configure_only_the_built_unit() {
-        let built = Spec::new("@metamao/bun-app", "0.1.0").depends("@metamao/node", "^1");
-        let errors = run(
-            &For::Build(built),
-            &[node()],
-            &[("@metamao/node", "packageManager", text("bun"))],
-        )
-        .unwrap_err();
-        assert_eq!(
-            errors,
-            [CompositionError::RootTarget {
-                unit: identity("@metamao/node"),
-                reason: RootTargetReason::NotTheBuiltUnit,
-            }]
-        );
-        assert!(errors[0].to_string().contains("through its `options`"));
-    }
-
-    #[test]
-    fn a_built_unit_s_missing_value_is_the_root_s_to_supply() {
-        let built = Spec::new("@metamao/bun-app", "0.1.0")
-            .depends("@metamao/db", "^1")
-            .param("title", required(ParameterType::String));
-        let db = Spec::new("@metamao/db", "1.0.0").param("url", required(ParameterType::String));
-        let errors = run(&For::Build(built), &[db], &[]).unwrap_err();
-        assert_eq!(
-            errors,
-            [
-                CompositionError::MissingValue {
-                    unit: identity("@metamao/bun-app"),
-                    version: version("0.1.0"),
-                    parameter: name("title"),
-                    responsible: vec![Requirer::Root],
-                    example: None,
-                },
-                CompositionError::MissingValue {
-                    unit: identity("@metamao/db"),
-                    version: version("1.0.0"),
-                    parameter: name("url"),
-                    responsible: vec![Requirer::Root],
-                    example: None,
-                },
             ]
         );
     }
@@ -2675,7 +1323,7 @@ mod tests {
                 .file("README.md"),
             node().file("package.json"),
         ];
-        let composed = run(&project(&[("@metamao/app", "^1")]), &units, &[]).unwrap();
+        let composed = run(&project(&[("@metamao/app", "^1")]), &units).unwrap();
         let files: Vec<(&str, &str, &[u8])> = composed
             .files
             .iter()
@@ -2704,12 +1352,12 @@ mod tests {
     #[test]
     fn file_bytes_and_the_executable_bit_are_preserved_without_interpolation() {
         let binary = vec![0, 159, 146, 150, 255, b'\r', b'\n'];
-        let template = b"name: {{ title }}\nrun: ${{ matrix.os }}\n".to_vec();
+        let text = b"name: __TITLE__ {{ title }}\nrun: ${{ matrix.os }}\n".to_vec();
         let units = [Spec::new("@metamao/tools", "1.0.0")
-            .param("title", optional(ParameterType::String, text("Demo")))
+            .declares("__TITLE__")
             .file_with("bin/run", binary.clone(), true)
-            .file_with("ci.yml", template.clone(), false)];
-        let composed = run(&project(&[("@metamao/tools", "^1")]), &units, &[]).unwrap();
+            .file_with("ci.yml", text.clone(), false)];
+        let composed = run(&project(&[("@metamao/tools", "^1")]), &units).unwrap();
         assert_eq!(
             composed.files,
             [
@@ -2722,7 +1370,7 @@ mod tests {
                 (
                     "ci.yml".to_owned(),
                     "@metamao/tools".to_owned(),
-                    template,
+                    text,
                     false
                 ),
             ]
@@ -2738,7 +1386,6 @@ mod tests {
         let errors = run(
             &project(&[("@metamao/web", "^1"), ("@metamao/api", "^1")]),
             &units,
-            &[],
         )
         .unwrap_err();
         assert_eq!(
@@ -2766,7 +1413,7 @@ mod tests {
         let built = Spec::new("@metamao/bun-app", "0.1.0")
             .depends("@metamao/node", "^1")
             .file("package.json");
-        let errors = run(&For::Build(built), &[node().file("package.json")], &[]).unwrap_err();
+        let errors = run(&For::Build(built), &[node().file("package.json")]).unwrap_err();
         assert_eq!(
             errors,
             [CompositionError::PathCollision {
@@ -2787,7 +1434,6 @@ mod tests {
         let errors = run(
             &project(&[("@metamao/api", "^1"), ("@metamao/web", "^1")]),
             &units,
-            &[],
         )
         .unwrap_err();
         assert_eq!(
@@ -2807,7 +1453,7 @@ mod tests {
         let units = [Spec::new("@metamao/docs", "1.0.0")
             .file("Guide/Intro.md")
             .file("guide/intro.md")];
-        let errors = run(&project(&[("@metamao/docs", "^1")]), &units, &[]).unwrap_err();
+        let errors = run(&project(&[("@metamao/docs", "^1")]), &units).unwrap_err();
         assert_eq!(
             errors,
             [CompositionError::PathCollision {
@@ -2820,64 +1466,16 @@ mod tests {
         assert!(errors[0].to_string().contains("differ only in case"));
     }
 
-    // Templates.
-
-    #[test]
-    fn templates_are_delivered_without_the_suffix_and_ordinary_files_as_they_are() {
-        let units = [Spec::new("@metamao/app", "1.0.0")
-            .file("package.json.assemblr.tmpl")
-            .file("config/app.yaml.assemblr.tmpl")
-            // `.tmpl` alone, or the suffix elsewhere in the path, selects nothing.
-            .file("notes.tmpl")
-            .file("assemblr.tmpl/README.md")
-            .file("Dockerfile")];
-        let composed = run(&project(&[("@metamao/app", "^1")]), &units, &[]).unwrap();
-        let delivered: Vec<&str> = composed
-            .files
-            .iter()
-            .map(|(file, _, _, _)| file.as_str())
-            .collect();
-        assert_eq!(
-            delivered,
-            [
-                "Dockerfile",
-                "assemblr.tmpl/README.md",
-                "config/app.yaml",
-                "notes.tmpl",
-                "package.json",
-            ]
-        );
-        assert_eq!(
-            composed.templates,
-            [
-                (
-                    "config/app.yaml".to_owned(),
-                    "config/app.yaml.assemblr.tmpl".to_owned()
-                ),
-                (
-                    "package.json".to_owned(),
-                    "package.json.assemblr.tmpl".to_owned()
-                ),
-            ]
-        );
-        // A template's source is delivered for rendering, unchanged here.
-        let (_, _, contents, _) = &composed.files[4];
-        assert_eq!(contents, b"@metamao/app package.json.assemblr.tmpl");
-    }
-
-    /// `@metamao/node` 1.0.0 providing a template and a script, published
-    /// alone and with 1.1.0.
     fn provider() -> Vec<Spec> {
         vec![
-            node().file("package.json.assemblr.tmpl").file_with(
+            node()
+                .file("package.json")
+                .file_with("bin/run", b"#!/bin/sh".to_vec(), true),
+            node().clone_as("1.1.0").file("package.json").file_with(
                 "bin/run",
                 b"#!/bin/sh".to_vec(),
                 true,
             ),
-            node()
-                .clone_as("1.1.0")
-                .file("package.json.assemblr.tmpl")
-                .file_with("bin/run", b"#!/bin/sh".to_vec(), true),
         ]
     }
 
@@ -2892,15 +1490,12 @@ mod tests {
     fn an_amendment_copy_takes_the_provider_s_file_s_place() {
         let built = Spec::new("@metamao/app", "0.1.0")
             .depends("@metamao/node", "=1.0.0")
-            .amends("package.json.assemblr.tmpl", "@metamao/node", "1.0.0")
+            .amends("package.json", "@metamao/node", "1.0.0")
             .amends("bin/run", "@metamao/node", "1.0.0")
-            .copy(
-                "package.json.assemblr.tmpl",
-                "{ \"name\": \"{{ own.name }}\" }",
-            )
+            .copy("package.json", "{ \"name\": \"acme\" }")
             .copy("bin/run", "#!/bin/sh\necho amended")
             .file("index.ts");
-        let composed = run(&For::Build(built), &provider(), &[]).unwrap();
+        let composed = run(&For::Build(built), &provider()).unwrap();
         let files: Vec<(&str, &str, &[u8], bool)> = composed
             .files
             .iter()
@@ -2932,17 +1527,10 @@ mod tests {
                 (
                     "package.json",
                     "@metamao/node",
-                    b"{ \"name\": \"{{ own.name }}\" }".as_slice(),
+                    b"{ \"name\": \"acme\" }".as_slice(),
                     false
                 ),
             ]
-        );
-        assert_eq!(
-            composed.templates,
-            [(
-                "package.json".to_owned(),
-                "package.json.assemblr.tmpl".to_owned()
-            )]
         );
         assert_eq!(
             composed.amended,
@@ -2960,22 +1548,16 @@ mod tests {
             // Resolved to 1.1.0, not the base.
             .amends("bin/run", "@metamao/node", "1.0.0")
             .copy("bin/run", "#!/bin/sh\necho amended")
-            // The provider's file is the template; the copy lacks the suffix.
-            .amends("package.json", "@metamao/node", "1.1.0")
-            .copy("package.json", "{}")
-            // The provider's file is not a template; the copy has the suffix.
-            .amends("bin/run.assemblr.tmpl", "@metamao/node", "1.1.0")
-            .copy("bin/run.assemblr.tmpl", "")
             // Not provided at all.
             .amends("missing.txt", "@metamao/node", "1.1.0")
             .copy("missing.txt", "")
             // Declared without a copy.
-            .amends("package.json.assemblr.tmpl", "@metamao/node", "1.1.0")
+            .amends("package.json", "@metamao/node", "1.1.0")
             // A copy without a declaration.
             .copy("stray.txt", "")
             // The unit's own file at an amended path collides.
-            .file("package.json.assemblr.tmpl");
-        let errors = run(&For::Build(built), &provider(), &[]).unwrap_err();
+            .file("package.json");
+        let errors = run(&For::Build(built), &provider()).unwrap_err();
         let path = |input: &str| path(input);
         assert_eq!(
             errors,
@@ -2989,28 +1571,13 @@ mod tests {
                 },
                 CompositionError::AmendmentNotProvided {
                     amender: Requirer::Root,
-                    path: path("bin/run.assemblr.tmpl"),
-                    unit: identity("@metamao/node"),
-                    version: version("1.1.0"),
-                    similar: Some(path("bin/run")),
-                },
-                CompositionError::AmendmentNotProvided {
-                    amender: Requirer::Root,
                     path: path("missing.txt"),
                     unit: identity("@metamao/node"),
                     version: version("1.1.0"),
-                    similar: None,
-                },
-                CompositionError::AmendmentNotProvided {
-                    amender: Requirer::Root,
-                    path: path("package.json"),
-                    unit: identity("@metamao/node"),
-                    version: version("1.1.0"),
-                    similar: Some(path("package.json.assemblr.tmpl")),
                 },
                 CompositionError::AmendmentMissingCopy {
                     amender: Requirer::Root,
-                    path: path("package.json.assemblr.tmpl"),
+                    path: path("package.json"),
                     provider: identity("@metamao/node"),
                 },
                 CompositionError::AmendmentUndeclared {
@@ -3019,8 +1586,8 @@ mod tests {
                 },
                 CompositionError::PathCollision {
                     files: vec![
-                        templated("package.json.assemblr.tmpl", "@metamao/app"),
-                        templated("package.json.assemblr.tmpl", "@metamao/node"),
+                        contributed("package.json", "@metamao/app"),
+                        contributed("package.json", "@metamao/node"),
                     ],
                 },
             ]
@@ -3032,22 +1599,12 @@ mod tests {
             messages[0]
         );
         assert!(
-            messages[1].contains("src/bin/run, which is not a template"),
+            messages[1].ends_with("has no src/missing.txt"),
             "{}",
             messages[1]
         );
-        assert!(
-            messages[2].ends_with("has no src/missing.txt"),
-            "{}",
-            messages[2]
-        );
-        assert!(
-            messages[3].contains("template src/package.json.assemblr.tmpl"),
-            "{}",
-            messages[3]
-        );
-        assert!(messages[4].contains("does not exist"), "{}", messages[4]);
-        assert!(messages[5].contains("not declared"), "{}", messages[5]);
+        assert!(messages[2].contains("does not exist"), "{}", messages[2]);
+        assert!(messages[3].contains("not declared"), "{}", messages[3]);
     }
 
     /// `@metamao/amender` 1.0.0, a published unit amending two files of
@@ -3057,11 +1614,8 @@ mod tests {
             .depends("@metamao/node", "=1.0.0")
             .amends("bin/run", "@metamao/node", "1.0.0")
             .copy("bin/run", "#!/bin/sh\necho amended by amender")
-            .amends("package.json.assemblr.tmpl", "@metamao/node", "1.0.0")
-            .copy(
-                "package.json.assemblr.tmpl",
-                "{ \"name\": \"{{ own.name }}\" }",
-            )
+            .amends("package.json", "@metamao/node", "1.0.0")
+            .copy("package.json", "{ \"name\": \"acme\" }")
             .file("amender.txt")
     }
 
@@ -3078,7 +1632,7 @@ mod tests {
         let mut published = provider();
         published.push(amender());
         published.push(web);
-        let composed = run(&For::Build(built), &published, &[]).unwrap();
+        let composed = run(&For::Build(built), &published).unwrap();
         let files: Vec<(&str, &str, &[u8], bool)> = composed
             .files
             .iter()
@@ -3115,7 +1669,7 @@ mod tests {
                 (
                     "package.json",
                     "@metamao/node",
-                    b"{ \"name\": \"{{ own.name }}\" }".as_slice(),
+                    b"{ \"name\": \"acme\" }".as_slice(),
                     false
                 ),
                 (
@@ -3150,7 +1704,7 @@ mod tests {
             .depends("@metamao/node", "^1.1");
         let mut published = provider();
         published.push(amender);
-        let composed = run(&For::Build(built), &published, &[]).unwrap();
+        let composed = run(&For::Build(built), &published).unwrap();
         assert_eq!(
             composed.amended,
             [("bin/run".to_owned(), "@metamao/amender".to_owned())]
@@ -3164,7 +1718,7 @@ mod tests {
             .depends("@metamao/node", "^1.1")
             .amends("bin/run", "@metamao/node", "1.0.0")
             .copy("bin/run", "#!/bin/sh\necho amended");
-        let errors = run(&For::Build(built), &provider(), &[]).unwrap_err();
+        let errors = run(&For::Build(built), &provider()).unwrap_err();
         assert!(
             matches!(
                 errors.as_slice(),
@@ -3181,13 +1735,13 @@ mod tests {
     fn several_amenders_of_one_provider_file_are_refused_together() {
         // Two published siblings amend `bin/run`, one of the copies not
         // being text, which is refused for every amender; two published
-        // units amend `package.json.assemblr.tmpl`, a JSON file, whose
+        // units amend `package.json`, a JSON file, whose
         // copies are carried for the merge; and a file only one member
         // amends still takes that copy.
         let other = Spec::new("@metamao/other", "1.0.0")
             .depends("@metamao/node", "=1.0.0")
-            .amends("package.json.assemblr.tmpl", "@metamao/node", "1.0.0")
-            .copy("package.json.assemblr.tmpl", "{}")
+            .amends("package.json", "@metamao/node", "1.0.0")
+            .copy("package.json", "{}")
             .amends("README.md", "@metamao/node", "1.0.0")
             .copy("README.md", "amended readme")
             .file("other.txt");
@@ -3205,7 +1759,7 @@ mod tests {
         published.push(amender());
         let mut with_binary = published.clone();
         with_binary.push(other_binary);
-        let errors = run(&For::Build(built.clone()), &with_binary, &[]).unwrap_err();
+        let errors = run(&For::Build(built.clone()), &with_binary).unwrap_err();
         assert_eq!(
             errors,
             [CompositionError::SeveralAmenders {
@@ -3236,7 +1790,7 @@ mod tests {
             .clone()
             .amends("bin/run", "@metamao/node", "1.0.0")
             .copy_bytes("bin/run", b"#!/bin/sh\0binary");
-        let composed = run(&For::Build(chained), &published, &[]).unwrap();
+        let composed = run(&For::Build(chained), &published).unwrap();
         assert_eq!(
             composed.amended,
             [
@@ -3251,9 +1805,9 @@ mod tests {
         // Without the text file's amenders, the JSON file's copies are both
         // carried, in requirer order, with the provider's own contents.
         let built = built
-            .amends("package.json.assemblr.tmpl", "@metamao/node", "1.0.0")
-            .copy("package.json.assemblr.tmpl", "{ \"app\": true }");
-        let composed = run(&For::Build(built), &published, &[]).unwrap();
+            .amends("package.json", "@metamao/node", "1.0.0")
+            .copy("package.json", "{ \"app\": true }");
+        let composed = run(&For::Build(built), &published).unwrap();
         assert_eq!(
             composed.amended,
             [
@@ -3269,7 +1823,7 @@ mod tests {
             .iter()
             .find(|(file, _, _, _)| file == "package.json")
             .unwrap();
-        assert_eq!(package.2, b"@metamao/node package.json.assemblr.tmpl");
+        assert_eq!(package.2, b"@metamao/node package.json");
         let readme = composed
             .files
             .iter()
@@ -3291,7 +1845,7 @@ mod tests {
             .file("index.ts");
         let mut published = provider();
         published.push(amender());
-        let composed = run(&For::Build(built), &published, &[]).unwrap();
+        let composed = run(&For::Build(built), &published).unwrap();
         assert_eq!(
             composed.amended,
             [
@@ -3310,149 +1864,11 @@ mod tests {
     }
 
     #[test]
-    fn a_template_and_an_ordinary_file_delivered_at_the_same_path_collide() {
-        let units = [
-            Spec::new("@metamao/api", "1.0.0").file("package.json.assemblr.tmpl"),
-            Spec::new("@metamao/web", "1.0.0").file("package.json"),
-        ];
-        let errors = run(
-            &project(&[("@metamao/web", "^1"), ("@metamao/api", "^1")]),
-            &units,
-            &[],
-        )
-        .unwrap_err();
-        assert_eq!(
-            errors,
-            [CompositionError::PathCollision {
-                files: vec![
-                    contributed("package.json", "@metamao/web"),
-                    templated("package.json.assemblr.tmpl", "@metamao/api"),
-                ],
-            }]
-        );
-        let message = errors[0].to_string();
-        for expected in [
-            "package.json from @metamao/web",
-            "package.json.assemblr.tmpl from @metamao/api (delivered as package.json)",
-            "no unit takes precedence",
-        ] {
-            assert!(message.contains(expected), "{message}");
-        }
-    }
-
-    #[test]
-    fn one_unit_s_template_and_ordinary_file_at_the_same_delivered_path_collide() {
-        let units = [Spec::new("@metamao/app", "1.0.0")
-            .file("wrangler.jsonc")
-            .file("wrangler.jsonc.assemblr.tmpl")];
-        let errors = run(&project(&[("@metamao/app", "^1")]), &units, &[]).unwrap_err();
-        assert_eq!(
-            errors,
-            [CompositionError::PathCollision {
-                files: vec![
-                    contributed("wrangler.jsonc", "@metamao/app"),
-                    templated("wrangler.jsonc.assemblr.tmpl", "@metamao/app"),
-                ],
-            }]
-        );
-        let message = errors[0].to_string();
-        assert!(
-            message.contains("a unit delivers each path once"),
-            "{message}"
-        );
-        assert!(!message.contains("amendment"), "{message}");
-    }
-
-    #[test]
-    fn delivered_paths_are_compared_like_any_other_path() {
-        // Case and nesting are checked on the delivered path.
-        let units = [
-            Spec::new("@metamao/api", "1.0.0")
-                .file("README.md.assemblr.tmpl")
-                .file("docs.assemblr.tmpl"),
-            Spec::new("@metamao/web", "1.0.0")
-                .file("readme.md")
-                .file("docs/intro.md"),
-        ];
-        let errors = run(
-            &project(&[("@metamao/web", "^1"), ("@metamao/api", "^1")]),
-            &units,
-            &[],
-        )
-        .unwrap_err();
-        assert_eq!(
-            errors,
-            [
-                CompositionError::PathCollision {
-                    files: vec![
-                        templated("README.md.assemblr.tmpl", "@metamao/api"),
-                        contributed("readme.md", "@metamao/web"),
-                    ],
-                },
-                CompositionError::NestedPathCollision {
-                    file: templated("docs.assemblr.tmpl", "@metamao/api"),
-                    nested: vec![contributed("docs/intro.md", "@metamao/web")],
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn a_template_whose_delivered_path_is_invalid_is_reported() {
-        // A reserved name such as `con.assemblr.tmpl` is already an invalid
-        // source path; these are valid sources whose delivered path is not.
-        let units = [Spec::new("@metamao/app", "1.0.0")
-            .file("notes..assemblr.tmpl")
-            .file("config/.assemblr.tmpl")];
-        let errors = run(&project(&[("@metamao/app", "^1")]), &units, &[]).unwrap_err();
-        let reported: Vec<String> = errors
-            .iter()
-            .map(|error| match error {
-                CompositionError::InvalidDeliveredPath { path, unit, .. } => {
-                    format!("{path} {unit}")
-                }
-                other => panic!("unexpected {other:?}"),
-            })
-            .collect();
-        assert_eq!(
-            reported,
-            [
-                "config/.assemblr.tmpl @metamao/app",
-                "notes..assemblr.tmpl @metamao/app"
-            ]
-        );
-        let message = errors[0].to_string();
-        for expected in [
-            "config/.assemblr.tmpl from @metamao/app is a template",
-            "without `.assemblr.tmpl` its path is invalid",
-        ] {
-            assert!(message.contains(expected), "{message}");
-        }
-    }
-
-    #[test]
-    fn delivered_path_strips_the_suffix_exactly() {
-        assert_eq!(delivered_path(&path("a/b.json")), Ok(None));
-        assert_eq!(delivered_path(&path("a/b.tmpl")), Ok(None));
-        assert_eq!(delivered_path(&path("a/b.ASSEMBLR.TMPL")), Ok(None));
-        assert_eq!(
-            delivered_path(&path("a/b.json.assemblr.tmpl")),
-            Ok(Some(path("a/b.json")))
-        );
-        assert_eq!(
-            delivered_path(&path("a/b.assemblr.tmpl.assemblr.tmpl")),
-            Ok(Some(path("a/b.assemblr.tmpl")))
-        );
-        assert!(delivered_path(&path(".assemblr.tmpl")).is_err());
-        assert!(delivered_path(&path("a/.assemblr.tmpl")).is_err());
-    }
-
-    #[test]
     fn one_unit_s_file_where_it_also_needs_a_directory_collides() {
         let units = [Spec::new("@metamao/docs", "1.0.0")
             .file("guide")
             .file("Guide/intro.md")];
-        let errors = run(&project(&[("@metamao/docs", "^1")]), &units, &[]).unwrap_err();
+        let errors = run(&project(&[("@metamao/docs", "^1")]), &units).unwrap_err();
         assert_eq!(
             errors,
             [CompositionError::NestedPathCollision {
@@ -3472,7 +1888,6 @@ mod tests {
         let errors = run(
             &project(&[("@metamao/api", "^1"), ("@metamao/web", "^1")]),
             &units,
-            &[],
         )
         .unwrap_err();
         assert_eq!(
@@ -3496,7 +1911,7 @@ mod tests {
             .file("e\u{301}te\u{301}.md")
             .file("a\u{301}\u{323}.md")
             .file("a\u{323}\u{301}.md")];
-        let errors = run(&project(&[("@metamao/docs", "^1")]), &units, &[]).unwrap_err();
+        let errors = run(&project(&[("@metamao/docs", "^1")]), &units).unwrap_err();
         assert_eq!(
             errors,
             [
@@ -3521,7 +1936,7 @@ mod tests {
         let units = [Spec::new("@metamao/docs", "1.0.0")
             .file("caf\u{e9}")
             .file("CAFE\u{301}/menu.md")];
-        let errors = run(&project(&[("@metamao/docs", "^1")]), &units, &[]).unwrap_err();
+        let errors = run(&project(&[("@metamao/docs", "^1")]), &units).unwrap_err();
         assert_eq!(
             errors,
             [CompositionError::NestedPathCollision {
@@ -3544,7 +1959,7 @@ mod tests {
             ("\u{212a}.md", "k.md"),
         ] {
             let units = [Spec::new("@metamao/docs", "1.0.0").file(first).file(second)];
-            let errors = run(&project(&[("@metamao/docs", "^1")]), &units, &[]).unwrap_err();
+            let errors = run(&project(&[("@metamao/docs", "^1")]), &units).unwrap_err();
             assert!(
                 matches!(errors.as_slice(), [CompositionError::PathCollision { .. }]),
                 "{first} {second}: {errors:?}"
@@ -3562,7 +1977,7 @@ mod tests {
             ("\u{130}.md", "i.md"),
         ] {
             let units = [Spec::new("@metamao/docs", "1.0.0").file(first).file(second)];
-            let composed = run(&project(&[("@metamao/docs", "^1")]), &units, &[]).unwrap();
+            let composed = run(&project(&[("@metamao/docs", "^1")]), &units).unwrap();
             assert_eq!(composed.files.len(), 2, "{first} {second}");
         }
     }
@@ -3574,7 +1989,7 @@ mod tests {
         let units = [Spec::new("@metamao/docs", "1.0.0")
             .file("\u{fb01}le.md")
             .file("file.md")];
-        let composed = run(&project(&[("@metamao/docs", "^1")]), &units, &[]).unwrap();
+        let composed = run(&project(&[("@metamao/docs", "^1")]), &units).unwrap();
         assert_eq!(composed.files.len(), 2);
     }
 
@@ -3592,7 +2007,6 @@ mod tests {
                 ("@metamao/a", "^1"),
             ]),
             &units,
-            &[],
         )
         .unwrap_err();
         assert_eq!(
@@ -3618,7 +2032,6 @@ mod tests {
         let errors = run(
             &project(&[("@metamao/api", "^1"), ("@metamao/web", "^1")]),
             &units,
-            &[],
         )
         .unwrap_err();
         assert_eq!(
@@ -3654,7 +2067,6 @@ mod tests {
         let errors = run(
             &project(&[("@metamao/api", "^1"), ("@metamao/web", "^1")]),
             &units,
-            &[],
         )
         .unwrap_err();
         assert_eq!(
@@ -3711,13 +2123,7 @@ mod tests {
         let none = FileTree::new();
         let missing = BTreeMap::new();
         assert_eq!(
-            compose(
-                resolution.graph(),
-                Root::Project,
-                &missing,
-                &BTreeMap::new()
-            )
-            .unwrap_err(),
+            compose(resolution.graph(), Root::Project, &missing).unwrap_err(),
             [
                 mismatch("@metamao/app", "1.0.0"),
                 mismatch("@metamao/node", "1.0.0"),
@@ -3735,13 +2141,7 @@ mod tests {
             ),
         ]
         .into();
-        let errors = compose(
-            resolution.graph(),
-            Root::Project,
-            &wrong_version,
-            &BTreeMap::new(),
-        )
-        .unwrap_err();
+        let errors = compose(resolution.graph(), Root::Project, &wrong_version).unwrap_err();
         assert_eq!(errors, [mismatch("@metamao/node", "1.0.0")]);
         assert!(errors[0].to_string().contains("does not match"));
 
@@ -3759,78 +2159,42 @@ mod tests {
         ]
         .into();
         assert_eq!(
-            compose(resolution.graph(), built, &complete, &BTreeMap::new()).unwrap_err(),
+            compose(resolution.graph(), built, &complete).unwrap_err(),
             [mismatch("@metamao/node", "1.0.0")]
         );
     }
 
     /// Units whose composition fails in every way at once.
-    fn every_problem() -> (For, Vec<Spec>, Vec<RootValue>) {
+    fn every_problem() -> (For, Vec<Spec>) {
         let units = vec![
             Spec::new("@metamao/api", "1.0.0")
                 .depends("@metamao/node", "^1")
-                .depends("@metamao/db", "^1")
-                .option("@metamao/node", "packageManager", text("pnpm"))
-                .option("@metamao/node", "colour", text("blue"))
-                .option("@metamao/db", "port", text("5432"))
                 .amends("README.md", "@metamao/node", "1.0.0")
                 .copy("README.md", "api readme")
                 .file("README.md")
                 .file("docs"),
             Spec::new("@metamao/web", "1.0.0")
                 .depends("@metamao/node", "^1")
-                .depends("@metamao/db", "^1")
-                .option("@metamao/node", "packageManager", text("bun"))
                 .amends("README.md", "@metamao/node", "1.0.0")
                 .copy_bytes("README.md", b"web readme\0")
                 .amends("missing.txt", "@metamao/node", "1.0.0")
                 .copy("stray.txt", "stray")
                 .file("readme.md")
-                .file("docs/index.md")
-                .file("notes..assemblr.tmpl"),
+                .file("docs/index.md"),
             node().file("README.md"),
-            Spec::new("@metamao/db", "1.0.0")
-                .param("port", required(ParameterType::Integer))
-                .param("url", required(ParameterType::String)),
         ];
         let root = project(&[("@metamao/api", "^1"), ("@metamao/web", "^1")]);
-        let root_values = vec![
-            ("@metamao/node", "version", ParameterValue::Integer(24)),
-            ("@metamao/web", "theme", text("dark")),
-        ];
-        (root, units, root_values)
+        (root, units)
     }
 
     #[test]
     fn every_problem_is_reported_in_a_stable_order() {
-        let (root, units, root_values) = every_problem();
-        let errors = run(&root, &units, &root_values).unwrap_err();
+        let (root, units) = every_problem();
+        let errors = run(&root, &units).unwrap_err();
         let kinds: Vec<String> = errors
             .iter()
             .map(|error| match error {
                 CompositionError::ContentMismatch { unit, .. } => format!("mismatch {unit}"),
-                CompositionError::RootTarget { unit, .. } => format!("target {unit}"),
-                CompositionError::UndeclaredParameter {
-                    unit,
-                    parameter,
-                    requirer,
-                    ..
-                } => format!("undeclared {unit} {parameter} {requirer}"),
-                CompositionError::InvalidValue {
-                    unit, parameter, ..
-                } => format!("invalid {unit} {parameter}"),
-                CompositionError::MappingIncompatible {
-                    unit, parameter, ..
-                } => format!("mapping {unit} {parameter}"),
-                CompositionError::InheritedParameter { unit, error, .. } => {
-                    format!("inherited {unit} {}", error.parameter)
-                }
-                CompositionError::OptionsConflict {
-                    unit, parameter, ..
-                } => format!("conflict {unit} {parameter}"),
-                CompositionError::MissingValue {
-                    unit, parameter, ..
-                } => format!("missing {unit} {parameter}"),
                 CompositionError::SeveralAmenders { unit, path, .. } => {
                     format!("several {unit} {path}")
                 }
@@ -3841,9 +2205,6 @@ mod tests {
                 | CompositionError::AmendmentUndeclared { amender, path, .. } => {
                     format!("amendment {amender} {path}")
                 }
-                CompositionError::InvalidDeliveredPath { path, unit, .. } => {
-                    format!("undeliverable {path} {unit}")
-                }
                 CompositionError::PathCollision { files } => format!("collision {}", files[0]),
                 CompositionError::NestedPathCollision { file, .. } => format!("nested {file}"),
             })
@@ -3851,45 +2212,138 @@ mod tests {
         assert_eq!(
             kinds,
             [
-                "target @metamao/node",
-                "invalid @metamao/db port",
-                "undeclared @metamao/node colour @metamao/api 1.0.0",
-                "undeclared @metamao/web theme the root",
-                "conflict @metamao/node packageManager",
-                "missing @metamao/db url",
                 "several @metamao/node README.md",
                 "amendment @metamao/web 1.0.0 missing.txt",
                 "amendment @metamao/web 1.0.0 stray.txt",
-                "undeliverable notes..assemblr.tmpl @metamao/web",
                 "collision README.md from @metamao/api",
                 "nested docs from @metamao/api",
             ]
         );
     }
 
+    /// A stack where two unrelated units declare `__NAME__`, a base
+    /// declares `__PROJECT_NAME__`, and amendments bring declarations into
+    /// a provider's file.
+    fn placeholder_stack() -> (For, Vec<Spec>) {
+        let units = vec![
+            Spec::new("@acme/base", "1.0.0")
+                .declares("__PROJECT_NAME__")
+                .file("package.json")
+                .file("README.md"),
+            Spec::new("@acme/postgres", "1.0.0")
+                .declares("__NAME__")
+                .file("db/config.json"),
+            Spec::new("@acme/docs", "1.0.0")
+                .depends("@acme/base", "^1")
+                .declares("__NAME__")
+                .amends("README.md", "@acme/base", "1.0.0")
+                .copy("README.md", "__PROJECT_NAME__ docs: __NAME__")
+                .file("docs/site.json"),
+            Spec::new("@acme/app", "1.0.0")
+                .depends("@acme/docs", "^1")
+                .depends("@acme/postgres", "^1")
+                .declares("__APP_TITLE__")
+                .file("index.html"),
+        ];
+        (project(&[("@acme/app", "^1")]), units)
+    }
+
+    #[test]
+    fn a_file_s_scope_holds_its_contributors_declarations_and_their_graphs() {
+        let (root, units) = placeholder_stack();
+        let composed = run(&root, &units).unwrap();
+        let scope = |file: &str| -> Vec<(&str, &str)> {
+            composed
+                .placeholders
+                .iter()
+                .filter(|(path, _, _)| path == file)
+                .map(|(_, placeholder, unit)| (placeholder.as_str(), unit.as_str()))
+                .collect()
+        };
+        // The base's own file sees the base alone; the amended one also the
+        // amender and what it depends on.
+        assert_eq!(scope("package.json"), [("__PROJECT_NAME__", "@acme/base")]);
+        assert_eq!(
+            scope("README.md"),
+            [
+                ("__NAME__", "@acme/docs"),
+                ("__PROJECT_NAME__", "@acme/base")
+            ]
+        );
+        // An unrelated unit's declaration of the same token stays out.
+        assert_eq!(scope("db/config.json"), [("__NAME__", "@acme/postgres")]);
+        assert_eq!(
+            scope("index.html"),
+            [
+                ("__APP_TITLE__", "@acme/app"),
+                ("__NAME__", "@acme/docs"),
+                ("__NAME__", "@acme/postgres"),
+                ("__PROJECT_NAME__", "@acme/base"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_token_a_contributor_ignores_is_out_of_the_file_s_scope() {
+        // The bundler unit's define is not a placeholder in its file, even
+        // when an amender brings a unit that declares the same token.
+        let units = vec![
+            Spec::new("@acme/vite", "1.0.0")
+                .ignores("__DEV__")
+                .file_with("vite.config.ts", b"define: __DEV__".to_vec(), false)
+                .file("index.html"),
+            Spec::new("@acme/flags", "1.0.0")
+                .declares("__DEV__")
+                .file("flags.json"),
+            Spec::new("@acme/app", "1.0.0")
+                .depends("@acme/vite", "^1")
+                .depends("@acme/flags", "^1")
+                .amends("vite.config.ts", "@acme/vite", "1.0.0")
+                .copy("vite.config.ts", "define: __DEV__, app")
+                .amends("index.html", "@acme/vite", "1.0.0")
+                .copy("index.html", "__DEV__"),
+        ];
+        let composed = run(&project(&[("@acme/app", "^1")]), &units).unwrap();
+        let scope = |file: &str| -> Vec<&str> {
+            composed
+                .placeholders
+                .iter()
+                .filter(|(path, _, _)| path == file)
+                .map(|(_, placeholder, _)| placeholder.as_str())
+                .collect()
+        };
+        assert!(scope("vite.config.ts").is_empty());
+        assert!(scope("index.html").is_empty());
+        assert_eq!(scope("flags.json"), ["__DEV__"]);
+    }
+
     #[test]
     fn declaration_and_enumeration_order_never_change_the_outcome() {
-        let (root, units, root_values) = every_problem();
         let succeeding = (
             project(&[("@metamao/bun-app", "^1"), ("@metamao/node", "^1")]),
             vec![
                 Spec::new("@metamao/bun-app", "1.0.0")
                     .depends("@metamao/node", "^1")
-                    .option("@metamao/node", "packageManager", text("bun"))
+                    .declares("__APP__")
+                    .declares("__TITLE__")
                     .file("src/index.ts")
                     .file("bunfig.toml"),
-                node().file("package.json").file(".nvmrc"),
+                node()
+                    .declares("__NAME__")
+                    .file("package.json")
+                    .file(".nvmrc"),
             ],
-            vec![("@metamao/node", "version", ParameterValue::Integer(24))],
         );
-        for (root, units, root_values) in [(root, units, root_values), succeeding] {
-            let expected = run(&root, &units, &root_values);
+        for (root, units) in [every_problem(), succeeding, placeholder_stack()] {
+            let expected = run(&root, &units);
             let reorder = |spec: &Spec| {
                 let mut spec = spec.clone();
                 spec.dependencies.reverse();
-                spec.options.reverse();
-                spec.params.reverse();
+                spec.placeholders.reverse();
+                spec.ignored.reverse();
                 spec.files.reverse();
+                spec.amendments.reverse();
+                spec.copies.reverse();
                 spec
             };
             let reordered_root = match &root {
@@ -3903,376 +2357,9 @@ mod tests {
             for rotation in 0..units.len() {
                 let mut shuffled: Vec<Spec> = units.iter().map(reorder).collect();
                 shuffled.rotate_left(rotation);
-                let mut values = root_values.clone();
-                let count = values.len().max(1);
-                values.rotate_left(rotation % count);
-                assert_eq!(run(&root, &shuffled, &values), expected);
-                assert_eq!(run(&reordered_root, &shuffled, &values), expected);
+                assert_eq!(run(&root, &shuffled), expected);
+                assert_eq!(run(&reordered_root, &shuffled), expected);
             }
         }
-    }
-
-    // --- parameter mappings ---
-
-    /// A stack that maps its `appName` to a Worker unit, which maps it on to
-    /// the application unit: three levels, one name.
-    fn stack() -> Vec<Spec> {
-        vec![
-            Spec::new("@metamao/app", "1.0.0")
-                .param("appName", optional(ParameterType::String, text("my-app"))),
-            Spec::new("@metamao/worker", "1.0.0")
-                .depends("@metamao/app", "^1")
-                .param("appName", optional(ParameterType::String, text("my-app")))
-                .map("@metamao/app", "appName", "appName"),
-            Spec::new("@metamao/db", "1.0.0")
-                .depends("@metamao/app", "^1")
-                .depends("@metamao/worker", "^1")
-                .param("appName", optional(ParameterType::String, text("my-app")))
-                .param("database", optional(ParameterType::String, text("app")))
-                .map("@metamao/app", "appName", "appName")
-                .map("@metamao/worker", "appName", "appName"),
-        ]
-    }
-
-    #[test]
-    fn a_mapping_carries_the_source_default_through_every_level() {
-        let composed = run(&project(&[("@metamao/db", "^1")]), &stack(), &[]).unwrap();
-        for unit in ["@metamao/app", "@metamao/worker", "@metamao/db"] {
-            assert_eq!(
-                values_of(&composed, unit)
-                    .into_iter()
-                    .find(|(name, _)| name == "appName")
-                    .unwrap()
-                    .1,
-                text("my-app"),
-                "{unit}"
-            );
-        }
-    }
-
-    #[test]
-    fn one_value_the_consumer_gives_reaches_every_dependency_once() {
-        let composed = run(
-            &project(&[("@metamao/db", "^1")]),
-            &stack(),
-            &[("@metamao/db", "appName", text("acme-portal"))],
-        )
-        .unwrap();
-        for unit in ["@metamao/app", "@metamao/worker", "@metamao/db"] {
-            assert!(
-                values_of(&composed, unit).contains(&("appName".to_owned(), text("acme-portal"))),
-                "{unit}"
-            );
-        }
-        // The identical requirements of two paths (the stack's own and the
-        // worker's) agree, and the unit's other parameters are untouched.
-        assert!(
-            values_of(&composed, "@metamao/db").contains(&("database".to_owned(), text("app")))
-        );
-    }
-
-    #[test]
-    fn a_value_set_on_a_dependency_directly_conflicts_with_a_mapping_and_says_so() {
-        let errors = run(
-            &project(&[("@metamao/db", "^1"), ("@metamao/app", "^1")]),
-            &stack(),
-            &[("@metamao/app", "appName", text("other"))],
-        )
-        .unwrap_err();
-        let conflict = errors
-            .iter()
-            .find(|error| matches!(error, CompositionError::OptionsConflict { .. }))
-            .unwrap();
-        let message = conflict.to_string();
-        assert!(message.contains("\"other\" from the root"), "{message}");
-        assert!(
-            message.contains("\"my-app\" from @metamao/worker 1.0.0 (mapped from its `appName`)"),
-            "{message}"
-        );
-        assert!(
-            message.contains("no requirement takes precedence"),
-            "{message}"
-        );
-    }
-
-    #[test]
-    fn mappings_never_convert_values_and_known_incompatibilities_are_refused() {
-        let incompatible = |source: ParameterDefinition, target: ParameterDefinition| {
-            let units = vec![
-                Spec::new("@metamao/lib", "1.0.0").param("x", target),
-                Spec::new("@metamao/top", "1.0.0")
-                    .depends("@metamao/lib", "^1")
-                    .param("y", source)
-                    .map("@metamao/lib", "x", "y"),
-            ];
-            run(
-                &project(&[("@metamao/top", "^1")]),
-                &units,
-                &[("@metamao/top", "y", text("a"))],
-            )
-        };
-        // A free string cannot configure an enumerated string.
-        let errors = incompatible(
-            optional(ParameterType::String, text("a")),
-            optional(enumerated(&["a", "b"]), text("a")),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(
-                errors.as_slice(),
-                [CompositionError::MappingIncompatible { .. }]
-            ),
-            "{errors:?}"
-        );
-        assert!(
-            errors[0]
-                .to_string()
-                .contains("a free string may hold values"),
-            "{}",
-            errors[0]
-        );
-        // An integer cannot configure a string.
-        let errors = incompatible(
-            optional(ParameterType::Integer, ParameterValue::Integer(1)),
-            optional(ParameterType::String, text("a")),
-        )
-        .unwrap_err();
-        assert!(
-            errors[0].to_string().contains("it is an integer"),
-            "{}",
-            errors[0]
-        );
-        // An enumerated string whose values the target allows, and a plain
-        // string target, are fine; one with a value the target lacks is not.
-        assert!(
-            incompatible(
-                optional(enumerated(&["a"]), text("a")),
-                optional(enumerated(&["a", "b"]), text("a")),
-            )
-            .is_ok()
-        );
-        assert!(
-            incompatible(
-                optional(enumerated(&["a", "c"]), text("a")),
-                optional(ParameterType::String, text("a")),
-            )
-            .is_ok()
-        );
-        let errors = incompatible(
-            optional(enumerated(&["a", "c"]), text("a")),
-            optional(enumerated(&["a", "b"]), text("a")),
-        )
-        .unwrap_err();
-        assert!(
-            errors[0].to_string().contains("allows \"c\""),
-            "{}",
-            errors[0]
-        );
-    }
-
-    #[test]
-    fn the_resolved_value_is_validated_even_when_the_definitions_are_compatible() {
-        // Both are enumerated and the source's values fit, but the consumer
-        // gives the source a value that is not one of them.
-        let units = vec![
-            Spec::new("@metamao/lib", "1.0.0").param(
-                "mode",
-                optional(enumerated(&["dev", "prod", "test"]), text("dev")),
-            ),
-            Spec::new("@metamao/top", "1.0.0")
-                .depends("@metamao/lib", "^1")
-                .param("mode", optional(enumerated(&["dev", "prod"]), text("dev")))
-                .map("@metamao/lib", "mode", "mode"),
-        ];
-        let errors = run(
-            &project(&[("@metamao/top", "^1")]),
-            &units,
-            &[("@metamao/top", "mode", text("test"))],
-        )
-        .unwrap_err();
-        assert!(
-            errors.iter().all(|error| matches!(error, CompositionError::InvalidValue { unit, .. } if *unit == identity("@metamao/top"))),
-            "{errors:?}"
-        );
-    }
-
-    #[test]
-    fn a_mapping_from_a_required_parameter_without_a_value_reports_the_source_once() {
-        let units = vec![
-            Spec::new("@metamao/lib", "1.0.0").param("name", required(ParameterType::String)),
-            Spec::new("@metamao/top", "1.0.0")
-                .depends("@metamao/lib", "^1")
-                .param("name", required(ParameterType::String))
-                .map("@metamao/lib", "name", "name"),
-        ];
-        let errors = run(&project(&[("@metamao/top", "^1")]), &units, &[]).unwrap_err();
-        // The source is the one to supply; the dependency's parameter is not
-        // also reported, since the source's value will reach it.
-        let missing: Vec<String> = errors
-            .iter()
-            .filter_map(|error| match error {
-                CompositionError::MissingValue { unit, .. } => Some(unit.to_string()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(missing, ["@metamao/top"]);
-    }
-
-    #[test]
-    fn a_mapping_to_a_parameter_the_dependency_does_not_declare_is_reported() {
-        let units = vec![
-            Spec::new("@metamao/lib", "1.0.0"),
-            Spec::new("@metamao/top", "1.0.0")
-                .depends("@metamao/lib", "^1")
-                .param("name", optional(ParameterType::String, text("n")))
-                .map("@metamao/lib", "nme", "name"),
-        ];
-        let errors = run(&project(&[("@metamao/top", "^1")]), &units, &[]).unwrap_err();
-        assert!(
-            matches!(errors.as_slice(), [CompositionError::UndeclaredParameter { parameter, .. }] if parameter.as_str() == "nme"),
-            "{errors:?}"
-        );
-    }
-
-    #[test]
-    fn mappings_give_the_same_values_whatever_order_the_units_come_in() {
-        let forward = run(
-            &project(&[("@metamao/db", "^1")]),
-            &stack(),
-            &[("@metamao/db", "appName", text("acme"))],
-        )
-        .unwrap();
-        let mut reversed = stack();
-        reversed.reverse();
-        let backward = run(
-            &project(&[("@metamao/db", "^1")]),
-            &reversed,
-            &[("@metamao/db", "appName", text("acme"))],
-        )
-        .unwrap();
-        assert_eq!(forward.values, backward.values);
-    }
-
-    /// A chain of inheritance: the base defines `title`, the middle unit
-    /// inherits it, and the top unit inherits it from the middle one.
-    fn inheriting() -> Vec<Spec> {
-        vec![
-            Spec::new("@metamao/base", "1.0.0")
-                .param("title", required(enumerated(&["Shop", "Blog"]))),
-            Spec::new("@metamao/middle", "1.0.0")
-                .depends("@metamao/base", "^1")
-                .inherits("title", "@metamao/base"),
-            Spec::new("@metamao/top", "1.0.0")
-                .depends("@metamao/middle", "^1")
-                .inherits("title", "@metamao/middle"),
-        ]
-    }
-
-    #[test]
-    fn an_inherited_parameter_takes_the_definition_and_passes_the_value_down() {
-        let composed = run(
-            &project(&[("@metamao/top", "^1")]),
-            &inheriting(),
-            &[("@metamao/top", "title", text("Shop"))],
-        )
-        .unwrap();
-        for unit in ["@metamao/top", "@metamao/middle", "@metamao/base"] {
-            assert_eq!(
-                values_of(&composed, unit),
-                [("title".to_owned(), text("Shop"))],
-                "{unit}"
-            );
-        }
-        // The definition is the base's: required, and enumerated.
-        let errors = run(&project(&[("@metamao/top", "^1")]), &inheriting(), &[]).unwrap_err();
-        assert!(
-            matches!(errors.as_slice(), [CompositionError::MissingValue { unit, .. }] if *unit == identity("@metamao/top")),
-            "{errors:?}"
-        );
-        let errors = run(
-            &project(&[("@metamao/top", "^1")]),
-            &inheriting(),
-            &[("@metamao/top", "title", text("Wiki"))],
-        )
-        .unwrap_err();
-        assert!(
-            matches!(errors.as_slice(), [CompositionError::InvalidValue { unit, .. }] if *unit == identity("@metamao/top")),
-            "{errors:?}"
-        );
-    }
-
-    #[test]
-    fn an_inherited_parameter_the_dependency_does_not_declare_is_reported_once() {
-        let units = vec![
-            Spec::new("@metamao/base", "1.0.0"),
-            Spec::new("@metamao/top", "1.0.0")
-                .depends("@metamao/base", "^1")
-                .inherits("title", "@metamao/base"),
-        ];
-        let errors = run(
-            &project(&[("@metamao/top", "^1")]),
-            &units,
-            &[("@metamao/top", "title", text("Shop"))],
-        )
-        .unwrap_err();
-        // Not also an undeclared parameter of either unit.
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(
-            matches!(&errors[0], CompositionError::InheritedParameter { unit, error, .. }
-                if *unit == identity("@metamao/top") && error.unit == identity("@metamao/base")),
-            "{errors:?}"
-        );
-        assert_eq!(
-            errors[0].to_string(),
-            "in @metamao/top 1.0.0, the parameter `title` is inherited from @metamao/base, which \
-             does not declare it"
-        );
-    }
-
-    #[test]
-    fn a_broken_chain_is_reported_by_the_unit_that_names_the_unit_without_it() {
-        let units = vec![
-            Spec::new("@metamao/base", "1.0.0"),
-            Spec::new("@metamao/middle", "1.0.0")
-                .depends("@metamao/base", "^1")
-                .inherits("title", "@metamao/base"),
-            Spec::new("@metamao/top", "1.0.0")
-                .depends("@metamao/middle", "^1")
-                .inherits("title", "@metamao/middle"),
-        ];
-        let errors = run(&project(&[("@metamao/top", "^1")]), &units, &[]).unwrap_err();
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(
-            errors[0]
-                .to_string()
-                .starts_with("in @metamao/middle 1.0.0,"),
-            "{errors:?}"
-        );
-    }
-
-    #[test]
-    fn a_built_unit_maps_from_an_inherited_parameter_like_its_own() {
-        let mut units = inheriting();
-        let top = units.pop().unwrap();
-        let other =
-            Spec::new("@metamao/other", "1.0.0").param("label", required(ParameterType::String));
-        units.push(other);
-        let built = top
-            .depends("@metamao/other", "^1")
-            .map("@metamao/other", "label", "title");
-        let composed = run(
-            &For::Build(built),
-            &units,
-            &[("@metamao/top", "title", text("Blog"))],
-        )
-        .unwrap();
-        assert_eq!(
-            values_of(&composed, "@metamao/other"),
-            [("label".to_owned(), text("Blog"))]
-        );
-        assert_eq!(
-            values_of(&composed, "@metamao/base"),
-            [("title".to_owned(), text("Blog"))]
-        );
     }
 }

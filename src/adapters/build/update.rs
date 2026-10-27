@@ -42,9 +42,8 @@ use super::amend::{self, MANIFEST_NEW};
 use super::exclusive::{BuildLock, BuildLockError};
 use super::output::LOCK_STAGING;
 use super::{
-    BuildProblem, Dependencies, MANIFEST, ManifestFileError, PendingFile, Resolved,
-    development_values, layer_sources, pending_files, read_working_manifest_text, render_files,
-    resolve_graph, without_amendments,
+    BuildProblem, Dependencies, MANIFEST, ManifestFileError, PendingFile, Resolved, layer_file,
+    layer_files, pending_files, read_working_manifest_text, resolve_graph,
 };
 use crate::adapters::git::UnitDirectory;
 use crate::adapters::git::{GitError, GitRepository, ReadSrcError};
@@ -55,7 +54,7 @@ use crate::adapters::registry::{Registry, StorageError};
 use crate::domain::{
     AmendmentDeclaration, Composition, FileTree, LockChange, LockError, Manifest, MergeFormat,
     ReconcileCause, ReconcileError, RelativePath, ResolutionError, Root, UnitContent, UnitIdentity,
-    UnitLock, Version, compose, delivered_path, is_text, resolve, update_lock,
+    UnitLock, Version, compose, is_text, resolve, update_lock,
 };
 
 /// The journal of an update that has started writing, in the Git directory.
@@ -248,17 +247,14 @@ fn update_with(
     let (Some(before), Some(after)) = (before, after) else {
         return Err(UpdateFailure::Rejected(problems));
     };
-    let bare = without_amendments(&manifest);
+    let bare = manifest.without_amendments();
     let no_copies = FileTree::new();
     let (units_before, units_after) = (before.units(), after.units());
-    // Each world gives inherited parameters the definition, and so the
-    // example, of its own versions.
     let compose_world = |world: &Resolved, units| {
         compose(
             world.resolution.graph(),
             Root::Unit(UnitContent::new(&bare, &src, &no_copies)),
             units,
-            &development_values(&manifest, Some(world)).0,
         )
     };
     let composed_after = compose_world(&after, &units_after);
@@ -299,7 +295,7 @@ fn update_with(
     let mut pending = Vec::new();
     if let Ok(composed_after) = &composed_after {
         let mut sink = Vec::new();
-        if let Some(rendered) = render_files(
+        if let Some(layered) = layer_files(
             composed_after,
             &new_lock,
             Some(manifest.name()),
@@ -308,7 +304,7 @@ fn update_with(
         ) {
             pending = pending_files(
                 composed_after,
-                rendered.unresolved,
+                layered.unresolved,
                 &new_lock,
                 &manifest,
                 &after.dependencies,
@@ -370,9 +366,9 @@ fn update_with(
     }
     for pending in &updated.pending {
         let declaration = AmendmentDeclaration::new(pending.provider.clone(), pending.base.clone());
-        edited = declare_amendment(&edited, &declared, &pending.source, &declaration)
+        edited = declare_amendment(&edited, &declared, &pending.path, &declaration)
             .map_err(|error| rejected(UpdateProblem::ManifestEdit(error)))?;
-        if let Some(next) = declared.with_amendment(pending.source.clone(), declaration) {
+        if let Some(next) = declared.with_amendment(pending.path.clone(), declaration) {
             declared = next;
         }
     }
@@ -397,7 +393,7 @@ fn update_with(
     // directories on the way are real directories, created here when they
     // do not exist and removed again if the update is not written.
     let mut created = Vec::new();
-    match amend::real_directories_of(root, updated.pending.iter().map(|pending| &pending.source)) {
+    match amend::real_directories_of(root, updated.pending.iter().map(|pending| &pending.path)) {
         Ok(missing) => created = missing,
         Err(amend::DirectoryProblem::NotADirectory(path)) => {
             problems.push(UpdateProblem::Build(BuildProblem::NotADirectory { path }));
@@ -410,13 +406,13 @@ fn update_with(
         }
     }
     for pending in &updated.pending {
-        let target = copy_target(root, &pending.source);
+        let target = copy_target(root, &pending.path);
         if fs::symlink_metadata(&target).is_ok() {
             problems.push(UpdateProblem::StagingOccupied { path: target });
             continue;
         }
         copy_plans.push((
-            pending.source.clone(),
+            pending.path.clone(),
             Planned {
                 before: Vec::new(),
                 after: pending.copy.clone(),
@@ -530,19 +526,15 @@ fn reconcile(
             }));
             continue;
         }
-        let delivered = delivered_path(path)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| path.clone());
         let mut found = Vec::new();
         let base_of = |world: &World<'_>, found: &mut Vec<BuildProblem>| {
-            let composed = world.composition.files().get(&delivered)?;
-            if composed.unit() != unit || composed.source() != path {
+            let composed = world.composition.files().get(path)?;
+            if composed.unit() != unit {
                 return None;
             }
-            layer_sources(
+            layer_file(
                 world.composition,
-                &delivered,
+                path,
                 world.lock,
                 Some(manifest.name()),
                 &world.resolved.dependencies,
@@ -585,11 +577,7 @@ fn reconcile(
             }
             continue;
         };
-        // A template's sources are rebased by line, whatever its format.
-        let format = match MergeFormat::of_path(&delivered) {
-            MergeFormat::Json if delivered != *path => MergeFormat::Text,
-            format => format,
-        };
+        let format = MergeFormat::of_path(path);
         let texts = (
             std::str::from_utf8(&old_base),
             std::str::from_utf8(copy.contents()),

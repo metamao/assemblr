@@ -3,19 +3,15 @@
 //! `docs/domain/authoring-workflow.md`).
 //!
 //! A unit contributes through the files it introduces, the dependencies it
-//! aggregates, the amendments it makes to its dependencies' files, and the
-//! options it sets on them. Aggregation counts: a unit whose purpose is to
-//! compose other units into one reusable dependency contributes that
-//! composition, whatever its size. Since amendments and options presuppose a
-//! dependency, a unit is without contribution exactly when it delivers no
+//! aggregates, and the amendments it makes to its dependencies' files.
+//! Aggregation counts: a unit whose purpose is to compose other units into
+//! one reusable dependency contributes that composition, whatever its size.
+//! Since amendments presuppose a dependency, a unit is without contribution exactly when it delivers no
 //! file and declares no dependency.
 //!
 //! An amendment whose copy is the provider's file byte for byte is
 //! redundant: it changes nothing at its base and claims the file for no
-//! reason, which keeps every other unit from amending it. An option equal
-//! to the parameter's default at the locked version is not reported: it
-//! pins the value for the other versions a consumer may resolve the
-//! dependency to, whose defaults may differ.
+//! reason, which keeps every other unit from amending it.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -107,8 +103,8 @@ mod tests {
 
     use super::{ContributionError, contribution_problems};
     use crate::domain::{
-        AmendmentDeclaration, Description, FileTree, Manifest, RelativePath, UnitFile,
-        UnitIdentity, Version,
+        AmendmentDeclaration, Description, FileTree, Manifest, Placeholders, RelativePath,
+        UnitFile, UnitIdentity, Version,
     };
 
     fn identity(input: &str) -> UnitIdentity {
@@ -144,9 +140,7 @@ mod tests {
                 .iter()
                 .map(|unit| (identity(unit), "^1".parse().unwrap()))
                 .collect(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
+            Placeholders::default(),
             amendments
                 .iter()
                 .map(|(file, unit, base)| {

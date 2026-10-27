@@ -312,7 +312,7 @@ contents.
   catalog declares for it. The manifest remains authoritative, and a catalog
   never overrides it.
 - `registry.jsonc` does **not** duplicate unit versions, dependencies,
-  parameters, or content hashes, and it does not pin unit versions. The
+  placeholders, or content hashes, and it does not pin unit versions. The
   metadata consumers need is published separately, in a generated
   [metadata index](#catalog-metadata-index--approved). Indexing adds no fields
   to `registry.jsonc`, and its references stay plain strings.
@@ -351,7 +351,7 @@ For each published version of each declared unit, the index describes:
 - the exact version;
 - its published Git provenance;
 - its dependency requirements;
-- its parameters, with types, descriptions, allowed values, and defaults;
+- its placeholders, with their descriptions, and the tokens it ignores;
 - the information required for version resolution, validation, and integrity
   checks.
 
@@ -779,7 +779,10 @@ assemblr catalog refresh [--no-commit]
   registered from a path or a URL.
 - Registering or synchronizing a catalog reads only the catalog, never its
   units' repositories. Each manifest its index lists must be valid and
-  declare the listed unit and version. A unit only catalogs declare is
+  declare the listed unit and version. One this version of Assemblr does
+  not accept, such as a manifest with `params` that an earlier version
+  indexed, is refused with a hint to run `catalog refresh`, which leaves
+  that version out ([placeholders](placeholders.md#removed)). A unit only catalogs declare is
   indexed with the versions their indexes list, with the listed commit and
   tree; a unit also registered directly is indexed from its own tags, and a
   catalog that lists another commit for one of its versions is rejected. Any
@@ -825,15 +828,14 @@ assemblr info <identity> --json
   error, never described from what the repository holds now.
 - The text lists the identity and version, description, source, the
   published versions in SemVer order, the commit and tree, the dependencies,
-  the parameters (type, default or `required`, allowed values, description),
-  the options, and the amendments. A section with nothing to list says
+  the placeholders to replace, with their descriptions, the ignored tokens,
+  and the amendments. A section with nothing to list says
   `none`. Names are in sorted order, so the output depends only on the
   registry and the repository.
 - `--json` prints one object from the same data: `identity`, `version`,
   `description`, `source`, `versions`, `commit`, `tree`, `dependencies`
-  (identity to requirement), `params` (name to `type`, `description`,
-  `required`, and `default` and `allowed` when present), `options` (identity
-  to parameter values), and `amendments` (path to `unit` and `base`). The
+  (identity to requirement), `placeholders` (`replace`, placeholder to
+  description, and `ignore`, an array of tokens), and `amendments` (path to `unit` and `base`). The
   order of keys is not significant, and fields may be added.
 - An unknown unit or version, a unit without a published version, an
   unreadable repository, and a version that no longer matches the index each
@@ -896,18 +898,15 @@ assemblr info @metamao/cloudflare-worker --json
 
 - identity and version, and the unit's published versions;
 - the unit description;
-- public parameters, with descriptions, types, requiredness, and defaults;
-- allowed values;
+- the placeholders its files hold, with their descriptions;
 - declared dependencies;
-- dependency configuration requirements (`options`);
 - relevant resolution and source information, where available.
 
 Human-readable and machine-readable output are derived from the **same domain
 information**. Neither is a separately maintained view.
 
 The same indexed metadata supports agent-facing validation and diagnostics,
-for example when a consumer composition is missing a required parameter (see
-[consumer-projects.md](consumer-projects.md#parameters-and-non-interactive-operation--approved)),
+for example the [placeholder report](placeholders.md#consumer-report--approved),
 and editing assistance for `assemblr.jsonc` (see
 [consumer-projects.md](consumer-projects.md#editing-assistance--approved-direction-details-open)).
 

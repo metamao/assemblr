@@ -1,6 +1,6 @@
 # 0010: `unit amend`: the search, the manifest edit, and recovery; amendments in a build
 
-- **Status:** Accepted; point 8 superseded by [0011](0011-published-amendments.md)
+- **Status:** Accepted; point 8 superseded by [0011](0011-published-amendments.md), point 2 superseded by [0036](0036-placeholders.md)
 - **Date:** 2026-10-21
 
 ## Context

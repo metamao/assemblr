@@ -53,7 +53,7 @@ const GITIGNORE_NEW: &str = ".assemblr-gitignore.new";
 /// it in the current directory, `web` for `@acme/web`: that directory must
 /// not exist, be empty, or already hold a manifest, so that a unit never
 /// lands among unrelated files by default. `description` is the manifest's
-/// description; without one, a placeholder names the unit.
+/// description; without one, `The <identity> unit.`
 pub fn init_unit(
     directory: Option<&Path>,
     identity: &UnitIdentity,

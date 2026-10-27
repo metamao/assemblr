@@ -1,6 +1,6 @@
 # 0035: Template filters and parameter patterns
 
-- **Status:** Accepted
+- **Status:** Superseded by [0036](0036-placeholders.md)
 - **Date:** 2026-10-25
 
 ## Context

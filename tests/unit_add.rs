@@ -36,9 +36,8 @@ impl Fixture {
         succeeds(self.assemblr(&self.dir, &["registry", "add", path]));
     }
 
-    /// A published `@acme/base` 1.0.0 whose `appName` is required with an
-    /// example, `mode` is an enumerated string with an example, and `port`
-    /// has a default.
+    /// A published `@acme/base` 1.0.0 whose `cfg.txt` holds the placeholder
+    /// `__APP_NAME__`.
     fn base(&self) -> Repo {
         let base = self.repo("base");
         base.write(
@@ -47,17 +46,10 @@ impl Fixture {
                 "@acme/base",
                 "1.0.0",
                 &[],
-                r#", "params": {
-                    "appName": { "type": "string", "description": "The app name.", "example": "demo" },
-                    "mode": { "type": "string", "description": "Mode.", "allowed": ["dev", "prod"], "example": "dev" },
-                    "port": { "type": "integer", "description": "Port.", "default": 8080 }
-                }"#,
+                r#", "placeholders": {"replace": {"__APP_NAME__": "The app's name."}}"#,
             ),
         );
-        base.write(
-            "src/cfg.txt.assemblr.tmpl",
-            "name={{ appName }} mode={{ mode }} port={{ port }}\n",
-        );
+        base.write("src/cfg.txt", "name=__APP_NAME__ port=8080\n");
         base.publish("1.0.0");
         self.register(&base);
         base
@@ -146,40 +138,30 @@ fn add_declares_the_dependency_builds_and_lets_amend_follow() {
         out.contains("Added @acme/base (^1.0.0) to manifest.jsonc"),
         "{out}"
     );
+    assert!(out.contains("Built @acme/app 0.1.0 into build/"), "{out}");
     assert!(
-        out.contains("declared `appName`, `mode` in params as inherited from it"),
+        out.contains("Placeholders: __APP_NAME__ in 1 file."),
         "{out}"
     );
-    assert!(out.contains("Built @acme/app 0.1.0 into build/"), "{out}");
     assert!(
         stderr(&output).contains("created assemblr-lock.json: @acme/base 1.0.0 (new)"),
         "{}",
         stderr(&output)
     );
-    // The manifest keeps its comment and holds the declaration and the
-    // required parameters, inherited from the dependency rather than copied,
-    // so they need no mapping in `options`.
+    // The manifest keeps its comment and holds the declaration only: the
+    // dependency's placeholder stays the dependency's, declared once.
     let text = app.read("manifest.jsonc");
     assert!(text.contains("// The app."), "{text}");
     let manifest = app.manifest();
     assert_eq!(manifest["dependencies"]["@acme/base"], "^1.0.0");
-    assert_eq!(
-        manifest["params"]["appName"],
-        serde_json::json!({ "from": "@acme/base" })
-    );
-    assert_eq!(
-        manifest["params"]["mode"],
-        serde_json::json!({ "from": "@acme/base" })
-    );
-    assert!(manifest.get("options").is_none(), "{manifest}");
-    assert!(manifest["params"].get("port").is_none(), "{manifest}");
-    assert_eq!(app.read("build/cfg.txt"), "name=demo mode=dev port=8080\n");
+    assert!(manifest.get("placeholders").is_none(), "{manifest}");
+    assert_eq!(app.read("build/cfg.txt"), "name=__APP_NAME__ port=8080\n");
     assert_eq!(app.lockfile()["units"]["@acme/base"]["version"], "1.0.0");
 
     // No separate build is needed before amending.
     let output = succeeds(fixture.assemblr(&app.path, &["unit", "amend", "cfg.txt"]));
     assert!(
-        stdout(&output).contains("created amendments/cfg.txt.assemblr.tmpl"),
+        stdout(&output).contains("created amendments/cfg.txt"),
         "{}",
         stdout(&output)
     );
@@ -283,157 +265,6 @@ fn promoting_a_transitive_dependency_keeps_its_locked_version() {
 }
 
 #[test]
-fn a_required_parameter_the_unit_declares_already_is_mapped_from_it() {
-    let fixture = Fixture::new("a_required_parameter_the_unit_declares_already_is_mapped_from_it");
-    fixture.base();
-    let app = fixture.app();
-    app.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/app",
-            "0.1.0",
-            &[],
-            r#", "params": {
-                "appName": { "type": "string", "description": "Our name.", "example": "ours" },
-                "mode": { "type": "string", "description": "Our mode.", "allowed": ["dev"], "example": "dev" }
-            }"#,
-        ),
-    );
-    let output = succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
-    assert!(
-        stdout(&output).contains("mapped `appName`, `mode` from the unit's own parameters"),
-        "{}",
-        stdout(&output)
-    );
-    let manifest = app.manifest();
-    assert_eq!(manifest["params"]["appName"]["description"], "Our name.");
-    assert_eq!(
-        manifest["options"]["@acme/base"]["appName"]["from"],
-        "appName"
-    );
-    assert_eq!(app.read("build/cfg.txt"), "name=ours mode=dev port=8080\n");
-}
-
-#[test]
-fn an_own_parameter_that_cannot_be_mapped_is_refused_with_the_option_as_the_way_out() {
-    let fixture = Fixture::new(
-        "an_own_parameter_that_cannot_be_mapped_is_refused_with_the_option_as_the_way_out",
-    );
-    fixture.base();
-    let app = fixture.app();
-    app.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/app",
-            "0.1.0",
-            &[],
-            r#", "params": { "appName": { "type": "integer", "description": "A number.", "example": 1 } }"#,
-        ),
-    );
-    let before = app.read("manifest.jsonc");
-    let output = fails(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
-    let err = stderr(&output);
-    assert!(
-        err.contains("the unit's own parameter `appName` cannot supply it"),
-        "{err}"
-    );
-    assert!(err.contains("--option appName=<value>"), "{err}");
-    assert_eq!(app.read("manifest.jsonc"), before);
-    assert!(!app.exists("assemblr-lock.json"));
-
-    let output = succeeds(fixture.assemblr(
-        &app.path,
-        &["unit", "add", "@acme/base", "--option", "appName=shop"],
-    ));
-    assert!(
-        stdout(&output).contains("set `appName`"),
-        "{}",
-        stdout(&output)
-    );
-    let manifest = app.manifest();
-    assert_eq!(manifest["options"]["@acme/base"]["appName"], "shop");
-    assert_eq!(manifest["params"]["mode"]["from"], "@acme/base");
-    assert_eq!(manifest["params"]["appName"]["type"], "integer");
-}
-
-#[test]
-fn a_required_parameter_without_an_example_is_refused_before_anything_is_written() {
-    let fixture = Fixture::new(
-        "a_required_parameter_without_an_example_is_refused_before_anything_is_written",
-    );
-    let plain = fixture.repo("plain");
-    plain.write(
-        "manifest.jsonc",
-        &manifest(
-            "@acme/plain",
-            "1.0.0",
-            &[],
-            r#", "params": { "token": { "type": "string", "description": "A token." } }"#,
-        ),
-    );
-    plain.write("src/t.txt.assemblr.tmpl", "{{ token }}\n");
-    plain.publish("1.0.0");
-    fixture.register(&plain);
-    let app = fixture.app();
-    let before = app.read("manifest.jsonc");
-    let output = fails(fixture.assemblr(&app.path, &["unit", "add", "@acme/plain"]));
-    let err = stderr(&output);
-    assert!(
-        err.contains("needs a value for `token` and declares no example"),
-        "{err}"
-    );
-    assert!(err.contains("--option token=<value>"), "{err}");
-    assert_eq!(app.read("manifest.jsonc"), before);
-    assert!(!app.exists("assemblr-lock.json"));
-
-    // A literal satisfies it, read by the parameter's type.
-    succeeds(fixture.assemblr(
-        &app.path,
-        &["unit", "add", "@acme/plain", "--option", "token=true"],
-    ));
-    assert_eq!(app.manifest()["options"]["@acme/plain"]["token"], "true");
-    assert_eq!(app.read("build/t.txt"), "true\n");
-}
-
-#[test]
-fn a_literal_is_read_by_the_parameters_type_and_a_bad_one_writes_nothing() {
-    let fixture =
-        Fixture::new("a_literal_is_read_by_the_parameters_type_and_a_bad_one_writes_nothing");
-    fixture.base();
-    let app = fixture.app();
-    let before = app.read("manifest.jsonc");
-    let output = fails(fixture.assemblr(
-        &app.path,
-        &["unit", "add", "@acme/base", "--option", "mode=staging"],
-    ));
-    assert!(
-        stderr(&output).contains("not one of the allowed values"),
-        "{}",
-        stderr(&output)
-    );
-    assert_eq!(app.read("manifest.jsonc"), before);
-    assert!(!app.exists("build"));
-
-    succeeds(fixture.assemblr(
-        &app.path,
-        &[
-            "unit",
-            "add",
-            "@acme/base",
-            "--option",
-            "port=9000",
-            "--option",
-            "mode=prod",
-        ],
-    ));
-    let manifest = app.manifest();
-    assert_eq!(manifest["options"]["@acme/base"]["port"], 9000);
-    assert_eq!(manifest["options"]["@acme/base"]["mode"], "prod");
-    assert!(manifest["params"].get("mode").is_none(), "{manifest}");
-    assert_eq!(app.read("build/cfg.txt"), "name=demo mode=prod port=9000\n");
-}
-
-#[test]
 fn the_consumer_add_in_a_unit_points_to_unit_add() {
     let fixture = Fixture::new("the_consumer_add_in_a_unit_points_to_unit_add");
     fixture.base();
@@ -496,83 +327,63 @@ fn a_requirement_spelled_differently_is_kept_as_written() {
 }
 
 #[test]
-fn a_unit_with_params_after_its_description_takes_a_dependency() {
-    // `unit init` writes `description` last; parameters added below it used
-    // to make every `unit add` refuse the edit (#120).
-    let fixture = Fixture::new("a_unit_with_params_after_its_description_takes_a_dependency");
+fn a_unit_with_placeholders_after_its_description_takes_a_dependency() {
+    // `unit init` writes `description` last; fields added below it used to
+    // make every `unit add` refuse the edit (#120).
+    let fixture = Fixture::new("a_unit_with_placeholders_after_its_description_takes_a_dependency");
     fixture.base();
     let app = fixture.app();
     app.write(
         "manifest.jsonc",
         "{\n  \"name\": \"@acme/app\",\n  \"version\": \"0.1.0\",\n  \"description\": \
-         \"The app.\",\n  \"params\": { \"title\": { \"type\": \"string\", \"description\": \
-         \"The title.\", \"example\": \"Demo\" } }\n}\n",
+         \"The app.\",\n  \"placeholders\": { \"replace\": { \"__TITLE__\": \"The title.\" } }\n}\n",
     );
-    app.write("src/title.txt.assemblr.tmpl", "{{ title }}\n");
+    app.write("src/title.txt", "__TITLE__\n");
     let output = succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
     assert!(
-        stdout(&output).contains("declared `appName`, `mode` in params"),
+        stdout(&output).contains("Placeholders: __APP_NAME__ in 1 file, __TITLE__ in 1 file."),
         "{}",
         stdout(&output)
     );
     let manifest = app.manifest();
     assert_eq!(manifest["dependencies"]["@acme/base"], "^1.0.0");
-    assert_eq!(manifest["params"]["title"]["example"], "Demo");
-    assert_eq!(manifest["params"]["appName"]["from"], "@acme/base");
-    // The one-line `params` object stays on one line.
+    // The one-line `placeholders` object stays as it was.
     assert!(
-        app.read("manifest.jsonc").contains(
-            "\"example\": \"Demo\" }, \"appName\": { \"from\": \"@acme/base\" }, \"mode\": \
-             { \"from\": \"@acme/base\" } }"
-        ),
+        app.read("manifest.jsonc")
+            .contains("\"placeholders\": { \"replace\": { \"__TITLE__\": \"The title.\" } }"),
         "{}",
         app.read("manifest.jsonc")
     );
-    assert_eq!(app.read("build/title.txt"), "Demo\n");
+    assert_eq!(app.read("build/title.txt"), "__TITLE__\n");
 }
 
 #[test]
-fn templates_written_first_name_every_parameter_to_declare() {
-    let fixture = Fixture::new("templates_written_first_name_every_parameter_to_declare");
+fn tokens_written_before_they_are_declared_are_a_warning_not_a_refusal() {
+    let fixture =
+        Fixture::new("tokens_written_before_they_are_declared_are_a_warning_not_a_refusal");
     fixture.base();
     let app = fixture.app();
-    app.write(
-        "src/page.txt.assemblr.tmpl",
-        "{{ title }} {{ slug }} {{ title }}\n",
+    app.write("src/page.txt", "__TITLE__ __SLUG__\n__TITLE__\n");
+    let output = succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
+    let err = stderr(&output);
+    for expected in [
+        "warning: 2 tokens look like placeholders but are not declared:",
+        "  __SLUG__\n      src/page.txt:1\n",
+        "  __TITLE__\n      src/page.txt:1\n      src/page.txt:2\n",
+        "hint: add each one to \"placeholders.replace\" with a description, or to \
+         \"placeholders.ignore\" if it is not a placeholder",
+    ] {
+        assert!(err.contains(expected), "{expected:?} in {err}");
+    }
+    assert_eq!(app.manifest()["dependencies"]["@acme/base"], "^1.0.0");
+    assert_eq!(
+        app.read("build/page.txt"),
+        "__TITLE__ __SLUG__\n__TITLE__\n"
     );
-    let before = app.read("manifest.jsonc");
-    let output = fails(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
-    assert!(
-        stderr(&output).contains(
-            "hint: declare `title`, `slug` under `params` in the manifest.jsonc of @acme/app, each like \
-             `\"title\": { \"type\": \"string\", \"description\": \"...\", \"example\": \"...\" }`"
-        ),
-        "{}",
-        stderr(&output)
-    );
-    assert_eq!(app.read("manifest.jsonc"), before);
-    let output = fails(fixture.assemblr(&app.path, &["unit", "build"]));
-    assert!(
-        stderr(&output).contains(
-            "hint: declare `title`, `slug` under `params` in the manifest.jsonc of @acme/app"
-        ),
-        "{}",
-        stderr(&output)
-    );
-
-    // Declared after `description`, as an author adds them, they let the
-    // dependency be added.
-    app.write(
-        "manifest.jsonc",
-        &before.replace(
-            "\"The app.\"\n}",
-            "\"The app.\",\n  \"params\": {\n    \"title\": { \"type\": \"string\", \
-             \"description\": \"T.\", \"example\": \"T\" },\n    \"slug\": { \"type\": \
-             \"string\", \"description\": \"S.\", \"example\": \"s\" }\n  }\n}",
-        ),
-    );
-    succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
-    assert_eq!(app.read("build/page.txt"), "T s T\n");
+    // The same tokens make `unit check` fail: a unit is not published with
+    // them undeclared.
+    let err = stderr(&fails(fixture.assemblr(&app.path, &["unit", "check"])));
+    assert!(err.contains("__SLUG__"), "{err}");
 }
 
 #[test]
@@ -592,25 +403,5 @@ fn a_manifest_with_trailing_commas_keeps_them_in_what_add_writes() {
         text.contains("\"dependencies\": {\n    \"@acme/base\": \"^1.0.0\",\n  },"),
         "{text}"
     );
-    assert!(text.contains("\"from\": \"@acme/base\",\n    },"), "{text}");
     assert!(text.ends_with("  },\n}\n"), "{text}");
-}
-
-#[test]
-fn a_dependency_whose_parameters_are_inherited_can_be_added_again() {
-    let fixture = Fixture::new("a_dependency_whose_parameters_are_inherited_can_be_added_again");
-    fixture.base();
-    let app = fixture.app();
-    succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
-    let output = succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/base"]));
-    assert!(
-        stdout(&output).contains("@acme/base is already a dependency"),
-        "{}",
-        stdout(&output)
-    );
-    succeeds(fixture.assemblr(&app.path, &["unit", "add", "@acme/base@1.0.0"]));
-    let manifest = app.manifest();
-    assert_eq!(manifest["dependencies"]["@acme/base"], "^1.0.0");
-    assert_eq!(manifest["params"]["appName"]["from"], "@acme/base");
-    assert!(manifest.get("options").is_none(), "{manifest}");
 }

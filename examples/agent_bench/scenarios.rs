@@ -73,6 +73,7 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
                 tree_contains(&project.join("src"), "/health"),
             );
             report.check("echo_route", tree_contains(&project.join("src"), "/echo"));
+            report.check("no_placeholders_left", no_placeholders(&agent, &project));
             report.check("compose_noop", nothing_to_compose(&agent, &project));
             report.check(
                 "code_survives_compose",
@@ -135,10 +136,10 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
                 contains(&project.join("assemblr.jsonc"), "@acme/auth-jwt"),
             );
             let issuer = "https://auth.orders.example/";
+            report.check("issuer_set", tree_contains(&project.join("src"), issuer));
             report.check(
-                "issuer_set",
-                tree_contains(&project.join("src"), issuer)
-                    || contains(&project.join("assemblr.jsonc"), issuer),
+                "no_placeholders_left",
+                !tree_contains(&project, "__JWT_ISSUER__"),
             );
             report.check(
                 "worker_name_kept",
@@ -278,10 +279,6 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
                         .all(|unit| text.contains(unit)),
                 );
                 report.check(
-                    "options_renamed",
-                    !text.contains("web-starter") && text.matches("\"tienda\"").count() == 3,
-                );
-                report.check(
                     "package_name",
                     contains(&project.join("package.json"), "\"name\": \"tienda\""),
                 );
@@ -311,12 +308,7 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
             let work = agent.work();
             agent.git(&work, &["clone", "-q", arg(&template)?, "tienda"])?;
             let project = work.join("tienda");
-            let declaration = project.join("assemblr.jsonc");
-            write(
-                &declaration,
-                &read(&declaration).replace("\"web-starter\"", "\"tienda\""),
-            )?;
-            agent.assemblr(&project, &["compose"])?;
+            fixture::replace(&project, "web-starter", "tienda")?;
             fixture::commit(&agent, &project, "Start tienda from web-starter")?;
             fixture::release(&agent, "angular-ssr", "1.1.0")
         },
@@ -439,8 +431,8 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "s15",
         summary: "publish a unit version that a catalog lists",
-        prompt: "En esta unit, añade un parámetro jwtAudience (por defecto \"api\") y exporta \
-                 JWT_AUDIENCE en src/auth.ts. Publícala como 1.1.0 y déjala lista para que mis \
+        prompt: "En esta unit, exporta también JWT_AUDIENCE en src/auth.ts, con la audiencia que \
+                 cada proyecto debe poner. Publícala como 1.1.0 y déjala lista para que mis \
                  proyectos puedan usarla.",
         start: "units/auth-jwt",
         extra_dirs: &["catalog"],
@@ -468,6 +460,10 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
             report.check(
                 "audience_in_src",
                 tree_contains(&unit.join("src"), "JWT_AUDIENCE"),
+            );
+            report.check(
+                "audience_declared",
+                contains(&unit.join("manifest.jsonc"), "AUDIENCE__"),
             );
             let index = output(
                 &agent,
@@ -522,15 +518,16 @@ pub(crate) const SCENARIOS: &[Scenario] = &[
             let Some(declaration) = declaration else {
                 return Ok(());
             };
+            let project = declaration.parent().unwrap_or(&declaration);
             report.check(
                 "issuer_set",
-                contains(&declaration, "https://auth.orders.example/"),
+                tree_contains(&project.join("src"), "https://auth.orders.example/"),
             );
-            let project = declaration.parent().unwrap_or(&declaration);
             report.check(
                 "worker_name",
                 contains(&project.join("wrangler.toml"), "name = \"orders-api\""),
             );
+            report.check("no_placeholders_left", no_placeholders(&agent, project));
             Ok(())
         },
     },
@@ -542,7 +539,8 @@ fn orders_api(machine: &Machine<'_>) -> Result<PathBuf, String> {
     fixture::project(
         machine,
         &project,
-        &[("@acme/cloudflare-worker", &["workerName=orders-api"])],
+        &["@acme/cloudflare-worker"],
+        &[("__PROJECT_NAME__", "orders-api")],
         "Start orders-api from @acme/cloudflare-worker",
     )?;
     Ok(project)
@@ -551,15 +549,15 @@ fn orders_api(machine: &Machine<'_>) -> Result<PathBuf, String> {
 /// The template project `templates/web-starter`.
 fn web_starter(machine: &Machine<'_>) -> Result<PathBuf, String> {
     let template = machine.root.path.join("templates/web-starter");
-    let option: &[&str] = &["projectName=web-starter"];
     fixture::project(
         machine,
         &template,
         &[
-            ("@acme/angular-ssr", option),
-            ("@acme/docker-bun", option),
-            ("@acme/cloudflare-pages", option),
+            "@acme/angular-ssr",
+            "@acme/docker-bun",
+            "@acme/cloudflare-pages",
         ],
+        &[("__PROJECT_NAME__", "web-starter")],
         "web-starter template",
     )?;
     Ok(template)
@@ -622,7 +620,7 @@ fn tree_contains(dir: &Path, text: &str) -> bool {
     find(dir, &|path| contains(path, text)).is_some()
 }
 
-/// Whether `dir` holds a file named `name`, or its template.
+/// Whether `dir` holds a file whose name starts with `name`.
 fn has_file(dir: &Path, name: &str) -> bool {
     find(dir, &|path| file_name(path).starts_with(name)).is_some()
 }
@@ -645,6 +643,13 @@ fn succeeds_program(machine: &Machine<'_>, dir: &Path, program: &str, args: &[&s
 /// The command's output, or nothing when it fails.
 fn output(machine: &Machine<'_>, dir: &Path, program: &str, args: &[&str]) -> String {
     machine.run(dir, program, args).unwrap_or_default()
+}
+
+/// Whether `assemblr status` reports no placeholder left to replace.
+fn no_placeholders(machine: &Machine<'_>, project: &Path) -> bool {
+    let status = output(machine, project, "assemblr", &["status", "--json"]);
+    serde_json::from_str::<serde_json::Value>(&status)
+        .is_ok_and(|status| status["placeholders"] == serde_json::json!([]))
 }
 
 fn nothing_to_compose(machine: &Machine<'_>, project: &Path) -> bool {

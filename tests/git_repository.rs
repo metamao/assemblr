@@ -496,7 +496,7 @@ fn amendments_are_read_by_the_rules_of_src() {
         (
             b"amendments".as_slice(),
             dir([
-                ("package.json.assemblr.tmpl", file("{}")),
+                ("package.json", file("{}")),
                 ("bin", dir([("run", executable("#!/bin/sh"))])),
             ]),
         ),
@@ -508,10 +508,7 @@ fn amendments_are_read_by_the_rules_of_src() {
         read_amendments(&repo, &commit).unwrap(),
         FileTree::from([
             (path("bin/run"), UnitFile::new(b"#!/bin/sh".to_vec(), true)),
-            (
-                path("package.json.assemblr.tmpl"),
-                UnitFile::new(b"{}".to_vec(), false)
-            ),
+            (path("package.json"), UnitFile::new(b"{}".to_vec(), false)),
         ])
     );
     assert_eq!(

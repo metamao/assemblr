@@ -1,31 +1,52 @@
-//! The unit manifest: a unit's identity, version, description, dependencies,
-//! dependency options, parameters, and amendment declarations.
+//! The unit manifest: a unit's identity, version, description,
+//! dependencies, placeholders, and amendment declarations.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use super::identity::UnitIdentity;
-use super::parameter::{Description, ParameterDefinition, ParameterName, ParameterValue};
 use super::path::RelativePath;
+use super::placeholder::Placeholders;
 use super::version::{Version, VersionRequirement};
 
-/// The values a consumer requires for one unit's parameters.
-pub type OptionValues = BTreeMap<ParameterName, ParameterValue>;
+/// A required human-readable description that is not empty or only
+/// whitespace. The text is kept exactly as written.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Description(String);
 
-/// One requirement a unit imposes on a dependency's parameter: a value, or a
-/// mapping from one of its own parameters.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OptionValue {
-    /// A fixed value.
-    Literal(ParameterValue),
-    /// The effective value of the unit's own parameter of this name, which
-    /// the dependency's parameter is then required to have. Nothing is
-    /// transformed or renamed on the way.
-    From(ParameterName),
+impl Description {
+    /// Accepts any text that contains something other than whitespace.
+    pub fn new(text: &str) -> Result<Self, BlankDescription> {
+        if text.trim().is_empty() {
+            Err(BlankDescription)
+        } else {
+            Ok(Self(text.to_owned()))
+        }
+    }
+
+    /// The description as written.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-/// What a unit requires for one dependency's parameters.
-pub type UnitOptionValues = BTreeMap<ParameterName, OptionValue>;
+impl fmt::Display for Description {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A description that is empty or only whitespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlankDescription;
+
+impl fmt::Display for BlankDescription {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the description must not be empty or only whitespace")
+    }
+}
+
+impl std::error::Error for BlankDescription {}
 
 /// The provenance of one amendment: the unit whose `src/` file the copy at
 /// `amendments/<path>` was taken from, a dependency direct or transitive,
@@ -56,68 +77,34 @@ impl AmendmentDeclaration {
 
 /// A validated unit manifest.
 ///
-/// Invariants beyond those of its parts:
-///
-/// - every `options` key is a declared dependency, because options target
-///   only direct dependencies;
-/// - a unit never depends on itself.
-///
-/// Whether an option value suits the dependency's parameter, whether an
-/// amendment's provider is among the unit's dependencies, direct or
-/// transitive, and whether an amended path exists in the provider's `src/`,
-/// depend on the dependencies' own content, so they are checked during
-/// composition, not here.
+/// Beyond the invariants of its parts, a unit never depends on itself.
+/// Whether an amendment's provider is among the unit's dependencies, direct
+/// or transitive, whether an amended path exists in the provider's `src/`,
+/// and whether the unit's placeholders suit its files and its graph depend
+/// on content beyond the manifest, so they are checked during composition
+/// and the build, not here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     name: UnitIdentity,
     version: Version,
     description: Description,
     dependencies: BTreeMap<UnitIdentity, VersionRequirement>,
-    options: BTreeMap<UnitIdentity, UnitOptionValues>,
-    params: BTreeMap<ParameterName, ParameterDefinition>,
-    inherited: BTreeMap<ParameterName, UnitIdentity>,
+    placeholders: Placeholders,
     amendments: BTreeMap<RelativePath, AmendmentDeclaration>,
 }
 
 impl Manifest {
     /// Creates a manifest, reporting every invariant it would break.
-    ///
-    /// `inherited` holds the parameters the unit declares as
-    /// `{ "from": "<dependency>" }`: each takes that dependency's
-    /// definition and passes its value on to it.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one argument per manifest member, each a distinct type"
-    )]
     pub fn new(
         name: UnitIdentity,
         version: Version,
         description: Description,
         dependencies: BTreeMap<UnitIdentity, VersionRequirement>,
-        options: BTreeMap<UnitIdentity, UnitOptionValues>,
-        params: BTreeMap<ParameterName, ParameterDefinition>,
-        inherited: BTreeMap<ParameterName, UnitIdentity>,
+        placeholders: Placeholders,
         amendments: BTreeMap<RelativePath, AmendmentDeclaration>,
     ) -> Result<Self, Vec<ManifestError>> {
         let declared = dependencies.keys().cloned().collect();
-        let mut errors = relation_errors(Some(&name), &declared, options.keys());
-        errors.extend(inheritance_errors(&declared, &options, &inherited));
-        for parameter in inherited.keys().filter(|name| params.contains_key(*name)) {
-            errors.push(ManifestError::DeclaredTwice(parameter.clone()));
-        }
-        for (target, values) in &options {
-            for (parameter, value) in values {
-                if let OptionValue::From(source) = value {
-                    if !params.contains_key(source) && !inherited.contains_key(source) {
-                        errors.push(ManifestError::UndeclaredMappingSource {
-                            target: target.clone(),
-                            parameter: parameter.clone(),
-                            source: source.clone(),
-                        });
-                    }
-                }
-            }
-        }
+        let errors = relation_errors(Some(&name), &declared);
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -126,9 +113,7 @@ impl Manifest {
             version,
             description,
             dependencies,
-            options,
-            params,
-            inherited,
+            placeholders,
             amendments,
         })
     }
@@ -159,6 +144,29 @@ impl Manifest {
         Some(manifest)
     }
 
+    /// The same manifest without amendments.
+    pub fn without_amendments(&self) -> Self {
+        let mut manifest = self.clone();
+        manifest.amendments.clear();
+        manifest
+    }
+
+    /// The same manifest with `dependency` required as `requirement`, in
+    /// place of any requirement it had, or `None` when that is the unit
+    /// itself.
+    pub fn with_dependency(
+        &self,
+        dependency: UnitIdentity,
+        requirement: VersionRequirement,
+    ) -> Option<Self> {
+        if dependency == self.name {
+            return None;
+        }
+        let mut manifest = self.clone();
+        manifest.dependencies.insert(dependency, requirement);
+        Some(manifest)
+    }
+
     /// The unit's identity.
     pub fn name(&self) -> &UnitIdentity {
         &self.name
@@ -179,47 +187,10 @@ impl Manifest {
         &self.dependencies
     }
 
-    /// The values the unit requires for its direct dependencies' parameters.
-    pub fn options(&self) -> &BTreeMap<UnitIdentity, UnitOptionValues> {
-        &self.options
-    }
-
-    /// The public parameters the unit defines itself. The ones it inherits
-    /// are in [`Manifest::inherited`].
-    pub fn params(&self) -> &BTreeMap<ParameterName, ParameterDefinition> {
-        &self.params
-    }
-
-    /// The public parameters the unit inherits, by the direct dependency
-    /// whose parameter of the same name defines each and receives its
-    /// value.
-    pub fn inherited(&self) -> &BTreeMap<ParameterName, UnitIdentity> {
-        &self.inherited
-    }
-
-    /// Every public parameter with its definition: the unit's own, and each
-    /// inherited one with the definition it takes, followed from dependency
-    /// to dependency through `lookup`, which gives a unit's manifest at the
-    /// version composed. An inherited parameter that cannot be followed to
-    /// a definition is left out and reported.
-    pub fn resolved_params<'m>(
-        &'m self,
-        lookup: impl Fn(&UnitIdentity) -> Option<&'m Manifest>,
-    ) -> (
-        BTreeMap<ParameterName, ParameterDefinition>,
-        Vec<InheritanceError>,
-    ) {
-        let mut params = self.params.clone();
-        let mut errors = Vec::new();
-        for (name, from) in &self.inherited {
-            match inherited_definition(name, from, &lookup) {
-                Ok(definition) => {
-                    params.insert(name.clone(), definition.clone());
-                }
-                Err(error) => errors.push(error),
-            }
-        }
-        (params, errors)
+    /// The placeholders the unit's files hold for the consumer to replace,
+    /// and the tokens that only look like placeholders.
+    pub fn placeholders(&self) -> &Placeholders {
+        &self.placeholders
     }
 
     /// The unit's amendments, by the amended file's path in the provider's
@@ -229,113 +200,20 @@ impl Manifest {
     }
 }
 
-/// The definition `name`, inherited from `from`, takes: followed through
-/// each dependency that inherits it in turn. Resolution never yields a
-/// cycle; a lookup that did is cut off where it repeats.
-fn inherited_definition<'m>(
-    name: &ParameterName,
-    from: &UnitIdentity,
-    lookup: &impl Fn(&UnitIdentity) -> Option<&'m Manifest>,
-) -> Result<&'m ParameterDefinition, InheritanceError> {
-    let mut visited = BTreeSet::new();
-    let mut unit = from;
-    loop {
-        let error = || InheritanceError {
-            parameter: name.clone(),
-            unit: unit.clone(),
-        };
-        if !visited.insert(unit) {
-            return Err(error());
-        }
-        let manifest = lookup(unit).ok_or_else(error)?;
-        if let Some(definition) = manifest.params.get(name) {
-            return Ok(definition);
-        }
-        unit = manifest.inherited.get(name).ok_or_else(error)?;
-    }
-}
-
-/// An inherited parameter whose definition cannot be found: `unit`, the
-/// dependency it is inherited from or one that dependency inherits it
-/// from in turn, does not declare it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InheritanceError {
-    /// The parameter.
-    pub parameter: ParameterName,
-    /// The unit that should declare it.
-    pub unit: UnitIdentity,
-}
-
-impl fmt::Display for InheritanceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "the parameter `{}` is inherited from {}, which does not declare it",
-            self.parameter, self.unit
-        )
-    }
-}
-
-impl std::error::Error for InheritanceError {}
-
-/// Checks that each inherited parameter names a declared dependency and
-/// that `options` does not also set it there, since the inherited parameter
-/// already passes its value on.
-pub(crate) fn inheritance_errors(
-    declared: &BTreeSet<UnitIdentity>,
-    options: &BTreeMap<UnitIdentity, UnitOptionValues>,
-    inherited: &BTreeMap<ParameterName, UnitIdentity>,
-) -> Vec<ManifestError> {
-    let mut errors = Vec::new();
-    for (parameter, unit) in inherited {
-        if !declared.contains(unit) {
-            errors.push(ManifestError::UndeclaredInheritance {
-                parameter: parameter.clone(),
-                unit: unit.clone(),
-            });
-        } else if options
-            .get(unit)
-            .is_some_and(|values| values.contains_key(parameter))
-        {
-            errors.push(ManifestError::InheritedOption {
-                parameter: parameter.clone(),
-                unit: unit.clone(),
-            });
-        }
-    }
-    errors
-}
-
-/// Checks the relations between a manifest's name, dependencies, and option
-/// targets, in deterministic order.
+/// Checks the relation between a manifest's name and its dependencies.
 ///
 /// Readers call this with whatever parts are valid, so these problems are
 /// reported together with problems in other fields. `name` is `None` when the
 /// manifest's own identity is missing or invalid. `declared` holds every
 /// validly named dependency, including one whose requirement is invalid.
-pub(crate) fn relation_errors<'a>(
+pub(crate) fn relation_errors(
     name: Option<&UnitIdentity>,
     declared: &BTreeSet<UnitIdentity>,
-    option_targets: impl IntoIterator<Item = &'a UnitIdentity>,
 ) -> Vec<ManifestError> {
-    let mut errors = Vec::new();
-    if let Some(name) = name {
-        if declared.contains(name) {
-            errors.push(ManifestError::SelfDependency(name.clone()));
-        }
+    match name {
+        Some(name) if declared.contains(name) => vec![ManifestError::SelfDependency(name.clone())],
+        _ => Vec::new(),
     }
-    let mut undeclared: Vec<&UnitIdentity> = option_targets
-        .into_iter()
-        .filter(|target| !declared.contains(*target))
-        .collect();
-    undeclared.sort();
-    undeclared.dedup();
-    errors.extend(
-        undeclared
-            .into_iter()
-            .map(|target| ManifestError::UndeclaredOptionTarget(target.clone())),
-    );
-    errors
 }
 
 /// A manifest whose parts are individually valid but inconsistent.
@@ -343,35 +221,6 @@ pub(crate) fn relation_errors<'a>(
 pub enum ManifestError {
     /// The unit declares a dependency on itself.
     SelfDependency(UnitIdentity),
-    /// `options` targets an identity that is not a declared dependency.
-    UndeclaredOptionTarget(UnitIdentity),
-    /// A mapping in `options` names a parameter the unit does not declare.
-    UndeclaredMappingSource {
-        /// The dependency the option targets.
-        target: UnitIdentity,
-        /// The dependency's parameter the mapping configures.
-        parameter: ParameterName,
-        /// The parameter the mapping names.
-        source: ParameterName,
-    },
-    /// A parameter is inherited from a unit that is not a declared
-    /// dependency.
-    UndeclaredInheritance {
-        /// The inherited parameter.
-        parameter: ParameterName,
-        /// The unit it names.
-        unit: UnitIdentity,
-    },
-    /// `options` sets the parameter of the dependency that an inherited
-    /// parameter already passes its value to.
-    InheritedOption {
-        /// The inherited parameter, and the dependency's parameter.
-        parameter: ParameterName,
-        /// The dependency.
-        unit: UnitIdentity,
-    },
-    /// A parameter is both defined and inherited.
-    DeclaredTwice(ParameterName),
 }
 
 impl fmt::Display for ManifestError {
@@ -379,35 +228,6 @@ impl fmt::Display for ManifestError {
         match self {
             Self::SelfDependency(name) => {
                 write!(f, "unit {name} declares a dependency on itself")
-            }
-            Self::UndeclaredOptionTarget(target) => write!(
-                f,
-                "{target} is not declared in `dependencies`; options may only target direct dependencies"
-            ),
-            Self::UndeclaredMappingSource {
-                target,
-                parameter,
-                source,
-            } => write!(
-                f,
-                "the option `{parameter}` of {target} is mapped from `{source}`, which is not a \
-                 parameter this unit declares in `params`"
-            ),
-            Self::UndeclaredInheritance { parameter, unit } => write!(
-                f,
-                "the parameter `{parameter}` is inherited from {unit}, which is not declared in \
-                 `dependencies`; a parameter is inherited only from a direct dependency"
-            ),
-            Self::InheritedOption { parameter, unit } => write!(
-                f,
-                "the option `{parameter}` of {unit} is set, but the inherited parameter \
-                 `{parameter}` already passes its value to {unit}; remove the option"
-            ),
-            Self::DeclaredTwice(parameter) => {
-                write!(
-                    f,
-                    "the parameter `{parameter}` is both defined and inherited"
-                )
             }
         }
     }
@@ -417,13 +237,8 @@ impl std::error::Error for ManifestError {}
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use super::{AmendmentDeclaration, Manifest, ManifestError, OptionValue, UnitOptionValues};
-    use crate::domain::{
-        Description, ParameterName, ParameterValue, RelativePath, UnitIdentity, Version,
-        VersionRequirement,
-    };
+    use super::{AmendmentDeclaration, Description, Manifest, ManifestError};
+    use crate::domain::{Placeholders, RelativePath, UnitIdentity, Version, VersionRequirement};
 
     fn identity(input: &str) -> UnitIdentity {
         input.parse().unwrap()
@@ -439,21 +254,11 @@ mod tests {
 
     fn manifest(
         dependencies: &[&str],
-        option_targets: &[&str],
         amendments: &[(&str, &str)],
     ) -> Result<Manifest, Vec<ManifestError>> {
         let dependencies = dependencies
             .iter()
             .map(|name| (identity(name), VersionRequirement::parse("^1.0.0").unwrap()))
-            .collect();
-        let option_values: UnitOptionValues = [(
-            ParameterName::parse("enabled").unwrap(),
-            OptionValue::Literal(ParameterValue::Boolean(true)),
-        )]
-        .into();
-        let options = option_targets
-            .iter()
-            .map(|name| (identity(name), option_values.clone()))
             .collect();
         let amendments = amendments
             .iter()
@@ -464,63 +269,49 @@ mod tests {
             Version::parse("1.0.0").unwrap(),
             Description::new("An app.").unwrap(),
             dependencies,
-            options,
-            BTreeMap::new(),
-            BTreeMap::new(),
+            Placeholders::default(),
             amendments,
         )
     }
 
     #[test]
-    fn options_and_amendments_may_target_declared_dependencies() {
-        let manifest = manifest(
-            &["@metamao/node"],
-            &["@metamao/node"],
-            &[("package.json", "@metamao/node")],
-        )
-        .unwrap();
-        assert_eq!(manifest.options().len(), 1);
+    fn amendments_may_target_declared_dependencies() {
+        let manifest = manifest(&["@metamao/node"], &[("package.json", "@metamao/node")]).unwrap();
         assert_eq!(manifest.dependencies().len(), 1);
         let amendment = &manifest.amendments()[&path("package.json")];
         assert_eq!(amendment.unit(), &identity("@metamao/node"));
         assert_eq!(amendment.base().to_string(), "1.2.0");
+        assert!(manifest.without_amendments().amendments().is_empty());
     }
 
     #[test]
-    fn every_inconsistency_is_reported_in_order() {
-        let errors = manifest(
-            &["@metamao/app"],
-            &["@z/z", "@metamao/app", "@a/a"],
-            &[
-                ("z.txt", "@z/z"),
-                ("a.txt", "@metamao/app"),
-                ("b.txt", "@a/a"),
-            ],
-        )
-        .unwrap_err();
+    fn a_unit_cannot_depend_on_itself() {
+        let errors = manifest(&["@metamao/app"], &[]).unwrap_err();
         assert_eq!(
             errors,
-            [
-                ManifestError::SelfDependency(identity("@metamao/app")),
-                ManifestError::UndeclaredOptionTarget(identity("@a/a")),
-                ManifestError::UndeclaredOptionTarget(identity("@z/z")),
-            ]
+            [ManifestError::SelfDependency(identity("@metamao/app"))]
+        );
+        assert!(errors[0].to_string().contains("on itself"));
+    }
+
+    #[test]
+    fn a_dependency_is_added_or_replaced_but_never_the_unit_itself() {
+        let manifest = manifest(&["@metamao/node"], &[]).unwrap();
+        let requirement = VersionRequirement::parse("^2.0.0").unwrap();
+        let added = manifest
+            .with_dependency(identity("@metamao/docker"), requirement.clone())
+            .unwrap();
+        assert_eq!(added.dependencies().len(), 2);
+        assert!(
+            manifest
+                .with_dependency(identity("@metamao/app"), requirement)
+                .is_none()
         );
     }
 
     #[test]
-    fn errors_explain_the_rule() {
-        let errors =
-            manifest(&[], &["@metamao/node"], &[("a.txt", "@metamao/docker")]).unwrap_err();
-        let message = errors[0].to_string();
-        assert!(message.contains("@metamao/node"), "{message}");
-        assert!(message.contains("direct dependencies"), "{message}");
-        assert_eq!(errors.len(), 1);
-    }
-
-    #[test]
     fn an_amendment_is_added_once_and_may_name_a_transitive_dependency() {
-        let manifest = manifest(&["@metamao/node"], &[], &[]).unwrap();
+        let manifest = manifest(&["@metamao/node"], &[]).unwrap();
         let amended = manifest
             .with_amendment(path("package.json"), declaration("@metamao/node"))
             .unwrap();

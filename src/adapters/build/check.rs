@@ -6,8 +6,10 @@
 //! A check reads the unit exactly as a build does and runs the shared
 //! validation (see [`validate`](super::validate)). On top of it, the unit
 //! lockfile must exist and record the current resolution, since a published
-//! version carries its lockfile, and the unit must make an effective,
-//! non-redundant contribution (OC-11). A check never writes `build/`, the
+//! version carries its lockfile, the unit must make an effective,
+//! non-redundant contribution (OC-11), and every token in its files that
+//! looks like a placeholder must be declared or ignored (see
+//! `docs/domain/placeholders.md`). A check never writes `build/`, the
 //! lockfile, or anything else in the working tree.
 
 use std::fmt;
@@ -20,7 +22,9 @@ use super::{BuildProblem, Inputs, MANIFEST, ManifestFileError, read_working_mani
 use crate::adapters::git::{GitRepository, ReadSrcError};
 use crate::adapters::lockfile;
 use crate::adapters::registry::Registry;
-use crate::domain::{ContributionError, LockChange, UnitIdentity, Version};
+use crate::domain::{
+    ContributionError, LockChange, UnitIdentity, UnresolvedTokens, Version, first_on_each_line,
+};
 
 /// Checks the unit whose repository's top level is `root`, resolving its
 /// dependencies from `registry`.
@@ -124,7 +128,8 @@ pub(super) struct Publishable {
 
 /// Runs the build's validation on `inputs` and the checks that gate
 /// publication on top of it: the lockfile exists (`locked`) and records the
-/// resolution, and the contribution is effective and non-redundant. Every
+/// resolution, the contribution is effective and non-redundant, and no
+/// token that looks like a placeholder is left undeclared. Every
 /// problem is added to `problems`, in that order after the build's, and the
 /// result is given only when the build's validation passed.
 pub(super) fn publication_checks(
@@ -166,6 +171,13 @@ pub(super) fn publication_checks(
             .into_iter()
             .map(CheckProblem::Contribution),
     );
+    if !validation.unresolved.is_empty() {
+        problems.push(CheckProblem::Undeclared {
+            unit: inputs.manifest.name().clone(),
+            version: inputs.manifest.version().clone(),
+            tokens: validation.unresolved,
+        });
+    }
     validation
         .result
         .filter(|validated| validated.pending.is_empty())
@@ -251,6 +263,16 @@ pub enum CheckProblem {
     },
     /// The unit's contribution does not qualify for publication.
     Contribution(ContributionError),
+    /// Tokens in the unit's own files look like placeholders, and neither
+    /// the unit nor its dependencies declare or ignore them.
+    Undeclared {
+        /// The unit.
+        unit: UnitIdentity,
+        /// Its version, as its manifest declares.
+        version: Version,
+        /// Each token and where it is.
+        tokens: UnresolvedTokens,
+    },
     /// A conflict between sibling amenders of a file the unit does not
     /// amend, which a build would hand to the unit as a marked copy.
     Pending {
@@ -294,6 +316,34 @@ impl fmt::Display for CheckProblem {
                 )
             }
             Self::Contribution(error) => error.fmt(f),
+            Self::Undeclared {
+                unit,
+                version,
+                tokens,
+            } => {
+                if tokens.len() == 1 {
+                    write!(
+                        f,
+                        "{unit} {version} has 1 token that looks like a placeholder but is not \
+                         declared:"
+                    )?;
+                } else {
+                    write!(
+                        f,
+                        "{unit} {version} has {} tokens that look like placeholders but are \
+                         not declared:",
+                        tokens.len()
+                    )?;
+                }
+                for (token, locations) in tokens {
+                    write!(f, "\n\n  {token}")?;
+                    // One row per line, as `unit build` lists them.
+                    for location in first_on_each_line(locations) {
+                        write!(f, "\n      {location}")?;
+                    }
+                }
+                Ok(())
+            }
             Self::Pending {
                 path,
                 provider,

@@ -1,8 +1,9 @@
 # Consumer Projects
 
 A **consumer project** is a software project composed from units. It is the
-final consumer of units. It selects units, supplies values for their
-parameters, and owns the application that results. This document defines how a
+final consumer of units. It selects units, replaces the
+[placeholders](placeholders.md) their files hold with its own values, and
+owns the application that results. This document defines how a
 consumer project is initialized, how it declares its composition, and how
 Assemblr composes and reconciles it.
 
@@ -54,12 +55,11 @@ and merged with PR #42. The owner has not approved it explicitly.
 
 **Command.** `assemblr init [<directory>]`. The directory defaults to the
 current one and is created, parents included, when it does not exist. It
-writes `assemblr.jsonc` with empty `dependencies` and `options`:
+writes `assemblr.jsonc` with empty `dependencies`:
 
 ```jsonc
 {
-  "dependencies": {},
-  "options": {}
+  "dependencies": {}
 }
 ```
 
@@ -83,23 +83,19 @@ Its API deliberately resembles a unit's [`manifest.jsonc`](manifest.md):
 | Field | Meaning |
 |-------|---------|
 | `dependencies` | The units the consumer **explicitly selects**, each with a SemVer requirement. |
-| `options` | Parameter values the consumer supplies to its explicitly selected units. |
 
-`dependencies` and `options` use the manifest's approved serialization (see
-[manifest.md](manifest.md#serialization-of-dependencies-options-params-and-amendments--approved)).
-`assemblr.jsonc` has **no** `params` field. Example (versions are
-illustrative):
+`dependencies` uses the manifest's approved serialization (see
+[manifest.md](manifest.md#serialization-of-dependencies-placeholders-and-amendments--approved)).
+The declaration holds no values for the units: the consumer replaces their
+placeholders in the files themselves (see [placeholders.md](placeholders.md)).
+A declaration that still holds `options` is rejected with an error that
+explains this. Example (versions are illustrative):
 
 ```jsonc
 {
   "dependencies": {
     "@metamao/angular-i18n": "^1.2.0",
     "@metamao/neonpg-drizzle": "^1.0.0"
-  },
-  "options": {
-    "@metamao/angular-i18n": {
-      "defaultLocale": "es"
-    }
   }
 }
 ```
@@ -108,19 +104,13 @@ Rules:
 
 - Only **explicit selections** belong in `dependencies`. Transitive
   dependencies are resolved, never declared redundantly.
-- `options` supplies values only to explicitly selected units, and only for
-  parameters those units expose in their `params`.
-- `dependencies` and `options` have the same semantics as in a unit manifest
-  wherever they apply: owner-qualified identities, the same SemVer requirement
-  dialect, and the same validation, compatibility, and conflict rules for
-  option values (see
-  [dependencies.md](dependencies.md#declaration--approved) and
-  [parameters-and-options.md](parameters-and-options.md#consumer-values--approved)).
-  A consumer value never overrides an incompatible requirement through
-  implicit precedence. Assemblr does not maintain two unnecessarily different
-  declarative languages.
-- A consumer project declares no public `params` contract. It is not a
-  reusable unit.
+- `dependencies` has the same semantics as in a unit manifest:
+  owner-qualified identities, the same SemVer requirement dialect, and the
+  same validation and compatibility rules (see
+  [dependencies.md](dependencies.md#declaration--approved)). Assemblr does
+  not maintain two unnecessarily different declarative languages.
+- A consumer project declares no placeholders and no amendments. It is not
+  a reusable unit.
 - Editing `assemblr.jsonc` does **not** change application files by itself.
   The consumer runs `compose` to reconcile the project with its declaration.
 - Assemblr's own validation is authoritative. Schemas only assist editing (see
@@ -129,7 +119,7 @@ Rules:
 Open:
 
 - The full schema of `assemblr.jsonc`, including its initial contents and
-  whether it has fields beyond `$schema`, `dependencies`, and `options`.
+  whether it has fields beyond `$schema` and `dependencies`.
   **OC-36.**
 
 ## Composition commands — Approved
@@ -168,7 +158,7 @@ assemblr compose
 - resolves and validates the desired composition;
 - materializes and reconciles its file contributions;
 - updates the corresponding lock and reconciliation state;
-- never changes the consumer's explicit dependency or option choices.
+- never changes the consumer's explicit dependency choices.
 
 `add` and `remove` change the declaration and then compose it with the same
 semantics as `compose`. There is no mandatory two-step "install, then compose"
@@ -223,9 +213,8 @@ amendments applied across provider versions (**Provisional (D-30, D-31)**).
 **What it does.** It reads the declaration, resolves the explicit
 selections from the local registry under the [lock](#lock-and-reconciliation-state--approved),
 and validates and composes the result as a unit build does, with the
-project as the root and its `options` as the root's values: parameters,
-option conflicts, path collisions, amendments including several of one
-JSON file, and rendering. Then it writes, in this order, the
+project as the root: path collisions and amendments, including several of
+one JSON file. Then it writes, in this order, the
 reconciliation base to `.assemblr/`, a journal of the files it is about to
 create, the files themselves, each created new in directories it creates,
 with its executable bit, and the lock; and removes the journal. Every
@@ -311,11 +300,9 @@ so guessing would risk reverting what it should keep (#73, ADR 0027).
 
 Open:
 
-- Exact grammar, including how `add` accepts parameter values. **OC-7.** The
-  grammar of `init`, `compose`, `add`, and `remove`, the requirement `add`
-  records, how `remove` treats a unit that is not an explicit selection, and
-  what happens to a removed unit's `options` entry are **Provisional (D-9,
-  D-17)** (see [composition details](#composition-details--provisional-d-10-to-d-12) and
+- Exact grammar. **OC-7.** The grammar of `init`, `compose`, `add`, and
+  `remove`, the requirement `add` records, and how `remove` treats a unit
+  that is not an explicit selection are **Provisional (D-9, D-17)** (see [composition details](#composition-details--provisional-d-10-to-d-12) and
   [add and remove details](#add-and-remove-details--provisional-d-17)).
 - Operations beyond updating locked versions within the declared requirements:
   changing requirements in bulk, updating past them, a dry run, and automatic
@@ -331,16 +318,9 @@ The owner has not approved them explicitly.
 <identity>`, one unit per invocation, run at the project's top level. Each
 edits `assemblr.jsonc` and then composes the edited declaration exactly as
 `compose` does, so the report names the declaration change, the versions
-that changed, and every file created, modified, merged, and removed.
-**Provisional (D-34):** `add` also takes `--option <name>=<value>`,
-repeatable, which sets the unit's `options` entry in the same edit. The
-value is read by the parameter's type at the version the unit resolves to
-(owner decision, revising D-34): a string parameter takes the text as it is,
-so `name=true` is the string "true", and a quoted JSON string gives its
-content; any other parameter, or one the unit does not declare, takes the
-JSON value the text reads as (`8080`, `true`), and a string otherwise, so the
-composition reports a value that does not fit. A name given twice is refused before anything is read.
-Otherwise parameter values are edited in the declaration's `options`.
+that changed, and every file created, modified, merged, and removed, then
+the [placeholders](placeholders.md#consumer-report--approved) that remain.
+The `--option` of D-34 was removed with options (#124).
 
 **`add`.** A unit that is not selected is added at the end of
 `dependencies`. Without a requirement it is recorded with a caret
@@ -358,8 +338,7 @@ requirement changes nothing.
 
 **`remove`.** The unit must be an explicit selection. One that is in the
 composition only because a selected unit requires it is refused, and the
-message says so. The selection and the unit's `options` entry are removed
-from the declaration, and the composition retires what no remaining
+message says so. The selection is removed from the declaration, and the composition retires what no remaining
 selection requires: files only that unit contributed are removed when the
 consumer did not edit them, files other units still require stay, and an
 edited file is a conflict that refuses the whole operation.
@@ -441,6 +420,8 @@ text, with these members:
 - `pending`: objects with `path` and `marked`, empty unless a composition
   waits;
 - `edited`: objects with `path` and `edit`;
+- `placeholders`: the [placeholder report](placeholders.md#output--approved),
+  `null` while a composition waits or was interrupted;
 - `files`: objects with `path`, `unit`, and `amended_by` (an array), or
   `null` when the composition cannot be planned;
 - `problems`: the warnings, as strings.
@@ -482,12 +463,11 @@ once and shared.
 
 ### Convergence — Approved
 
-Given equivalent effective units, exact versions, parameter values, and
-applicable consumer state, composition produces **equivalent materialized
+Given equivalent effective units, exact versions, and applicable consumer
+state, composition produces **equivalent materialized
 results regardless of the order** in which units were originally added.
-Installation order is never used as merge or option precedence (see
-[dependencies.md](dependencies.md#resolution--approved) and
-[parameters-and-options.md](parameters-and-options.md#rules--approved)).
+Installation order is never used as merge precedence (see
+[dependencies.md](dependencies.md#resolution--approved)).
 
 ## Version resolution — Approved
 
@@ -539,30 +519,20 @@ Decided by the owner on #63 (decision log D-23):
   of the ones named, goes to stdout; `Nothing to update` says that nothing
   moved and nothing was touched.
 
-## Parameters and non-interactive operation — Approved
+## Non-interactive operation — Approved
 
 Assemblr's CLI is **non-interactive by default**. It never blocks waiting for
 a prompt or a confirmation.
 
-- Valid parameter defaults are applied automatically.
-- The consumer supplies explicit values through `options` in `assemblr.jsonc`
-  or through command-line arguments (syntax **OC-7**).
-- A missing required value or an invalid value fails clearly. A composition
-  whose required configuration cannot be resolved is never partially applied.
+- A composition takes no values. The consumer replaces the placeholders the
+  units deliver in the files, after the composition, and Assemblr reports
+  those that remain (see [placeholders.md](placeholders.md#consumer-report--approved)).
+- A remaining placeholder never stops a composition and never changes an
+  exit code.
 - Diagnostics give an agent or a human enough to correct the declaration or
-  the command: the relevant unit metadata, comparable to `info` (description,
-  required and optional parameters, types, allowed values, and defaults),
-  together with the validation errors.
-- The consumer supplies values only to its **explicit selections**. It is
-  never asked for the required parameters of transitive units: each published
-  unit is responsible for satisfying its dependencies' required parameters
-  (see
-  [parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved)).
-- Parameters customize file contents only. They never change dependency
-  topology or which files exist (see
-  [parameters-and-options.md](parameters-and-options.md#what-parameters-must-not-do--approved)).
-- An option value is not a one-time initialization input. Changing it is a
-  composition change, reconciled like a change to units or versions (see
+  the command.
+- Replacing a placeholder is an ordinary consumer modification, kept by
+  later compositions like any other (see
   [Reconciliation](#reconciliation--approved)).
 
 ## No external commands — Approved
@@ -588,7 +558,7 @@ The files of a consumer project result from four distinct things:
 
 | | Meaning |
 |-|---------|
-| **Initial delivery** | The files a unit introduces in its `src/`, rendered with its parameter values and materialized when the unit enters the composition. |
+| **Initial delivery** | The files a unit introduces in its `src/`, delivered byte for byte, placeholders included, when the unit enters the composition. |
 | **Amendments** | Modifications that units make to files their dependencies provide (see [amendments-and-composition.md](amendments-and-composition.md#amendments--approved)). |
 | **Effective composition** | The deterministic result of composing every contribution for the current declaration. The previously materialized one is the **reconciliation base**, and the newly desired one is **incoming**. |
 | **Consumer modifications** | Changes the consumer makes to the project's files after they are materialized. |
@@ -599,7 +569,7 @@ Rules:
   modify it freely.
 - That file keeps receiving changes through the effective composition, for
   example from the amendments of a unit added later, from a new version of a
-  unit, or from changed option values. Consumer modification does not make a
+  unit. Consumer modification does not make a
   file immune to later contributions.
 - Every contributed file follows the **same lifecycle**. Whether a change is
   applied depends only on whether it can be reconciled safely against the
@@ -658,7 +628,7 @@ Composition reconciles three inputs:
 - The [merge semantics](amendments-and-composition.md#merge-semantics--approved)
   apply, including that downstream consumer edits are never arbitrarily
   overridden by incoming changes.
-- Changes to units, versions, `options`, and amendments all go through the
+- Changes to units, versions, and amendments all go through the
   same reconciliation, which applies to every contributed file alike.
 - Repeating `compose` without relevant changes does not rewrite the project.
 
@@ -1016,9 +986,6 @@ Locally indexed registry metadata improves editing `assemblr.jsonc`:
 
 - unit-name discovery and completion;
 - available versions;
-- option-key completion;
-- parameter descriptions and types;
-- allowed-value hints;
 - validation of the declaration.
 
 Recommended (provisional) initial mechanism: a static JSON Schema for the

@@ -4,8 +4,8 @@
 //!
 //! The schema is a fixed document embedded in the binary, so every unit
 //! initialized by one version of Assemblr gets the same bytes. It describes
-//! the manifest vocabulary and the provisional parameter-definition rules
-//! with the keywords of JSON Schema draft 7, which editors support widely.
+//! the manifest vocabulary, placeholder names included, with the keywords
+//! of JSON Schema draft 7, which editors support widely.
 //! Assemblr's own validation stays authoritative: the schema expresses what
 //! it can, and nothing the schema accepts is thereby valid.
 
@@ -29,7 +29,7 @@ mod tests {
 
     use super::manifest_schema;
     use crate::adapters::manifest::MANIFEST_FIELDS;
-    use crate::domain::{ParameterName, UnitIdentity, Version};
+    use crate::domain::{PlaceholderName, UnitIdentity, Version};
 
     fn schema() -> Value {
         serde_json::from_str(manifest_schema()).unwrap()
@@ -68,59 +68,23 @@ mod tests {
     }
 
     #[test]
-    fn the_parameter_definition_matches_the_provisional_rules() {
+    fn placeholders_take_a_described_replace_map_and_an_ignore_list() {
         let schema = schema();
-        let parameter = &schema["definitions"]["parameter"];
-        assert_eq!(parameter["additionalProperties"], false);
+        let placeholders = &schema["properties"]["placeholders"];
+        assert_eq!(placeholders["additionalProperties"], false);
+        let replace = &placeholders["properties"]["replace"];
         assert_eq!(
-            parameter["required"],
-            serde_json::json!(["type", "description"])
-        );
-        let mut properties: Vec<&str> = parameter["properties"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        properties.sort_unstable();
-        assert_eq!(
-            properties,
-            [
-                "allowed",
-                "default",
-                "description",
-                "example",
-                "pattern",
-                "type"
-            ]
+            replace["propertyNames"]["$ref"],
+            "#/definitions/placeholder"
         );
         assert_eq!(
-            parameter["properties"]["type"]["enum"],
-            serde_json::json!(["string", "integer", "boolean"])
+            replace["additionalProperties"]["$ref"],
+            "#/definitions/text"
         );
-        assert_eq!(parameter["properties"]["allowed"]["minItems"], 1);
-        assert_eq!(parameter["properties"]["allowed"]["uniqueItems"], true);
-        // `allowed` and `pattern` are refused for any type but `string`.
-        assert_eq!(
-            parameter["allOf"][0]["else"],
-            serde_json::json!({ "properties": { "allowed": false, "pattern": false } })
-        );
-        assert_eq!(
-            schema["definitions"]["parameterName"]["not"],
-            serde_json::json!({ "const": "own" })
-        );
-        // A parameter is defined or inherited, `{ "from": "<identity>" }`.
-        assert_eq!(
-            schema["properties"]["params"]["additionalProperties"]["oneOf"][1]["$ref"],
-            "#/definitions/inheritedParameter"
-        );
-        let inherited = &schema["definitions"]["inheritedParameter"];
-        assert_eq!(inherited["required"], serde_json::json!(["from"]));
-        assert_eq!(inherited["additionalProperties"], false);
-        assert_eq!(
-            inherited["properties"]["from"]["$ref"],
-            "#/definitions/identity"
-        );
+        let ignore = &placeholders["properties"]["ignore"];
+        assert_eq!(ignore["type"], "array");
+        assert_eq!(ignore["items"]["$ref"], "#/definitions/placeholder");
+        assert_eq!(ignore["uniqueItems"], true);
     }
 
     #[test]
@@ -181,30 +145,29 @@ mod tests {
     }
 
     #[test]
-    fn the_parameter_name_pattern_agrees_with_the_parser_except_for_own() {
-        let name = pattern("parameterName");
+    fn the_placeholder_pattern_agrees_with_the_parser() {
+        let name = pattern("placeholder");
         for input in [
-            "appName",
-            "node_compat",
-            "a",
-            "A1_",
-            "1a",
-            "_a",
-            "app-name",
-            "app name",
+            "__PROJECT_NAME__",
+            "__A__",
+            "__A1_B__",
+            "__A___",
+            "___A__",
+            "__1A__",
+            "__project_name__",
+            "__A_",
+            "_A__",
+            "____",
+            "__A-B__",
+            "__ A__",
             "",
-            "ñ",
         ] {
             assert_eq!(
                 name.is_match(input),
-                ParameterName::parse(input).is_ok(),
+                PlaceholderName::parse(input).is_ok(),
                 "{input:?}"
             );
         }
-        // The reserved name is excluded by `not`, which the pattern alone
-        // cannot express.
-        assert!(name.is_match("own"));
-        assert!(ParameterName::parse("own").is_err());
     }
 
     #[test]
@@ -221,7 +184,7 @@ mod tests {
         )
         .unwrap();
         assert!(paths.is_match("package.json"));
-        assert!(paths.is_match("config/wrangler.toml.assemblr.tmpl"));
+        assert!(paths.is_match("config/wrangler.toml"));
         assert!(!paths.is_match("/config/a"));
         assert!(!paths.is_match("config//a"));
         assert!(!paths.is_match("config/"));

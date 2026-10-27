@@ -11,21 +11,22 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use assemblr::adapters::{
-    AddFailure, AddProblem, AddedParameter, AmendFailure, AmendProblem, AmendState, BuildFailure,
-    BuildProblem, Built, CheckFailure, CheckProblem, DeclarationChange, FileOutcome, GitOutcome,
-    IndexOutcome, InitFailure, Initialized, LockfileOutcome, ManifestFileError, Pending,
-    PublishFailure, PublishProblem, PublishState, Published, RecoveryError, Registry,
-    RenderErrorKind, TagProblem, TemplateError, UpdateFailure, UpdateProblem, UpdateState, Updated,
-    add_dependency, amend_unit, build_unit, check_unit, init_unit, publish_unit, update_unit,
+    AddFailure, AddProblem, AmendFailure, AmendProblem, AmendState, BuildFailure, BuildProblem,
+    Built, CheckFailure, CheckProblem, DeclarationChange, FileOutcome, GitOutcome, IndexOutcome,
+    InitFailure, Initialized, LockfileOutcome, ManifestFileError, Pending, PublishFailure,
+    PublishProblem, PublishState, Published, RecoveryError, Registry, TagProblem, UpdateFailure,
+    UpdateProblem, UpdateState, Updated, add_dependency, amend_unit, build_unit, check_unit,
+    init_unit, publish_unit, update_unit,
 };
 use assemblr::domain::{
-    ContributionError, Excluded, IntegrityChange, LockChange, LockError, ParameterName,
-    RegistryError, RelativePath, ResolutionError, UnitIdentity,
+    ContributionError, Excluded, IntegrityChange, LockChange, LockError, PlaceholderError,
+    PlaceholderList, RegistryError, RelativePath, ResolutionError, UnitIdentity,
 };
 use clap::{Args, Subcommand};
 
 use super::diagnostic::{Diagnosis, count, fail, fail_with};
-use super::project::{UnitArgument, option_argument, unit_argument};
+use super::placeholders;
+use super::project::{UnitArgument, unit_argument};
 
 #[derive(Debug, Subcommand)]
 pub(super) enum UnitCommand {
@@ -44,12 +45,10 @@ pub(super) enum UnitCommand {
     /// Add a dependency to the unit and build it
     ///
     /// Declares the unit in `manifest.jsonc` and builds as `unit build`
-    /// does, so `unit amend` works right after. A required parameter of
-    /// the dependency is mapped to a parameter of this unit with the same
-    /// name, declared for it when there is none, unless `--option` sets it.
+    /// does, so `unit amend` works right after.
     #[command(after_long_help = "Examples:\n  \
         assemblr unit add @acme/base\n  \
-        assemblr unit add @acme/base@^1.2.0 --option appName=shop")]
+        assemblr unit add @acme/base@^1.2.0")]
     Add(AddArgs),
     /// Build the unit and its dependencies into build/
     ///
@@ -102,12 +101,6 @@ pub(super) struct AddArgs {
     /// The unit, like `@acme/base` or `@acme/base@^1.2`
     #[arg(value_name = "UNIT", value_parser = unit_argument)]
     unit: UnitArgument,
-    /// Set a parameter of the dependency to a literal; repeat for several
-    ///
-    /// The value is read by the parameter's type, as `assemblr add` reads
-    /// it. A required parameter without one is mapped instead.
-    #[arg(long = "option", value_name = "NAME=VALUE", value_parser = option_argument)]
-    options: Vec<(String, String)>,
 }
 
 #[derive(Debug, Args)]
@@ -120,8 +113,7 @@ pub(super) struct UpdateArgs {
 
 #[derive(Debug, Args)]
 pub(super) struct AmendArgs {
-    /// The file to amend: a file name, or a path in the dependency's src/;
-    /// a template matches with or without `.assemblr.tmpl`
+    /// The file to amend: a file name, or a path in the dependency's src/
     file: String,
     /// Look only in this dependency, direct or transitive, like `@acme/base`
     #[arg(long, value_name = "UNIT", value_parser = UnitIdentity::parse)]
@@ -641,21 +633,11 @@ fn update_diagnosis(failure: &UpdateFailure, root: &Path) -> Diagnosis {
 
 fn add(args: &AddArgs) -> ExitCode {
     let identity = args.unit.identity();
-    let mut options: Vec<(&str, &str)> = Vec::new();
-    for (name, value) in &args.options {
-        if options.iter().any(|(given, _)| given == name) {
-            return fail(
-                &format!("--option {name} is given more than once"),
-                Some("give each option once"),
-            );
-        }
-        options.push((name, value));
-    }
     let (root, registry) = match locate() {
         Ok(located) => located,
         Err(code) => return code,
     };
-    match add_dependency(&root, &registry, identity, args.unit.version(), &options) {
+    match add_dependency(&root, &registry, identity, args.unit.version()) {
         Ok(added) => {
             let declaration = match added.change() {
                 DeclarationChange::Added { requirement } => {
@@ -667,67 +649,16 @@ fn add(args: &AddArgs) -> ExitCode {
                 DeclarationChange::Kept { requirement } => {
                     format!("{identity} is already a dependency ({requirement})")
                 }
-                DeclarationChange::Removed { .. } => {
+                DeclarationChange::Removed => {
                     unreachable!("`unit add` never removes a declaration")
                 }
             };
-            let parameters = describe_parameters(added.parameters());
-            if parameters.is_empty() {
-                println!("{declaration}.");
-            } else {
-                println!("{declaration}; {}.", parameters.join("; "));
-            }
+            println!("{declaration}.");
             report_built(added.built());
             ExitCode::SUCCESS
         }
         Err(failure) => fail_with(&failure.to_string(), &add_diagnosis(&failure, &root)),
     }
-}
-
-/// How the dependency's parameters were satisfied, one phrase per kind.
-fn describe_parameters(parameters: &[AddedParameter]) -> Vec<String> {
-    let names = |pick: fn(&AddedParameter) -> Option<&assemblr::domain::ParameterName>| {
-        let names: Vec<String> = parameters
-            .iter()
-            .filter_map(pick)
-            .map(|name| format!("`{name}`"))
-            .collect();
-        names
-    };
-    let mut phrases = Vec::new();
-    let literal = names(|parameter| match parameter {
-        AddedParameter::Literal(name) => Some(name),
-        _ => None,
-    });
-    if !literal.is_empty() {
-        phrases.push(format!("set {}", literal.join(", ")));
-    }
-    let inherited = names(|parameter| match parameter {
-        AddedParameter::Inherited(name) => Some(name),
-        _ => None,
-    });
-    if !inherited.is_empty() {
-        phrases.push(format!(
-            "declared {} in params as inherited from it",
-            inherited.join(", ")
-        ));
-    }
-    let existing = names(|parameter| match parameter {
-        AddedParameter::MappedToExisting(name) => Some(name),
-        _ => None,
-    });
-    if !existing.is_empty() {
-        phrases.push(format!(
-            "mapped {} from the unit's own {}",
-            existing.join(", "),
-            if existing.len() == 1 {
-                "parameter"
-            } else {
-                "parameters"
-            }
-        ));
-    }
-    phrases
 }
 
 /// What a failed `unit add` left, and what the author can do.
@@ -779,7 +710,12 @@ fn add_diagnosis(failure: &AddFailure, root: &Path) -> Diagnosis {
     };
     let advice = distinct(problems.iter().filter_map(|problem| {
         match problem {
-            AddProblem::Build(BuildProblem::Manifest(ManifestFileError::Missing { .. })) => {
+            AddProblem::Build(problem)
+                if matches!(
+                    **problem,
+                    BuildProblem::Manifest(ManifestFileError::Missing { .. })
+                ) =>
+            {
                 Some(format!(
                     "{} is not a unit repository's top level; run `assemblr unit add` in the \
                  directory that holds `manifest.jsonc`",
@@ -792,27 +728,12 @@ fn add_diagnosis(failure: &AddFailure, root: &Path) -> Diagnosis {
              @owner/name@~1.2, or @owner/name@=1.2.3"
                     .to_owned(),
             ),
-            AddProblem::ParameterClash { parameter, .. } => Some(format!(
-                "set the dependency's parameter to a literal with `--option {parameter}=<value>`, \
-             or rename the unit's own parameter"
-            )),
-            AddProblem::NoExample { parameter, .. } => Some(format!(
-                "set it with `--option {parameter}=<value>`, or declare `{parameter}` with an \
-             `example` in the unit's `params` and run the command again, which maps it"
-            )),
             AddProblem::CannotEdit(_) => {
                 Some("edit manifest.jsonc by hand and run `assemblr unit build`".to_owned())
             }
             _ => None,
         }
     }));
-    let mut advice = advice;
-    advice.extend(undeclared_advice(problems.iter().filter_map(
-        |problem| match problem {
-            AddProblem::Build(problem) => Some(problem),
-            _ => None,
-        },
-    )));
     let diagnosis = Diagnosis::note("nothing was changed");
     if advice.is_empty() {
         diagnosis
@@ -854,6 +775,39 @@ fn report_built(built: &Built) {
         count(built.files(), "file", "files"),
         count(built.dependencies(), "dependency", "dependencies")
     );
+    let found = built.placeholders();
+    if !found.is_empty() {
+        let listed: Vec<String> = found
+            .placeholders()
+            .keys()
+            .map(|placeholder| {
+                format!(
+                    "{placeholder} in {}",
+                    count(found.files_of(placeholder), "file", "files")
+                )
+            })
+            .collect();
+        println!("Placeholders: {}.", listed.join(", "));
+    }
+    let tokens = built.unresolved();
+    if !tokens.is_empty() {
+        eprintln!(
+            "warning: {}",
+            if tokens.len() == 1 {
+                "1 token looks like a placeholder but is not declared:".to_owned()
+            } else {
+                format!(
+                    "{} tokens look like placeholders but are not declared:",
+                    tokens.len()
+                )
+            }
+        );
+        for line in placeholders::tokens_body(tokens) {
+            eprintln!("{line}");
+        }
+        eprintln!();
+        eprintln!("hint: {}", placeholders::tokens_hint(tokens));
+    }
 }
 
 fn check() -> ExitCode {
@@ -909,6 +863,7 @@ fn check_advice(problem: &CheckProblem, root: &Path, command: &str) -> Option<St
         CheckProblem::Contribution(ContributionError::RedundantAmendment { .. }) => {
             return None;
         }
+        CheckProblem::Undeclared { tokens, .. } => placeholders::tokens_hint(tokens),
         CheckProblem::Pending { path, .. } => format!(
             "run `assemblr unit build`, which creates amendments/{path} with each conflict \
              marked and declares it; edit it to the content you want, remove every marker, and \
@@ -1122,8 +1077,7 @@ fn diagnosis(failure: &BuildFailure, root: &Path) -> Diagnosis {
         BuildFailure::Pending(pending) => return pending_diagnosis(pending, ""),
         BuildFailure::PendingWrite { written, .. } => return pending_write_diagnosis(written, ""),
     };
-    let mut advice = distinct(problems.iter().filter_map(|problem| advice(problem, root)));
-    advice.extend(undeclared_advice(problems.iter()));
+    let advice = distinct(problems.iter().filter_map(|problem| advice(problem, root)));
     let diagnosis = Diagnosis::note("build/ and assemblr-lock.json were not changed");
     if advice.is_empty() {
         diagnosis
@@ -1182,49 +1136,6 @@ const DELETING_THE_LOCKFILE: &str = "deleting assemblr-lock.json is not a repair
      every locked version, and the next build resolves every dependency again, possibly to \
      other versions";
 
-/// How to declare the parameters that templates name and their unit does
-/// not declare, in one piece of advice per unit. The unit is named, since a
-/// dependency published without `unit publish` can hold such a template too,
-/// and then its own manifest is the one to change.
-fn undeclared_advice<'a>(problems: impl Iterator<Item = &'a BuildProblem>) -> Vec<String> {
-    let mut units: Vec<(&UnitIdentity, Vec<&ParameterName>)> = Vec::new();
-    for problem in problems {
-        if let BuildProblem::Template {
-            unit,
-            amended_by: None,
-            error: TemplateError::Render(error),
-            ..
-        } = problem
-        {
-            if let RenderErrorKind::Undefined { name, .. } = error.kind() {
-                let at = match units.iter().position(|(listed, _)| *listed == unit) {
-                    Some(at) => at,
-                    None => {
-                        units.push((unit, Vec::new()));
-                        units.len() - 1
-                    }
-                };
-                if !units[at].1.contains(&name) {
-                    units[at].1.push(name);
-                }
-            }
-        }
-    }
-    units
-        .into_iter()
-        .filter_map(|(unit, names)| {
-            let first = names.first()?;
-            let listed: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
-            Some(format!(
-                "declare {} under `params` in the manifest.jsonc of {unit}, each like \
-                 `\"{first}\": {{ \"type\": \"string\", \"description\": \"...\", \"example\": \
-                 \"...\" }}`, and run the command again",
-                listed.join(", ")
-            ))
-        })
-        .collect()
-}
-
 /// Advice for the first problem that has one.
 fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
     Some(match problem {
@@ -1276,6 +1187,29 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
         BuildProblem::Published { .. } => {
             "run `assemblr registry sync` to check the registered repositories again".to_owned()
         }
+        BuildProblem::Placeholder(error) => match error {
+            PlaceholderError::Unused {
+                list: PlaceholderList::Replace,
+                ..
+            } => "remove it from manifest.jsonc, or add it where the consumer must set the value"
+                .to_owned(),
+            PlaceholderError::Unused {
+                list: PlaceholderList::Ignore,
+                ..
+            } => "remove it from \"placeholders.ignore\"".to_owned(),
+            PlaceholderError::Redeclared { .. } => {
+                "remove it from \"placeholders.replace\": the dependency's declaration and \
+                 description apply to the files of this unit too"
+                    .to_owned()
+            }
+            PlaceholderError::IgnoresDeclared { .. } => {
+                "remove it from \"placeholders.ignore\", so that consumers see the placeholder"
+                    .to_owned()
+            }
+            PlaceholderError::InPath { .. } => {
+                "rename the file, and write the placeholder in its content instead".to_owned()
+            }
+        },
         _ => return None,
     })
 }

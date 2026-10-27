@@ -64,7 +64,7 @@ scaffold on that Git-based foundation, consistently for every unit. It:
   author who does not can delete it (owner decision of 2026-10-25, in the
   session for [#120](https://github.com/metamao/assemblr/issues/120));
 - avoids other unnecessary scaffolding, for example an `amendments/`
-  directory or a placeholder file in `src/`.
+  directory or an empty marker file in `src/`.
 
 Assemblr's own validation remains authoritative over the schema.
 
@@ -92,7 +92,7 @@ never lands among unrelated files by default. A name that cannot be a
 directory on every platform, such as `con`, is refused and needs a directory.
 `.` sets up the unit in the current directory, for example to adopt an
 existing repository. The description is the
-manifest's; without one, a placeholder names the unit. The result says what
+manifest's; without one, it is "The `<identity>` unit." The result says what
 was created, replaced, and already in place, and what to do next.
 
 **The repository.** When no Git repository encloses the directory, `unit
@@ -149,8 +149,8 @@ resolution.
 
 ### Add details — Approved
 
-**Command.** `assemblr unit add <unit>[@<requirement>] [--option
-<name>=<value>]...`, run at the repository's top level as `unit build` is.
+**Command.** `assemblr unit add <unit>[@<requirement>]`, run at the
+repository's top level as `unit build` is.
 It edits `dependencies` in `manifest.jsonc` and then builds exactly as
 `unit build` does, so the lockfile is still written only by `unit build`
 and `unit update`. One unit per call. The result goes to stdout, and the
@@ -165,24 +165,10 @@ version is recorded as a caret requirement on it; any other requirement is
 recorded as written. A unit declared already keeps its requirement unless
 another is given.
 
-**Required parameters.** A required parameter of the added unit that has no
-default and no value in the unit's `options` is **mapped** from a parameter
-of the unit's own with the same name (see
-[parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved)):
-the unit's own parameter when it declares one that can be mapped, and
-otherwise one declared for it in `params` as inherited from the added unit,
-`{ "from": "<unit>" }`, which takes the dependency's definition and needs no
-entry in `options` (owner decision of 2026-10-25 on
-[#120](https://github.com/metamao/assemblr/issues/120), **Provisional
-(D-49)**; see
-[declaration](parameters-and-options.md#declaration--approved)). `--option
-<name>=<value>` sets a literal instead, read by the parameter's type as the
-consumer's `add` reads it. The command refuses, changing nothing, when the
-unit's own parameter of that name cannot be mapped, and when the
-dependency's parameter has no example, since the unit could not be built
-with the mapped parameter (see [build details](#build-details--approved));
-both name `--option` as the way out, and the second also declaring the
-parameter with an example by hand, which the command then maps.
+**Placeholders.** The added unit's placeholders stay its own: nothing is
+copied into the unit's manifest, and the build summary lists the
+placeholders the composed result holds (see
+[placeholders.md](placeholders.md#author-checks--approved)).
 
 **Writing and recovery.** Everything is planned on the manifest's text and
 validated as a build validates the working tree before anything is written:
@@ -225,11 +211,8 @@ These were decided by the owner for the first amendments increment.
 **Command.** `assemblr unit amend <file> [--unit <identity>]`, run at the
 repository's top level as `unit build` is. `<file>` without a `/` is a file
 name, matched against the name of every file in the `src/` trees searched;
-with a `/` it is a path in that `src/`, matched exactly. Either form matches
-a template by its source name or by its delivered name, without
-`.assemblr.tmpl`: `config/package.json` and `package.json` both find
-`config/package.json.assemblr.tmpl`. The copy always keeps the source path,
-suffix included. `--unit` restricts the search to one locked dependency,
+with a `/` it is a path in that `src/`, matched exactly. The copy keeps the
+provider's path. `--unit` restricts the search to one locked dependency,
 direct or transitive; without it, every locked unit is searched. Several
 matches are reported, each by its path and provider, and never resolved by
 preference. The result goes to stdout, naming the units below whose
@@ -278,9 +261,8 @@ the copy, as long as its content is still the composed base.
 
 - manifest validity;
 - identity and version validity;
-- parameter and options consistency, including that the required parameters
-  of every dependency are satisfied through the dependency chain (see
-  [parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved));
+- placeholder declarations and the tokens of the unit's files (see
+  [placeholders.md](placeholders.md#author-checks--approved));
 - dependency resolution;
 - amendment validity: each amendment targets a locked unit, direct or
   transitive, that provides the path, its declared base version is the
@@ -291,11 +273,10 @@ the copy, as long as its content is still the composed base.
 - an **effective, non-redundant contribution**.
 
 A unit that contributes nothing is **invalid for publication**. Contributions
-may come from files, amendments, meaningful configuration of dependencies, or
-the aggregation of dependencies into a reusable composition. This check is
-not a superficial "`src/` must contain files" rule. A unit with no `src/`
-files can still contribute through amendments, options, or the units it
-composes.
+may come from files, amendments, or the aggregation of dependencies into a
+reusable composition. This check is not a superficial "`src/` must contain
+files" rule. A unit with no `src/` files can still contribute through
+amendments or the units it composes.
 
 The effective-contribution algorithm is approved as the [check
 details](#check-details--approved-d-1-d-3) describe (OC-11, resolved).
@@ -323,15 +304,12 @@ hint to run `unit build`, which writes it. `unit check` never creates it.
 when it delivers at least one `src/` file or declares at least one dependency.
 Aggregation is a contribution: a unit whose purpose is to compose other units
 into one reusable dependency contributes that composition, whether it
-aggregates one unit or many. Since amendments and options presuppose a
-dependency, a unit is ineffective exactly when it has no file and no
-dependency, and that is reported. An amendment whose copy is the provider's
-file byte for byte at the declared base is a **redundant** contribution and is
-reported by path: it changes nothing and claims the file for no reason. An
-option equal to the parameter's default at the locked version is not reported:
-consumers resolve the dependency within the declared range, where the default
-may differ, so the explicit value pins it. The check gates `unit check` and
-`unit publish`, never a build (OC-28).
+aggregates one unit or many. Since amendments presuppose a dependency, a
+unit is ineffective exactly when it has no file and no dependency, and that
+is reported. An amendment whose copy is the provider's file byte for byte at
+the declared base is a **redundant** contribution and is reported by path:
+it changes nothing and claims the file for no reason. The check gates
+`unit check` and `unit publish`, never a build (OC-28).
 
 **What a merge would not carry.** For each of the unit's own copies of a
 JSON or JSONC file, `unit check` and `unit build` report, as warnings that
@@ -341,10 +319,10 @@ unit that amends the same file would make the merge drop them (see
 [the merge engine](amendments-and-composition.md#the-merge-engine--approved)),
 and the author hears of it before a consumer does.
 
-**Required parameters.** `unit check` and `unit publish` use the same
-development values as a build (see [development values](#build-details--approved)):
-a required parameter is checked with its `example`. A required parameter with
-neither a default nor an example cannot be checked or published.
+**Placeholders.** A token of the placeholder form that neither the unit nor
+its resolved graph declares or ignores, which a build only warns about, is a
+problem `unit check` and `unit publish` report (see
+[placeholders.md](placeholders.md#author-checks--approved)).
 
 ## Build — Approved
 
@@ -389,9 +367,9 @@ Rules:
   against path traversal and symlink escapes.
 - A **failed build never damages authoring files**, such as the manifest,
   `src/`, or `amendments/`.
-- Development input values configure only the unit being built. Its
-  dependencies receive configuration only through the unit's own `options`;
-  a build has no other way to configure them.
+- Every file is delivered byte for byte: a build renders and substitutes
+  nothing, and placeholders stay in `build/` as they are in the files (see
+  [placeholders.md](placeholders.md)).
 
 ### Build details — Approved
 
@@ -405,10 +383,8 @@ stdout. Diagnostics, and changes to the unit lockfile, go to stderr.
 **Validations that gate a build** (OC-28):
 
 - manifest validity, identity, and version;
-- parameter and options consistency, including that the required
-  parameters of every dependency are satisfied through the dependency chain;
 - dependency resolution, under the [unit lock state](#unit-lock-state--approved);
-- `src/` path validity and path collisions, on delivered paths (see
+- `src/` path validity and path collisions (see
   [units.md](units.md#src-unit-files));
 - amendment validity: each declared provider is a locked unit, direct or
   transitive, that provides the path in its `src/` at the locked version, the
@@ -417,9 +393,11 @@ stdout. Diagnostics, and changes to the unit lockfile, go to stderr.
   resolved dependencies publish, each base is verified against the registry
   record, and siblings that conflict in a file the unit does not amend put
   the build in the pending state;
-- rendering of the templates of the unit and of its dependencies, amended
-  copies included (see
-  [parameters-and-options.md](parameters-and-options.md#rendering--approved)).
+- the unit's placeholder declarations, after a resolution succeeds, since
+  they are checked against the resolved graph (see
+  [placeholders.md](placeholders.md#author-checks--approved)). A token the
+  unit's files hold that nothing declares or ignores is a warning, not a
+  problem that gates the build.
 
 The effective-contribution check (OC-11) does not gate a build; it gates
 publication. Neither does a clean or committed working tree. A build also
@@ -428,20 +406,6 @@ refuses to run while an update of the unit is interrupted, until
 A failed build reports every problem it can discover independently. A problem in a later
 step that cannot run after an earlier failure, such as composition after a
 failed resolution, is not reported.
-
-**Development values** (OC-6, decided by the owner on #62, decision log
-D-24). A unit's build, check, and publication give each of its own required
-parameters, those without a default, the `example` its definition declares.
-They are authoring-time values for the unit being built only: they configure
-nothing else, they never reach a consumer's composition, and a composition
-never uses an example in place of a missing value. A required parameter with
-neither a default nor an example fails the build, naming each such parameter
-and saying to add an `example`. An example must satisfy the parameter's type
-and allowed values, which the manifest checks, and it does not prove that
-every value is valid: the values a composition resolves are validated as
-they are. The unit's dependencies are configured only through its `options`,
-so a mapped parameter carries the example to them in the build. Building a
-unit under several configurations is not offered.
 
 **The working tree's `src/`.** A build reads the files that committing
 everything would publish, with their current working-tree contents:
@@ -464,13 +428,11 @@ execute it. Windows file systems record no such bit, so there a tracked
 file is executable when the Git index records it as executable, and an
 untracked file is not.
 
-**Templates.** The `src/` files ending in `.assemblr.tmpl`, of the unit and
-of its dependencies, are rendered with the resolved parameter values of the
-unit that provides each one, and delivered without the suffix (see
-[units.md](units.md#templates) and
-[parameters-and-options.md](parameters-and-options.md#rendering--approved)).
-Every rendering problem is reported with its file and position, and a build
-with any is rejected before `build/` or the lockfile changes.
+**Placeholders.** The result lists, after the summary, each placeholder the
+composed files hold and in how many files, in name order. The warning about
+undeclared tokens lists each token with its locations, one `path:line` per
+row, and offers both fixes (see
+[placeholders.md](placeholders.md#author-checks--approved)).
 
 **Amendments.** A build applies the unit's own amendments and those its
 resolved dependencies publish. The unit's `amendments/` is read by the same
@@ -479,15 +441,10 @@ links; an empty `amendments/`, or one holding only ignored files, is no
 amendment. A published version's `amendments/` and lockfile are read from
 Git at the indexed commit, by the same rules. Each declared copy takes the
 place of the provider's file: it is delivered at the provider's delivered
-path with the provider's executable bit, and it is rendered exactly when the
-provider's file is, with the provider's values and the amending unit's own
-as `own`, the values that unit has in this build (see
-[amendments-and-composition.md](amendments-and-composition.md#template-contexts--approved)).
-Every amendment that cannot be applied is reported with the others: a
+path with the provider's executable bit. Every amendment that cannot be applied is reported with the others: a
 declared base other than the locked version (see
 [unit lock state](#unit-lock-state--approved)), a provider that is not a
-locked unit, a path the provider does not have at that version, naming the
-provider's template or plain file when only the suffix differs, a
+locked unit, a path the provider does not have at that version, a
 declaration without a copy, and a copy without a declaration. For a
 published amender, its lockfile's identity of each version its base is
 composed of is compared with the registry record, and a disagreement is an
@@ -633,11 +590,10 @@ because a new version becomes available.
 [unit lock state](#unit-lock-state--approved), and reconciles the unit's
 amendments from their historical base to the newer dependency version.
 
-- Reconciliation works on the **source templates**: the base at the old
+- Reconciliation works on the files as they are: the base at the old
   version, the amendment copy, and the base at the new version. The result is
-  a new editable copy that keeps its template expressions. The declared base
-  version and the lock change together with it (see
-  [amendments-and-composition.md](amendments-and-composition.md#template-contexts--approved)).
+  a new editable copy, placeholders included. The declared base version and
+  the lock change together with it.
 - Changing the **resolved version** of a dependency and changing its declared
   SemVer **range** are separate concerns.
 - Assemblr **never widens a declared range automatically**. Changing a range is
@@ -684,7 +640,7 @@ reports that and touches no file.
 **Amendments** (owner decision on #100, replacing the earlier statement
 that no marker-based resolution is offered for a unit's amendments). For
 each of the unit's own amendments, the update composes its **layered base**
-twice, on the source templates: before the update, at the lock state, and
+twice: before the update, at the lock state, and
 after it, at the new resolution (see
 [amendments-and-composition.md](amendments-and-composition.md#the-base)).
 
@@ -695,9 +651,8 @@ after it, at the new resolution (see
   file is JSON or JSONC, or UTF-8 text outside the structured formats without
   a merge (XML; YAML, TOML, and INI are text, owner decision on #92), the
   amendment is **rebased**: the base before, the copy, and the base after are
-  merged three ways, by value for a JSON or JSONC file that is not a template
-  and by line otherwise, with neither side taking precedence, so the copy
-  keeps its template expressions and its own layout. A change below that the
+  merged three ways, by value for a JSON or JSONC file and by line otherwise,
+  with neither side taking precedence, so the copy keeps its own layout. A change below that the
   copy did not touch flows through. Insertions the base and the copy make at
   the same position are both kept, the base's first, as a composition applies
   them across versions (see
@@ -790,11 +745,10 @@ tag version must match the manifest version at the tagged commit exactly (see
 2. resolves and verifies dependencies and amendments, including that the
    unit lockfile the published version will carry identifies the content of
    every amendment base;
-3. verifies that the required parameters of its direct dependencies are
-   satisfied by defaults, its `options`, or mappings from its own parameters,
-   and that those of transitive dependencies are satisfied through the
-   dependency chain (see
-   [parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved));
+3. verifies the unit's placeholder declarations, and that every token of
+   the placeholder form in its files is declared or ignored by the unit or
+   its resolved graph (see
+   [placeholders.md](placeholders.md#author-checks--approved));
 4. runs **all** mandatory Assemblr-native checks;
 5. rejects effectively empty or redundant units;
 6. requires a **committed, clean** Git state;

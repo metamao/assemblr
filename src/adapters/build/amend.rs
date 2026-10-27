@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 
 use super::exclusive::BuildLock;
 use super::{
-    BuildLockError, BuildProblem, MANIFEST, ManifestFileError, development_values, layer_sources,
-    read_working_manifest_text, resolve_graph, without_amendments,
+    BuildLockError, BuildProblem, MANIFEST, ManifestFileError, layer_file,
+    read_working_manifest_text, resolve_graph,
 };
 use crate::adapters::git::{FILE_LIMIT, GitError, GitRepository, ReadSrcError, UnitDirectory};
 use crate::adapters::lockfile::{self, LockfileError};
@@ -34,7 +34,7 @@ use crate::adapters::manifest::{EditError, declare_amendment, read_manifest};
 use crate::adapters::registry::{Registry, StorageError};
 use crate::domain::{
     AmendmentDeclaration, LockChange, LockError, RelativePath, RelativePathError, ResolutionError,
-    Root, UnitContent, UnitIdentity, Version, compose, delivered_path,
+    Root, UnitContent, UnitIdentity, Version, compose,
 };
 
 /// Where the edited manifest is written before it replaces `manifest.jsonc`.
@@ -45,9 +45,7 @@ pub(super) const MANIFEST_NEW: &str = ".assemblr-manifest.jsonc.new";
 /// repository's top level is `root`, or of `unit` alone when it is given.
 ///
 /// `file` is a filename, searched recursively, or, when it contains a `/`,
-/// a path in the provider's `src/`. Either matches a template by its source
-/// name or by its delivered name, without `.assemblr.tmpl`; the copy always
-/// keeps the source name.
+/// a path in the provider's `src/`.
 pub fn amend_unit(
     root: &Path,
     registry: &Registry,
@@ -236,20 +234,17 @@ pub fn amend_unit(
         return Err(AmendFailure::Rejected(problems));
     }
     // The base: the file as the unit's dependencies compose it, which is
-    // the file as it stands in `build/` before this amendment. The sources
-    // are layered, so a template keeps its expressions. The unit's own
-    // amendments are no part of it, and are left out of the composition:
+    // the file as it stands in `build/` before this amendment. The unit's
+    // own amendments are no part of it, and are left out of the composition:
     // one of them may be a copy an interrupted run left undeclared, or one
     // with conflict markers the author has not resolved yet.
-    let (development, _) = development_values(&manifest, Some(&resolved));
     let units = resolved.units();
-    let bare = without_amendments(&manifest);
+    let bare = manifest.without_amendments();
     let no_copies = crate::domain::FileTree::new();
     let composition = compose(
         resolved.resolution.graph(),
         Root::Unit(UnitContent::new(&bare, &src, &no_copies)),
         &units,
-        &development,
     );
     let composition = match composition {
         Ok(composition) => composition,
@@ -262,14 +257,10 @@ pub fn amend_unit(
             return Err(AmendFailure::Rejected(problems));
         }
     };
-    let delivered = delivered_path(&found.path)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| found.path.clone());
     let mut found_problems = Vec::new();
-    let base = layer_sources(
+    let base = layer_file(
         &composition,
-        &delivered,
+        &found.path,
         lock,
         Some(manifest.name()),
         &resolved.dependencies,
@@ -283,7 +274,7 @@ pub fn amend_unit(
     // their versions.
     let below: Vec<(UnitIdentity, Version)> = composition
         .files()
-        .get(&delivered)
+        .get(&found.path)
         .map(|composed| {
             composed
                 .amendments()
@@ -448,16 +439,11 @@ impl Wanted {
     }
 
     /// Whether `path`, a provider's source path, is the file asked for: by
-    /// its source name or path, or by its delivered one for a template.
+    /// its name or its path.
     fn matches(&self, path: &RelativePath) -> bool {
-        let delivered = delivered_path(path).ok().flatten();
         match self {
-            Self::Name(name) => {
-                let last = |path: &RelativePath| path.segments().last().map(str::to_owned);
-                last(path).as_deref() == Some(name)
-                    || delivered.as_ref().and_then(last).as_deref() == Some(name)
-            }
-            Self::Path(wanted) => path == wanted || delivered.as_ref() == Some(wanted),
+            Self::Name(name) => path.segments().last() == Some(name.as_str()),
+            Self::Path(wanted) => path == wanted,
         }
     }
 }
@@ -826,7 +812,7 @@ impl fmt::Display for AmendProblem {
                     units.join(", ")
                 )?;
                 if file.contains('/') {
-                    f.write_str("; a path is matched exactly, with or without `.assemblr.tmpl`")
+                    f.write_str("; a path is matched exactly")
                 } else {
                     f.write_str("; a name is matched against every file's name")
                 }

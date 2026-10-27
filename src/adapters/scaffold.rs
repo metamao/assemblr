@@ -27,9 +27,9 @@ pub(crate) fn unit_readme(identity: &UnitIdentity, description: &Description) ->
          \n\
          <!-- The files it delivers under src/, and the files of its dependencies it amends. -->\n\
          \n\
-         ## Options\n\
+         ## Placeholders\n\
          \n\
-         <!-- Each parameter: what it changes, and its default. -->\n\
+         <!-- Each placeholder its files hold: the value the project writes in its place. -->\n\
          \n\
          ## Use\n\
          \n\

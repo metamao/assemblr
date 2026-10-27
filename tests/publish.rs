@@ -278,7 +278,7 @@ fn check_runs_the_build_s_validations_and_writes_nothing() {
             "@acme/app",
             "0.1.0",
             &[("@acme/node", "^1"), ("@acme/missing", "^1")],
-            r#", "params": {"name": {"type": "string", "description": "No default."}}"#,
+            "",
         ),
     );
     app.write("src/aux.txt", "reserved on Windows");
@@ -288,11 +288,6 @@ fn check_runs_the_build_s_validations_and_writes_nothing() {
     assert_eq!(errors(&check), errors(&build));
     assert!(
         stderr(&check).contains("@acme/missing"),
-        "{}",
-        stderr(&check)
-    );
-    assert!(
-        stderr(&check).contains("required parameters without defaults"),
         "{}",
         stderr(&check)
     );

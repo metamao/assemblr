@@ -7,10 +7,10 @@ repository.
 
 - The manifest format is **JSONC**: JSON with comments.
 - The manifest is the source of the unit's identity, version, description,
-  dependencies, parameters, dependency options, and amendment declarations.
+  dependencies, placeholder declarations, and amendment declarations.
 - A consumer project declares its composition in `assemblr.jsonc`, which
-  deliberately reuses the manifest's `dependencies` and `options` semantics but
-  is not a unit manifest (see
+  deliberately reuses the manifest's `dependencies` semantics but is not a
+  unit manifest (see
   [consumer-projects.md](consumer-projects.md#project-configuration--approved)).
 
 ## Vocabulary — Approved
@@ -24,8 +24,7 @@ These fields make up the accepted conceptual vocabulary:
 | `version` | The unit's exact SemVer version. | [units.md](units.md#versioning--approved) |
 | `description` | A human-readable description. **Required.** | |
 | `dependencies` | Owner-qualified identities with SemVer ranges. | [dependencies.md](dependencies.md) |
-| `params` | The unit's public configuration contract. | [parameters-and-options.md](parameters-and-options.md#parameters) |
-| `options` | Strict requirements imposed on dependency parameters. | [parameters-and-options.md](parameters-and-options.md#dependency-options) |
+| `placeholders` | The placeholders the unit's files hold for the consumer to replace, and the tokens that only look like placeholders. | [placeholders.md](placeholders.md#declaration--approved) |
 | `amendments` | Declares the unit's amendments and their provenance. | [amendments-and-composition.md](amendments-and-composition.md#layout-and-declaration) |
 
 The **meaning** of each field above is approved. An amendment declaration
@@ -33,44 +32,31 @@ names the amended path, the unit below that provides it, and the exact base
 version (see
 [amendments-and-composition.md](amendments-and-composition.md#layout-and-declaration)).
 Earlier experimental syntax, such as `extends` or a `merges` field, is not
-canonical.
+canonical. `params` and `options` no longer exist; a manifest that holds
+either is rejected with an error that explains the replacement (see
+[placeholders.md](placeholders.md#removed)).
 
-## Serialization of `dependencies`, `options`, `params`, and `amendments` — Approved
+## Serialization of `dependencies`, `placeholders`, and `amendments` — Approved
 
-These four fields are **maps**:
+| Field | Form |
+|-------|------|
+| `dependencies` | A map from unit identities (`@owner/unit-name`) to SemVer requirement strings |
+| `placeholders` | An object with two optional members: `replace`, a map from placeholders to non-empty descriptions, and `ignore`, an array of distinct placeholder-form tokens |
+| `amendments` | A map from amended paths, the file's path in the provider's `src/`, which is the copy's path under `amendments/`, to an object with `unit`, the identity of the **direct** dependency that provides the file, and `base`, the exact version the copy was taken from, as a string |
 
-| Field | Keys | Values |
-|-------|------|--------|
-| `dependencies` | Unit identities (`@owner/unit-name`) | A SemVer requirement string |
-| `options` | Identities of the unit's **direct** dependencies | A map from parameter name to the value required for that parameter |
-| `params` | Parameter names | The parameter's typed definition: its type, its description, an optional default, optional allowed values, and an optional pattern |
-| `amendments` | Amended paths: the file's path in the provider's `src/`, which is the copy's path under `amendments/` | An object with `unit`, the identity of the **direct** dependency that provides the file, and `base`, the exact version the copy was taken from, as a string |
-
-- An option value or a default is written as the JSON value of the parameter's
-  type: a string or an enumerated string as a JSON string, an integer as a JSON
-  integer, and a boolean as a JSON boolean.
-- Every key of `options` must also be a key of `dependencies` (see
-  [parameters-and-options.md](parameters-and-options.md#rules--approved)).
-- In a unit's `options`, a value is either a JSON value of the parameter's
-  type, a literal, or an object `{ "from": "<name>" }`, a **mapping** from the
-  unit's own parameter of that name, which must be declared in `params` (see
-  [parameters-and-options.md](parameters-and-options.md#satisfying-dependency-parameters--approved)).
-  A consumer's `options` in `assemblr.jsonc` holds literals only.
 - Every `unit` of an amendment must be a key of `dependencies`, and every
   amended path follows the `src/` path rules (see
   [units.md](units.md#src-unit-files)). `base` is an exact version, not a
   requirement, and it must equal that dependency's locked version (see
   [amendments-and-composition.md](amendments-and-composition.md#layout-and-declaration)).
-- A parameter definition has no `required` property. Requiredness follows from
-  the presence of a default (see
-  [parameters-and-options.md](parameters-and-options.md#declaration--approved)).
-- A consumer project's `assemblr.jsonc` reuses the `dependencies` and `options`
-  serialization. It has no `params` (see
+- Every key of `replace` and entry of `ignore` has the placeholder form (see
+  [placeholders.md](placeholders.md#form--approved)).
+- A consumer project's `assemblr.jsonc` reuses the `dependencies`
+  serialization (see
   [consumer-projects.md](consumer-projects.md#project-configuration--approved)).
 
-Example. The structure is canonical. Identities, versions, and parameter names
-are illustrative. The property names inside a parameter definition are not yet
-fixed (**OC-45**), so that definition is elided:
+Example. The structure is canonical. Identities, versions, and placeholders
+are illustrative:
 
 ```jsonc
 {
@@ -80,84 +66,33 @@ fixed (**OC-45**), so that definition is elided:
   "dependencies": {
     "@metamao/cloudflare-worker": "^2.1.0"
   },
-  "options": {
-    "@metamao/cloudflare-worker": {
-      "nodeCompat": true
+  "placeholders": {
+    "replace": {
+      "__APP_TITLE__": "The application's visible name."
     }
   },
-  "params": {
-    "appName": { /* type, description, optional default, optional allowed values */ }
-  },
   "amendments": {
-    "wrangler.toml.assemblr.tmpl": { "unit": "@metamao/cloudflare-worker", "base": "2.1.0" }
+    "wrangler.toml": { "unit": "@metamao/cloudflare-worker", "base": "2.1.0" }
   }
 }
 ```
 
 Open:
 
-- How an option value mapped from the unit's own parameter is written.
-  **OC-39.**
 - List identity hints (**OC-4**).
 
-## Parameter definitions and manifest text — Approved
+## Manifest text — Approved
 
 Accepted by the owner as defaults for Alpha and approved in the
-[owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799): **OC-45**, **OC-50**, and **OC-51** are resolved.
+[owner review of 2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799): **OC-51** is resolved.
 
-A parameter definition has these properties:
-
-| Property | Required | Value |
-|----------|----------|-------|
-| `type` | Yes | `"string"`, `"integer"`, or `"boolean"` |
-| `description` | Yes | A string that is not empty or only whitespace |
-| `default` | No | A JSON value of the parameter's type. Its presence makes the parameter optional. |
-| `allowed` | No | Only with `"type": "string"`, which makes the parameter an enumerated string. A non-empty array of strings with no duplicates. |
-| `pattern` | No | Only with `"type": "string"`. A regular expression that the default, the example, and every value a unit or a project supplies must match somewhere, as JSON Schema's `pattern`: `^…$` anchors it. The syntax is the `regex-lite` crate's, in which `\d`, `\w`, and `\s` are ASCII classes as in ECMAScript; Unicode classes such as `\p{L}` are rejected. Owner decision of 2026-10-25 ([#120](https://github.com/metamao/assemblr/issues/120)); the syntax is **Provisional (D-48)**. |
-| `example` | No | A JSON value of the parameter's type that satisfies `allowed` and `pattern`. The value the unit is built, checked, and published with when the parameter is required and has no default. It is not a default and never a consumer value (decision log D-24). |
-
-```jsonc
-{
-  "params": {
-    "appName": { "type": "string", "description": "The application name.", "example": "my-app" },
-    "port": { "type": "integer", "description": "Local port.", "default": 8080 },
-    "packageManager": {
-      "type": "string",
-      "description": "The package manager.",
-      "allowed": ["npm", "pnpm", "bun"],
-      "default": "pnpm"
-    }
-  }
-}
-```
-
-A parameter may instead be inherited from a direct dependency, with no
-other property (**OC-54**, details **Provisional (D-49)**):
-
-```jsonc
-{
-  "dependencies": { "@metamao/node": "^1.0.0" },
-  "params": { "appName": { "from": "@metamao/node" } }
-}
-```
-
-Other rules:
-
-- **Parameter names** start with an ASCII letter and continue with ASCII
-  letters, digits, or underscores, such as `appName` or `node_compat`. Names
-  are usable in the template syntax (OC-5), and the rule can be widened
-  compatibly. **OC-50.** `own` is reserved
-  for the amending author's context and is not a valid parameter name (see
-  [parameters-and-options.md](parameters-and-options.md#declaration--approved)).
 - **JSONC.** Comments (`//` and `/* */`) and trailing commas after a value are
   accepted, as in common JSONC tooling. Other JSON5 extensions, such as
   single-quoted strings, unquoted keys, and hexadecimal numbers, are rejected.
   **OC-51.**
 - **Duplicate keys** in any object are rejected rather than silently resolved.
   **OC-51.**
-- **Integers** are 64-bit signed. A fraction, an exponent, or an integer
-  outside that range is not an integer. **OC-51.**
-- **Descriptions**, of the unit and of each parameter, must not be empty or
+- **Descriptions**, of the unit and of each placeholder, must not be empty or
   only whitespace. **OC-51.**
 
 ## Validation — Approved
@@ -165,7 +100,7 @@ Other rules:
 - Unknown fields are rejected.
 - Invalid combinations of fields and values are rejected.
 - A missing `description` is an error.
-- Identity, version, parameter, option, and dependency declarations are
+- Identity, version, dependency, placeholder, and amendment declarations are
   validated as described in their respective documents.
 - Validation errors are reported, never silently corrected.
 

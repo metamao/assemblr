@@ -69,7 +69,7 @@ add to the test build:
 
 | Crate | Purpose |
 |-------|---------|
-| `regex-lite` (dev) | Compiles the patterns of the embedded manifest JSON Schema in tests, so that they are checked against the domain's parsers of identities, versions, and parameter names (ADR 0014). Pure Rust, no dependencies, MSRV 1.65. A full JSON Schema validator (`jsonschema`, about 75 crates) was rejected for a schema that is editor assistance only. |
+| `regex-lite` (dev) | Compiles the patterns of the embedded manifest JSON Schema in tests, so that they are checked against the domain's parsers of identities, versions, and placeholder names (ADRs 0014, 0036). Pure Rust, no dependencies, MSRV 1.65. A full JSON Schema validator (`jsonschema`, about 75 crates) was rejected for a schema that is editor assistance only. |
 
 `Cargo.lock` is committed, and CI builds with `--locked`.
 

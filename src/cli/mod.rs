@@ -5,6 +5,7 @@ mod catalog;
 mod diagnostic;
 mod guide;
 mod info;
+mod placeholders;
 mod project;
 mod registry;
 mod search;
@@ -65,15 +66,15 @@ enum Command {
     ///
     /// Selects the unit in `assemblr.jsonc` and composes the project.
     /// Without a version requirement, the unit is recorded with `^` on the
-    /// version chosen. A unit with a required parameter needs `--option`.
+    /// version chosen. Lists the placeholders the composed files hold for
+    /// the project's values.
     #[command(after_long_help = "Examples:\n  \
         assemblr add @acme/web\n  \
-        assemblr add @acme/web@~1.2\n  \
-        assemblr add @acme/web --option appName=shop --option port=8080")]
+        assemblr add @acme/web@~1.2")]
     Add(project::AddArgs),
     /// Remove a unit from the project and compose it
     ///
-    /// Removes the unit and its options from `assemblr.jsonc`, then composes
+    /// Removes the unit from `assemblr.jsonc`, then composes
     /// the project, which removes the unit's files.
     #[command(after_long_help = "Example:\n  assemblr remove @acme/web")]
     Remove(project::RemoveArgs),
@@ -91,15 +92,16 @@ enum Command {
     /// Shows whether a composition is waiting for conflicts or has
     /// anything to do, the units and the updates published for them, and
     /// the files edited since the last composition, with the units that
-    /// deliver them. Changes nothing, and reads the local registry offline.
+    /// deliver them, and the placeholders that remain in the composed files.
+    /// Changes nothing, and reads the local registry offline.
     #[command(after_long_help = "Examples:\n  \
         assemblr status\n  \
         assemblr status --files --json")]
     Status(status::StatusArgs),
-    /// Show a registered unit's versions, parameters, and more
+    /// Show a registered unit's versions, placeholders, and more
     ///
     /// Reads the local registry, offline. Shows the unit's description,
-    /// versions, dependencies, parameters, options, and amendments.
+    /// versions, dependencies, placeholders, and amendments.
     #[command(after_long_help = "Examples:\n  \
         assemblr info @acme/web\n  \
         assemblr info @acme/web@1.2.0 --json")]

@@ -119,8 +119,8 @@ How the status of a statement affects implementation:
   case, which collide on case-insensitive file systems; and paths reserved for
   Assemblr's own files, such as `assemblr.jsonc` and the lockfiles. These
   affect content identity (OC-8) and reconciliation. Approved meanwhile: two
-  units' `src/` files delivered at the same path are a path collision (a
-  template is delivered without its `.assemblr.tmpl` suffix), and so is a file
+  units' `src/` files delivered at the same path are a path collision, and so
+  is a file
   whose delivered path is a directory of another file's, within one unit or
   across units; `src/` paths follow the portable path rules in [unit
   files](units.md#src-unit-files). Approved (owner, 2026-10-23): paths that
@@ -180,56 +180,6 @@ How the status of a statement affects implementation:
 - **Context:** [merge
   semantics](amendments-and-composition.md#structured-and-unknown-formats)
 
-### OC-5
-
-- **Approved (normative):** Parameters affect file contents only. Rendering is
-  deterministic, and a pure function of one file's source and its context. A
-  unit file's context is the resolved parameter values of the unit that
-  provides it. `own` is reserved for the amending author's context, is not a
-  parameter name, and is defined only when an amendment copy is rendered,
-  where it holds the amending unit's own resolved parameter values. An
-  undefined reference is a rendering error, never empty text. Templates are
-  selected explicitly by the `.assemblr.tmpl` suffix, matched exactly at the
-  end of the name, and delivered without it; every other file is delivered
-  byte for byte; the suffix is a rendering switch, not a file class, and an
-  amendment copy keeps the provider's path, so it inherits the outcome. The
-  grammar is `{{ name }}` references, `{{ own.name }}`, and the escape `{{
-  "{{" }}`, a subset of Jinja's, and a reference may go through one of the
-  filters `tojson` and `e`, with Jinja's output (owner decision of
-  2026-10-25, [#120](https://github.com/metamao/assemblr/issues/120)); every
-  other construct opening with `{{`, `{%`, or `{#` is an error, never passed
-  through. Without a filter, strings render raw, integers in decimal, and
-  booleans as `true` or `false`, with no quoting or format-specific
-  escaping; inserted text is never rendered again; text
-  outside references is copied byte for byte. A template must be UTF-8.
-  Rendering errors are collected across files, ordered by delivered path and
-  position, with file, line, and column, and they gate `unit build`. Originals
-  and amendments are rendered against compatible base contexts.
-- **Open detail:** Whether constructs beyond references and the two
-  filters, such as conditional content or other filters, are ever
-  supported, and with which engine; if
-  conditional content is added, it must not silently discard changes.
-- **Origin:** Owner
-- **Context:** [rendering](parameters-and-options.md#rendering--approved),
-  [templates](units.md#templates), [template
-  contexts](amendments-and-composition.md#template-contexts--approved)
-
-### OC-6
-
-- **Approved (normative):** Required parameters without defaults must be
-  supplied explicitly for development builds. Development build values
-  configure only the unit being built; its dependencies are configured only
-  through its own `options`. Decided by the owner (#62, decision log D-24): a
-  parameter's `example` is the value a unit's build, check, and publication
-  use for a required parameter without a default; it is not a default and
-  never a consumer value (see
-  [examples](parameters-and-options.md#examples--approved) and [development
-  values](authoring-workflow.md#build-details--approved)).
-- **Open detail:** Building one unit under several configurations (for example
-  `--value` flags); not offered.
-- **Origin:** Owner
-- **Context:** [build](authoring-workflow.md#build--approved)
-
 ### OC-7
 
 - **Approved (normative):** The authoring operations (`init`, `amend`,
@@ -256,8 +206,7 @@ How the status of a statement affects implementation:
   the unit whose repository's top level is the current directory, without
   searching parent directories. `unit amend <file> [--unit <identity>]`
   searches the direct dependencies' `src/` at their locked versions for a file
-  name, or exactly for a path, matching a template with or without its suffix,
-  restricted to one dependency by `--unit`, and reports several matches rather
+  name, or exactly for a path, restricted to one dependency by `--unit`, and reports several matches rather
   than choosing (see [amend
   details](authoring-workflow.md#amend-details--approved)). `unit update
   [<identity>...]` updates every locked dependency, or the named ones, direct
@@ -284,8 +233,7 @@ How the status of a statement affects implementation:
   `assemblr add <identity>[@<requirement>]` and `assemblr remove <identity>`
   edit the declaration and compose it: `add` records a caret requirement on
   the resolved version when none is given and keeps the requirement of a unit
-  that is selected already, `remove` takes the selection and its `options`
-  entry and refuses a unit that is not an explicit selection (**Provisional
+  that is selected already, `remove` takes the selection and refuses a unit that is not an explicit selection (**Provisional
   (D-17)**; see [add and remove
   details](consumer-projects.md#add-and-remove-details--provisional-d-17)). `assemblr
   update [<identity>...]` is decided by the owner (#63, decision log D-23; see
@@ -316,9 +264,7 @@ How the status of a statement affects implementation:
 - **Open detail:** Exact grammar and semantics of every other command, flag,
   and argument, including: how `registry info` relates to the top-level
   `info`, and whether unit inspection is spelled `info` or `unit info`; what
-  `registry doctor` does beyond diagnosis; how `add` takes parameter values
-  (`--option <name>=<value>`, **Provisional (D-34)**, its values read by the
-  parameter's type by owner decision). The grammar of `unit init` (its
+  `registry doctor` does beyond diagnosis. The grammar of `unit init` (its
   default directory, **Provisional (D-33)**), `init`, `compose`, `add`, and
   `remove`, and `--verbose` on `compose`, `add`, `remove`, and `update`
   (**Provisional (D-31)**), stays open until the owner closes it. Approved in
@@ -502,7 +448,7 @@ How the status of a statement affects implementation:
   identities to plain-string Git references. HTTPS and SSH references and
   `file://` URLs are permitted; local paths are not. The
   referenced manifest must declare the catalog's identity for it.
-  `registry.jsonc` duplicates no versions, dependencies, parameters, or
+  `registry.jsonc` duplicates no versions, dependencies, placeholders, or
   hashes, and indexing adds no fields to it. A catalog needs no SemVer or
   release publication. Entries are added and removed with `catalog add` and
   `catalog remove`, or edited directly and validated through refresh,
@@ -558,19 +504,19 @@ How the status of a statement affects implementation:
 ### OC-36
 
 - **Approved (normative):** `assemblr.jsonc` is the editable JSONC declaration
-  of explicit `dependencies` and their `options`, with manifest-consistent
-  semantics and no `params`. Editing assistance comes from local registry
+  of explicit `dependencies`, with manifest-consistent semantics; it holds no
+  values for the units (owner decision on #124). Editing assistance comes from local registry
   metadata. Recommended (provisional): a static JSON Schema plus a locally
   generated, project-aware schema, through existing editor tooling, with no
   language server or editor extension. The CLI is authoritative.
 - **Open detail:** The full schema of `assemblr.jsonc`, its initial contents,
-  and fields beyond `dependencies` and `options`, whose serialization is
-  approved (see [manifest
-  serialization](manifest.md#serialization-of-dependencies-options-params-and-amendments--approved));
-  `assemblr.jsonc` has no `params`; schema file names and locations; how the
-  project-aware schema is generated and refreshed. **Provisional (D-9)**:
-  `init` writes `dependencies` and `options` as empty maps, and the reader
-  accepts `$schema`; no schema file is written yet.
+  and fields beyond `dependencies`, whose serialization is approved (see
+  [manifest
+  serialization](manifest.md#serialization-of-dependencies-placeholders-and-amendments--approved));
+  schema file names and locations; how the project-aware schema is generated
+  and refreshed. **Provisional (D-9)**: `init` writes `dependencies` as an
+  empty map, and the reader accepts `$schema`; no schema file is written
+  yet.
 - **Origin:** Owner
 - **Context:** [project
   configuration](consumer-projects.md#project-configuration--approved),
@@ -634,27 +580,6 @@ How the status of a statement affects implementation:
 - **Context:** [version
   resolution](consumer-projects.md#version-resolution--approved), [explicit
   updates](dependencies.md#explicit-updates--approved)
-
-### OC-39
-
-- **Approved (normative):** A published unit satisfies its direct
-  dependencies' required parameters through defaults, its `options`, or
-  mappings from its own public parameters. Mappings reference only declared
-  parameters with compatible types and allowed values. `unit publish`
-  validates these obligations across the resolved graph, through the
-  dependency chain. Decided by the owner (#62, decision log D-24): a mapping
-  is written `{ "from": "<own parameter>" }` as an option value and is a
-  strict requirement carrying the source's effective value, defaults included,
-  with no conversion; values are decided from the dependents to the
-  dependencies through any number of levels; compatible values from several
-  paths agree and different ones are an options conflict that names the
-  mapping (see
-  [mappings](parameters-and-options.md#satisfying-dependency-parameters--approved)).
-- **Open detail:** Transformations of values, name-based propagation, and
-  options on transitive units, which are not offered.
-- **Origin:** Consumer
-- **Context:** [satisfying dependency
-  parameters](parameters-and-options.md#satisfying-dependency-parameters--approved)
 
 ### OC-40
 
@@ -771,33 +696,13 @@ How the status of a statement affects implementation:
 - **Context:** [pending-resolution
   details](consumer-projects.md#pending-resolution-details--approved-d-18-sibling-conflicts-provisional-d-44)
 
-### OC-52
-
-- **Approved (normative):** An amendment's base and copy are rendered against
-  compatible contexts before changes are derived, and a composition applies
-  the derived changes to the provider's file at the resolved version. Decided
-  by the owner (#59, decision log D-22): the base and the copy are rendered
-  with one context, the composition's values for the provider's parameters,
-  plus `own`; the changes are applied to the resolved file rendered with the
-  same context; a parameter a template names must be declared at the resolved
-  version with the same kind of value as at the base, or the composition fails
-  and names it, with no fallback to a default of the base version (see [across
-  provider
-  versions](amendments-and-composition.md#across-provider-versions--approved)).
-- **Open detail:** A parameter whose meaning changes while its name and kind
-  stay is not detected.
-- **Origin:** Owner
-- **Context:** [template
-  contexts](amendments-and-composition.md#template-contexts--approved)
-
 ### OC-53
 
-- **Approved (normative):** `unit update` reconciles the source templates of a
-  unit's amendments from the old base to the new version, together with the
+- **Approved (normative):** `unit update` reconciles a unit's amendments
+  from the old base to the new version, together with the
   declared base versions and the lock, and never leaves a silent partial
   update. Decided by the owner (#59, decision log D-22): an unchanged file is
-  carried over; a changed text file is rebased by a line merge on the source
-  templates, neither side taking precedence except that insertions both make
+  carried over; a changed text file is rebased by a line merge, neither side taking precedence except that insertions both make
   at one position keep the provider's first (#70), and the copy, the declared
   base, and the lock change together; a collision, a file with no merge, or
   non-text content writes nothing and is reported with each collision's lines
@@ -807,21 +712,21 @@ How the status of a statement affects implementation:
 - **Origin:** Foundation
 - **Context:** [update](authoring-workflow.md#update--approved)
 
-### OC-54
+### OC-55
 
-- **Approved (normative):** A unit may declare a parameter as **inherited**
-  from a direct dependency, `"name": { "from": "<dependency>" }` in
-  `params`, instead of copying the dependency's definition: it takes the
-  definition of the dependency's parameter of the same name and passes its
-  value on to it. Decided by the owner on
-  [#120](https://github.com/metamao/assemblr/issues/120) (2026-10-25).
-- **Open detail:** **Provisional (D-49):** the definition is the one of the
-  dependency's version composed, followed through dependencies that inherit
-  it in turn; `options` may not also set that parameter of the dependency;
-  `info` names the dependency rather than a definition; `unit add` declares
-  a required parameter it cannot map as inherited instead of copying it.
-- **Origin:** #120
-- **Context:** [declaration](parameters-and-options.md#declaration--approved)
+- **Approved (normative):** A unit's files hold the values each project sets
+  as declared placeholders, delivered byte for byte; the author's checks and
+  the consumer's report are as [placeholders.md](placeholders.md) describes
+  (owner decision on #124).
+- **Open detail:** **Provisional (D-50):** `status` derives the report with
+  no stored state; only managed files whose composed content holds a
+  declared placeholder are reported; the text lists one `path:line` per row;
+  `compose --continue` prints the report; an `ignore` entry is used only
+  where it is a token.
+  Deferred: a way for the consumer to silence a placeholder, and a
+  `unit publish` note when a version removes or renames one.
+- **Origin:** #124
+- **Context:** [report details](placeholders.md#report-details--provisional-d-50)
 
 ## Resolved contracts
 
@@ -829,8 +734,8 @@ How the status of a statement affects implementation:
 
 - **Resolution:** **Resolved.** The consumer-project lifecycle is approved:
   `init`, the editable `assemblr.jsonc` declaration, `add`, `remove`, and
-  `compose`, explicit and transitive dependencies, non-interactive parameter
-  handling, file contributions, reconciliation, Git-like conflict resolution,
+  `compose`, explicit and transitive dependencies, non-interactive operation,
+  file contributions, reconciliation, Git-like conflict resolution,
   and the lockfile. Its open details are tracked as OC-7, OC-8, OC-10, OC-36
   to OC-38, OC-44, and OC-47 to OC-49.
 - **Context:** [consumer-projects.md](consumer-projects.md)
@@ -855,7 +760,7 @@ How the status of a statement affects implementation:
   canonical.
 - **Context:** [layout and
   declaration](amendments-and-composition.md#layout-and-declaration),
-  [serialization](manifest.md#serialization-of-dependencies-options-params-and-amendments--approved)
+  [serialization](manifest.md#serialization-of-dependencies-placeholders-and-amendments--approved)
 
 ### OC-3
 
@@ -908,21 +813,17 @@ How the status of a statement affects implementation:
 
 ### OC-21
 
-- **Resolution:** **Resolved.** A unit's `options` target only its direct
-  dependencies. Transitive dependencies' required configuration is satisfied
-  through the chain. Incompatible requirements remain options conflicts,
-  without precedence.
-- **Context:** [options rules](parameters-and-options.md#rules--approved),
-  [satisfying dependency
-  parameters](parameters-and-options.md#satisfying-dependency-parameters--approved)
+- **Resolution:** **Superseded** by placeholders (owner decision on
+  #124): options no longer exist. The entry had resolved that a
+  unit's `options` target only its direct dependencies.
+- **Context:** [placeholders](placeholders.md#removed)
 
 ### OC-22
 
-- **Resolution:** **Resolved.** A parameter without a default is required, and
-  one with a default is optional. There is no `required` property. A missing
-  required value is an explicit validation error.
-- **Context:** [parameter
-  declaration](parameters-and-options.md#declaration--approved)
+- **Resolution:** **Superseded** by placeholders (owner decision on
+  #124): parameters no longer exist. The entry had resolved
+  that a parameter without a default is required.
+- **Context:** [placeholders](placeholders.md#removed)
 
 ### OC-24
 
@@ -938,14 +839,14 @@ How the status of a statement affects implementation:
 ### OC-28
 
 - **Resolution:** **Resolved.** `unit build` is gated by manifest validity,
-  identity, and version; parameter and options consistency, including
-  dependency parameters satisfied through the chain; dependency resolution;
-  `src/` path validity and path collisions, on delivered paths; amendment
-  validity, as the [build
-  details](authoring-workflow.md#build-details--approved) list it; and the
-  rendering of the templates of the unit and its dependencies, amended copies
-  included. The effective-contribution check (OC-11) and a clean working tree
-  do not gate a build.
+  identity, and version; dependency resolution; `src/` path validity and
+  path collisions; amendment validity, as the [build
+  details](authoring-workflow.md#build-details--approved) list it; and,
+  since placeholders replaced parameters and templates (owner decision on
+  #124), the unit's placeholder declarations. The
+  effective-contribution check (OC-11), a clean working tree, and an
+  undeclared placeholder-shaped token, a warning there, do not gate a
+  build.
 - **Context:** [build details](authoring-workflow.md#build-details--approved)
 
 ### OC-30
@@ -996,8 +897,8 @@ How the status of a statement affects implementation:
 
 - **Resolution:** **Resolved.** A unit is effective when it delivers a `src/`
   file or declares a dependency; an amendment copy identical to the provider's
-  file at its base is redundant and reported; an option equal to the locked
-  version's default is not reported (D-1). Owner decision in the [owner review
+  file at its base is redundant and reported (D-1). Its part on options was
+  removed with them (#124). Owner decision in the [owner review
   of
   2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
 - **Context:** [check
@@ -1062,14 +963,10 @@ How the status of a statement affects implementation:
 
 ### OC-45
 
-- **Resolution:** **Resolved.** A parameter definition has `type` (`"string"`,
-  `"integer"`, `"boolean"`), `description`, an optional `default`, an optional
-  `allowed`, valid only for strings, and an optional `example` (#62). The
-  default accepted for Alpha is approved. Owner decision in the [owner review
-  of
-  2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
-- **Context:** [parameter
-  definitions](manifest.md#parameter-definitions-and-manifest-text--approved)
+- **Resolution:** **Superseded** by placeholders (owner decision on
+  #124): parameters no longer exist. The entry had resolved
+  the fields of a parameter definition.
+- **Context:** [placeholders](placeholders.md#removed)
 
 ### OC-46
 
@@ -1083,13 +980,11 @@ How the status of a statement affects implementation:
 
 ### OC-50
 
-- **Resolution:** **Resolved.** Parameter names start with an ASCII letter and
-  continue with ASCII letters, digits, or underscores; `own` is reserved. The
-  default accepted for Alpha is approved. Owner decision in the [owner review
-  of
-  2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
-- **Context:** [parameter
-  definitions](manifest.md#parameter-definitions-and-manifest-text--approved)
+- **Resolution:** **Superseded** by placeholders (owner decision on
+  #124): parameters no longer exist, and the form of a
+  placeholder is [approved](placeholders.md#form--approved). The entry had
+  resolved the grammar of parameter names.
+- **Context:** [placeholders](placeholders.md#removed)
 
 ### OC-51
 
@@ -1100,4 +995,50 @@ How the status of a statement affects implementation:
   decision in the [owner review of
   2026-10-23](https://github.com/metamao/assemblr/issues/34#issuecomment-6358234799).
 - **Context:** [manifest
-  text](manifest.md#parameter-definitions-and-manifest-text--approved)
+  text](manifest.md#manifest-text--approved)
+
+### OC-5
+
+- **Resolution:** **Superseded** by placeholders (owner decision on
+  #124): Assemblr renders nothing and delivers every file byte
+  for byte, so templates, the `.assemblr.tmpl` suffix, the `own` context, and
+  the template grammar no longer exist, and the question of further template
+  constructs is moot.
+- **Context:** [placeholders](placeholders.md#removed),
+  [unit files](units.md#src-unit-files)
+
+### OC-6
+
+- **Resolution:** **Superseded** by placeholders (owner decision on
+  #124): parameters and their `example` values no longer
+  exist, so a build takes no development values and composes the files as
+  they are, placeholders included.
+- **Context:** [placeholders](placeholders.md#removed),
+  [build](authoring-workflow.md#build--approved)
+
+### OC-39
+
+- **Resolution:** **Superseded** by placeholders (owner decision on
+  #124): a unit no longer satisfies its dependencies'
+  parameters through options or mappings. A dependency's placeholder stays
+  declared by the dependency; a unit that fixes its value amends the file,
+  and one that leaves it keeps it for the consumer's report.
+- **Context:** [placeholders](placeholders.md#declaration--approved)
+
+### OC-52
+
+- **Resolution:** **Resolved.** A composition derives an amendment's changes
+  from its base and its copy and applies them to the provider's file at the
+  resolved version (owner, #59, decision log D-22). The rendering contexts
+  the entry also covered, and its open detail of a parameter that changes
+  meaning, were removed with templates (owner decision on
+  #124).
+- **Context:** [across provider
+  versions](amendments-and-composition.md#across-provider-versions--approved)
+
+### OC-54
+
+- **Resolution:** **Superseded** by placeholders (owner decision on
+  #124): parameters, and with them inherited parameters
+  (D-49), no longer exist.
+- **Context:** [placeholders](placeholders.md#removed)

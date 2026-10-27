@@ -6,23 +6,9 @@
   "dependencies": {
     "@acme/cloudflare-worker": "^1.0.0"
   },
-  "params": {
-    "jwtIssuer": {
-      "type": "string",
-      "description": "The issuer every accepted token must name.",
-      "example": "https://auth.example.com/"
-    },
-    "workerName": {
-      "type": "string",
-      "description": "The Worker name.",
-      "example": "my-worker"
-    }
-  },
-  "options": {
-    "@acme/cloudflare-worker": {
-      "workerName": {
-        "from": "workerName"
-      }
+  "placeholders": {
+    "replace": {
+      "__JWT_ISSUER__": "The issuer every accepted token must name, such as https://auth.example.com/."
     }
   }
 }

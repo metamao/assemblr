@@ -81,7 +81,7 @@ fn init_creates_the_scaffold_and_a_repository_in_a_new_directory() {
         "{}",
         stdout(&output)
     );
-    // Dependencies are added with the command that maps their parameters.
+    // Dependencies are added with the command that records them.
     assert!(
         stdout(&output).contains("add dependencies with `assemblr unit add <unit>`"),
         "{}",
@@ -440,14 +440,19 @@ fn the_loop_runs_from_init_to_a_dependent_s_build_through_a_second_registry() {
     // A base unit, initialized, built, committed, and published.
     let node = fixture.dir.join("node");
     succeeds(fixture.init(&fixture.dir, &["@acme/node", "node"]));
-    fs::write(node.join("src/node.txt.assemblr.tmpl"), "port {{ port }}\n").unwrap();
+    fs::write(node.join("src/node.txt"), "port __PORT__\n").unwrap();
     let manifest = read(&node.join("manifest.jsonc")).replace(
         "\"description\": \"The @acme/node unit.\"",
-        "\"description\": \"Node.\",\n  \"params\": {\"port\": {\"type\": \"integer\", \
-         \"description\": \"The port.\", \"default\": 3000}}",
+        "\"description\": \"Node.\",\n  \"placeholders\": {\"replace\": \
+         {\"__PORT__\": \"The port the server listens on.\"}}",
     );
     fs::write(node.join("manifest.jsonc"), manifest).unwrap();
-    succeeds(fixture.assemblr(&node, &["unit", "build"]));
+    let output = succeeds(fixture.assemblr(&node, &["unit", "build"]));
+    assert!(
+        stdout(&output).contains("Placeholders: __PORT__ in 1 file."),
+        "{}",
+        stdout(&output)
+    );
     git(&node, &["add", "-A"]);
     git(&node, &["commit", "-q", "-m", "node"]);
     let output = succeeds(fixture.assemblr(&node, &["unit", "publish"]));
@@ -459,18 +464,13 @@ fn the_loop_runs_from_init_to_a_dependent_s_build_through_a_second_registry() {
     succeeds(fixture.assemblr(&fixture.dir, &["registry", "add", node.to_str().unwrap()]));
     let manifest = read(&app.join("manifest.jsonc")).replace(
         "\"description\": \"The @acme/app unit.\"",
-        "\"description\": \"App.\",\n  \"dependencies\": {\"@acme/node\": \"^0.1\"},\n  \
-         \"options\": {\"@acme/node\": {\"port\": 8080}}",
+        "\"description\": \"App.\",\n  \"dependencies\": {\"@acme/node\": \"^0.1\"}",
     );
     fs::write(app.join("manifest.jsonc"), manifest).unwrap();
     fs::write(app.join("src/app.txt"), "app").unwrap();
     succeeds(fixture.assemblr(&app, &["unit", "build"]));
     succeeds(fixture.assemblr(&app, &["unit", "amend", "node.txt"]));
-    fs::write(
-        app.join("amendments/node.txt.assemblr.tmpl"),
-        "port {{ port }}, amended\n",
-    )
-    .unwrap();
+    fs::write(app.join("amendments/node.txt"), "port __PORT__, amended\n").unwrap();
     succeeds(fixture.assemblr(&app, &["unit", "build"]));
     succeeds(fixture.assemblr(&app, &["unit", "check"]));
     git(&app, &["add", "-A"]);
@@ -501,7 +501,10 @@ fn the_loop_runs_from_init_to_a_dependent_s_build_through_a_second_registry() {
         "{}",
         stdout(&output)
     );
-    assert_eq!(read(&site.join("build/node.txt")), "port 8080, amended\n");
+    assert_eq!(
+        read(&site.join("build/node.txt")),
+        "port __PORT__, amended\n"
+    );
     assert_eq!(read(&site.join("build/app.txt")), "app");
 }
 

@@ -5,24 +5,5 @@
   "description": "Docker image and dev container running Bun.",
   "dependencies": {
     "@acme/base": "^1.0.0"
-  },
-  "params": {
-    "projectName": {
-      "type": "string",
-      "description": "The project name.",
-      "example": "my-app"
-    },
-    "bunVersion": {
-      "type": "string",
-      "description": "The Bun version of the image.",
-      "default": "1.2"
-    }
-  },
-  "options": {
-    "@acme/base": {
-      "projectName": {
-        "from": "projectName"
-      }
-    }
   }
 }

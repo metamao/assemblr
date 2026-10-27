@@ -16,8 +16,9 @@ a different implementation of the same technology, such as
 `@alice/cloudflare-angular-ssr`; no implementation is inherently official or
 privileged. Assemblr is a composition tool. It does not prescribe how
 applications are written. Humans and coding agents are both intended users.
-Agents matter especially, because they can inspect a unit's metadata and
-parameter contracts, incorporate it, and move on to application-specific code.
+Agents matter especially, because they can inspect a unit's metadata and the
+placeholders it declares, incorporate it, and move on to application-specific
+code.
 
 ## Sources of authority
 
@@ -92,9 +93,9 @@ Details that are still open are listed in
 |----------|--------|
 | [units.md](units.md) | Unit identity, versioning, repository convention, unit contents |
 | [manifest.md](manifest.md) | `manifest.jsonc` format, vocabulary, schema, and validation |
-| [parameters-and-options.md](parameters-and-options.md) | `params` (a unit's public configuration) and `options` (requirements on dependencies) |
+| [placeholders.md](placeholders.md) | Placeholders: what a unit declares, the author's checks, and the consumer's report |
 | [dependencies.md](dependencies.md) | Dependency declarations and resolution |
-| [amendments-and-composition.md](amendments-and-composition.md) | Amendments, template contexts, merge semantics, and supporting evidence |
+| [amendments-and-composition.md](amendments-and-composition.md) | Amendments, merge semantics, and supporting evidence |
 | [registries-and-discovery.md](registries-and-discovery.md) | The CLI-managed local registry, Git-based units, catalogs and their metadata indexes, registration, synchronization, immutability, removal, `search` and `info` |
 | [authoring-workflow.md](authoring-workflow.md) | `unit init`, `amend`, `check`, `build`, `update`, `publish`, and author responsibilities |
 | [consumer-projects.md](consumer-projects.md) | `init`, `assemblr.jsonc`, `add`, `remove`, `compose`, explicit and transitive dependencies, file contributions, reconciliation, conflict resolution, and the lockfile |
@@ -107,7 +108,7 @@ Details that are still open are listed in
 | **Unit** | A versioned, author-owned, opinionated implementation of a software capability or integration. |
 | **Owner** | The individual or organization namespace in a unit identity (`@owner`). |
 | **Identity** | The pair `@owner/unit-name`. It uniquely identifies a logical unit and implies nothing about dependencies or repository location. |
-| **Manifest** | `manifest.jsonc`, the declaration of a unit's identity, version, description, dependencies, params, options, and amendments. |
+| **Manifest** | `manifest.jsonc`, the declaration of a unit's identity, version, description, dependencies, placeholders, and amendments. |
 | **Unit repository** | The Git repository that holds exactly one unit's authoring sources and history. Every unit has one. |
 | **Working tree** | The author's editable checkout of a unit repository. Mutable, and never a published version. |
 | **Published version** | A unit version established by `unit publish` as a `v<version>` Git tag whose manifest declares exactly that version. Immutable. |
@@ -115,10 +116,9 @@ Details that are still open are listed in
 | **Amendment** | An editable full-file copy of a file provided by a dependency, modified by the amending unit. Replaces the earlier term *fragment*. |
 | **Base** | The exact historical version of a dependency file that an amendment was copied from. |
 | **Provenance** | The recorded origin of an amendment: the dependency, its exact version, and the file it was copied from. |
-| **Parameter** (`params`) | A declared, public configuration input of a unit that customizes file contents. |
-| **Option** (`options`) | A strict requirement that a unit imposes on a parameter of one of its dependencies. |
+| **Placeholder** | A literal token such as `__PROJECT_NAME__` that a unit's files hold for a value each project sets, declared with a description in the manifest. Assemblr reports it and never substitutes it; the consumer replaces it. |
 | **Composition** | A unit, or a consumer project's explicit selections, together with the resolved dependency graph and their combined contributions. |
-| **Contribution** | What a unit adds beyond its dependencies: files, amendments, or meaningful configuration of dependencies. |
+| **Contribution** | What a unit adds beyond its dependencies: files or amendments. |
 | **Local registry** | The CLI-managed subsystem, global to the user's Assemblr installation, that records registered sources, their published versions, and discoverable metadata. |
 | **Registered source** | A unit repository or a catalog that has been explicitly registered and validated. |
 | **Catalog** | A Git repository with an `@owner/name` identity, in a namespace separate from units, whose `registry.jsonc` maps unit identities to Git repository references. An inventory of sources: it contains no unit sources, and its declaration lists no unit versions. |
@@ -132,11 +132,10 @@ Details that are still open are listed in
 | **Snapshot** | A fixed, identifiable copy of a unit's content at a resolved version, with its Git provenance. |
 | **Lock state** | The record of the exact resolved versions (and their sources and content identity) used for a composition. A unit repository keeps it in its CLI-managed **unit lockfile**, and a consumer project in its own CLI-managed lockfile. The two are distinct. |
 | **Build directory** | `build/`, the Assemblr-owned, disposable directory where `unit build` writes a composed result. |
-| **Options conflict** | Two incompatible explicit option requirements on the same dependency parameter. |
 | **Merge conflict** | Incompatible changes from several contributors to the same file content. |
 | **Path collision** | Two units in one composition that provide a file at the same path through their `src/` directories. An error. |
 | **Consumer project** | A software project composed from units, initialized with `assemblr init`. The final consumer of units. |
-| **Project configuration** | `assemblr.jsonc`, the editable declaration of a consumer project's desired composition: its explicit `dependencies` and their `options`. |
+| **Project configuration** | `assemblr.jsonc`, the editable declaration of a consumer project's desired composition: its explicit `dependencies`. |
 | **Explicit selection** | A unit declared in a consumer project's `dependencies`. |
 | **Transitive dependency** | A unit present in a composition only because another unit requires it. |
 | **Reconciliation base** | The previously materialized composition of a consumer project, used with the **current** files and the **incoming** composition for three-way reconciliation. Distinct from an amendment's base. |

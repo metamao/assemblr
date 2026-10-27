@@ -106,12 +106,12 @@ const PACKAGE: &str = "{\n  \"name\": \"worker\",\n  \"private\": true,\n  \"scr
                        \"dev\": \"wrangler dev\",\n    \"deploy\": \"wrangler deploy\"\n  },\n  \
                        \"dependencies\": {\n    \"hono\": \"^4\"\n  },\n  \"files\": [\"dist\"]\n}\n";
 
-const WRANGLER: &str = "{\n  // The worker's name.\n  \"name\": \"{{ name }}\",\n  \
+const WRANGLER: &str = "{\n  // The worker's name.\n  \"name\": \"__WORKER_NAME__\",\n  \
                         \"compatibility_date\": \"2026-01-01\",\n  \"d1_databases\": [\n    { \
                         \"binding\": \"DB\", \"database_name\": \"main\" },\n  ],\n}\n";
 
-/// A provider `@acme/worker` 1.0.0 with `package.json` and the template
-/// `wrangler.jsonc`, registered; `@acme/db` and `@acme/api` published with
+/// A provider `@acme/worker` 1.0.0 with `package.json` and `wrangler.jsonc`,
+/// which holds a placeholder, registered; `@acme/db` and `@acme/api` published with
 /// the given copies, registered; and an unbuilt `@acme/app` depending on
 /// both. Each amender's copy is a function of the provider's file.
 fn scenario(
@@ -136,11 +136,11 @@ fn scenario_with(
             "@acme/worker",
             "1.0.0",
             &[],
-            r#", "params": {"name": {"type": "string", "description": "The name.", "default": "worker"}}"#,
+            r#", "placeholders": {"replace": {"__WORKER_NAME__": "The worker's name."}}"#,
         ),
     );
     worker.write("src/package.json", package);
-    worker.write("src/wrangler.jsonc.assemblr.tmpl", WRANGLER);
+    worker.write("src/wrangler.jsonc", WRANGLER);
     worker.publish("1.0.0");
     fixture.register(&worker);
     for (name, copies) in [("db", db_copies), ("api", api_copies)] {
@@ -219,14 +219,14 @@ fn independent_amendments_of_package_json_compose_with_the_provider_s_layout() {
          \"drizzle-orm\": \"^0.44\",\n    \"hono\": \"^4\"\n  },\n  \"files\": [\"dist\"],\n  \
          \"devDependencies\": {\n    \"drizzle-kit\": \"^0.31\"\n  }\n}\n"
     );
-    // The template is rendered for the provider and delivered once.
+    // The provider's file is delivered once, its placeholder kept.
     assert!(
         app.read("build/wrangler.jsonc")
-            .contains("\"name\": \"worker\"")
+            .contains("\"name\": \"__WORKER_NAME__\"")
     );
 
-    // The unit's own amendment joins the published ones, with its `own`
-    // values, and `unit check` agrees with the build.
+    // The unit's own amendment joins the published ones, with a placeholder
+    // of its own, and `unit check` agrees with the build.
     app.write(
         "manifest.jsonc",
         &manifest(
@@ -238,10 +238,9 @@ fn independent_amendments_of_package_json_compose_with_the_provider_s_layout() {
                 ("@acme/worker", "=1.0.0"),
             ],
             &format!(
-                "{}, \"params\": {{\"title\": {{\"type\": \"string\", \"description\": \"T.\", \
-                 \"default\": \"My App\"}}}}",
+                "{}, \"placeholders\": {{\"replace\": {{\"__APP_TITLE__\": \"The app's title.\"}}}}",
                 amending(
-                    &["package.json", "wrangler.jsonc.assemblr.tmpl"],
+                    &["package.json", "wrangler.jsonc"],
                     "@acme/worker",
                     "1.0.0"
                 )
@@ -254,20 +253,26 @@ fn independent_amendments_of_package_json_compose_with_the_provider_s_layout() {
         &composed.replace("\"name\": \"worker\"", "\"name\": \"app\""),
     );
     app.write(
-        "amendments/wrangler.jsonc.assemblr.tmpl",
+        "amendments/wrangler.jsonc",
         &WRANGLER.replace(
             "  \"compatibility_date\": \"2026-01-01\",\n",
-            "  \"compatibility_date\": \"2026-01-01\",\n  \"vars\": { \"TITLE\": \"{{ own.title }}\" },\n",
+            "  \"compatibility_date\": \"2026-01-01\",\n  \"vars\": { \"TITLE\": \"__APP_TITLE__\" },\n",
         ),
     );
-    succeeds(fixture.build(&app));
+    let output = succeeds(fixture.build(&app));
+    assert!(
+        stdout(&output)
+            .contains("Placeholders: __APP_TITLE__ in 1 file, __WORKER_NAME__ in 1 file."),
+        "{}",
+        stdout(&output)
+    );
     assert_eq!(
         app.read("build/package.json"),
         composed.replace("\"name\": \"worker\"", "\"name\": \"app\"")
     );
     assert!(
         app.read("build/wrangler.jsonc")
-            .contains("\"vars\": { \"TITLE\": \"My App\" }")
+            .contains("\"vars\": { \"TITLE\": \"__APP_TITLE__\" }")
     );
     succeeds(fixture.assemblr(&app.path, &["unit", "check"]));
 }
@@ -404,14 +409,14 @@ fn lists_are_whole_values_and_jsonc_comments_and_trailing_commas_survive() {
     );
     let (_worker, app) = scenario(
         &fixture,
-        &[("wrangler.jsonc.assemblr.tmpl", &audit)],
-        &[("wrangler.jsonc.assemblr.tmpl", &flags)],
+        &[("wrangler.jsonc", &audit)],
+        &[("wrangler.jsonc", &flags)],
     );
     succeeds(fixture.build(&app));
     // The file has trailing commas, so the list written anew has them too.
     assert_eq!(
         app.read("build/wrangler.jsonc"),
-        "{\n  // The worker's name.\n  \"name\": \"worker\",\n  \"compatibility_date\": \
+        "{\n  // The worker's name.\n  \"name\": \"__WORKER_NAME__\",\n  \"compatibility_date\": \
          \"2026-01-01\",\n  \"compatibility_flags\": [\"nodejs_compat\"],\n  \"d1_databases\": [\n    \
          {\n      \"binding\": \"DB\",\n      \"database_name\": \"main\",\n    },\n    {\n      \
          \"binding\": \"AUDIT\",\n      \"database_name\": \"audit\",\n    },\n  ],\n}\n"
@@ -426,8 +431,8 @@ fn lists_are_whole_values_and_jsonc_comments_and_trailing_commas_survive() {
     );
     let (_worker, app) = scenario(
         &fixture,
-        &[("wrangler.jsonc.assemblr.tmpl", &audit)],
-        &[("wrangler.jsonc.assemblr.tmpl", &other)],
+        &[("wrangler.jsonc", &audit)],
+        &[("wrangler.jsonc", &other)],
     );
     let err = stderr(&fails(fixture.build(&app)));
     assert!(err.contains("/d1_databases: @acme/api changes"), "{err}");
@@ -451,14 +456,8 @@ fn appends_of_scalars_to_one_list_are_joined() {
     );
     let (_worker, app) = scenario(
         &fixture,
-        &[
-            ("package.json", &db),
-            ("wrangler.jsonc.assemblr.tmpl", &db_flags),
-        ],
-        &[
-            ("package.json", &api),
-            ("wrangler.jsonc.assemblr.tmpl", &api_flags),
-        ],
+        &[("package.json", &db), ("wrangler.jsonc", &db_flags)],
+        &[("package.json", &api), ("wrangler.jsonc", &api_flags)],
     );
     succeeds(fixture.build(&app));
     // The provider's items first, then each amender's new ones in identity

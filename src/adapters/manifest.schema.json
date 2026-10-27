@@ -32,31 +32,26 @@
         "description": "A SemVer requirement, such as `^1.2`, `~1.4`, or `=2.0.0`."
       }
     },
-    "options": {
+    "placeholders": {
       "type": "object",
-      "description": "Values this unit requires for the parameters of its direct dependencies, by dependency identity.",
-      "propertyNames": { "$ref": "#/definitions/identity" },
-      "additionalProperties": {
-        "type": "object",
-        "description": "The required values, by parameter name.",
-        "propertyNames": { "$ref": "#/definitions/parameterName" },
-        "additionalProperties": {
-          "oneOf": [
-            { "$ref": "#/definitions/value" },
-            { "$ref": "#/definitions/mapping" }
-          ]
+      "description": "The placeholders this unit's files hold for the consumer to replace, and the tokens that only look like placeholders. A placeholder is two underscores, uppercase ASCII letters, digits, or underscores, and two underscores, such as `__PROJECT_NAME__`.",
+      "additionalProperties": false,
+      "properties": {
+        "replace": {
+          "type": "object",
+          "description": "The placeholders the consumer replaces in the files, each with a description of the value to write.",
+          "propertyNames": { "$ref": "#/definitions/placeholder" },
+          "additionalProperties": {
+            "$ref": "#/definitions/text",
+            "description": "What value the consumer writes in place of the placeholder."
+          }
+        },
+        "ignore": {
+          "type": "array",
+          "description": "Tokens in this unit's files that look like placeholders but are not, such as a bundler's define. Never one that a dependency declares in `replace`.",
+          "items": { "$ref": "#/definitions/placeholder" },
+          "uniqueItems": true
         }
-      }
-    },
-    "params": {
-      "type": "object",
-      "description": "The unit's public configuration parameters, by name.",
-      "propertyNames": { "$ref": "#/definitions/parameterName" },
-      "additionalProperties": {
-        "oneOf": [
-          { "$ref": "#/definitions/parameter" },
-          { "$ref": "#/definitions/inheritedParameter" }
-        ]
       }
     },
     "amendments": {
@@ -82,103 +77,9 @@
       "type": "string",
       "pattern": "\\S"
     },
-    "parameterName": {
+    "placeholder": {
       "type": "string",
-      "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
-      "not": { "const": "own" }
-    },
-    "value": {
-      "type": ["string", "integer", "boolean"]
-    },
-    "parameter": {
-      "type": "object",
-      "description": "A parameter definition. A parameter without a default is required from consumers.",
-      "required": ["type", "description"],
-      "additionalProperties": false,
-      "properties": {
-        "type": {
-          "type": "string",
-          "enum": ["string", "integer", "boolean"],
-          "description": "The parameter's type."
-        },
-        "description": {
-          "$ref": "#/definitions/text",
-          "description": "What the parameter configures."
-        },
-        "default": {
-          "$ref": "#/definitions/value",
-          "description": "The value used when a consumer supplies none. Its presence makes the parameter optional."
-        },
-        "example": {
-          "$ref": "#/definitions/value",
-          "description": "A value this unit is built, checked, and published with while the parameter is required and has no default. It is not a default: a consumer must still supply the parameter, and the example is never used as its value."
-        },
-        "allowed": {
-          "type": "array",
-          "items": { "type": "string" },
-          "minItems": 1,
-          "uniqueItems": true,
-          "description": "The values a string parameter accepts, which makes it an enumerated string. Only with `\"type\": \"string\"`."
-        },
-        "pattern": {
-          "type": "string",
-          "description": "A regular expression every value must match somewhere, as in JSON Schema: anchor it with ^ and $. \\d, \\w, and \\s are ASCII classes, and Unicode classes such as \\p{L} are not supported. Checked for the default, the example, and every value a unit or a project supplies. Only with `\"type\": \"string\"`."
-        }
-      },
-      "allOf": [
-        {
-          "if": { "properties": { "type": { "const": "string" } } },
-          "then": {
-            "properties": {
-              "default": { "type": "string" },
-              "example": { "type": "string" }
-            }
-          },
-          "else": { "properties": { "allowed": false, "pattern": false } }
-        },
-        {
-          "if": { "properties": { "type": { "const": "integer" } } },
-          "then": {
-            "properties": {
-              "default": { "type": "integer" },
-              "example": { "type": "integer" }
-            }
-          }
-        },
-        {
-          "if": { "properties": { "type": { "const": "boolean" } } },
-          "then": {
-            "properties": {
-              "default": { "type": "boolean" },
-              "example": { "type": "boolean" }
-            }
-          }
-        }
-      ]
-    },
-    "inheritedParameter": {
-      "type": "object",
-      "description": "A parameter that takes its definition from the dependency's parameter of the same name, and passes its value on to it.",
-      "required": ["from"],
-      "additionalProperties": false,
-      "properties": {
-        "from": {
-          "$ref": "#/definitions/identity",
-          "description": "The direct dependency whose parameter defines this one."
-        }
-      }
-    },
-    "mapping": {
-      "type": "object",
-      "description": "Requires the dependency's parameter to have the value of one of this unit's own parameters, as it is decided for the composition. Nothing is converted.",
-      "required": ["from"],
-      "additionalProperties": false,
-      "properties": {
-        "from": {
-          "$ref": "#/definitions/parameterName",
-          "description": "The unit's own parameter."
-        }
-      }
+      "pattern": "^__[A-Z][A-Z0-9_]*__$"
     },
     "amendment": {
       "type": "object",

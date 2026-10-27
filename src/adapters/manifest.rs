@@ -9,11 +9,9 @@ use std::fmt;
 
 use super::jsonc::{self, Json, SyntaxError};
 use crate::domain::{
-    self, AllowedValues, AllowedValuesError, AmendmentDeclaration, BlankDescription, Description,
-    IdentityError, Manifest, ManifestError, OptionValue, OptionValues, ParameterDefinition,
-    ParameterName, ParameterNameError, ParameterType, ParameterValue, ParameterValueError,
-    PatternError, PatternProblem, Project, RelativePath, RelativePathError, RequirementError,
-    UnitIdentity, UnitOptionValues, ValuePattern, Version, VersionError, VersionRequirement,
+    self, AmendmentDeclaration, BlankDescription, Description, IdentityError, Manifest,
+    ManifestError, PlaceholderName, PlaceholderNameError, Placeholders, Project, RelativePath,
+    RelativePathError, RequirementError, UnitIdentity, Version, VersionError, VersionRequirement,
 };
 
 pub(crate) const MANIFEST_FIELDS: &[&str] = &[
@@ -22,23 +20,15 @@ pub(crate) const MANIFEST_FIELDS: &[&str] = &[
     "version",
     "description",
     "dependencies",
-    "options",
-    "params",
+    "placeholders",
     "amendments",
 ];
-const PROJECT_FIELDS: &[&str] = &["$schema", "dependencies", "options"];
-const PARAMETER_FIELDS: &[&str] = &[
-    "type",
-    "description",
-    "default",
-    "allowed",
-    "pattern",
-    "example",
-];
-const MAPPING_FIELDS: &[&str] = &["from"];
-const INHERITED_FIELDS: &[&str] = &["from"];
+const PROJECT_FIELDS: &[&str] = &["$schema", "dependencies"];
+const PLACEHOLDER_FIELDS: &[&str] = &["replace", "ignore"];
 const AMENDMENT_FIELDS: &[&str] = &["unit", "base"];
-const SCALAR: &[JsonKind] = &[JsonKind::String, JsonKind::Integer, JsonKind::Boolean];
+/// The fields of parameters and options, reported as removed rather than
+/// unknown.
+const REMOVED_FIELDS: &[&str] = &["params", "options"];
 
 /// Reads and validates the text of a `manifest.jsonc`.
 ///
@@ -57,7 +47,7 @@ pub fn read_manifest(text: &str) -> Result<Manifest, ReadManifestError> {
 }
 
 /// Reads and validates the text of a consumer project's `assemblr.jsonc`,
-/// by the manifest's rules for `dependencies` and `options` (see
+/// by the manifest's rules for `dependencies` (see
 /// `docs/domain/consumer-projects.md`).
 pub fn read_project(text: &str) -> Result<Project, ReadManifestError> {
     let json = jsonc::parse(text).map_err(ReadManifestError::Syntax)?;
@@ -124,7 +114,7 @@ impl fmt::Display for ManifestIssue {
     }
 }
 
-/// The location of a value in a manifest, such as `params.appName.default`.
+/// The location of a value in a manifest, such as `amendments["a.json"].base`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FieldPath(Vec<PathSegment>);
 
@@ -256,29 +246,20 @@ pub enum IssueKind {
     InvalidVersion(VersionError),
     /// The value is not a valid version requirement.
     InvalidRequirement(RequirementError),
-    /// The key is not a valid parameter name.
-    InvalidParameterName(ParameterNameError),
+    /// The key or entry is not a placeholder name.
+    InvalidPlaceholder(PlaceholderNameError),
+    /// The entry appears more than once in the same list. The first
+    /// occurrence is the one kept.
+    DuplicateEntry,
+    /// The placeholder is listed both to replace and to ignore.
+    ReplacedAndIgnored(PlaceholderName),
     /// The key is not a valid unit file path.
     InvalidPath(RelativePathError),
     /// The description is empty or only whitespace.
     BlankDescription(BlankDescription),
-    /// The parameter `type` is not one of the supported types.
-    UnknownParameterType(String),
-    /// `allowed` is declared for a parameter that is not a string.
-    AllowedValuesRequireString,
-    /// The `allowed` list is invalid.
-    InvalidAllowedValues(AllowedValuesError),
-    /// `pattern` is declared for a parameter that is not a string.
-    PatternRequiresString,
-    /// The `pattern` is not a valid regular expression.
-    InvalidPattern(PatternError),
-    /// The default does not satisfy the parameter's type.
-    InvalidDefault(ParameterValueError),
-    /// The example does not satisfy the parameter's type.
-    InvalidExample(ParameterValueError),
-    /// A consumer's `options` holds a mapping, which only a unit's manifest
-    /// can write.
-    MappingInConsumer,
+    /// The field belonged to parameters and options, which Assemblr no
+    /// longer has: a unit ships placeholders instead.
+    Removed(RemovedField),
     /// The manifest's fields are inconsistent with each other.
     Inconsistent(ManifestError),
 }
@@ -317,29 +298,49 @@ impl fmt::Display for IssueKind {
             Self::InvalidIdentity(error) => error.fmt(f),
             Self::InvalidVersion(error) => error.fmt(f),
             Self::InvalidRequirement(error) => error.fmt(f),
-            Self::InvalidParameterName(error) => error.fmt(f),
+            Self::InvalidPlaceholder(error) => error.fmt(f),
+            Self::DuplicateEntry => f.write_str("duplicate entry"),
+            Self::ReplacedAndIgnored(name) => write!(
+                f,
+                "{name} is in both `replace` and `ignore`; keep it in `replace` if the consumer \
+                 sets it, or in `ignore` if it is not a placeholder"
+            ),
             Self::InvalidPath(error) => error.fmt(f),
             Self::BlankDescription(error) => error.fmt(f),
-            Self::UnknownParameterType(name) => write!(
-                f,
-                "unknown parameter type {name:?}; expected \"string\", \"integer\", or \"boolean\""
-            ),
-            Self::AllowedValuesRequireString => {
-                f.write_str("allowed values are only supported for parameters of type \"string\"")
-            }
-            Self::InvalidAllowedValues(error) => error.fmt(f),
-            Self::PatternRequiresString => {
-                f.write_str("a pattern is only supported for parameters of type \"string\"")
-            }
-            Self::InvalidPattern(error) => error.fmt(f),
-            Self::InvalidDefault(error) => write!(f, "invalid default: {error}"),
-            Self::InvalidExample(error) => write!(f, "invalid example: {error}"),
-            Self::MappingInConsumer => f.write_str(
-                "a mapping names a parameter of a unit's own `params`, so only a unit's \
-                 manifest can write one; a project supplies values",
-            ),
+            Self::Removed(removed) => removed.fmt(f),
             Self::Inconsistent(error) => error.fmt(f),
         }
+    }
+}
+
+/// A field of parameters and options, which Assemblr no longer reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovedField {
+    /// A unit's `params`.
+    Params,
+    /// A unit's `options` for its dependencies.
+    UnitOptions,
+    /// A consumer project's `options`.
+    ProjectOptions,
+}
+
+impl fmt::Display for RemovedField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Params => {
+                "parameters were replaced by placeholders: write a token such as \
+                 __PROJECT_NAME__ in the files and declare it under \"placeholders\".\"replace\" \
+                 with a description, then remove `params`"
+            }
+            Self::UnitOptions => {
+                "options were removed: to fix a value a dependency leaves to the consumer, amend \
+                 its file with `assemblr unit amend`, then remove `options`"
+            }
+            Self::ProjectOptions => {
+                "options were removed: the units' files hold placeholders that you replace in \
+                 the files themselves, and `assemblr status` lists them; remove `options`"
+            }
+        })
     }
 }
 
@@ -563,14 +564,6 @@ impl fmt::Display for EditError {
 
 impl std::error::Error for EditError {}
 
-/// The base type named by a parameter's `type` field.
-#[derive(Clone, Copy)]
-enum BaseType {
-    String,
-    Integer,
-    Boolean,
-}
-
 type Members<'j> = BTreeMap<&'j str, &'j Json>;
 
 /// The `dependencies` read so far.
@@ -578,8 +571,8 @@ type Members<'j> = BTreeMap<&'j str, &'j Json>;
 struct Dependencies {
     /// Entries whose identity and requirement are both valid.
     requirements: BTreeMap<UnitIdentity, VersionRequirement>,
-    /// Every validly named dependency, even one with an invalid requirement,
-    /// so that `options` targeting it are not reported as undeclared.
+    /// Every validly named dependency, even one with an invalid
+    /// requirement, so that a dependency on the unit itself is reported.
     declared: BTreeSet<UnitIdentity>,
 }
 
@@ -601,7 +594,7 @@ impl Reader {
 
     fn manifest(&mut self, json: &Json) -> Option<Manifest> {
         let root = FieldPath::default();
-        let fields = self.fields(&root, json, MANIFEST_FIELDS)?;
+        let fields = self.fields_or_removed(&root, json, MANIFEST_FIELDS, REMOVED_FIELDS)?;
 
         if let Some(schema) = fields.get("$schema") {
             self.string(&root.key("$schema"), schema);
@@ -618,53 +611,37 @@ impl Reader {
         let dependencies = fields
             .get("dependencies")
             .map(|json| self.dependencies(&root.key("dependencies"), json));
-        let options = fields.get("options").map_or_else(BTreeMap::new, |json| {
-            self.options(&root.key("options"), json, true)
-        });
-        let (params, inherited) = fields.get("params").map_or_else(Default::default, |json| {
-            self.params(&root.key("params"), json)
-        });
+        let placeholders = fields.get("placeholders").map_or_else(
+            || Some(Placeholders::default()),
+            |json| self.placeholders(&root.key("placeholders"), json),
+        );
         let amendments = fields.get("amendments").map_or_else(BTreeMap::new, |json| {
             self.amendments(&root.key("amendments"), json)
         });
-
-        // When `dependencies` is not an object, no option or amendment
-        // target can be judged undeclared, so only its type error is
-        // reported.
-        let dependencies = dependencies.unwrap_or_else(|| Some(Dependencies::default()))?;
-        for (target, values) in &options {
-            for (parameter, value) in values {
-                if let OptionValue::From(source) = value {
-                    if !params.contains_key(source) && !inherited.contains_key(source) {
-                        self.inconsistent(ManifestError::UndeclaredMappingSource {
-                            target: target.clone(),
-                            parameter: parameter.clone(),
-                            source: source.clone(),
-                        });
-                    }
-                }
+        for (field, removed) in [
+            ("params", RemovedField::Params),
+            ("options", RemovedField::UnitOptions),
+        ] {
+            if fields.contains_key(field) {
+                self.report(root.key(field), IssueKind::Removed(removed));
             }
         }
-        for error in domain::relation_errors(name.as_ref(), &dependencies.declared, options.keys())
-        {
-            self.inconsistent(error);
-        }
-        for error in domain::inheritance_errors(&dependencies.declared, &options, &inherited) {
+
+        // When `dependencies` is not an object, no dependency can be judged
+        // to be the unit itself, so only its type error is reported.
+        let dependencies = dependencies.unwrap_or_else(|| Some(Dependencies::default()))?;
+        for error in domain::relation_errors(name.as_ref(), &dependencies.declared) {
             self.inconsistent(error);
         }
 
-        // `relation_errors` and `inheritance_errors` have already reported
-        // every inconsistency that `Manifest::new` could find, so its errors
-        // carry nothing new. A name is one key of `params`, so it is never
-        // both defined and inherited.
+        // `relation_errors` has already reported every inconsistency that
+        // `Manifest::new` could find, so its errors carry nothing new.
         Manifest::new(
             name?,
             version?,
             description?,
             dependencies.requirements,
-            options,
-            params,
-            inherited,
+            placeholders?,
             amendments,
         )
         .ok()
@@ -672,35 +649,21 @@ impl Reader {
 
     fn project(&mut self, json: &Json) -> Option<Project> {
         let root = FieldPath::default();
-        let fields = self.fields(&root, json, PROJECT_FIELDS)?;
+        let fields = self.fields_or_removed(&root, json, PROJECT_FIELDS, &["options"])?;
         if let Some(schema) = fields.get("$schema") {
             self.string(&root.key("$schema"), schema);
         }
         let dependencies = fields
             .get("dependencies")
             .map(|json| self.dependencies(&root.key("dependencies"), json));
-        let options = fields.get("options").map_or_else(BTreeMap::new, |json| {
-            self.options(&root.key("options"), json, false)
-        });
-        let dependencies = dependencies.unwrap_or_else(|| Some(Dependencies::default()))?;
-        for error in domain::relation_errors(None, &dependencies.declared, options.keys()) {
-            self.inconsistent(error);
+        if fields.contains_key("options") {
+            self.report(
+                root.key("options"),
+                IssueKind::Removed(RemovedField::ProjectOptions),
+            );
         }
-        let options = options
-            .into_iter()
-            .map(|(target, values)| {
-                let values: OptionValues = values
-                    .into_iter()
-                    .filter_map(|(name, value)| match value {
-                        OptionValue::Literal(value) => Some((name, value)),
-                        // Reported while reading.
-                        OptionValue::From(_) => None,
-                    })
-                    .collect();
-                (target, values)
-            })
-            .collect();
-        Project::new(dependencies.requirements, options).ok()
+        let dependencies = dependencies.unwrap_or_else(|| Some(Dependencies::default()))?;
+        Some(Project::new(dependencies.requirements))
     }
 
     fn inconsistent(&mut self, error: ManifestError) {
@@ -708,25 +671,6 @@ impl Reader {
             ManifestError::SelfDependency(name) => FieldPath::default()
                 .key("dependencies")
                 .key(&name.to_string()),
-            ManifestError::UndeclaredOptionTarget(target) => {
-                FieldPath::default().key("options").key(&target.to_string())
-            }
-            ManifestError::UndeclaredMappingSource {
-                target, parameter, ..
-            } => FieldPath::default()
-                .key("options")
-                .key(&target.to_string())
-                .key(parameter.as_str())
-                .key("from"),
-            ManifestError::UndeclaredInheritance { parameter, .. }
-            | ManifestError::DeclaredTwice(parameter) => FieldPath::default()
-                .key("params")
-                .key(parameter.as_str())
-                .key("from"),
-            ManifestError::InheritedOption { parameter, unit } => FieldPath::default()
-                .key("options")
-                .key(&unit.to_string())
-                .key(parameter.as_str()),
         };
         self.report(path, IssueKind::Inconsistent(error));
     }
@@ -755,8 +699,23 @@ impl Reader {
         json: &'j Json,
         known: &'static [&'static str],
     ) -> Option<Members<'j>> {
+        self.fields_or_removed(path, json, known, &[])
+    }
+
+    /// [`fields`](Self::fields), where the `removed` fields are left for
+    /// the caller to report as such.
+    fn fields_or_removed<'j>(
+        &mut self,
+        path: &FieldPath,
+        json: &'j Json,
+        known: &'static [&'static str],
+        removed: &[&str],
+    ) -> Option<Members<'j>> {
         let members = self.object(path, json)?;
-        for key in members.keys().filter(|key| !known.contains(key)) {
+        for key in members
+            .keys()
+            .filter(|key| !known.contains(key) && !removed.contains(key))
+        {
             self.report(path.key(key), IssueKind::UnknownField(known));
         }
         Some(members)
@@ -784,18 +743,6 @@ impl Reader {
         }
     }
 
-    fn scalar(&mut self, path: &FieldPath, json: &Json) -> Option<ParameterValue> {
-        match json {
-            Json::String(text) => Some(ParameterValue::String(text.clone())),
-            Json::Integer(number) => Some(ParameterValue::Integer(*number)),
-            Json::Bool(flag) => Some(ParameterValue::Boolean(*flag)),
-            _ => {
-                self.wrong_type(path.clone(), SCALAR, json);
-                None
-            }
-        }
-    }
-
     fn identity(&mut self, path: &FieldPath, json: &Json) -> Option<UnitIdentity> {
         let text = self.string(path, json)?;
         self.identity_key(path, text)
@@ -808,9 +755,9 @@ impl Reader {
             .ok()
     }
 
-    fn parameter_name_key(&mut self, path: &FieldPath, key: &str) -> Option<ParameterName> {
-        ParameterName::parse(key)
-            .map_err(|error| self.report(path.clone(), IssueKind::InvalidParameterName(error)))
+    fn placeholder_name(&mut self, path: &FieldPath, text: &str) -> Option<PlaceholderName> {
+        PlaceholderName::parse(text)
+            .map_err(|error| self.report(path.clone(), IssueKind::InvalidPlaceholder(error)))
             .ok()
     }
 
@@ -854,168 +801,65 @@ impl Reader {
         Some(dependencies)
     }
 
-    fn options(
-        &mut self,
-        path: &FieldPath,
-        json: &Json,
-        mappings: bool,
-    ) -> BTreeMap<UnitIdentity, UnitOptionValues> {
-        let Some(members) = self.object(path, json) else {
-            return BTreeMap::new();
-        };
-        let mut options = BTreeMap::new();
-        for (key, value) in members {
-            let path = path.key(key);
-            let identity = self.identity_key(&path, key);
-            let values = self.option_values(&path, value, mappings);
-            if let Some(identity) = identity {
-                options.insert(identity, values);
-            }
-        }
-        options
-    }
-
-    /// The options of one dependency. A value is a scalar, or, in a unit's
-    /// manifest only, `{ "from": "<own parameter>" }`, a mapping.
-    fn option_values(&mut self, path: &FieldPath, json: &Json, mappings: bool) -> UnitOptionValues {
-        let Some(members) = self.object(path, json) else {
-            return UnitOptionValues::new();
-        };
-        let mut values = UnitOptionValues::new();
-        for (key, value) in members {
-            let path = path.key(key);
-            let name = self.parameter_name_key(&path, key);
-            let value = match value {
-                Json::Object(_) if !mappings => {
-                    self.report(path.clone(), IssueKind::MappingInConsumer);
-                    None
-                }
-                Json::Object(_) => self.mapping(&path, value),
-                _ => self.scalar(&path, value).map(OptionValue::Literal),
-            };
-            if let (Some(name), Some(value)) = (name, value) {
-                values.insert(name, value);
-            }
-        }
-        values
-    }
-
-    fn mapping(&mut self, path: &FieldPath, json: &Json) -> Option<OptionValue> {
-        let fields = self.fields(path, json, MAPPING_FIELDS)?;
-        let source = self.required(path, &fields, "from")?;
-        let text = self.string(&path.key("from"), source)?;
-        self.parameter_name_key(&path.key("from"), text)
-            .map(OptionValue::From)
-    }
-
-    /// The parameters a unit defines, and those it inherits: an object
-    /// with a `from` member is an inherited declaration, which has no other
-    /// member.
-    fn params(
-        &mut self,
-        path: &FieldPath,
-        json: &Json,
-    ) -> (
-        BTreeMap<ParameterName, ParameterDefinition>,
-        BTreeMap<ParameterName, UnitIdentity>,
-    ) {
-        let (mut params, mut inherited) = (BTreeMap::new(), BTreeMap::new());
-        let Some(members) = self.object(path, json) else {
-            return (params, inherited);
-        };
-        for (key, value) in members {
-            let path = path.key(key);
-            let name = self.parameter_name_key(&path, key);
-            if matches!(value, Json::Object(entries) if entries.iter().any(|(key, _)| key == "from"))
-            {
-                let from = self
-                    .fields(&path, value, INHERITED_FIELDS)
-                    .and_then(|fields| self.required(&path, &fields, "from"))
-                    .and_then(|json| self.identity(&path.key("from"), json));
-                if let (Some(name), Some(from)) = (name, from) {
-                    inherited.insert(name, from);
-                }
-                continue;
-            }
-            let definition = self.parameter(&path, value);
-            if let (Some(name), Some(definition)) = (name, definition) {
-                params.insert(name, definition);
-            }
-        }
-        (params, inherited)
-    }
-
-    fn parameter(&mut self, path: &FieldPath, json: &Json) -> Option<ParameterDefinition> {
-        let fields = self.fields(path, json, PARAMETER_FIELDS)?;
-        let base = self
-            .required(path, &fields, "type")
-            .and_then(|json| self.base_type(&path.key("type"), json));
-        let description = self
-            .required(path, &fields, "description")
-            .and_then(|json| self.description(&path.key("description"), json));
-        let allowed = fields
-            .get("allowed")
-            .map(|json| self.allowed(&path.key("allowed"), json));
-        let default = fields
-            .get("default")
-            .and_then(|json| self.scalar(&path.key("default"), json));
-
-        let parameter_type = match (base?, allowed) {
-            (BaseType::String, None) => Some(ParameterType::String),
-            (BaseType::String, Some(allowed)) => allowed.map(ParameterType::EnumeratedString),
-            (_, Some(_)) => {
-                self.report(path.key("allowed"), IssueKind::AllowedValuesRequireString);
-                None
-            }
-            (BaseType::Integer, None) => Some(ParameterType::Integer),
-            (BaseType::Boolean, None) => Some(ParameterType::Boolean),
-        }?;
-        if let Some(Err(error)) = default.as_ref().map(|value| parameter_type.check(value)) {
-            self.report(path.key("default"), IssueKind::InvalidDefault(error));
-            return None;
-        }
-        let example = fields
-            .get("example")
-            .and_then(|json| self.scalar(&path.key("example"), json));
-        if let Some(Err(error)) = example.as_ref().map(|value| parameter_type.check(value)) {
-            self.report(path.key("example"), IssueKind::InvalidExample(error));
-            return None;
-        }
-        let pattern = match fields.get("pattern") {
-            None => None,
-            Some(json) => {
-                let path = path.key("pattern");
-                let source = self.string(&path, json)?;
-                match ValuePattern::new(source) {
-                    Ok(pattern) => Some((path, pattern)),
-                    Err(error) => {
-                        self.report(path, IssueKind::InvalidPattern(error));
-                        return None;
+    /// `placeholders`: the placeholders to replace, each with its
+    /// description, and the tokens to ignore. `None` when it cannot be
+    /// read.
+    fn placeholders(&mut self, path: &FieldPath, json: &Json) -> Option<Placeholders> {
+        let fields = self.fields(path, json, PLACEHOLDER_FIELDS)?;
+        let mut valid = true;
+        let mut replace = BTreeMap::new();
+        if let Some(json) = fields.get("replace") {
+            let path = path.key("replace");
+            match self.object(&path, json) {
+                Some(members) => {
+                    for (key, value) in members {
+                        let path = path.key(key);
+                        let name = self.placeholder_name(&path, key);
+                        let description = self.description(&path, value);
+                        match (name, description) {
+                            (Some(name), Some(description)) => {
+                                replace.insert(name, description);
+                            }
+                            _ => valid = false,
+                        }
                     }
                 }
+                None => valid = false,
             }
-        };
-        let definition = ParameterDefinition::new(parameter_type, description?, default).ok()?;
-        let definition = match example {
-            Some(example) => definition.with_example(example).ok()?,
-            None => definition,
-        };
-        let Some((pattern_path, pattern)) = pattern else {
-            return Some(definition);
-        };
-        match definition.with_pattern(pattern) {
-            Ok(definition) => Some(definition),
-            Err(problem) => {
-                let (at, kind) = match problem {
-                    PatternProblem::NotAString => (pattern_path, IssueKind::PatternRequiresString),
-                    PatternProblem::Default(error) => {
-                        (path.key("default"), IssueKind::InvalidDefault(error))
+        }
+        let mut ignore = std::collections::BTreeSet::new();
+        if let Some(json) = fields.get("ignore") {
+            let path = path.key("ignore");
+            match json {
+                Json::Array(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        let path = path.index(index);
+                        let name = self
+                            .string(&path, item)
+                            .and_then(|text| self.placeholder_name(&path, text));
+                        match name {
+                            Some(name) if ignore.contains(&name) => {
+                                self.report(path, IssueKind::DuplicateEntry);
+                            }
+                            Some(name) => {
+                                ignore.insert(name);
+                            }
+                            None => valid = false,
+                        }
                     }
-                    PatternProblem::Example(error) => {
-                        (path.key("example"), IssueKind::InvalidExample(error))
-                    }
-                };
-                self.report(at, kind);
+                }
+                _ => {
+                    self.wrong_type(path, &[JsonKind::Array], json);
+                    valid = false;
+                }
+            }
+        }
+        match Placeholders::new(replace, ignore) {
+            Ok(placeholders) => valid.then_some(placeholders),
+            Err(both) => {
+                for name in both {
+                    self.report(path.key("ignore"), IssueKind::ReplacedAndIgnored(name));
+                }
                 None
             }
         }
@@ -1053,56 +897,18 @@ impl Reader {
             .and_then(|json| self.version(&path.key("base"), json));
         Some(AmendmentDeclaration::new(unit?, base?))
     }
-
-    fn base_type(&mut self, path: &FieldPath, json: &Json) -> Option<BaseType> {
-        match self.string(path, json)? {
-            "string" => Some(BaseType::String),
-            "integer" => Some(BaseType::Integer),
-            "boolean" => Some(BaseType::Boolean),
-            other => {
-                self.report(
-                    path.clone(),
-                    IssueKind::UnknownParameterType(other.to_owned()),
-                );
-                None
-            }
-        }
-    }
-
-    fn allowed(&mut self, path: &FieldPath, json: &Json) -> Option<AllowedValues> {
-        let Json::Array(items) = json else {
-            self.wrong_type(path.clone(), &[JsonKind::Array], json);
-            return None;
-        };
-        let mut values = Vec::with_capacity(items.len());
-        let mut all_strings = true;
-        for (index, item) in items.iter().enumerate() {
-            match self.string(&path.index(index), item) {
-                Some(text) => values.push(text.to_owned()),
-                None => all_strings = false,
-            }
-        }
-        if !all_strings {
-            return None;
-        }
-        AllowedValues::new(values)
-            .map_err(|error| self.report(path.clone(), IssueKind::InvalidAllowedValues(error)))
-            .ok()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        FieldPath, IssueKind, JsonKind, ReadManifestError, declare_amendment, read_manifest,
-        rebase_amendments,
+        FieldPath, IssueKind, JsonKind, ReadManifestError, RemovedField, declare_amendment,
+        read_manifest, read_project, rebase_amendments,
     };
     use crate::domain::{
-        AllowedValuesError, AmendmentDeclaration, IdentityErrorReason, ManifestError,
-        ParameterType, ParameterValue, ParameterValueError, RelativePath, Segment, UnitIdentity,
-        ValueKind, Version,
+        AmendmentDeclaration, IdentityErrorReason, ManifestError, PlaceholderName, RelativePath,
+        Segment, UnitIdentity, Version,
     };
-    use crate::domain::{OptionValue, ParameterName};
 
     const FULL: &str = r#"{
   // Editor support only.
@@ -1114,24 +920,16 @@ mod tests {
     "@metamao/cloudflare-worker": "^2.1.0",
     "@metamao/node": "~1.4",
   },
-  "options": {
-    "@metamao/cloudflare-worker": { "nodeCompat": true, "compatibilityDate": "2026-01-01" },
-    /* The package manager the stack is tested with. */
-    "@metamao/node": { "packageManager": "pnpm", "major": 22 },
-  },
-  "params": {
-    "appName": { "type": "string", "description": "The application name." },
-    "port": { "type": "integer", "description": "Local port.", "default": 8080 },
-    "ssr": { "type": "boolean", "description": "Render on the server.", "default": true },
-    "locale": {
-      "type": "string",
-      "description": "Default locale.",
-      "allowed": ["en", "es"],
-      "default": "es",
+  "placeholders": {
+    "replace": {
+      /* Shown in the browser's title bar. */
+      "__APP_TITLE__": "The application's visible name.",
+      "__WORKER_NAME__": "The Worker's name in kebab-case.",
     },
+    "ignore": ["__DEV__", "__WEBPACK_DEFINE__"],
   },
   "amendments": {
-    "package.json.assemblr.tmpl": { "unit": "@metamao/node", "base": "1.4.2" },
+    "package.json": { "unit": "@metamao/node", "base": "1.4.2" },
     "config/wrangler.toml": { "unit": "@metamao/cloudflare-worker", "base": "2.1.0" },
   },
 }"#;
@@ -1156,6 +954,10 @@ mod tests {
 
     fn identity(input: &str) -> UnitIdentity {
         input.parse().unwrap()
+    }
+
+    fn placeholder(input: &str) -> PlaceholderName {
+        PlaceholderName::parse(input).unwrap()
     }
 
     #[test]
@@ -1184,44 +986,25 @@ mod tests {
             ]
         );
 
-        let node = &manifest.options()[&identity("@metamao/node")];
-        let values: Vec<(String, ParameterValue)> = node
+        let placeholders = manifest.placeholders();
+        let replace: Vec<(&str, &str)> = placeholders
+            .replace()
             .iter()
-            .map(|(name, value)| match value {
-                OptionValue::Literal(value) => (name.to_string(), value.clone()),
-                OptionValue::From(_) => panic!("a literal was expected"),
-            })
+            .map(|(name, description)| (name.as_str(), description.as_str()))
             .collect();
         assert_eq!(
-            values,
+            replace,
             [
-                ("major".to_owned(), ParameterValue::Integer(22)),
-                (
-                    "packageManager".to_owned(),
-                    ParameterValue::String("pnpm".to_owned())
-                ),
+                ("__APP_TITLE__", "The application's visible name."),
+                ("__WORKER_NAME__", "The Worker's name in kebab-case."),
             ]
         );
-
-        let params = manifest.params();
-        let names: Vec<&str> = params.keys().map(|name| name.as_str()).collect();
-        assert_eq!(names, ["appName", "locale", "port", "ssr"]);
-        let app_name = params.values().next().unwrap();
-        assert_eq!(app_name.parameter_type(), &ParameterType::String);
-        assert!(app_name.is_required());
-        let locale = &params[&"locale".parse().unwrap()];
-        let ParameterType::EnumeratedString(allowed) = locale.parameter_type() else {
-            panic!("locale should be an enumerated string");
-        };
-        assert_eq!(allowed.as_slice(), ["en", "es"]);
-        assert_eq!(
-            locale.default(),
-            Some(&ParameterValue::String("es".to_owned()))
-        );
-        assert!(!locale.is_required());
-        let port = &params[&"port".parse().unwrap()];
-        assert_eq!(port.parameter_type(), &ParameterType::Integer);
-        assert_eq!(port.default(), Some(&ParameterValue::Integer(8080)));
+        let ignore: Vec<&str> = placeholders
+            .ignore()
+            .iter()
+            .map(|name| name.as_str())
+            .collect();
+        assert_eq!(ignore, ["__DEV__", "__WEBPACK_DEFINE__"]);
 
         let amendments: Vec<(String, String, String)> = manifest
             .amendments()
@@ -1243,7 +1026,7 @@ mod tests {
                     "2.1.0".to_owned()
                 ),
                 (
-                    "package.json.assemblr.tmpl".to_owned(),
+                    "package.json".to_owned(),
                     "@metamao/node".to_owned(),
                     "1.4.2".to_owned()
                 ),
@@ -1253,11 +1036,144 @@ mod tests {
 
     #[test]
     fn optional_collections_default_to_empty() {
-        let manifest = read_manifest(&with(r#""params": {}"#)).unwrap();
+        let manifest = read_manifest(&with(r#""placeholders": {}"#)).unwrap();
         assert!(manifest.dependencies().is_empty());
-        assert!(manifest.options().is_empty());
-        assert!(manifest.params().is_empty());
+        assert!(manifest.placeholders().is_empty());
         assert!(manifest.amendments().is_empty());
+        let manifest = read_manifest(&with(r#""dependencies": {}"#)).unwrap();
+        assert!(manifest.placeholders().is_empty());
+    }
+
+    #[test]
+    fn placeholder_declarations_are_validated() {
+        let text = with(
+            r#""placeholders": {
+                 "replace": {
+                   "__project-name__": "The name.",
+                   "__BLANK__": "  ",
+                   "__NUMBER__": 1,
+                   "__BOTH__": "Both."
+                 },
+                 "ignore": ["__BOTH__", "plain", 3, "__TWICE__", "__TWICE__"]
+               }"#,
+        );
+        let found = issues(&text);
+        let found: Vec<(&str, &IssueKind)> = found
+            .iter()
+            .map(|(path, kind)| (path.as_str(), kind))
+            .collect();
+        assert_eq!(found.len(), 7, "{found:#?}");
+        assert!(matches!(
+            found[0],
+            ("placeholders.ignore", IssueKind::ReplacedAndIgnored(name)) if name.as_str() == "__BOTH__"
+        ));
+        assert!(matches!(
+            found[1],
+            ("placeholders.ignore[1]", IssueKind::InvalidPlaceholder(_))
+        ));
+        assert!(matches!(
+            found[2],
+            (
+                "placeholders.ignore[2]",
+                IssueKind::WrongType {
+                    found: JsonKind::Integer,
+                    ..
+                }
+            )
+        ));
+        assert!(matches!(
+            found[3],
+            ("placeholders.ignore[4]", IssueKind::DuplicateEntry)
+        ));
+        assert!(matches!(
+            found[4],
+            (
+                "placeholders.replace.__BLANK__",
+                IssueKind::BlankDescription(_)
+            )
+        ));
+        assert!(matches!(
+            found[5],
+            (
+                "placeholders.replace.__NUMBER__",
+                IssueKind::WrongType {
+                    found: JsonKind::Integer,
+                    ..
+                }
+            )
+        ));
+        assert!(matches!(
+            found[6],
+            (
+                "placeholders.replace[\"__project-name__\"]",
+                IssueKind::InvalidPlaceholder(_)
+            )
+        ));
+        // `values` is not a field of `placeholders`.
+        let unknown = issues(&with(r#""placeholders": {"values": {}}"#));
+        assert!(matches!(
+            unknown.as_slice(),
+            [(path, IssueKind::UnknownField(_))] if path == "placeholders.values"
+        ));
+    }
+
+    #[test]
+    fn an_invalid_placeholder_name_suggests_its_spelling() {
+        let issues = issues(&with(
+            r#""placeholders": {"replace": {"__project-name__": "The name."}}"#,
+        ));
+        let message = issues[0].1.to_string();
+        assert!(message.contains("\"__project-name__\""), "{message}");
+        assert!(message.contains("\"__PROJECT_NAME__\""), "{message}");
+    }
+
+    #[test]
+    fn parameters_and_options_are_rejected_with_the_way_forward() {
+        let text = with(
+            r#""dependencies": {"@metamao/node": "^1.0.0"},
+               "params": {"appName": {"type": "string", "description": "A."}},
+               "options": {"@metamao/node": {"major": 22}}"#,
+        );
+        assert_eq!(
+            issues(&text),
+            [
+                (
+                    "options".to_owned(),
+                    IssueKind::Removed(RemovedField::UnitOptions)
+                ),
+                (
+                    "params".to_owned(),
+                    IssueKind::Removed(RemovedField::Params)
+                ),
+            ]
+        );
+        assert!(
+            IssueKind::Removed(RemovedField::Params)
+                .to_string()
+                .contains("\"placeholders\".\"replace\""),
+        );
+        assert!(
+            IssueKind::Removed(RemovedField::UnitOptions)
+                .to_string()
+                .contains("assemblr unit amend"),
+        );
+
+        let error =
+            read_project(r#"{"dependencies": {}, "options": {"@metamao/node": {}}}"#).unwrap_err();
+        let ReadManifestError::Invalid(issues) = error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(
+            issues[0].kind(),
+            &IssueKind::Removed(RemovedField::ProjectOptions)
+        );
+        assert!(issues[0].kind().to_string().contains("assemblr status"));
+        // A project never had `params`: it is an unknown field there.
+        let error = read_project(r#"{"params": {}}"#).unwrap_err();
+        let ReadManifestError::Invalid(issues) = error else {
+            panic!("{error:?}");
+        };
+        assert!(matches!(issues[0].kind(), IssueKind::UnknownField(_)));
     }
 
     #[test]
@@ -1312,6 +1228,110 @@ mod tests {
     }
 
     #[test]
+    fn unknown_fields_are_rejected_at_every_level() {
+        let text = with(r#""fragments": [], "placeholders": {"replace": {}, "extra": 1}"#);
+        assert_eq!(
+            issues(&text),
+            [
+                (
+                    "fragments".to_owned(),
+                    IssueKind::UnknownField(super::MANIFEST_FIELDS)
+                ),
+                (
+                    "placeholders.extra".to_owned(),
+                    IssueKind::UnknownField(super::PLACEHOLDER_FIELDS)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_keys_are_rejected() {
+        let text = with(
+            r#""version": "2.0.0", "placeholders": {"replace": {"__A__": "A.", "__A__": "B."}}"#,
+        );
+        assert_eq!(
+            issues(&text),
+            [
+                (
+                    "placeholders.replace.__A__".to_owned(),
+                    IssueKind::DuplicateKey
+                ),
+                ("version".to_owned(), IssueKind::DuplicateKey),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_problem_is_reported_in_one_pass() {
+        let text = r#"{
+          "name": "@metamao/App",
+          "version": "one",
+          "dependencies": {"@metamao/node": 1},
+          "params": {"x": {"type": "string"}},
+          "placeholders": {"replace": {"__X__": ""}},
+          "extra": true
+        }"#;
+        let paths: Vec<String> = issues(text).into_iter().map(|(path, _)| path).collect();
+        assert_eq!(
+            paths,
+            [
+                "dependencies[\"@metamao/node\"]",
+                "description",
+                "extra",
+                "name",
+                "params",
+                "placeholders.replace.__X__",
+                "version",
+            ]
+        );
+    }
+
+    #[test]
+    fn key_order_in_the_source_does_not_matter() {
+        let forward = with(
+            r#""dependencies": {"@a/a": "^1", "@b/b": "^2"},
+               "placeholders": {"replace": {"__A__": "A.", "__B__": ""}, "ignore": ["__Y__", "__X__"]}"#,
+        );
+        let backward = r#"{
+          "placeholders": {"ignore": ["__X__", "__Y__"], "replace": {"__B__": "", "__A__": "A."}},
+          "dependencies": {"@b/b": "^2", "@a/a": "^1"},
+          "description": "An app.", "version": "1.0.0", "name": "@metamao/app"
+        }"#;
+        assert_eq!(read_manifest(&forward), read_manifest(backward));
+        assert_eq!(issues(backward).len(), 1);
+
+        let reordered = r#"{
+          "description": "Angular SSR on Cloudflare Workers.",
+          "amendments": {
+            "config/wrangler.toml": { "base": "2.1.0", "unit": "@metamao/cloudflare-worker" },
+            "package.json": { "base": "1.4.2", "unit": "@metamao/node" }
+          },
+          "placeholders": {
+            "ignore": ["__WEBPACK_DEFINE__", "__DEV__"],
+            "replace": {
+              "__WORKER_NAME__": "The Worker's name in kebab-case.",
+              "__APP_TITLE__": "The application's visible name."
+            }
+          },
+          "dependencies": { "@metamao/node": "~1.4", "@metamao/cloudflare-worker": "^2.1.0" },
+          "version": "1.0.0",
+          "name": "@metamao/cloudflare-angular-ssr"
+        }"#;
+        assert_eq!(
+            read_manifest(reordered).unwrap(),
+            read_manifest(FULL).unwrap()
+        );
+        assert!(
+            read_manifest(FULL)
+                .unwrap()
+                .placeholders()
+                .replace()
+                .contains_key(&placeholder("__APP_TITLE__"))
+        );
+    }
+
+    #[test]
     fn syntax_errors_are_reported_with_their_position() {
         let Err(ReadManifestError::Syntax(error)) = read_manifest("{\n  \"name\": 'x'\n}") else {
             panic!("expected a syntax error");
@@ -1351,26 +1371,6 @@ mod tests {
     }
 
     #[test]
-    fn unknown_fields_are_rejected_at_every_level() {
-        let text = with(
-            r#""fragments": [], "params": {"a": {"type": "string", "description": "A.", "required": true}}"#,
-        );
-        assert_eq!(
-            issues(&text),
-            [
-                (
-                    "fragments".to_owned(),
-                    IssueKind::UnknownField(super::MANIFEST_FIELDS)
-                ),
-                (
-                    "params.a.required".to_owned(),
-                    IssueKind::UnknownField(super::PARAMETER_FIELDS)
-                ),
-            ]
-        );
-    }
-
-    #[test]
     fn an_unknown_field_lists_the_fields_allowed_there() {
         assert_eq!(
             IssueKind::UnknownField(&["a", "b"]).to_string(),
@@ -1379,20 +1379,6 @@ mod tests {
         assert_eq!(
             IssueKind::UnknownField(&["a", "b", "c"]).to_string(),
             "unknown field; the fields here are `a`, `b`, and `c`"
-        );
-    }
-
-    #[test]
-    fn duplicate_keys_are_rejected() {
-        let text = with(
-            r#""version": "2.0.0", "params": {"a": {"type": "string", "type": "integer", "description": "A."}}"#,
-        );
-        assert_eq!(
-            issues(&text),
-            [
-                ("params.a.type".to_owned(), IssueKind::DuplicateKey),
-                ("version".to_owned(), IssueKind::DuplicateKey),
-            ]
         );
     }
 
@@ -1432,34 +1418,6 @@ mod tests {
     }
 
     #[test]
-    fn options_must_target_declared_dependencies() {
-        let text = with(
-            r#""dependencies": {"@metamao/node": "^1.0.0"},
-               "options": {"@metamao/node": {"major": 22}, "@metamao/docker": {"base": "alpine"}}"#,
-        );
-        assert_eq!(
-            issues(&text),
-            [(
-                "options[\"@metamao/docker\"]".to_owned(),
-                IssueKind::Inconsistent(ManifestError::UndeclaredOptionTarget(identity(
-                    "@metamao/docker"
-                )))
-            )]
-        );
-    }
-
-    #[test]
-    fn a_dependency_with_an_invalid_requirement_still_counts_as_declared() {
-        let text = with(
-            r#""dependencies": {"@metamao/node": "latest"},
-               "options": {"@metamao/node": {"major": 22}}"#,
-        );
-        let issues = issues(&text);
-        assert_eq!(issues.len(), 1, "{issues:?}");
-        assert!(matches!(issues[0].1, IssueKind::InvalidRequirement(_)));
-    }
-
-    #[test]
     fn a_unit_cannot_depend_on_itself() {
         let text = with(r#""dependencies": {"@metamao/app": "^1.0.0"}"#);
         assert_eq!(
@@ -1468,292 +1426,6 @@ mod tests {
                 "dependencies[\"@metamao/app\"]".to_owned(),
                 IssueKind::Inconsistent(ManifestError::SelfDependency(identity("@metamao/app")))
             )]
-        );
-    }
-
-    #[test]
-    fn option_values_must_be_scalars_with_valid_names() {
-        let text = with(
-            r#""dependencies": {"@metamao/node": "^1.0.0"},
-               "options": {"@metamao/node": {"versions": [22], "ratio": 0.5, "bad-name": true, "nothing": null}}"#,
-        );
-        let issues = issues(&text);
-        let paths: Vec<&str> = issues.iter().map(|(path, _)| path.as_str()).collect();
-        assert_eq!(
-            paths,
-            [
-                "options[\"@metamao/node\"][\"bad-name\"]",
-                "options[\"@metamao/node\"].nothing",
-                "options[\"@metamao/node\"].ratio",
-                "options[\"@metamao/node\"].versions",
-            ]
-        );
-        assert!(matches!(issues[0].1, IssueKind::InvalidParameterName(_)));
-        assert!(matches!(
-            issues[2].1,
-            IssueKind::WrongType {
-                found: JsonKind::OtherNumber,
-                ..
-            }
-        ));
-        assert_eq!(
-            issues[3].1.to_string(),
-            "expected a string, an integer, or a boolean, found an array"
-        );
-    }
-
-    #[test]
-    fn a_pattern_is_a_valid_expression_on_a_string_that_its_values_match() {
-        let text = with(
-            r#""params": {
-                 "slug": {"type": "string", "description": "A.", "pattern": "^[a-z-]+$", "example": "my-app"},
-                 "badPattern": {"type": "string", "description": "A.", "pattern": "[a-"},
-                 "unicodeClass": {"type": "string", "description": "A.", "pattern": "\\p{L}"},
-                 "onInteger": {"type": "integer", "description": "A.", "pattern": "^1"},
-                 "badDefault": {"type": "string", "description": "A.", "pattern": "^a", "default": "b"},
-                 "badExample": {"type": "string", "description": "A.", "pattern": "^a", "example": "b"}
-               }"#,
-        );
-        let issues = issues(&text);
-        let found: Vec<(&str, String)> = issues
-            .iter()
-            .map(|(path, kind)| (path.as_str(), kind.to_string()))
-            .collect();
-        assert_eq!(found.len(), 5, "{found:#?}");
-        assert_eq!(
-            found[0],
-            (
-                "params.badDefault.default",
-                "invalid default: \"b\" does not match the pattern `^a`".to_owned()
-            )
-        );
-        assert_eq!(
-            found[1],
-            (
-                "params.badExample.example",
-                "invalid example: \"b\" does not match the pattern `^a`".to_owned()
-            )
-        );
-        assert_eq!(found[2].0, "params.badPattern.pattern");
-        assert!(found[2].1.starts_with("invalid pattern: "), "{found:#?}");
-        assert_eq!(
-            found[3],
-            (
-                "params.onInteger.pattern",
-                "a pattern is only supported for parameters of type \"string\"".to_owned()
-            )
-        );
-        assert_eq!(found[4].0, "params.unicodeClass.pattern");
-
-        let manifest = read_manifest(&with(
-            r#""params": {"slug": {"type": "string", "description": "A.", "pattern": "^[a-z-]+$", "example": "my-app"}}"#,
-        ))
-        .unwrap();
-        let slug = &manifest.params()[&ParameterName::parse("slug").unwrap()];
-        assert_eq!(slug.pattern().unwrap().as_str(), "^[a-z-]+$");
-    }
-
-    #[test]
-    fn an_inherited_parameter_names_a_direct_dependency_and_nothing_else() {
-        let manifest = read_manifest(&with(
-            r#""dependencies": {"@metamao/base": "^1"},
-               "params": {"title": {"from": "@metamao/base"}},
-               "options": {"@metamao/other": {}}"#,
-        ));
-        // `options` may not target an undeclared unit; the rest is valid.
-        assert!(manifest.is_err());
-        let manifest = read_manifest(&with(
-            r#""dependencies": {"@metamao/base": "^1", "@metamao/other": "^1"},
-               "params": {"title": {"from": "@metamao/base"}},
-               "options": {"@metamao/other": {"label": {"from": "title"}}}"#,
-        ))
-        .unwrap();
-        assert!(manifest.params().is_empty());
-        assert_eq!(
-            manifest.inherited()[&ParameterName::parse("title").unwrap()],
-            identity("@metamao/base")
-        );
-
-        let text = with(
-            r#""dependencies": {"@metamao/base": "^1"},
-               "params": {
-                 "title": {"from": "@metamao/base", "type": "string"},
-                 "notADependency": {"from": "@metamao/other"},
-                 "badIdentity": {"from": "base"},
-                 "alsoSet": {"from": "@metamao/base"}
-               },
-               "options": {"@metamao/base": {"alsoSet": "x"}}"#,
-        );
-        let issues = issues(&text);
-        let found: Vec<(&str, String)> = issues
-            .iter()
-            .map(|(path, kind)| (path.as_str(), kind.to_string()))
-            .collect();
-        assert_eq!(found.len(), 4, "{found:#?}");
-        assert_eq!(found[0].0, "options[\"@metamao/base\"].alsoSet");
-        assert!(
-            found[0]
-                .1
-                .contains("already passes its value to @metamao/base"),
-            "{found:#?}"
-        );
-        assert_eq!(found[1].0, "params.badIdentity.from");
-        assert_eq!(found[2].0, "params.notADependency.from");
-        assert!(
-            found[2]
-                .1
-                .contains("inherited only from a direct dependency"),
-            "{found:#?}"
-        );
-        assert_eq!(
-            found[3],
-            (
-                "params.title.type",
-                "unknown field; the fields here are `from`".to_owned()
-            )
-        );
-    }
-
-    #[test]
-    fn parameter_definitions_are_validated() {
-        let text = with(
-            r#""params": {
-                 "noType": {"description": "A."},
-                 "badType": {"type": "number", "description": "A."},
-                 "wrongDefault": {"type": "integer", "description": "A.", "default": "8080"},
-                 "notAllowed": {"type": "string", "description": "A.", "allowed": ["a", "b"], "default": "c"},
-                 "allowedOnBoolean": {"type": "boolean", "description": "A.", "allowed": ["true"]},
-                 "emptyAllowed": {"type": "string", "description": "A.", "allowed": []},
-                 "repeatedAllowed": {"type": "string", "description": "A.", "allowed": ["a", "a"]},
-                 "mixedAllowed": {"type": "string", "description": "A.", "allowed": ["a", 1]},
-                 "blank": {"type": "string", "description": ""}
-               }"#,
-        );
-        let issues = issues(&text);
-        let found: Vec<(&str, &IssueKind)> = issues
-            .iter()
-            .map(|(path, kind)| (path.as_str(), kind))
-            .collect();
-        assert_eq!(found.len(), 9, "{found:#?}");
-        assert!(matches!(
-            found[0],
-            (
-                "params.allowedOnBoolean.allowed",
-                IssueKind::AllowedValuesRequireString
-            )
-        ));
-        assert!(
-            matches!(found[1], ("params.badType.type", IssueKind::UnknownParameterType(name)) if name == "number")
-        );
-        assert!(matches!(
-            found[2],
-            ("params.blank.description", IssueKind::BlankDescription(_))
-        ));
-        assert!(matches!(
-            found[3],
-            (
-                "params.emptyAllowed.allowed",
-                IssueKind::InvalidAllowedValues(AllowedValuesError::Empty)
-            )
-        ));
-        assert!(matches!(
-            found[4],
-            (
-                "params.mixedAllowed.allowed[1]",
-                IssueKind::WrongType {
-                    found: JsonKind::Integer,
-                    ..
-                }
-            )
-        ));
-        assert!(matches!(
-            found[5],
-            ("params.noType.type", IssueKind::MissingField)
-        ));
-        assert!(matches!(
-            found[6],
-            ("params.notAllowed.default", IssueKind::InvalidDefault(ParameterValueError::NotAllowed { value, .. })) if value == "c"
-        ));
-        assert!(matches!(
-            found[7],
-            ("params.repeatedAllowed.allowed", IssueKind::InvalidAllowedValues(AllowedValuesError::Duplicates(values))) if values == &["a"]
-        ));
-        assert!(matches!(
-            found[8],
-            (
-                "params.wrongDefault.default",
-                IssueKind::InvalidDefault(ParameterValueError::TypeMismatch {
-                    expected: ValueKind::Integer,
-                    found: ValueKind::String,
-                })
-            )
-        ));
-    }
-
-    #[test]
-    fn every_problem_is_reported_in_one_pass() {
-        let text = r#"{
-          "name": "@metamao/App",
-          "version": "one",
-          "dependencies": {"@metamao/node": 1},
-          "options": {"@metamao/docker": {}},
-          "params": {"x": {"type": "string"}},
-          "extra": true
-        }"#;
-        let paths: Vec<String> = issues(text).into_iter().map(|(path, _)| path).collect();
-        assert_eq!(
-            paths,
-            [
-                "dependencies[\"@metamao/node\"]",
-                "description",
-                "extra",
-                "name",
-                "options[\"@metamao/docker\"]",
-                "params.x.description",
-                "version",
-            ]
-        );
-    }
-
-    #[test]
-    fn key_order_in_the_source_does_not_matter() {
-        let forward = with(
-            r#""dependencies": {"@a/a": "^1", "@b/b": "^2"},
-               "options": {"@a/a": {"x": 1, "y": 2}, "@c/c": {}},
-               "params": {"p": {"type": "integer", "description": "P.", "default": "1"}, "q": {"type": "x", "description": "Q."}}"#,
-        );
-        let backward = r#"{
-          "params": {"q": {"description": "Q.", "type": "x"}, "p": {"default": "1", "description": "P.", "type": "integer"}},
-          "options": {"@c/c": {}, "@a/a": {"y": 2, "x": 1}},
-          "dependencies": {"@b/b": "^2", "@a/a": "^1"},
-          "description": "An app.", "version": "1.0.0", "name": "@metamao/app"
-        }"#;
-        assert_eq!(read_manifest(&forward), read_manifest(backward));
-        assert_eq!(issues(backward).len(), 3);
-
-        let reordered = r#"{
-          "description": "Angular SSR on Cloudflare Workers.",
-          "amendments": {
-            "config/wrangler.toml": { "base": "2.1.0", "unit": "@metamao/cloudflare-worker" },
-            "package.json.assemblr.tmpl": { "base": "1.4.2", "unit": "@metamao/node" }
-          },
-          "params": {
-            "ssr": { "default": true, "description": "Render on the server.", "type": "boolean" },
-            "port": { "default": 8080, "type": "integer", "description": "Local port." },
-            "locale": { "default": "es", "allowed": ["en", "es"], "description": "Default locale.", "type": "string" },
-            "appName": { "description": "The application name.", "type": "string" }
-          },
-          "options": {
-            "@metamao/node": { "major": 22, "packageManager": "pnpm" },
-            "@metamao/cloudflare-worker": { "compatibilityDate": "2026-01-01", "nodeCompat": true }
-          },
-          "dependencies": { "@metamao/node": "~1.4", "@metamao/cloudflare-worker": "^2.1.0" },
-          "version": "1.0.0",
-          "name": "@metamao/cloudflare-angular-ssr"
-        }"#;
-        assert_eq!(
-            read_manifest(reordered).unwrap(),
-            read_manifest(FULL).unwrap()
         );
     }
 
@@ -1877,10 +1549,7 @@ mod tests {
     fn bases_are_replaced_in_place_keeping_everything_else() {
         let edited = rebased(
             FULL,
-            &[
-                ("config/wrangler.toml", "2.2.0"),
-                ("package.json.assemblr.tmpl", "1.5.0"),
-            ],
+            &[("config/wrangler.toml", "2.2.0"), ("package.json", "1.5.0")],
         )
         .unwrap();
         let expected = FULL
@@ -1931,116 +1600,13 @@ mod tests {
 
     #[test]
     fn diagnostics_name_the_field_and_the_fix() {
-        let error = read_manifest(&with(
-            r#""params": {"port": {"type": "integer", "description": "P.", "default": 80.5}}"#,
-        ))
-        .unwrap_err();
+        let error = read_manifest(&with(r#""placeholders": {"ignore": "__A__"}"#)).unwrap_err();
         let message = error.to_string();
         assert!(message.starts_with("1 problem:"), "{message}");
         assert!(
-            message.contains(
-                "params.port.default: expected a string, an integer, or a boolean, found a number that is not a 64-bit integer"
-            ),
+            message.contains("placeholders.ignore: expected an array, found a string"),
             "{message}"
         );
         assert_eq!(FieldPath::default().to_string(), "(manifest)");
-    }
-
-    #[test]
-    fn an_example_is_read_checked_against_the_parameter_and_is_not_a_default() {
-        let manifest = read_manifest(&with(
-            r#""params": {
-              "appName": {"type": "string", "description": "The name.", "example": "acme"},
-              "mode": {"type": "string", "description": "M.", "allowed": ["dev", "prod"], "example": "prod"}
-            }"#,
-        ))
-        .unwrap();
-        let app = &manifest.params()[&ParameterName::parse("appName").unwrap()];
-        assert_eq!(
-            app.example(),
-            Some(&ParameterValue::String("acme".to_owned()))
-        );
-        // Still required: an example is not a default.
-        assert!(app.is_required());
-        assert_eq!(app.default(), None);
-
-        let text = with(
-            r#""params": {
-              "bad": {"type": "integer", "description": "A.", "example": "x"},
-              "mode": {"type": "string", "description": "M.", "allowed": ["dev"], "example": "prod"}
-            }"#,
-        );
-        let issues = issues(&text);
-        let paths: Vec<&str> = issues.iter().map(|(path, _)| path.as_str()).collect();
-        assert_eq!(paths, ["params.bad.example", "params.mode.example"]);
-        assert!(
-            issues
-                .iter()
-                .all(|(_, kind)| matches!(kind, IssueKind::InvalidExample(_)))
-        );
-    }
-
-    #[test]
-    fn a_mapping_names_a_declared_parameter_of_the_unit_and_a_project_cannot_write_one() {
-        let manifest = read_manifest(&with(
-            r#""dependencies": {"@metamao/node": "^1"},
-               "options": {"@metamao/node": {"major": {"from": "nodeMajor"}, "pm": "pnpm"}},
-               "params": {"nodeMajor": {"type": "integer", "description": "N.", "default": 22}}"#,
-        ))
-        .unwrap();
-        let node = &manifest.options()[&identity("@metamao/node")];
-        assert_eq!(
-            node[&ParameterName::parse("major").unwrap()],
-            OptionValue::From(ParameterName::parse("nodeMajor").unwrap())
-        );
-        assert_eq!(
-            node[&ParameterName::parse("pm").unwrap()],
-            OptionValue::Literal(ParameterValue::String("pnpm".to_owned()))
-        );
-
-        // An undeclared source, another key beside `from`, and a non-name.
-        let text = with(
-            r#""dependencies": {"@metamao/node": "^1"},
-               "options": {"@metamao/node": {
-                 "a": {"from": "missing"},
-                 "b": {"from": "x", "also": 1},
-                 "c": {"from": "bad-name"}
-               }}"#,
-        );
-        let issues = issues(&text);
-        let paths: Vec<&str> = issues.iter().map(|(path, _)| path.as_str()).collect();
-        assert!(
-            paths.contains(&"options[\"@metamao/node\"].a.from"),
-            "{paths:?}"
-        );
-        assert!(
-            paths.contains(&"options[\"@metamao/node\"].b.also"),
-            "{paths:?}"
-        );
-        assert!(
-            paths.contains(&"options[\"@metamao/node\"].c.from"),
-            "{paths:?}"
-        );
-        assert!(issues.iter().any(|(path, kind)| path.ends_with("a.from")
-            && matches!(
-                kind,
-                IssueKind::Inconsistent(ManifestError::UndeclaredMappingSource { .. })
-            )));
-
-        // A consumer supplies values; a mapping belongs to a unit.
-        let error = super::read_project(
-            r#"{"dependencies": {"@metamao/node": "^1"},
-                "options": {"@metamao/node": {"major": {"from": "x"}}}}"#,
-        )
-        .unwrap_err();
-        let ReadManifestError::Invalid(issues) = error else {
-            panic!("{error:?}");
-        };
-        assert!(
-            issues
-                .iter()
-                .any(|issue| *issue.kind() == IssueKind::MappingInConsumer),
-            "{issues:?}"
-        );
     }
 }

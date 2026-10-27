@@ -1,12 +1,9 @@
 //! Advice for the problems a composition reports, shared by the commands
-//! that compose: what the person can do about each kind of problem, since a
-//! single sentence for all of them sent people to `options` for problems
-//! that `options` cannot fix.
+//! that compose: what the person can do about each kind of problem, since
+//! each needs its own way out.
 
 use assemblr::adapters::{CrossVersionReason, MergeFailure};
-use assemblr::domain::{
-    CompositionError, ParameterValueError, Requirer, RootTargetReason, UnitIdentity, Version,
-};
+use assemblr::domain::{CompositionError, Requirer, UnitIdentity, Version};
 
 /// Who reads the advice, since the same problem is fixed in different
 /// files: a consumer edits `assemblr.jsonc`, and an author edits the
@@ -20,84 +17,9 @@ pub(super) enum Audience {
 /// What to do about `error`, or `None` when the message already says it or
 /// there is nothing the reader can do.
 pub(super) fn composition_advice(error: &CompositionError, audience: Audience) -> Option<String> {
-    let options = match audience {
-        Audience::Consumer => "assemblr.jsonc `options`",
-        Audience::Author => "the manifest's `options`",
-    };
     Some(match error {
         // A defect in Assemblr, not something to act on.
         CompositionError::ContentMismatch { .. } => return None,
-        CompositionError::RootTarget { reason, .. } => match reason {
-            RootTargetReason::NotComposed | RootTargetReason::Transitive => format!(
-                "remove the entry from {options}, or declare the unit in `dependencies` so that \
-                 it is selected"
-            ),
-            RootTargetReason::NotTheBuiltUnit => {
-                format!("remove the entry from {options}; a unit's build configures only itself")
-            }
-        },
-        CompositionError::UndeclaredParameter { .. } => format!(
-            "spell the parameter as the unit declares it in {options}, or remove the entry; `assemblr \
-             info <unit>` lists the parameters the unit declares"
-        ),
-        CompositionError::InvalidValue {
-            error: ParameterValueError::NoMatch { .. },
-            ..
-        } => format!(
-            "give the option in {options} a value that matches the pattern; `assemblr info \
-             <unit>` shows the parameter's description"
-        ),
-        CompositionError::InvalidValue { .. } => format!(
-            "give the option in {options} a value of the parameter's type and, for an \
-             enumerated parameter, one of its allowed values"
-        ),
-        CompositionError::InheritedParameter { .. } => {
-            "the unit's author must define the parameter instead of inheriting it, or depend on \
-             a version of the dependency that declares it"
-                .to_owned()
-        }
-        CompositionError::MappingIncompatible { .. } => {
-            "the unit's author must change the mapping or the parameters; a mapping never \
-             converts a value"
-                .to_owned()
-        }
-        CompositionError::OptionsConflict { requirements, .. } => {
-            let mapped = requirements.iter().find_map(|requirement| {
-                requirement
-                    .from()
-                    .map(|from| (requirement.requirer(), from))
-            });
-            match mapped {
-                Some((requirer, from)) => format!(
-                    "make the requirements agree: {requirer} carries its `{from}` to this \
-                     parameter, so set `{from}` of that unit in {options} rather than this \
-                     parameter directly, or give both the same value"
-                ),
-                None => format!(
-                    "make the requirements agree: change the value in {options}, or select \
-                     versions of the units whose requirements match"
-                ),
-            }
-        }
-        CompositionError::MissingValue {
-            unit,
-            parameter,
-            responsible,
-            ..
-        } => match audience {
-            _ if !responsible.contains(&Requirer::Root) => {
-                "the units that depend on it must set the value; ask their authors".to_owned()
-            }
-            Audience::Consumer => format!(
-                "run `assemblr add {unit} --option {parameter}=<value>`, or set `{parameter}` \
-                 under {unit} in assemblr.jsonc `options`"
-            ),
-            Audience::Author => format!(
-                "under {unit} in {options}, map `{parameter}` to a parameter this unit \
-                 declares in `params`, as in `\"{parameter}\": {{\"from\": \"{parameter}\"}}`, \
-                 or set a value"
-            ),
-        },
         CompositionError::SeveralAmenders { .. } => {
             "remove one of the amending units, or ask an author to deliver the change in a file \
              of its own"
@@ -137,11 +59,6 @@ pub(super) fn composition_advice(error: &CompositionError, audience: Audience) -
                  another version of it, or ask its author to publish a corrected one"
             ),
         },
-        CompositionError::InvalidDeliveredPath { .. } => {
-            "the unit's author must rename the template so that its path without \
-             `.assemblr.tmpl` is a valid path"
-                .to_owned()
-        }
         CompositionError::PathCollision { .. } | CompositionError::NestedPathCollision { .. } => {
             let (drop, from) = match audience {
                 Audience::Consumer => ("one of the units", "the selection"),
@@ -183,7 +100,8 @@ fn merge_advice(failure: Option<&MergeFailure>, audience: Audience) -> String {
         }
         Some(MergeFailure::Conflicts(_)) => format!(
             "the amendments of one file must agree: {who} so that no two amenders set one \
-             value differently, or expose the value as a parameter of the provider"
+             value differently, or have the provider leave the value to the consumer as a \
+             placeholder"
         ),
         Some(MergeFailure::TextConflicts(_)) => format!(
             "no amender takes precedence over another: {who} so that they change different \
@@ -278,7 +196,7 @@ mod tests {
     use assemblr::domain::{CompositionError, Requirer};
 
     #[test]
-    fn an_own_amendment_base_points_at_unit_update_and_not_at_options() {
+    fn an_own_amendment_base_points_at_unit_update() {
         let error = CompositionError::AmendmentBase {
             amender: Requirer::Root,
             path: "config/app.json".parse().unwrap(),
@@ -288,7 +206,6 @@ mod tests {
         };
         let advice = composition_advice(&error, Audience::Author).unwrap();
         assert!(advice.contains("unit update"), "{advice}");
-        assert!(!advice.contains("options"), "{advice}");
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! Composing the files of a composition: templates rendered, and each
-//! amended file's copies layered on the provider's file (see
+//! Composing the files of a composition: each amended file's copies
+//! layered on the provider's file (see
 //! `crate::adapters::layered` and `docs/domain/amendments-and-composition.md`).
 //!
 //! An amender's base is the composition below it at its own locked
@@ -16,23 +16,22 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{BuildProblem, CrossVersionReason, Dependencies, TemplateError};
+use super::{BuildProblem, CrossVersionReason, Dependencies};
 use crate::adapters::layered::{Layer, Unresolved, layer_json, layer_text};
 use crate::adapters::merge::{MergeFailure, MergeNote, unshared_notes};
-use crate::adapters::render::{Context, parameters_referenced, render};
 use crate::domain::{
-    ComposedFile, Composition, FileTree, MergeFormat, ParameterValues, RelativePath, UnitFile,
-    UnitIdentity, UnitLock, Version, dependency_closure, is_text,
+    ComposedFile, Composition, FileTree, MergeFormat, RelativePath, UnitFile, UnitIdentity,
+    UnitLock, Version, dependency_closure, is_text,
 };
 
 /// The composed files of a composition.
-pub(crate) struct Rendered {
+pub(crate) struct Layered {
     pub(crate) files: Vec<(RelativePath, UnitFile)>,
     /// What the composition reports without failing, each with the
     /// delivered path it concerns.
     pub(crate) notes: Vec<(RelativePath, String)>,
     /// The amendments applied to another version of their provider than
-    /// the one they were taken from, each with its delivered path.
+    /// the one they were taken from, each with its path.
     pub(crate) crossed: Vec<(RelativePath, String)>,
     /// The files with a conflict between siblings that no amender above
     /// both resolved. Such a file is not among `files`.
@@ -43,10 +42,8 @@ pub(crate) struct Rendered {
 /// that no unit above both resolved.
 #[derive(Debug, Clone)]
 pub struct UnresolvedFile {
-    /// The delivered path.
-    pub(crate) delivered: RelativePath,
-    /// The path in the provider's `src/`.
-    pub(crate) source: RelativePath,
+    /// The path in the provider's `src/`, which is also the delivered one.
+    pub(crate) path: RelativePath,
     /// The provider.
     pub(crate) provider: UnitIdentity,
     /// Its resolved version, when it is locked.
@@ -67,7 +64,7 @@ impl std::fmt::Display for UnresolvedFile {
             f,
             "src/{} of {}{}: the amendments of {} conflict, and no unit above them resolves \
              the conflict:",
-            self.source,
+            self.path,
             self.provider,
             self.version
                 .as_ref()
@@ -82,32 +79,19 @@ impl std::fmt::Display for UnresolvedFile {
     }
 }
 
-/// Which text of each side is layered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Sides {
-    /// Templates rendered with the composition's values: what a build
-    /// delivers.
-    Rendered,
-    /// The sources, as `unit amend` copies them and `unit update` rebases
-    /// them.
-    Sources,
-}
-
-/// Renders every file of `composition`: templates with the parameter
-/// values of the unit that provides each one, plus the amending unit's
-/// values as `own` for a copy, and amended files layered. Every problem is
-/// reported, by delivered path and then position, and the files are given
-/// only when there was none. `built` is the unit being built, whose
-/// amendments are not published versions.
-pub(crate) fn render_files(
+/// Layers every file of `composition`: each amended file's copies on the
+/// provider's file. Every problem is reported, by path and then position,
+/// and the files are given only when there was none. `built` is the unit
+/// being built, whose amendments are not published versions.
+pub(crate) fn layer_files(
     composition: &Composition<'_>,
     lock: &UnitLock,
     built: Option<&UnitIdentity>,
     dependencies: &Dependencies,
     problems: &mut Vec<BuildProblem>,
-) -> Option<Rendered> {
-    let worlds = Worlds::new(composition, lock, built, dependencies);
-    let mut rendered = Rendered {
+) -> Option<Layered> {
+    let worlds = Worlds::new(lock, built, dependencies);
+    let mut layered = Layered {
         files: Vec::new(),
         notes: Vec::new(),
         crossed: Vec::new(),
@@ -116,27 +100,26 @@ pub(crate) fn render_files(
     let mut failed = false;
     for (path, composed) in composition.files() {
         let mut sink = Vec::new();
-        let outcome = worlds.layer(path, composed, Sides::Rendered, &mut sink);
+        let outcome = worlds.layer(path, composed, &mut sink);
         problems.extend(sink);
         let Some(outcome) = outcome else {
             failed = true;
             continue;
         };
-        rendered
+        layered
             .notes
             .extend(outcome.notes.into_iter().map(|note| (path.clone(), note)));
-        rendered
+        layered
             .crossed
             .extend(outcome.crossed.into_iter().map(|note| (path.clone(), note)));
         if outcome.unresolved.is_empty() {
-            rendered.files.push((
+            layered.files.push((
                 path.clone(),
                 UnitFile::new(outcome.bytes, composed.is_executable()),
             ));
         } else {
-            rendered.unresolved.push(UnresolvedFile {
-                delivered: path.clone(),
-                source: composed.source().clone(),
+            layered.unresolved.push(UnresolvedFile {
+                path: path.clone(),
                 provider: composed.unit().clone(),
                 version: lock
                     .units()
@@ -153,14 +136,14 @@ pub(crate) fn render_files(
             });
         }
     }
-    (!failed).then_some(rendered)
+    (!failed).then_some(layered)
 }
 
-/// Layers the sources of the amended file delivered at `path`: the
-/// provider's source and the copies of every amender, with conflicts
-/// between siblings marked. This is the base of a new amendment of the
-/// file by the unit being built, and the copy the pending state creates.
-pub(crate) fn layer_sources(
+/// Layers the amended file at `path` alone: the provider's file and the
+/// copies of every amender, with conflicts between siblings marked. This is
+/// the base of a new amendment of the file by the unit being built, and the
+/// copy the pending state creates.
+pub(crate) fn layer_file(
     composition: &Composition<'_>,
     path: &RelativePath,
     lock: &UnitLock,
@@ -169,29 +152,24 @@ pub(crate) fn layer_sources(
     problems: &mut Vec<BuildProblem>,
 ) -> Option<Vec<u8>> {
     let composed = composition.files().get(path)?;
-    let worlds = Worlds::new(composition, lock, built, dependencies);
+    let worlds = Worlds::new(lock, built, dependencies);
     worlds
-        .layer(path, composed, Sides::Sources, problems)
+        .layer(path, composed, problems)
         .map(|outcome| outcome.bytes)
 }
 
-/// The amended file: whose it is, where it lives, and whether it is a
-/// template.
+/// The amended file: whose it is and where it lives.
 #[derive(Clone, Copy)]
 struct FileRef<'r> {
     provider: &'r UnitIdentity,
-    source: &'r RelativePath,
-    delivered: &'r RelativePath,
-    template: bool,
+    path: &'r RelativePath,
 }
 
 impl<'r> FileRef<'r> {
-    fn of(delivered: &'r RelativePath, composed: &ComposedFile<'r>) -> Self {
+    fn of(path: &'r RelativePath, composed: &ComposedFile<'r>) -> Self {
         Self {
             provider: composed.unit(),
-            source: composed.source(),
-            delivered,
-            template: composed.is_template(),
+            path,
         }
     }
 }
@@ -210,14 +188,12 @@ struct History {
     src: BTreeMap<(UnitIdentity, Version), FileTree>,
     amendments: BTreeMap<(UnitIdentity, Version), FileTree>,
     locks: BTreeMap<(UnitIdentity, Version), Option<UnitLock>>,
-    /// Each reconstructed base, by amender, its version, the source path,
-    /// and which sides were layered.
-    bases: BTreeMap<(UnitIdentity, Version, RelativePath, bool), Vec<u8>>,
+    /// Each reconstructed base, by amender, its version, and the path.
+    bases: BTreeMap<(UnitIdentity, Version, RelativePath), Vec<u8>>,
 }
 
 /// The composition's world and the published worlds it reaches.
-struct Worlds<'c, 'a> {
-    composition: &'c Composition<'a>,
+struct Worlds<'c> {
     lock: &'c UnitLock,
     built: Option<&'c UnitIdentity>,
     dependencies: &'c Dependencies,
@@ -235,15 +211,13 @@ struct Amender<'w> {
     below: BTreeSet<&'w UnitIdentity>,
 }
 
-impl<'c, 'a> Worlds<'c, 'a> {
+impl<'c> Worlds<'c> {
     fn new(
-        composition: &'c Composition<'a>,
         lock: &'c UnitLock,
         built: Option<&'c UnitIdentity>,
         dependencies: &'c Dependencies,
     ) -> Self {
         Self {
-            composition,
             lock,
             built,
             dependencies,
@@ -251,66 +225,11 @@ impl<'c, 'a> Worlds<'c, 'a> {
         }
     }
 
-    fn values_of(&self, unit: &UnitIdentity) -> ParameterValues {
-        self.composition
-            .values()
-            .get(unit)
-            .cloned()
-            .unwrap_or_default()
-    }
-
     fn published_version(&self, amender: &UnitIdentity) -> Option<Version> {
         (Some(amender) != self.built)
             .then(|| self.lock.units().get(amender))
             .flatten()
             .map(|locked| locked.version().clone())
-    }
-
-    /// One side of a file as it is layered: the bytes, or, for a template
-    /// rendered, the text rendered with the provider's values and the
-    /// amender's as `own`. `None` when it cannot be, with the problem in
-    /// `sink` unless `quiet`.
-    fn side(
-        &self,
-        file: FileRef<'_>,
-        bytes: &[u8],
-        amender: Option<&UnitIdentity>,
-        sides: Sides,
-        quiet: bool,
-        sink: &mut Vec<BuildProblem>,
-    ) -> Option<Vec<u8>> {
-        if sides == Sides::Sources || !file.template {
-            return Some(bytes.to_vec());
-        }
-        let provider = file.provider;
-        let template = |error| BuildProblem::Template {
-            unit: provider.clone(),
-            path: file.source.clone(),
-            amended_by: amender.cloned(),
-            published: amender.and_then(|amender| self.published_version(amender)),
-            error,
-        };
-        let Ok(text) = std::str::from_utf8(bytes) else {
-            if !quiet {
-                sink.push(template(TemplateError::NotUtf8));
-            }
-            return None;
-        };
-        let values = self.values_of(provider);
-        let own = amender.map(|amender| self.values_of(amender));
-        let context = match &own {
-            Some(own) => Context::amended(&values, own),
-            None => Context::new(&values),
-        };
-        match render(text, &context) {
-            Ok(rendered) => Some(rendered.into_bytes()),
-            Err(errors) => {
-                if !quiet {
-                    sink.extend(errors.into_iter().map(TemplateError::Render).map(template));
-                }
-                None
-            }
-        }
     }
 
     /// The published lockfile of `unit` at `version`, read once.
@@ -439,7 +358,7 @@ impl<'c, 'a> Worlds<'c, 'a> {
                 .filter(|(unit, locked)| {
                     self.dependencies
                         .manifest(unit, locked.version())
-                        .and_then(|manifest| manifest.amendments().get(file.source))
+                        .and_then(|manifest| manifest.amendments().get(file.path))
                         .is_some_and(|declaration| declaration.unit() == file.provider)
                 })
                 .map(|(unit, locked)| (unit, locked.version()))
@@ -453,15 +372,13 @@ impl<'c, 'a> Worlds<'c, 'a> {
     fn unshared_notes(
         &self,
         file: FileRef<'_>,
-        sides: Sides,
         amender: &Amender<'_>,
         provider_text: &[u8],
         copy: &[u8],
     ) -> Vec<String> {
         let mut notes = Vec::new();
         if Some(amender.identity) != self.built
-            || sides != Sides::Rendered
-            || MergeFormat::of_path(file.delivered) != MergeFormat::Json
+            || MergeFormat::of_path(file.path) != MergeFormat::Json
         {
             return notes;
         }
@@ -479,7 +396,7 @@ impl<'c, 'a> Worlds<'c, 'a> {
                 "amendments/{} of {}: if another unit amends src/{} of {} too, {what} of this \
                  copy is not carried; the merge carries members and values, not comments or \
                  order",
-                file.source, amender.identity, file.source, file.provider
+                file.path, amender.identity, file.path, file.provider
             ));
         }
         notes
@@ -510,7 +427,6 @@ impl<'c, 'a> Worlds<'c, 'a> {
         &self,
         path: &RelativePath,
         composed: &ComposedFile<'_>,
-        sides: Sides,
         sink: &mut Vec<BuildProblem>,
     ) -> Option<Outcome> {
         let file = FileRef::of(path, composed);
@@ -568,25 +484,11 @@ impl<'c, 'a> Worlds<'c, 'a> {
             ) {
                 continue;
             }
-            let base = self.base_of(
-                amender.identity,
-                version,
-                amender.copy,
-                file,
-                sides,
-                resolved.as_ref(),
-                sink,
-            )?;
+            let base = self.base_of(amender.identity, version, file, resolved.as_ref(), sink)?;
             reconstructed.insert(amender.identity, base);
         }
-        let layered = self.layer_with(
-            file,
-            composed.contents(),
-            sides,
-            &amenders,
-            &reconstructed,
-            sink,
-        )?;
+        let layered =
+            self.layer_with(file, composed.contents(), &amenders, &reconstructed, sink)?;
         Some(Outcome {
             bytes: layered.bytes,
             notes: layered.notes,
@@ -602,54 +504,37 @@ impl<'c, 'a> Worlds<'c, 'a> {
         &self,
         file: FileRef<'_>,
         provider_bytes: &[u8],
-        sides: Sides,
         amenders: &[Amender<'_>],
         reconstructed: &BTreeMap<&UnitIdentity, Vec<u8>>,
         sink: &mut Vec<BuildProblem>,
     ) -> Option<Outcome> {
-        let (provider, path) = (file.provider, file.delivered);
+        let (provider, path) = (file.provider, file.path);
         let version = self
             .lock
             .units()
             .get(provider)
             .map(|locked| locked.version().clone());
-        let provider_text = self.side(file, provider_bytes, None, sides, false, sink);
+        let provider_text = provider_bytes;
         if amenders.is_empty() {
-            return provider_text.map(|bytes| Outcome {
-                bytes,
+            return Some(Outcome {
+                bytes: provider_text.to_vec(),
                 notes: Vec::new(),
                 crossed: Vec::new(),
                 unresolved: Vec::new(),
             });
         }
-        let mut copies = Vec::new();
-        for amender in amenders {
-            copies.push(self.side(
-                file,
-                amender.copy,
-                Some(amender.identity),
-                sides,
-                false,
-                sink,
-            ));
-        }
-        let (Some(provider_text), Some(copies)) = (
-            provider_text,
-            copies.into_iter().collect::<Option<Vec<Vec<u8>>>>(),
-        ) else {
-            return None;
-        };
+        let copies: Vec<&[u8]> = amenders.iter().map(|amender| amender.copy).collect();
         // One amender whose base is the file itself, or a base reconstructed
         // at other versions that is the file all the same: its copy takes
         // the file's place, byte for byte, whatever the format.
         if let ([amender], [copy]) = (amenders, copies.as_slice()) {
             let unchanged = reconstructed
                 .get(amender.identity)
-                .is_none_or(|base| *base == provider_text);
+                .is_none_or(|base| base.as_slice() == provider_text);
             if unchanged {
                 return Some(Outcome {
-                    notes: self.unshared_notes(file, sides, amender, &provider_text, copy),
-                    bytes: copy.clone(),
+                    notes: self.unshared_notes(file, amender, provider_text, copy),
+                    bytes: copy.to_vec(),
                     crossed: Vec::new(),
                     unresolved: Vec::new(),
                 });
@@ -658,7 +543,7 @@ impl<'c, 'a> Worlds<'c, 'a> {
         // Amenders in a chain, each above the one before, with each copy
         // taken on top of the composition below it: the top copy is the
         // file, whatever the format.
-        let mut ordered: Vec<(&Amender<'_>, &Vec<u8>)> = amenders.iter().zip(&copies).collect();
+        let mut ordered: Vec<(&Amender<'_>, &&[u8])> = amenders.iter().zip(&copies).collect();
         ordered.sort_by_key(|(amender, _)| amender.below.len());
         let chain = ordered
             .windows(2)
@@ -667,7 +552,7 @@ impl<'c, 'a> Worlds<'c, 'a> {
         if chain {
             if let Some((_, top)) = ordered.last() {
                 return Some(Outcome {
-                    bytes: (*top).clone(),
+                    bytes: top.to_vec(),
                     notes: Vec::new(),
                     crossed: Vec::new(),
                     unresolved: Vec::new(),
@@ -677,7 +562,7 @@ impl<'c, 'a> Worlds<'c, 'a> {
         let merge = |failure: Option<MergeFailure>| BuildProblem::Merge {
             unit: provider.clone(),
             version: version.clone(),
-            path: file.source.clone(),
+            path: file.path.clone(),
             amenders: amenders
                 .iter()
                 .map(|amender| amender.identity.clone())
@@ -695,13 +580,8 @@ impl<'c, 'a> Worlds<'c, 'a> {
                 .collect(),
             failure,
         };
-        // A template's sources are layered by line, whatever its format: a
-        // placeholder in a value's place is not the format's syntax.
-        let format = match MergeFormat::of_path(path) {
-            MergeFormat::Json if sides == Sides::Sources && file.template => MergeFormat::Text,
-            format => format,
-        };
-        let all_text = is_text(&provider_text)
+        let format = MergeFormat::of_path(path);
+        let all_text = is_text(provider_text)
             && copies.iter().all(|copy| is_text(copy))
             && reconstructed.values().all(|base| is_text(base));
         if format == MergeFormat::Unsupported || !all_text {
@@ -711,7 +591,7 @@ impl<'c, 'a> Worlds<'c, 'a> {
             match amenders {
                 [amender] => sink.push(BuildProblem::CrossVersion {
                     unit: provider.clone(),
-                    path: file.source.clone(),
+                    path: file.path.clone(),
                     amender: amender.identity.clone(),
                     published: amender.version.clone(),
                     base: amender.base.clone(),
@@ -734,7 +614,7 @@ impl<'c, 'a> Worlds<'c, 'a> {
             })
             .filter_map(|(copy, base)| copy.map(|copy| (copy, base)))
             .collect();
-        let Ok(provider_str) = std::str::from_utf8(&provider_text) else {
+        let Ok(provider_str) = std::str::from_utf8(provider_text) else {
             sink.push(merge(None));
             return None;
         };
@@ -763,7 +643,7 @@ impl<'c, 'a> Worlds<'c, 'a> {
                     .merged
                     .notes()
                     .iter()
-                    .map(|note| format!("src/{} of {provider}: {note}", file.source))
+                    .map(|note| format!("src/{} of {provider}: {note}", file.path))
                     .collect(),
                 bytes: layered.merged.into_text().into_bytes(),
                 crossed: Vec::new(),
@@ -781,24 +661,16 @@ impl<'c, 'a> Worlds<'c, 'a> {
     /// records: the provider's file at the declared base, composed with the
     /// amenders of the file below `amender` there, each at the version
     /// locked, on its own base by the same rule.
-    #[allow(clippy::too_many_arguments)]
     fn base_of(
         &self,
         amender: &UnitIdentity,
         version: &Version,
-        copy: &[u8],
         file: FileRef<'_>,
-        sides: Sides,
         resolved: Option<&Version>,
         sink: &mut Vec<BuildProblem>,
     ) -> Option<Vec<u8>> {
-        let (provider, source) = (file.provider, file.source);
-        let key = (
-            amender.clone(),
-            version.clone(),
-            source.clone(),
-            sides == Sides::Rendered,
-        );
+        let (provider, source) = (file.provider, file.path);
+        let key = (amender.clone(), version.clone(), source.clone());
         if let Some(base) = self.history.borrow().bases.get(&key) {
             return Some(base.clone());
         }
@@ -824,21 +696,6 @@ impl<'c, 'a> Worlds<'c, 'a> {
             sink.push(cross(CrossVersionReason::BaseUnavailable));
             return None;
         };
-        // A parameter a template names must mean the same at the resolved
-        // version as at the base, or the contribution cannot be told from
-        // the provider's own change.
-        if file.template && resolved.is_some_and(|resolved| *resolved != declared) {
-            if let Some(problem) = self.parameter_changed(
-                provider,
-                &declared,
-                resolved,
-                provider_file.contents(),
-                copy,
-            ) {
-                sink.push(cross(problem));
-                return None;
-            }
-        }
         // The amenders of the file in the amender's world.
         let manifest_at = |unit: &UnitIdentity| {
             world
@@ -898,73 +755,18 @@ impl<'c, 'a> Worlds<'c, 'a> {
             let base = self.base_of(
                 amender_below.identity,
                 version_below,
-                amender_below.copy,
                 file,
-                sides,
                 Some(&declared),
                 sink,
             )?;
             reconstructed.insert(amender_below.identity, base);
         }
-        let outcome = self.layer_with(
-            file,
-            provider_file.contents(),
-            sides,
-            &lower,
-            &reconstructed,
-            sink,
-        )?;
+        let outcome =
+            self.layer_with(file, provider_file.contents(), &lower, &reconstructed, sink)?;
         self.history
             .borrow_mut()
             .bases
             .insert(key, outcome.bytes.clone());
         Some(outcome.bytes)
-    }
-
-    /// A parameter that `base_source` or `copy` names and that is not
-    /// declared alike at `resolved` and at `base`.
-    fn parameter_changed(
-        &self,
-        provider: &UnitIdentity,
-        base: &Version,
-        resolved: Option<&Version>,
-        base_source: &[u8],
-        copy: &[u8],
-    ) -> Option<CrossVersionReason> {
-        let mut referenced = std::str::from_utf8(base_source)
-            .map(parameters_referenced)
-            .unwrap_or_default();
-        referenced.extend(
-            std::str::from_utf8(copy)
-                .map(parameters_referenced)
-                .unwrap_or_default(),
-        );
-        // An inherited parameter takes its definition from the composed
-        // version of the unit it names, at either version of the provider.
-        let composed = |identity: &UnitIdentity| {
-            let locked = self.lock.units().get(identity)?;
-            self.dependencies.manifest(identity, locked.version())
-        };
-        let at = |version: &Version| {
-            self.dependencies
-                .manifest(provider, version)
-                .map(|manifest| manifest.resolved_params(composed).0)
-        };
-        let (then, now) = (at(base)?, resolved.and_then(at)?);
-        for name in referenced {
-            let kind = |params: &BTreeMap<_, crate::domain::ParameterDefinition>| {
-                params
-                    .get(&name)
-                    .map(|definition| definition.parameter_type().value_kind())
-            };
-            if kind(&now).is_none() || kind(&then) != kind(&now) {
-                return Some(CrossVersionReason::Parameter {
-                    name: name.clone(),
-                    base: kind(&then),
-                    resolved: kind(&now),
-                });
-            }
-        }
-        None
     }
 }

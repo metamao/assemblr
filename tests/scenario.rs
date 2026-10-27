@@ -3,9 +3,9 @@
 //!
 //! It follows the shape of the reference-scenario validation (#50, EXP-12 in
 //! the `system-design` research repository) with small stand-in files: an
-//! application unit that requires a parameter, and three units that amend
-//! it, two of them the same text file. A consumer composes them, edits the
-//! result, takes two provider releases (one merging cleanly, one stopping on
+//! application unit with a placeholder, and three units that amend it, two
+//! of them the same text file. A consumer composes them, replaces the
+//! placeholder, edits the result, takes two provider releases (one merging cleanly, one stopping on
 //! a conflict it resolves), removes a unit, and composes again. Every step
 //! is a real command; nothing is published or composed by hand.
 //!
@@ -40,20 +40,19 @@ impl Fixture {
     }
 }
 
-const APP_PARAM: &str = r#""params": {"appName": {"type": "string", "description": "The application name.", "example": "demo"}}"#;
-
-/// A unit's manifest at `version`, depending on `@ref/app` and passing its
-/// own `appName` on to it, when `dependent`.
+/// A unit's manifest at `version`: depending on `@ref/app` when
+/// `dependent`, and otherwise declaring the placeholder `__APP_NAME__`,
+/// which the dependents write in their files too.
 fn manifest(name: &str, version: &str, description: &str, dependent: bool) -> String {
-    let dependency = if dependent {
-        r#", "dependencies": {"@ref/app": "^1.0.0"}, "options": {"@ref/app": {"appName": {"from": "appName"}}}"#
+    let fields = if dependent {
+        r#""dependencies": {"@ref/app": "^1.0.0"}"#
     } else {
-        ""
+        r#""placeholders": {"replace": {"__APP_NAME__": "The application's name, in kebab-case."}}"#
     };
     format!(
         "{{\n  \"$schema\": \"./manifest.schema.json\", \"name\": \"{name}\", \
          \"version\": \"{version}\", \"description\": \"{description}\",\n  \
-         {APP_PARAM}{dependency}\n}}\n"
+         {fields}\n}}\n"
     )
 }
 
@@ -153,10 +152,10 @@ impl<'a> Author<'a> {
     }
 }
 
-const PACKAGE: &str = "{\n  \"name\": \"{{ appName }}\",\n  \"private\": true,\n  \"scripts\": {\n    \"build\": \"ng build\"\n  },\n  \"dependencies\": {\n    \"@angular/core\": \"^20\"\n  }\n}\n";
+const PACKAGE: &str = "{\n  \"name\": \"__APP_NAME__\",\n  \"private\": true,\n  \"scripts\": {\n    \"build\": \"ng build\"\n  },\n  \"dependencies\": {\n    \"@angular/core\": \"^20\"\n  }\n}\n";
 const AGENTS: &str =
     "# Agent guidance\n\nRead the README first.\n\n## Rules\n\n- Keep changes small.\n";
-const README: &str = "# {{ appName }}\n\nAn application.\n\nRun `npm start`.\n";
+const README: &str = "# __APP_NAME__\n\nAn application.\n\nRun `npm start`.\n";
 
 /// The four units of the scenario, published and registered: `@ref/app`,
 /// and `@ref/worker`, `@ref/docker`, and `@ref/neon`, which amend it.
@@ -167,9 +166,9 @@ fn publish_units(fixture: &Fixture) -> Author<'_> {
         "app",
         &manifest("@ref/app", "1.0.0", "An application skeleton.", false),
     );
-    app.src("package.json.assemblr.tmpl", PACKAGE)
+    app.src("package.json", PACKAGE)
         .src("AGENTS.md", AGENTS)
-        .src("README.md.assemblr.tmpl", README)
+        .src("README.md", README)
         .build();
     app.publish("app 1.0.0");
 
@@ -183,13 +182,13 @@ fn publish_units(fixture: &Fixture) -> Author<'_> {
         .build()
         .amend(
             "package.json",
-            "package.json.assemblr.tmpl",
+            "package.json",
             "\"build\": \"ng build\"",
             "\"build\": \"ng build\",\n    \"deploy\": \"wrangler deploy\"",
         )
         .src(
-            "wrangler.jsonc.assemblr.tmpl",
-            "{\n  // The worker.\n  \"name\": \"{{ appName }}\",\n  \"main\": \"dist/server.mjs\"\n}\n",
+            "wrangler.jsonc",
+            "{\n  // The worker.\n  \"name\": \"__APP_NAME__\",\n  \"main\": \"dist/server.mjs\"\n}\n",
         );
     worker.publish("worker 1.0.0");
 
@@ -225,7 +224,7 @@ fn publish_units(fixture: &Fixture) -> Author<'_> {
         )
         .amend(
             "package.json",
-            "package.json.assemblr.tmpl",
+            "package.json",
             "\"@angular/core\": \"^20\"",
             "\"@angular/core\": \"^20\",\n    \"@neondatabase/serverless\": \"^1\"",
         )
@@ -236,12 +235,7 @@ fn publish_units(fixture: &Fixture) -> Author<'_> {
 }
 
 const DECLARATION: &str = r#"{
-  "dependencies": {"@ref/worker": "^1.0.0", "@ref/docker": "^1.0.0", "@ref/neon": "^1.0.0"},
-  "options": {
-    "@ref/worker": {"appName": "shop"},
-    "@ref/docker": {"appName": "shop"},
-    "@ref/neon": {"appName": "shop"}
-  }
+  "dependencies": {"@ref/worker": "^1.0.0", "@ref/docker": "^1.0.0", "@ref/neon": "^1.0.0"}
 }
 "#;
 
@@ -265,15 +259,20 @@ fn units_are_authored_published_composed_updated_and_reconciled() {
         assert!(listing.contains(unit), "{listing}");
     }
 
-    // The first composition: one value of `appName` reaches every unit, two
-    // units amend `package.json` value by value, and two add a section to
-    // `AGENTS.md` at one place, kept in the order of their identities.
+    // The first composition: two units amend `package.json` value by value,
+    // two add a section to `AGENTS.md` at one place, kept in the order of
+    // their identities, and the placeholder of `@ref/app` is reported in
+    // every file that holds it, the worker's own file included.
     let shop = project(&fixture, "shop");
     let out = fixture.run(&shop, &["compose"]);
-    assert!(
-        out.contains("@ref/docker, @ref/neon each add lines"),
-        "{out}"
-    );
+    for expected in [
+        "@ref/docker, @ref/neon each add lines",
+        "1 placeholder to replace, in 3 files:",
+        "  __APP_NAME__\n\n    @ref/app: The application's name, in kebab-case.\n      \
+         README.md:1\n      package.json:2\n      wrangler.jsonc:3\n",
+    ] {
+        assert!(out.contains(expected), "{expected:?} in {out}");
+    }
     let composed = files(&shop);
     let names: Vec<&str> = composed.iter().map(|(path, _)| path.as_str()).collect();
     assert_eq!(
@@ -290,7 +289,6 @@ fn units_are_authored_published_composed_updated_and_reconciled() {
         ]
     );
     let package = read(&shop.join("package.json"));
-    assert!(package.contains("\"name\": \"shop\""), "{package}");
     assert!(
         package.contains("\"deploy\": \"wrangler deploy\""),
         "{package}"
@@ -303,12 +301,18 @@ fn units_are_authored_published_composed_updated_and_reconciled() {
     let container = agents.find("## Dev container").unwrap();
     let database = agents.find("## Database").unwrap();
     assert!(container < database, "{agents}");
-    assert!(read(&shop.join("wrangler.jsonc")).contains("\"name\": \"shop\""));
 
     // The same declaration composes to the same files elsewhere.
     let again = project(&fixture, "again");
     fixture.run(&again, &["compose"]);
     assert_eq!(files(&again), composed);
+
+    // The consumer replaces the placeholder, and nothing remains.
+    for file in ["README.md", "package.json", "wrangler.jsonc"] {
+        edit(&shop.join(file), "__APP_NAME__", "shop");
+    }
+    let out = fixture.run(&shop, &["status"]);
+    assert!(!out.contains("__APP_NAME__"), "{out}");
 
     // The consumer edits two files, and the provider releases changes to
     // both. `update` moves the provider and merges each file: the amenders
@@ -324,12 +328,12 @@ fn units_are_authored_published_composed_updated_and_reconciled() {
         "Run `npm start`.\n\nSee docs/ for more.\n",
     );
     edit(
-        &app.dir.join("src/README.md.assemblr.tmpl"),
+        &app.dir.join("src/README.md"),
         "An application.",
         "An Angular application.",
     );
     edit(
-        &app.dir.join("src/package.json.assemblr.tmpl"),
+        &app.dir.join("src/package.json"),
         "\"@angular/core\": \"^20\"",
         "\"@angular/core\": \"^20\",\n    \"@angular/router\": \"^20\"",
     );
@@ -339,6 +343,7 @@ fn units_are_authored_published_composed_updated_and_reconciled() {
     assert!(out.contains("merged README.md"), "{out}");
     assert!(out.contains("merged package.json"), "{out}");
     let package = read(&shop.join("package.json"));
+    assert!(package.contains("\"name\": \"shop\""), "{package}");
     assert!(package.contains("\"test\": \"vitest\""), "{package}");
     assert!(
         package.contains("\"@angular/router\": \"^20\""),
@@ -349,6 +354,7 @@ fn units_are_authored_published_composed_updated_and_reconciled() {
         "{package}"
     );
     let readme = read(&shop.join("README.md"));
+    assert!(readme.starts_with("# shop\n"), "{readme}");
     assert!(readme.contains("An Angular application."), "{readme}");
     assert!(readme.contains("See docs/ for more."), "{readme}");
 
@@ -360,7 +366,7 @@ fn units_are_authored_published_composed_updated_and_reconciled() {
         "Run `npm start` in the container.",
     );
     edit(
-        &app.dir.join("src/README.md.assemblr.tmpl"),
+        &app.dir.join("src/README.md"),
         "Run `npm start`.",
         "Run `npm run dev`.",
     );

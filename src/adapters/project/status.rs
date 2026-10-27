@@ -1,7 +1,8 @@
 //! What `assemblr status` reports about a consumer project, read-only and
 //! offline: where its composition stands, its units, the files edited since
-//! the last composition, and which units deliver each file (see
-//! `docs/domain/consumer-projects.md`, **Provisional (D-46)**).
+//! the last composition, the placeholders that remain, and which units
+//! deliver each file (see `docs/domain/consumer-projects.md`,
+//! **Provisional (D-46)**, and `docs/domain/placeholders.md`).
 //!
 //! Nothing is written and nothing is locked: the report is what the
 //! project, its state directory, and the local registry hold when it is
@@ -9,21 +10,22 @@
 //! from the lock in effect: the lockfile, or the one a composition waiting
 //! for its conflicts keeps.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use super::lockfile::{self, LOCKFILE, Lockfile};
 use super::store::Store;
 use super::{
-    ComposeProblem, DECLARATION, MANIFEST, Origin, Planned, plan, read_current, read_text,
-    snapshot_of,
+    ComposeProblem, CurrentFile, DECLARATION, MANIFEST, Origin, Planned, plan, read_current,
+    read_text, remaining_placeholders, snapshot_of,
 };
 use crate::adapters::build::{BuildProblem, newest_allowed};
 use crate::adapters::manifest::read_project;
 use crate::adapters::registry::Registry;
 use crate::domain::{
-    BlobId, Current, ReconciliationState, RelativePath, Snapshot, UnitIdentity, Version,
-    VersionRequirement,
+    BlobId, Current, PlaceholderReport, ReconciliationState, RelativePath, Snapshot, UnitIdentity,
+    Version, VersionRequirement,
 };
 
 /// Reports on the consumer project at `root` against `registry`'s index.
@@ -169,18 +171,33 @@ pub fn project_status(root: &Path, registry: &Registry) -> Result<ProjectStatus,
 
     // The base is verified first, as `compose` does: one that does not
     // verify leaves nothing to compare, and `compose` refuses to run.
-    let (edited, verified) = match (&state, &effective) {
+    let (edited, current) = match (&state, &effective) {
         (CompositionState::Composed, Some((_, reconciliation))) => {
             match edits(root, &store, reconciliation) {
-                Ok(edited) => (edited, true),
+                Ok((edited, current)) => (edited, Some(current)),
                 Err(problem) => {
                     problems.push(problem);
-                    (Vec::new(), false)
+                    (Vec::new(), None)
                 }
             }
         }
-        _ => (Vec::new(), false),
+        _ => (Vec::new(), None),
     };
+    let verified = current.is_some();
+    // The managed files were read for the edits already; the ones whose
+    // planned content holds a placeholder are searched. Without a stored
+    // listing to bound it, nothing else is read (Provisional (D-50)).
+    let placeholders = current
+        .as_ref()
+        .zip(planned.as_ref())
+        .map(|(current, planned)| {
+            remaining_placeholders(&planned.scopes, |path| {
+                current
+                    .get(path)
+                    .filter(|held| matches!(held.compared, Current::File(_)))
+                    .map(|held| Cow::Borrowed(held.bytes.as_slice()))
+            })
+        });
     let up_to_date = match (&state, &effective, &planned) {
         (CompositionState::Composed, Some((_, reconciliation)), Some(planned)) if verified => Some(
             snapshot_of(&planned.files).identity() == *reconciliation.base()
@@ -236,6 +253,7 @@ pub fn project_status(root: &Path, registry: &Registry) -> Result<ProjectStatus,
         up_to_date,
         units,
         edited,
+        placeholders,
         origins: planned.map(|planned| planned.origins),
         problems,
     })
@@ -269,14 +287,25 @@ fn newest_stable(index: &crate::domain::RegistryIndex, identity: &UnitIdentity) 
         .cloned()
 }
 
-/// The managed files that differ from the stored base, in path order. A
-/// file whose base is not stored is compared by the identity the listing
-/// records, which needs no stored content.
+/// The managed files that differ from the stored base, in path order, and
+/// what the project holds at each managed path. A file whose base is not
+/// stored is compared by the identity the listing records, which needs no
+/// stored content.
+#[allow(
+    clippy::type_complexity,
+    reason = "a private pair of the edits and the files they were read from"
+)]
 fn edits(
     root: &Path,
     store: &Store,
     reconciliation: &ReconciliationState,
-) -> Result<Vec<(RelativePath, FileEdit)>, ComposeProblem> {
+) -> Result<
+    (
+        Vec<(RelativePath, FileEdit)>,
+        BTreeMap<RelativePath, CurrentFile>,
+    ),
+    ComposeProblem,
+> {
     let base = store
         .verify_base(reconciliation.base(), reconciliation.unbased())
         .map_err(ComposeProblem::Base)?;
@@ -292,7 +321,7 @@ fn edits(
         };
         edited.push((path.clone(), edit));
     }
-    Ok(edited)
+    Ok((edited, current))
 }
 
 /// A consumer project's status.
@@ -302,6 +331,7 @@ pub struct ProjectStatus {
     up_to_date: Option<bool>,
     units: Vec<UnitStatus>,
     edited: Vec<(RelativePath, FileEdit)>,
+    placeholders: Option<PlaceholderReport>,
     origins: Option<BTreeMap<RelativePath, Origin>>,
     problems: Vec<ComposeProblem>,
 }
@@ -328,6 +358,14 @@ impl ProjectStatus {
     /// content are not an edit.
     pub fn edited(&self) -> &[(RelativePath, FileEdit)] {
         &self.edited
+    }
+
+    /// For a composed project whose composition can be planned, the
+    /// placeholders its units declare that the managed files still hold.
+    /// `None` while a composition waits or was interrupted, as for
+    /// [`edited`](Self::edited), or when it cannot be planned.
+    pub fn placeholders(&self) -> Option<&PlaceholderReport> {
+        self.placeholders.as_ref()
     }
 
     /// The units that deliver each file of the composition the declaration

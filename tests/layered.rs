@@ -543,7 +543,7 @@ fn declare(project: &Path, dependencies: &[(&str, &str)]) {
     fs::write(
         project.join("assemblr.jsonc"),
         format!(
-            "{{\n  \"dependencies\": {{{}}},\n  \"options\": {{}}\n}}\n",
+            "{{\n  \"dependencies\": {{{}}}\n}}\n",
             dependencies.join(", ")
         ),
     )
@@ -1266,8 +1266,8 @@ fn a_lower_amendment_dropped_below_a_published_amender_leaves_its_copy() {
 }
 
 #[test]
-fn a_json_template_is_amended_and_rebased_by_line() {
-    let fixture = Fixture::new("json-template");
+fn a_json_file_with_a_placeholder_is_amended_and_rebased() {
+    let fixture = Fixture::new("json-placeholder");
     let base = fixture.repo("base");
     base.write(
         "manifest.jsonc",
@@ -1275,12 +1275,12 @@ fn a_json_template_is_amended_and_rebased_by_line() {
             "@acme/base",
             "1.0.0",
             &[],
-            r#", "params": {"port": {"type": "integer", "description": "The port.", "default": 8787}}"#,
+            r#", "placeholders": {"replace": {"__PORT__": "The port the server listens on."}}"#,
         ),
     );
     base.write(
-        "src/config.json.assemblr.tmpl",
-        "{\n  \"port\": {{ port }},\n  \"name\": \"base\"\n}\n",
+        "src/config.json",
+        "{\n  \"port\": \"__PORT__\",\n  \"name\": \"base\"\n}\n",
     );
     base.publish("1.0.0");
     fixture.register(&base);
@@ -1292,8 +1292,8 @@ fn a_json_template_is_amended_and_rebased_by_line() {
         "1.0.0",
         &[("@acme/base", "=1.0.0")],
         &[(
-            "config.json.assemblr.tmpl",
-            "{\n  \"api\": true,\n  \"port\": {{ port }},\n  \"name\": \"base\"\n}\n",
+            "config.json",
+            "{\n  \"api\": true,\n  \"port\": \"__PORT__\",\n  \"name\": \"base\"\n}\n",
         )],
     );
     fixture.register(&api);
@@ -1305,8 +1305,8 @@ fn a_json_template_is_amended_and_rebased_by_line() {
         "1.0.0",
         &[("@acme/base", "=1.0.0")],
         &[(
-            "config.json.assemblr.tmpl",
-            "{\n  \"port\": {{ port }},\n  \"name\": \"base\",\n  \"db\": true\n}\n",
+            "config.json",
+            "{\n  \"port\": \"__PORT__\",\n  \"name\": \"base\",\n  \"db\": true\n}\n",
         )],
     );
     fixture.register(&db);
@@ -1314,15 +1314,14 @@ fn a_json_template_is_amended_and_rebased_by_line() {
     succeeds(fixture.build(&app));
     assert_eq!(
         app.read("build/config.json"),
-        "{\n  \"api\": true,\n  \"port\": 8787,\n  \"name\": \"base\",\n  \"db\": true\n}\n"
+        "{\n  \"api\": true,\n  \"port\": \"__PORT__\",\n  \"name\": \"base\",\n  \"db\": true\n}\n"
     );
-    // The copy is the sources layered by line, placeholders and all.
+    // The copy is the sources layered, placeholder and all.
     succeeds(fixture.assemblr(&app.path, &["unit", "amend", "config.json"]));
-    let copy =
-        "{\n  \"api\": true,\n  \"port\": {{ port }},\n  \"name\": \"base\",\n  \"db\": true\n}\n";
-    assert_eq!(app.read("amendments/config.json.assemblr.tmpl"), copy);
+    let copy = "{\n  \"api\": true,\n  \"port\": \"__PORT__\",\n  \"name\": \"base\",\n  \"db\": true\n}\n";
+    assert_eq!(app.read("amendments/config.json"), copy);
     app.write(
-        "amendments/config.json.assemblr.tmpl",
+        "amendments/config.json",
         &copy.replace("\"api\": true", "\"api\": false"),
     );
     succeeds(fixture.build(&app));
@@ -1335,8 +1334,8 @@ fn a_json_template_is_amended_and_rebased_by_line() {
         "1.1.0",
         &[("@acme/base", "=1.0.0")],
         &[(
-            "config.json.assemblr.tmpl",
-            "{\n  \"port\": {{ port }},\n  \"name\": \"base\",\n  \"db\": 2\n}\n",
+            "config.json",
+            "{\n  \"port\": \"__PORT__\",\n  \"name\": \"base\",\n  \"db\": 2\n}\n",
         )],
     );
     let output = succeeds(fixture.assemblr(&app.path, &["unit", "update"]));
@@ -1346,12 +1345,12 @@ fn a_json_template_is_amended_and_rebased_by_line() {
         stdout(&output)
     );
     assert_eq!(
-        app.read("amendments/config.json.assemblr.tmpl"),
-        "{\n  \"api\": false,\n  \"port\": {{ port }},\n  \"name\": \"base\",\n  \"db\": 2\n}\n"
+        app.read("amendments/config.json"),
+        "{\n  \"api\": false,\n  \"port\": \"__PORT__\",\n  \"name\": \"base\",\n  \"db\": 2\n}\n"
     );
     succeeds(fixture.build(&app));
     assert_eq!(
         app.read("build/config.json"),
-        "{\n  \"api\": false,\n  \"port\": 8787,\n  \"name\": \"base\",\n  \"db\": 2\n}\n"
+        "{\n  \"api\": false,\n  \"port\": \"__PORT__\",\n  \"name\": \"base\",\n  \"db\": 2\n}\n"
     );
 }

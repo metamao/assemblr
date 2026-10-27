@@ -17,6 +17,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use super::diagnostic::{Diagnosis, count, fail, fail_with};
+use super::placeholders;
 use super::project::problem_advice;
 
 #[derive(Debug, Args)]
@@ -135,6 +136,12 @@ fn report(status: &ProjectStatus, all_files: bool) {
         println!("Edited since the last composition:");
         for (path, edit) in status.edited() {
             println!("  {path}: {}{}", edit.as_str(), origin(path));
+        }
+    }
+    if let Some(report) = status.placeholders().filter(|report| !report.is_empty()) {
+        println!("Placeholders to replace:");
+        for line in placeholders::body(report) {
+            println!("{line}");
         }
     }
     if all_files {
@@ -319,6 +326,7 @@ fn status_json(status: &ProjectStatus) -> Value {
         "units": units,
         "pending": pending,
         "edited": edited,
+        "placeholders": status.placeholders().map(placeholders::report_json),
         "files": files,
         "problems": problems,
     })
