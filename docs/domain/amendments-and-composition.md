@@ -135,8 +135,9 @@ Details:
   unit's copies; in a unit's directory, the copies of that unit and of the
   units of the catalog below it. Each unit is rebased after the units of
   the catalog it depends on. A clean rebase is written only once the whole
-  build validates, together with it; a failed build leaves `amendments/`
-  and `.assemblr/` as they were. A rebase with conflicts writes every
+  build validates, before `build/`; a build that fails before then leaves
+  `amendments/` and `.assemblr/` as they were, and a failure while writing
+  after it names the copies rebased. A rebase with conflicts writes every
   rebased copy and the new bases, and builds nothing. A file whose rebase
   conflicts is not rebased in the units above until it is resolved.
 

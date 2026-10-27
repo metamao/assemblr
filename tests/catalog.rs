@@ -507,7 +507,10 @@ fn a_change_to_what_a_copy_changed_stops_the_build_with_markers() {
     write(&catalog, "units/a/src/a.txt", "one\ntwo\nthree, by a\n");
     let err = build_error(&fixture, &catalog);
     assert!(
-        err.contains("units/b/amendments/a.txt: src/a.txt of @acme/a changed"),
+        err.contains(
+            "units/b/amendments/a.txt: src/a.txt of @acme/a, as the units below compose it, \
+             changed"
+        ),
         "{err}"
     );
     assert!(err.contains("between markers"), "{err}");
@@ -869,4 +872,49 @@ fn a_json_change_below_a_copy_is_merged_into_it() {
         assert!(built.contains(script), "{built}");
     }
     succeeds(fixture.run(&catalog, &["unit", "check"]));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_rebased_copy_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new("sibling-mode");
+    let catalog = fixture.amending();
+    let copy = catalog.join("units/b/amendments/a.txt");
+    fs::set_permissions(&copy, fs::Permissions::from_mode(0o755)).unwrap();
+    write(&catalog, "units/a/src/a.txt", "one, by a\ntwo\nthree\n");
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+    assert_eq!(read(&copy), "one, by a\ntwo\nthree, by b\n");
+    assert_eq!(
+        fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+}
+
+#[test]
+fn a_failed_store_write_puts_the_rebased_copies_back() {
+    let fixture = Fixture::new("sibling-restore");
+    let catalog = fixture.amending();
+    write(&catalog, "units/a/src/a.txt", "one, by a\ntwo\nthree\n");
+    // The record cannot be staged: a directory holds its staging name.
+    fs::create_dir_all(catalog.join(".assemblr/amendment-bases.json.new/x")).unwrap();
+    let record = read(&catalog.join(".assemblr/amendment-bases.json"));
+    let err = build_error(&fixture, &catalog);
+    assert!(
+        err.contains("the copies and their stored bases are as they were"),
+        "{err}"
+    );
+    assert_eq!(
+        read(&catalog.join("units/b/amendments/a.txt")),
+        "one\ntwo\nthree, by b\n"
+    );
+    assert_eq!(
+        read(&catalog.join(".assemblr/amendment-bases.json")),
+        record
+    );
+    assert!(
+        !catalog
+            .join("units/b/amendments/a.txt.assemblr-rebase-new")
+            .exists()
+    );
 }

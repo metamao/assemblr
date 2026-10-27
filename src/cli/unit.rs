@@ -727,7 +727,8 @@ fn add_diagnosis(failure: &AddFailure, root: &Path) -> Diagnosis {
                 BuildFailure::Publish(_)
                 | BuildFailure::PartlyBuilt { .. }
                 | BuildFailure::Rebased(_)
-                | BuildFailure::RebaseWrite(_) => Vec::new(),
+                | BuildFailure::RebaseWrite(_)
+                | BuildFailure::AfterRebase { .. } => Vec::new(),
                 BuildFailure::Pending(pending) => {
                     return pending_diagnosis(pending, "manifest.jsonc holds the dependency and ");
                 }
@@ -809,7 +810,11 @@ fn build() -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(failure) => {
-                if let BuildFailure::PartlyBuilt { built, .. } = &failure {
+                let inner = match &failure {
+                    BuildFailure::AfterRebase { failure, .. } => failure.as_ref(),
+                    failure => failure,
+                };
+                if let BuildFailure::PartlyBuilt { built, .. } = inner {
                     for built in built {
                         report_built(built, true);
                     }
@@ -834,8 +839,8 @@ fn report_built(built: &Built, at_catalog: bool) {
     report_lockfile(built);
     for copy in built.rebased() {
         eprintln!(
-            "note: rebased units/{}/amendments/{} onto the change in src/{} of {} since its \
-             stored base",
+            "note: rebased units/{}/amendments/{} onto the change in src/{} of {}, as the \
+             units below compose it, since its stored base",
             copy.unit().name(),
             copy.path(),
             copy.path(),
@@ -1245,6 +1250,18 @@ fn diagnosis(failure: &BuildFailure, root: &Path) -> Diagnosis {
         BuildFailure::RebaseWrite(_) => {
             return Diagnosis::note("build/ and assemblr-lock.json were not changed")
                 .advise("fix the problem and run `assemblr unit build` again");
+        }
+        BuildFailure::AfterRebase { rebased, failure } => {
+            let copies: Vec<String> = rebased
+                .iter()
+                .map(|copy| format!("units/{}/amendments/{}", copy.unit().name(), copy.path()))
+                .collect();
+            return diagnosis(failure, root).noting_first(&format!(
+                "{} {} rebased first, with {} stored base in .assemblr/",
+                copies.join(", "),
+                if copies.len() == 1 { "was" } else { "were" },
+                if copies.len() == 1 { "its" } else { "their" }
+            ));
         }
     };
     let advice = distinct(problems.iter().filter_map(|problem| advice(problem, root)));

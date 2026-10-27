@@ -495,7 +495,13 @@ pub(super) fn apply(
     }
     let replace = |path: &Path, bytes: &[u8]| {
         let staged = staging(path);
-        let written = write_new(&staged, bytes).and_then(|()| fs::rename(&staged, path));
+        // The new file takes the copy's mode, so that its executable bit
+        // stays.
+        let written = fs::metadata(path).and_then(|metadata| {
+            write_new(&staged, bytes)?;
+            fs::set_permissions(&staged, metadata.permissions())?;
+            fs::rename(&staged, path)
+        });
         if written.is_err() {
             let _ = fs::remove_file(&staged);
         }

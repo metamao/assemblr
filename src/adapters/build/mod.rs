@@ -1501,6 +1501,14 @@ pub enum BuildFailure {
     Rebased(Vec<RebasedCopy>),
     /// Writing the rebased copies of a catalog, or their bases, failed.
     RebaseWrite(RebaseWriteError),
+    /// In a catalog, the build wrote the rebased copies `rebased` and their
+    /// new bases, then ended in `failure` while writing the rest.
+    AfterRebase {
+        /// The copies rebased and written.
+        rebased: Vec<RebasedCopy>,
+        /// What happened next.
+        failure: Box<BuildFailure>,
+    },
 }
 
 /// The pending state a build created.
@@ -1573,9 +1581,9 @@ impl fmt::Display for BuildFailure {
                     first = false;
                     write!(
                         f,
-                        "units/{}/amendments/{}: src/{} of {} changed since the copy's stored \
-                         base, in what the copy changes too, and the copy holds each conflict \
-                         between markers:",
+                        "units/{}/amendments/{}: src/{} of {}, as the units below compose \
+                         it, changed since the copy's stored base, in what the copy changes \
+                         too, and the copy holds each conflict between markers:",
                         copy.unit.name(),
                         copy.path,
                         copy.path,
@@ -1588,6 +1596,7 @@ impl fmt::Display for BuildFailure {
                 Ok(())
             }
             Self::RebaseWrite(error) => error.fmt(f),
+            Self::AfterRebase { failure, .. } => failure.fmt(f),
         }
     }
 }

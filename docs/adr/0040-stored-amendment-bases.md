@@ -44,8 +44,10 @@ registered repositories and verified against the lockfile.
    rebased copies below in place, so layered copies (ADR 0032) follow.
 5. **Writes come last.** A clean rebase is computed in memory and written
    only after the whole build validates: each copy through a new file and
-   a rename, then the store, whose record is replaced last. A failed write
-   puts the replaced copies back. A rebase with conflicts writes every
+   a rename, keeping its mode, then the store, whose record is replaced
+   last, and then `build/`. A failed write of the rebase puts the replaced
+   copies back; a failure while writing `build/` or the pending state
+   afterwards names the copies rebased. A rebase with conflicts writes every
    rebased copy and the new bases, and builds nothing, as the pending state
    does (D-60).
 
