@@ -286,7 +286,10 @@ fn a_unit_in_a_catalog_declares_no_version() {
         r#"{"name": "@acme/c", "version": "1.0.0", "description": "C."}"#,
     );
     let err = build_error(&fixture, &catalog);
-    assert!(err.contains("units/c/manifest.jsonc"), "{err}");
+    // The manifest is named by its file-system path, with the platform's
+    // separators.
+    let manifest = Path::new("units").join("c").join("manifest.jsonc");
+    assert!(err.contains(&manifest.display().to_string()), "{err}");
     assert!(err.contains("has no version of its own"), "{err}");
 }
 
