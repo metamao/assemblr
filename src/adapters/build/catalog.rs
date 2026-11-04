@@ -164,7 +164,15 @@ pub fn build_catalog(root: &Path, registry: &Registry) -> Result<Vec<Built>, Bui
 /// build, as a unit's build does in its manifest.
 fn declare_in_catalog(root: &Path, opened: &Opened) -> Option<super::Declared> {
     let text = opened.catalog_text.as_deref()?;
-    super::declare_required(&root.join(CATALOG), text, &root.join(CATALOG_NEW))
+    super::declare_required(
+        &root.join(CATALOG),
+        text,
+        &root.join(CATALOG_NEW),
+        |edited, version| {
+            let expected = read_catalog(text).map(|read| read.with_assemblr(Some(version.clone())));
+            expected.is_ok() && read_catalog(edited).ok() == expected.ok()
+        },
+    )
 }
 
 /// Builds the unit in `units/<directory>` of the catalog whose top level

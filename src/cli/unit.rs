@@ -845,11 +845,21 @@ fn report_built(built: &Built, at_catalog: bool) {
     report_lockfile(built);
     match built.declared() {
         None => {}
-        Some(Declared::Set { file, version }) => eprintln!(
-            "note: set `assemblr` to {version} in {}, the oldest Assemblr that reads it; \
-             commit the file with the build's other changes",
-            file_name(file)
-        ),
+        Some(Declared::Set { file, version }) => {
+            let name = file_name(file);
+            // A unit's copy of the schema predates the field when it was
+            // written by an earlier `unit init`.
+            let schema = if name == "manifest.jsonc" {
+                "; if your editor flags the field, run `assemblr unit init` to refresh \
+                 manifest.schema.json"
+            } else {
+                ""
+            };
+            eprintln!(
+                "note: set `assemblr` to {version} in {name}, the oldest Assemblr that reads \
+                 it; commit the file with the build's other changes{schema}"
+            );
+        }
         Some(Declared::Failed {
             file,
             version,
