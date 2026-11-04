@@ -32,7 +32,7 @@ mod update;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub use add::{AddFailure, AddProblem, DependencyAdded, add_dependency};
@@ -49,6 +49,7 @@ pub use update::{
     Updated, WriteError as UpdateWriteError, update_unit,
 };
 
+use super::compatibility;
 use super::git::{GitError, GitRepository, InvalidVersion, MANIFEST_LIMIT, ReadSrcError};
 use super::lockfile::{self, LockfileError, PublishedLockfileError};
 use super::manifest::{ReadManifestError, read_manifest};
@@ -277,6 +278,9 @@ fn publish_validated(
     let new_lock = (lockfile != LockfileOutcome::Unchanged).then_some(&lock);
     let published = output::publish(root, root, &files, new_lock, &opened.guard)
         .map_err(BuildFailure::Publish)?;
+    // After the build, so that a build that fails changes nothing the
+    // author wrote; the next build sets it if this one could not.
+    let declared = declare_required(&root.join(MANIFEST), text, &root.join(amend::MANIFEST_NEW));
     Ok(Built {
         unit: manifest.name().clone(),
         version: manifest.version().clone(),
@@ -290,6 +294,7 @@ fn publish_validated(
         unresolved: validated.unresolved,
         leftover: published.leftover,
         rebased: Vec::new(),
+        declared,
     })
 }
 
@@ -1393,9 +1398,19 @@ pub struct Built {
     leftover: Option<(PathBuf, io::Error)>,
     /// In a catalog, the copies rebased onto their bases now first.
     rebased: Vec<RebasedCopy>,
+    /// What the build did to the `assemblr` field, when it had to set it.
+    declared: Option<Declared>,
 }
 
 impl Built {
+    /// The `assemblr` field the build set, or could not set, in
+    /// `manifest.jsonc` or `catalog.jsonc`: `None` when it already held the
+    /// version a build writes. In a catalog, the first unit built carries
+    /// it.
+    pub fn declared(&self) -> Option<&Declared> {
+        self.declared.as_ref()
+    }
+
     /// In a catalog, the copies under `amendments/` that the build rebased
     /// first, because the file below them changed since their stored base.
     pub fn rebased(&self) -> &[RebasedCopy] {
@@ -1463,6 +1478,69 @@ impl Built {
             .as_ref()
             .map(|(path, error)| (path.as_path(), error))
     }
+}
+
+/// The `assemblr` field a build set, after writing the build, in the
+/// unit's `manifest.jsonc` or the catalog's `catalog.jsonc`: the oldest
+/// version of Assemblr that reads the unit, which `unit publish` requires
+/// the commit to hold (see `docs/adr/0041-format-compatibility.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Declared {
+    /// The file now holds the version.
+    Set {
+        /// The file.
+        file: PathBuf,
+        /// The version.
+        version: Version,
+    },
+    /// The file could not be edited or written, and is as it was; the
+    /// build itself is written.
+    Failed {
+        /// The file.
+        file: PathBuf,
+        /// The version it should hold.
+        version: Version,
+        /// Why it could not be set.
+        reason: String,
+    },
+}
+
+/// Sets the `assemblr` field of `file`, whose text is `text`, to the
+/// version a build writes, through the new file `staged`. `None` when it
+/// already holds it. A failure leaves `file` as it was.
+pub(super) fn declare_required(file: &Path, text: &str, staged: &Path) -> Option<Declared> {
+    let version = compatibility::required();
+    let failed = |reason: String| Declared::Failed {
+        file: file.to_owned(),
+        version: version.clone(),
+        reason,
+    };
+    let edited = match compatibility::declare(text, &version) {
+        Ok(None) => return None,
+        Ok(Some(edited)) => edited,
+        Err(reason) => return Some(failed(reason)),
+    };
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(staged)
+        .and_then(|mut new| {
+            new.write_all(edited.as_bytes())?;
+            new.sync_all()
+        })
+        .and_then(|()| fs::rename(staged, file));
+    Some(match written {
+        Ok(()) => Declared::Set {
+            file: file.to_owned(),
+            version,
+        },
+        Err(error) => {
+            if error.kind() != io::ErrorKind::AlreadyExists {
+                let _ = fs::remove_file(staged);
+            }
+            failed(format!("could not write {}: {error}", staged.display()))
+        }
+    })
 }
 
 /// What a build did to the lockfile.

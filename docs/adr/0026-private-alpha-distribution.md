@@ -69,4 +69,5 @@ or self-update is required (#68, D-25).
 - A release is reproducible from its tag: `--locked`, the pinned toolchain,
   and the commit are all fixed.
 - The persisted formats are not versioned by the release; compatibility
-  between alpha builds is not promised.
+  between alpha builds is not promised. *Amended (ADR 0041):* from the first
+  beta, later versions read every format a beta wrote or published.

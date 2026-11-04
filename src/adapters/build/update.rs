@@ -45,6 +45,7 @@ use super::{
     BuildProblem, Dependencies, MANIFEST, ManifestFileError, PendingFile, Resolved, layer_file,
     layer_files, pending_files, read_working_manifest_text, resolve_graph,
 };
+use crate::adapters::compatibility;
 use crate::adapters::git::UnitDirectory;
 use crate::adapters::git::{GitError, GitRepository, ReadSrcError};
 use crate::adapters::layered::{has_markers, rebase_json, rebase_text};
@@ -1015,9 +1016,7 @@ impl Journal {
         match root.get("format").and_then(Value::as_u64) {
             Some(JOURNAL_FORMAT) => {}
             Some(other) => {
-                return Err(format!(
-                    "it has format {other}, which this version of Assemblr does not read"
-                ));
+                return Err(compatibility::unknown_format("it", other, JOURNAL_FORMAT));
             }
             None => return Err("it has no format number".to_owned()),
         }
@@ -1852,5 +1851,16 @@ mod tests {
         let path = dir.join("journal.json");
         fs::write(&path, with).unwrap();
         assert_eq!(Journal::read(&path).unwrap(), journal_with_copy());
+    }
+
+    #[test]
+    fn every_promised_journal_format_is_read() {
+        // Samples never change (ADR 0041): a reader that stops reading one
+        // fails here.
+        let sample = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/formats/update-journal-1.json");
+        let journal = Journal::read(&sample).unwrap();
+        assert!(journal.manifest.is_some());
+        assert_eq!(journal.copies.len(), 1);
     }
 }

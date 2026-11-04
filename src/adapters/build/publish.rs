@@ -29,7 +29,10 @@ use super::exclusive::BuildLock;
 use super::{
     BuildProblem, Inputs, Joint, MANIFEST, ManifestFileError, PublishedContent, Sibling, Siblings,
 };
-use crate::adapters::git::{GitError, GitRepository, InvalidVersion, ReadFileError, ReadSrcError};
+use crate::adapters::compatibility;
+use crate::adapters::git::{
+    CATALOG, GitError, GitRepository, InvalidVersion, ReadFileError, ReadSrcError,
+};
 use crate::adapters::lockfile::{self, PublishedLockfileError};
 use crate::adapters::registry::{
     Indexed, ReferenceError, Registry, RegistryFailure, TagProblem, local_reference,
@@ -39,6 +42,24 @@ use crate::domain::{
     Excluded, ObjectId, ObservedTag, ObservedVersion, Provenance, RegistryError, SourceReference,
     UnitIdentity, UnitLock, Version,
 };
+
+/// Reports when `declared`, the `assemblr` field of the committed `file`,
+/// is not the version a build writes: a publication requires it, so that
+/// an older Assemblr refuses the version rather than misreading it.
+fn check_declared(
+    file: &'static str,
+    declared: Option<&Version>,
+    problems: &mut Vec<PublishProblem>,
+) {
+    let required = compatibility::required();
+    if declared != Some(&required) {
+        problems.push(PublishProblem::Assemblr {
+            file,
+            declared: declared.cloned(),
+            required,
+        });
+    }
+}
 
 /// Publishes the version the committed manifest of the unit whose
 /// repository's top level is `root` declares, resolving its dependencies
@@ -159,6 +180,7 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
         return Err(PublishFailure::Rejected(problems));
     };
     let manifest = published.manifest();
+    check_declared(MANIFEST, manifest.assemblr(), &mut problems);
     let identity = manifest.name().clone();
     let version = manifest.version().clone();
     let provenance = published.provenance().clone();
@@ -348,6 +370,7 @@ fn publish_catalog(root: &Path, registry: &Registry) -> Result<Published, Publis
     let (Some(catalog), Some(previous), Some(index)) = (catalog, previous, index) else {
         return Err(PublishFailure::Rejected(problems));
     };
+    check_declared(CATALOG, catalog.catalog().assemblr(), &mut problems);
 
     // Each unit's committed files, as dependents read them.
     let mut siblings = Siblings::default();
@@ -762,6 +785,17 @@ impl std::error::Error for PublishFailure {}
 pub enum PublishProblem {
     /// A problem `unit check` reports, on the committed content.
     Check(Box<CheckProblem>),
+    /// The committed `manifest.jsonc` or `catalog.jsonc` does not declare
+    /// in `assemblr` the oldest version of Assemblr that reads the unit, as
+    /// a build writes it.
+    Assemblr {
+        /// The file.
+        file: &'static str,
+        /// What it declares, if anything.
+        declared: Option<Version>,
+        /// What a build writes.
+        required: Version,
+    },
     /// `HEAD` names no commit.
     NoCommit,
     /// The working tree is not committed and clean.
@@ -815,6 +849,24 @@ impl fmt::Display for PublishProblem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Check(problem) => problem.fmt(f),
+            Self::Assemblr {
+                file,
+                declared: None,
+                required,
+            } => write!(
+                f,
+                "the committed {file} does not declare `assemblr`, the oldest Assemblr that \
+                 reads the unit, which is {required}"
+            ),
+            Self::Assemblr {
+                file,
+                declared: Some(declared),
+                required,
+            } => write!(
+                f,
+                "the committed {file} declares `assemblr` {declared}, but the oldest Assemblr \
+                 that reads the unit is {required}"
+            ),
             Self::NoCommit => f.write_str(
                 "the repository has no commit; a published version is a tag on a commit, so \
                  commit the unit first",

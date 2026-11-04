@@ -98,6 +98,7 @@ Details that are still open are listed in
 | [registries-and-discovery.md](registries-and-discovery.md) | The CLI-managed local registry, Git-based units, registration, synchronization, immutability, removal, `search` and `info` |
 | [authoring-workflow.md](authoring-workflow.md) | `unit init`, `amend`, `check`, `build`, `update`, `publish`, and author responsibilities |
 | [consumer-projects.md](consumer-projects.md) | `init`, `assemblr.jsonc`, `add`, `remove`, `compose`, explicit and transitive dependencies, file contributions, reconciliation, conflict resolution, and the lockfile |
+| [compatibility.md](compatibility.md) | What later versions of Assemblr promise to read: published units, project and machine state, journals, and `--json` |
 | [open-contracts.md](open-contracts.md) | Register of unresolved contracts |
 
 ## Glossary

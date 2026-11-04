@@ -91,6 +91,7 @@ pub struct Manifest {
     dependencies: BTreeMap<UnitIdentity, VersionRequirement>,
     placeholders: Placeholders,
     amendments: BTreeMap<RelativePath, AmendmentDeclaration>,
+    assemblr: Option<Version>,
 }
 
 impl Manifest {
@@ -115,7 +116,16 @@ impl Manifest {
             dependencies,
             placeholders,
             amendments,
+            assemblr: None,
         })
+    }
+
+    /// The same manifest declaring `assemblr` as the oldest version of
+    /// Assemblr that reads the unit, or declaring none.
+    #[must_use]
+    pub fn with_assemblr(mut self, assemblr: Option<Version>) -> Self {
+        self.assemblr = assemblr;
+        self
     }
 
     /// The same manifest with `declaration` added for `path`, or `None` when
@@ -198,6 +208,13 @@ impl Manifest {
     pub fn amendments(&self) -> &BTreeMap<RelativePath, AmendmentDeclaration> {
         &self.amendments
     }
+
+    /// The oldest version of Assemblr that reads the unit, as its manifest
+    /// declares it: `None` when it declares none, as a unit in a catalog,
+    /// whose catalog declares it, or a manifest written before the field.
+    pub fn assemblr(&self) -> Option<&Version> {
+        self.assemblr.as_ref()
+    }
 }
 
 /// A catalog's `catalog.jsonc`: a repository whose units, one in each
@@ -207,12 +224,31 @@ impl Manifest {
 pub struct Catalog {
     name: UnitIdentity,
     version: Version,
+    assemblr: Option<Version>,
 }
 
 impl Catalog {
     /// The catalog `name`, publishing its units at `version`.
     pub fn new(name: UnitIdentity, version: Version) -> Self {
-        Self { name, version }
+        Self {
+            name,
+            version,
+            assemblr: None,
+        }
+    }
+
+    /// The same catalog declaring `assemblr` as the oldest version of
+    /// Assemblr that reads its units, or declaring none.
+    #[must_use]
+    pub fn with_assemblr(mut self, assemblr: Option<Version>) -> Self {
+        self.assemblr = assemblr;
+        self
+    }
+
+    /// The oldest version of Assemblr that reads the catalog's units, as
+    /// `catalog.jsonc` declares it, or `None` when it declares none.
+    pub fn assemblr(&self) -> Option<&Version> {
+        self.assemblr.as_ref()
     }
 
     /// The catalog's name, `@owner/name`, which is not a unit's identity.

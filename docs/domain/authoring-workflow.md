@@ -812,7 +812,12 @@ assumption. Every check of `unit check` runs on it, including the lockfile:
 `assemblr-lock.json` must be in the commit and record exactly the current
 resolution, with the content identity of every locked version, which the
 amendment bases are verified against. A missing or stale lockfile is
-reported with the hint to run `unit build` and commit.
+reported with the hint to run `unit build` and commit. So is a committed
+`manifest.jsonc`, or `catalog.jsonc`, whose `assemblr` is missing or not the
+oldest Assemblr that reads the unit, which `unit build` writes after a
+successful build (see
+[compatibility.md](compatibility.md#the-oldest-assemblr-that-reads-a-unit),
+**Provisional (D-62)**).
 
 **The tag.** `v<version>`, annotated, with the message `<identity>
 <version>`, created at the commit's id with the author's own Git

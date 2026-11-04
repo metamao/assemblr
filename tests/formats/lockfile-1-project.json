@@ -1,0 +1,19 @@
+{
+  "format": 1,
+  "project": {
+    "base": "sha256-v1:a99644a1499ac608b28d21d8d31ab7376202fa4074e1a681fb5f896e0ac2bc63",
+    "format": 1,
+    "managed": [
+      "README.md",
+      "bin/run"
+    ],
+    "unbased": []
+  },
+  "units": {
+    "@acme/node": {
+      "commit": "1111111111111111111111111111111111111111",
+      "tree": "2222222222222222222222222222222222222222",
+      "version": "1.0.0"
+    }
+  }
+}

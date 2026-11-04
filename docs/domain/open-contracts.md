@@ -1023,3 +1023,16 @@ How the status of a statement affects implementation:
   #124): parameters, and with them inherited parameters
   (D-49), no longer exist.
 - **Context:** [placeholders](placeholders.md#removed)
+
+### OC-57
+
+- **Resolution:** **Resolved.** What later versions of Assemblr read, from
+  the first beta release: every published unit and catalog version,
+  forever; a declared oldest Assemblr in `manifest.jsonc` and
+  `catalog.jsonc`, computed by Assemblr; project and machine state migrated
+  when written, with older versions refusing and saying to upgrade; and
+  `--json` that only gains fields (owner decision of 2026-11-04, one
+  question at a time in the project thread). The field's name, form, and
+  where it is written are **Provisional (D-62)**.
+- **Context:** [compatibility.md](compatibility.md),
+  [ADR 0041](../adr/0041-format-compatibility.md)

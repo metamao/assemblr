@@ -845,3 +845,72 @@ fn publish_never_pushes() {
     assert!(git(&remote, &["tag", "--list"]).is_empty());
     assert!(git(&remote, &["branch", "--list"]).is_empty());
 }
+
+#[test]
+fn a_build_declares_the_oldest_assemblr_publish_requires_it_and_older_ones_skip_newer_units() {
+    let fixture = Fixture::new("assemblr-field");
+    let (node, app) = app_on_node(&fixture, "^1");
+
+    // The build writes the field after `version`, and says so once.
+    let output = succeeds(fixture.build(&app));
+    assert!(
+        stderr(&output).contains("note: set `assemblr` to 0.1.0-alpha.1 in manifest.jsonc"),
+        "{}",
+        stderr(&output)
+    );
+    let text = app.read("manifest.jsonc");
+    let declared = text.find(r#""assemblr": "0.1.0-alpha.1""#).expect(&text);
+    assert!(text.find(r#""version""#).unwrap() < declared, "{text}");
+    let output = succeeds(fixture.build(&app));
+    assert!(
+        !stderr(&output).contains("`assemblr`"),
+        "{}",
+        stderr(&output)
+    );
+
+    // A commit that declares another version is not published.
+    app.write(
+        "manifest.jsonc",
+        &app.read("manifest.jsonc")
+            .replace(r#""assemblr": "0.1.0-alpha.1""#, r#""assemblr": "0.0.1""#),
+    );
+    app.commit("stale");
+    let output = fails(fixture.publish(&app));
+    assert!(
+        errors(&output).iter().any(|line| line.contains(
+            "the committed manifest.jsonc declares `assemblr` 0.0.1, but the oldest Assemblr \
+             that reads the unit is 0.1.0-alpha.1"
+        )),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("run `assemblr unit build`"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(app.tags().is_empty());
+    built_and_committed(&fixture, &app, "declared");
+    succeeds(fixture.publish(&app));
+    assert_eq!(app.tags(), ["v0.1.0"]);
+
+    // A version that needs a newer Assemblr, with a field this one does not
+    // know, is skipped with the reason, and the earlier versions stay.
+    node.write(
+        "manifest.jsonc",
+        &manifest(
+            "@acme/node",
+            "2.0.0",
+            &[],
+            r#", "assemblr": "99.0.0", "hooks": {}"#,
+        ),
+    );
+    node.publish_by_hand("2.0.0");
+    let output = succeeds(fixture.assemblr(&fixture.dir, &["registry", "sync"]));
+    assert!(
+        stderr(&output).contains("needs Assemblr 99.0.0 or later"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fixture.versions("@acme/node"), ["1.0.0", "1.1.0"]);
+}

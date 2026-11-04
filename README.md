@@ -242,7 +242,8 @@ your own.
    versions of `@acme/rust-base`.
 
 4. **Build and check it.** `build/` shows exactly what a project would
-   receive:
+   receive. The build also writes `assemblr` in `manifest.jsonc`: the oldest
+   Assemblr that reads the unit, which you commit with it:
 
    ```sh
    assemblr unit build

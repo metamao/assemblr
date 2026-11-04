@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use super::compatibility;
 use super::jsonc::{self, Json, SyntaxError};
 use crate::domain::{
     self, AmendmentDeclaration, BlankDescription, Catalog, Description, IdentityError, Manifest,
@@ -18,13 +19,14 @@ pub(crate) const MANIFEST_FIELDS: &[&str] = &[
     "$schema",
     "name",
     "version",
+    "assemblr",
     "description",
     "dependencies",
     "placeholders",
     "amendments",
 ];
 const PROJECT_FIELDS: &[&str] = &["$schema", "dependencies"];
-const CATALOG_FIELDS: &[&str] = &["$schema", "name", "version"];
+const CATALOG_FIELDS: &[&str] = &["$schema", "name", "version", "assemblr"];
 /// The dependency value that requires a sibling in the same catalog, at the
 /// catalog's version.
 const SIBLING: &str = "catalog";
@@ -61,8 +63,7 @@ fn read(text: &str, in_catalog: Option<&InCatalog<'_>>) -> Result<Manifest, Read
         in_catalog,
     };
     let manifest = reader.manifest(&json);
-    let mut issues = reader.issues;
-    issues.sort_by(|a, b| a.path.cmp(&b.path));
+    let issues = only_what_matters(reader.issues);
     match manifest {
         Some(manifest) if issues.is_empty() => Ok(manifest),
         _ => Err(ReadManifestError::Invalid(issues)),
@@ -76,12 +77,25 @@ pub(crate) fn read_catalog(text: &str) -> Result<Catalog, ReadManifestError> {
     let json = jsonc::parse(text).map_err(ReadManifestError::Syntax)?;
     let mut reader = Reader::default();
     let catalog = reader.catalog(&json);
-    let mut issues = reader.issues;
-    issues.sort_by(|a, b| a.path.cmp(&b.path));
+    let issues = only_what_matters(reader.issues);
     match catalog {
         Some(catalog) if issues.is_empty() => Ok(catalog),
         _ => Err(ReadManifestError::Invalid(issues)),
     }
+}
+
+/// `issues` in field order, or only the one that says a newer Assemblr is
+/// needed when there is one: what else this version finds in a manifest
+/// written for a newer one, such as fields it does not know, is expected.
+fn only_what_matters(mut issues: Vec<ManifestIssue>) -> Vec<ManifestIssue> {
+    if issues
+        .iter()
+        .any(|issue| matches!(issue.kind, IssueKind::NeedsNewerAssemblr { .. }))
+    {
+        issues.retain(|issue| matches!(issue.kind, IssueKind::NeedsNewerAssemblr { .. }));
+    }
+    issues.sort_by(|a, b| a.path.cmp(&b.path));
+    issues
 }
 
 /// Where the manifest of a unit in a catalog is read: the catalog, the
@@ -334,6 +348,15 @@ pub enum IssueKind {
     Inconsistent(ManifestError),
     /// A unit in a catalog declares a `version`, which is the catalog's.
     VersionInCatalog,
+    /// A unit in a catalog declares `assemblr`, which is the catalog's.
+    AssemblrInCatalog,
+    /// The unit or catalog needs a newer Assemblr than the one reading it.
+    NeedsNewerAssemblr {
+        /// The oldest version that reads it, as it declares.
+        required: Version,
+        /// The version reading it.
+        running: Version,
+    },
     /// A unit in a catalog is not named after its directory: holds the
     /// identity the catalog gives it.
     NotTheDirectoryName(UnitIdentity),
@@ -409,6 +432,15 @@ impl fmt::Display for IssueKind {
             Self::VersionInCatalog => f.write_str(
                 "a unit in a catalog has no version of its own: every unit is published at \
                  the `version` in `catalog.jsonc`; remove this field",
+            ),
+            Self::AssemblrInCatalog => f.write_str(
+                "a unit in a catalog is read by the versions of Assemblr that `catalog.jsonc` \
+                 names, and `assemblr unit build` writes it there; remove this field",
+            ),
+            Self::NeedsNewerAssemblr { required, running } => write!(
+                f,
+                "it needs Assemblr {required} or later, and this is Assemblr {running}; \
+                 upgrade Assemblr to read it"
             ),
             Self::NotTheDirectoryName(expected) => write!(
                 f,
@@ -775,6 +807,15 @@ impl Reader<'_> {
                 Some(in_catalog.catalog.version().clone())
             }
         };
+        let assemblr = match self.in_catalog {
+            None => self.assemblr(&root, &fields),
+            Some(_) => {
+                if fields.contains_key(compatibility::FIELD) {
+                    self.report(root.key(compatibility::FIELD), IssueKind::AssemblrInCatalog);
+                }
+                None
+            }
+        };
         let description = self
             .required(&root, &fields, "description")
             .and_then(|json| self.description(&root.key("description"), json));
@@ -815,6 +856,21 @@ impl Reader<'_> {
             amendments,
         )
         .ok()
+        .map(|manifest| manifest.with_assemblr(assemblr))
+    }
+
+    /// The oldest version of Assemblr that reads the unit or catalog whose
+    /// top-level `fields` these are, when they declare one. A version newer
+    /// than the one running is reported.
+    fn assemblr(&mut self, root: &FieldPath, fields: &Members<'_>) -> Option<Version> {
+        let path = root.key(compatibility::FIELD);
+        let required = self.version(&path, fields.get(compatibility::FIELD)?)?;
+        let running = compatibility::running();
+        if required.cmp_precedence(&running) == std::cmp::Ordering::Greater {
+            self.report(path, IssueKind::NeedsNewerAssemblr { required, running });
+            return None;
+        }
+        Some(required)
     }
 
     /// Checks that `name` is the identity the catalog gives the unit's
@@ -846,7 +902,8 @@ impl Reader<'_> {
         let version = self
             .required(&root, &fields, "version")
             .and_then(|json| self.version(&root.key("version"), json));
-        Some(Catalog::new(name?, version?))
+        let assemblr = self.assemblr(&root, &fields);
+        Some(Catalog::new(name?, version?).with_assemblr(assemblr))
     }
 
     fn project(&mut self, json: &Json) -> Option<Project> {
@@ -1177,9 +1234,12 @@ impl Reader<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{
-        FieldPath, IssueKind, JsonKind, ReadManifestError, RemovedField, declare_amendment,
-        read_manifest, read_project, rebase_amendments,
+        FieldPath, InCatalog, IssueKind, JsonKind, ReadManifestError, RemovedField,
+        declare_amendment, read_catalog, read_catalog_manifest, read_manifest, read_project,
+        rebase_amendments,
     };
     use crate::domain::{
         AmendmentDeclaration, IdentityErrorReason, ManifestError, PlaceholderName, RelativePath,
@@ -1899,5 +1959,121 @@ mod tests {
             "{message}"
         );
         assert_eq!(FieldPath::default().to_string(), "(manifest)");
+    }
+
+    #[test]
+    fn the_oldest_assemblr_that_reads_a_unit_is_read_and_a_newer_one_refused() {
+        let manifest = read_manifest(&with(r#""assemblr": "0.1.0-alpha.1""#)).unwrap();
+        assert_eq!(
+            manifest.assemblr().map(ToString::to_string).as_deref(),
+            Some("0.1.0-alpha.1")
+        );
+        assert_eq!(
+            read_manifest(&with(r#""placeholders": {}"#))
+                .unwrap()
+                .assemblr(),
+            None
+        );
+        assert_eq!(issues(&with(r#""assemblr": "next""#))[0].0, "assemblr");
+        // A manifest written for a newer Assemblr: the fields this version
+        // does not know are expected, so only the version is reported.
+        let newer = issues(&with(r#""assemblr": "99.0.0", "hooks": {}"#));
+        assert_eq!(newer.len(), 1, "{newer:?}");
+        let (path, kind) = &newer[0];
+        assert_eq!(path, "assemblr");
+        assert!(matches!(kind, IssueKind::NeedsNewerAssemblr { .. }));
+        let message = kind.to_string();
+        assert!(
+            message.contains("needs Assemblr 99.0.0 or later"),
+            "{message}"
+        );
+        assert!(message.contains("upgrade Assemblr"), "{message}");
+    }
+
+    #[test]
+    fn a_catalog_declares_the_oldest_assemblr_for_its_units() {
+        let catalog = read_catalog(
+            r#"{"name": "@acme/web", "version": "1.0.0", "assemblr": "0.1.0-alpha.1"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            catalog.assemblr().map(ToString::to_string).as_deref(),
+            Some("0.1.0-alpha.1")
+        );
+        match read_catalog(
+            r#"{"name": "@acme/web", "version": "1.0.0", "assemblr": "99.0.0", "x": 1}"#,
+        ) {
+            Err(ReadManifestError::Invalid(issues)) => {
+                assert_eq!(issues.len(), 1, "{issues:?}");
+                assert!(matches!(
+                    issues[0].kind(),
+                    IssueKind::NeedsNewerAssemblr { .. }
+                ));
+            }
+            other => panic!("expected the newer version to be refused, got {other:?}"),
+        }
+        // A unit of the catalog leaves it to `catalog.jsonc`.
+        let directories = BTreeSet::from(["app".to_owned()]);
+        let in_catalog = InCatalog::new(&catalog, "app", &directories);
+        let unit =
+            r#"{"name": "@acme/app", "description": "An app.", "assemblr": "0.1.0-alpha.1"}"#;
+        match read_catalog_manifest(unit, &in_catalog) {
+            Err(ReadManifestError::Invalid(issues)) => {
+                assert_eq!(issues[0].path().to_string(), "assemblr");
+                assert_eq!(issues[0].kind(), &IssueKind::AssemblrInCatalog);
+            }
+            other => panic!("expected the field to be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_promised_form_of_the_authored_files_is_read() {
+        // Samples never change (ADR 0041): a published unit stays readable
+        // in every later version, so a reader that stops reading one fails
+        // here.
+        let alpha = read_manifest(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/formats/manifest-alpha.jsonc"
+        )))
+        .unwrap();
+        assert_eq!(alpha.assemblr(), None);
+        let current = read_manifest(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/formats/manifest.jsonc"
+        )))
+        .unwrap();
+        assert_eq!(current.clone().with_assemblr(None), alpha);
+        assert!(current.assemblr().is_some());
+        assert_eq!(
+            read_catalog(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/formats/catalog-alpha.jsonc"
+            )))
+            .unwrap()
+            .assemblr(),
+            None
+        );
+        let catalog = read_catalog(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/formats/catalog.jsonc"
+        )))
+        .unwrap();
+        assert!(catalog.assemblr().is_some());
+        let directories = BTreeSet::from(["app".to_owned(), "server".to_owned()]);
+        let unit = read_catalog_manifest(
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/formats/catalog-unit.jsonc"
+            )),
+            &InCatalog::new(&catalog, "app", &directories),
+        )
+        .unwrap();
+        assert_eq!(unit.version(), catalog.version());
+        let project = read_project(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/formats/assemblr.jsonc"
+        )))
+        .unwrap();
+        assert_eq!(project.dependencies().len(), 1);
     }
 }

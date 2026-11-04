@@ -1,0 +1,4 @@
+// A consumer project's declaration.
+{
+  "dependencies": { "@acme/web": "^1.2" },
+}

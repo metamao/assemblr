@@ -33,6 +33,9 @@ use crate::domain::{
     RelativePath, UnitFile, UnitIdentity, UnitLock, VersionRequirement, resolve, update_lock,
 };
 
+/// Where a new `catalog.jsonc` is written before it replaces the old one.
+const CATALOG_NEW: &str = ".assemblr-catalog.jsonc.new";
+
 /// Where a unit command runs, as far as catalogs go.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Location {
@@ -151,7 +154,17 @@ pub fn build_catalog(root: &Path, registry: &Registry) -> Result<Vec<Built>, Bui
             }
         }
     }
+    if let Some(first) = built.first_mut() {
+        first.declared = declare_in_catalog(root, &opened);
+    }
     Ok(built)
+}
+
+/// Sets the `assemblr` field of the catalog's `catalog.jsonc` after a
+/// build, as a unit's build does in its manifest.
+fn declare_in_catalog(root: &Path, opened: &Opened) -> Option<super::Declared> {
+    let text = opened.catalog_text.as_deref()?;
+    super::declare_required(&root.join(CATALOG), text, &root.join(CATALOG_NEW))
 }
 
 /// Builds the unit in `units/<directory>` of the catalog whose top level
@@ -236,7 +249,7 @@ pub(super) fn build_in_catalog(
     }
     let rebased = apply_rebase(root, rebase)?;
     let outcome = lockfile_outcome(opened.previous.as_ref(), &joint.lock);
-    write(
+    let mut built = write(
         root,
         identity,
         unit,
@@ -245,7 +258,9 @@ pub(super) fn build_in_catalog(
         rebased,
         &opened.guard,
     )
-    .map_err(BuildFailure::Publish)
+    .map_err(BuildFailure::Publish)?;
+    built.declared = declare_in_catalog(root, &opened);
+    Ok(built)
 }
 
 /// Rebases the copies of the units of `scope` whose stored base is not the
@@ -577,6 +592,7 @@ fn write(
         unresolved: validated.unresolved,
         leftover: published.leftover,
         rebased,
+        declared: None,
     })
 }
 
@@ -586,6 +602,8 @@ pub(super) struct Opened {
     pub(super) guard: BuildLock,
     /// The catalog's `catalog.jsonc`, when it could be read.
     pub(super) catalog: Option<Catalog>,
+    /// Its text, when it could be read.
+    pub(super) catalog_text: Option<String>,
     /// Its unit directories, under `units/`.
     pub(super) directories: BTreeSet<String>,
     /// Every unit whose manifest could be read, by identity.
@@ -649,19 +667,19 @@ pub(super) fn open(root: &Path, registry: &Registry) -> Result<Opened, Vec<Build
         problems.push(BuildProblem::CatalogAndManifest { path: manifest });
     }
     let catalog_path = root.join(CATALOG);
-    let catalog = read_working_text(catalog_path.clone())
+    let catalog_text = read_working_text(catalog_path.clone())
         .map_err(|error| problems.push(BuildProblem::Manifest(error)))
-        .ok()
-        .and_then(|text| {
-            read_catalog(&text)
-                .map_err(|error| {
-                    problems.push(BuildProblem::Manifest(ManifestFileError::Invalid {
-                        path: catalog_path.clone(),
-                        error,
-                    }));
-                })
-                .ok()
-        });
+        .ok();
+    let catalog = catalog_text.as_deref().and_then(|text| {
+        read_catalog(text)
+            .map_err(|error| {
+                problems.push(BuildProblem::Manifest(ManifestFileError::Invalid {
+                    path: catalog_path.clone(),
+                    error,
+                }));
+            })
+            .ok()
+    });
     let entries = repository
         .working_units()
         .map_err(|error| problems.push(BuildProblem::Repository(error)))
@@ -798,6 +816,7 @@ pub(super) fn open(root: &Path, registry: &Registry) -> Result<Opened, Vec<Build
     Ok(Opened {
         guard,
         catalog,
+        catalog_text,
         directories,
         units,
         siblings,

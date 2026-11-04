@@ -1,0 +1,16 @@
+// A unit manifest that declares the oldest Assemblr that reads it.
+{
+  "$schema": "./manifest.schema.json",
+  "name": "@acme/web",
+  "version": "1.2.0",
+  "assemblr": "0.1.0-alpha.1",
+  "description": "A web application.",
+  "dependencies": { "@acme/node": "^1.0" },
+  "placeholders": {
+    "replace": { "__APP_TITLE__": "The application's visible name." },
+    "ignore": ["__DEV__"],
+  },
+  "amendments": {
+    "package.json": { "unit": "@acme/node", "base": "1.0.0" },
+  },
+}

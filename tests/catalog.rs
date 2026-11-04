@@ -1064,3 +1064,45 @@ fn a_catalog_unit_s_content_identity_is_the_root_tree() {
         assert_eq!(unit["versions"][0]["tree"], root.as_str(), "{name}");
     }
 }
+
+#[test]
+fn a_catalog_build_declares_the_oldest_assemblr_in_catalog_jsonc_and_publish_requires_it() {
+    let fixture = Fixture::new("assemblr-field");
+    let catalog = fixture.three_units();
+    let output = succeeds(fixture.run(&catalog, &["unit", "build"]));
+    assert_eq!(
+        stderr(&output)
+            .matches("note: set `assemblr` to 0.1.0-alpha.1 in catalog.jsonc")
+            .count(),
+        1,
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        read(&catalog.join("catalog.jsonc")).contains(r#""assemblr": "0.1.0-alpha.1""#),
+        "{}",
+        read(&catalog.join("catalog.jsonc"))
+    );
+    // The units' manifests leave it to the catalog.
+    assert!(!read(&catalog.join("units/a/manifest.jsonc")).contains("assemblr\""));
+
+    // A commit without it is not published.
+    write(
+        &catalog,
+        "catalog.jsonc",
+        r#"{"name": "@acme/web", "version": "1.0.0"}"#,
+    );
+    git(&catalog, &["add", "-A"]);
+    git(&catalog, &["commit", "-q", "-m", "undeclared"]);
+    let err = stderr(&fails(fixture.run(&catalog, &["unit", "publish"])));
+    assert!(
+        err.contains("the committed catalog.jsonc does not declare `assemblr`"),
+        "{err}"
+    );
+    assert_eq!(git(&catalog, &["tag", "--list"]), "");
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+    git(&catalog, &["add", "-A"]);
+    git(&catalog, &["commit", "-q", "-m", "declared"]);
+    succeeds(fixture.run(&catalog, &["unit", "publish"]));
+    assert_eq!(git(&catalog, &["tag", "--list"]), "v1.0.0");
+}

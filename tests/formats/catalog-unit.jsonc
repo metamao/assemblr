@@ -1,0 +1,6 @@
+{
+  "name": "@acme/app",
+  "description": "A unit of the catalog.",
+  "dependencies": { "@acme/server": "catalog", "@acme/node": "^1.0" },
+  "amendments": { "src/main.ts": { "unit": "@acme/server", "base": "catalog" } },
+}
