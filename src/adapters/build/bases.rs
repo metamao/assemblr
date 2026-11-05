@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use super::amend::composed_bases;
 use super::catalog::in_unit;
 use super::{BuildProblem, Siblings, resolve_graph_in};
+use crate::adapters::compatibility;
 use crate::adapters::layered::{has_markers, rebase_json, rebase_text_on_stored};
 use crate::adapters::project::{STATE_DIR, Store, StoreError, write_new};
 use crate::domain::{
@@ -617,11 +618,7 @@ fn parse_record(bytes: &[u8]) -> Result<BaseIdentity, String> {
     }
     match object.get("format").and_then(Value::as_u64) {
         Some(RECORD_FORMAT) => {}
-        Some(format) => {
-            return Err(format!(
-                "its format is {format}, which this version of Assemblr does not know"
-            ));
-        }
+        Some(format) => return Err(compatibility::unknown_format("it", format, RECORD_FORMAT)),
         None => return Err("it has no `format` number".to_owned()),
     }
     object
@@ -750,7 +747,10 @@ mod tests {
         )
         .unwrap();
         let error = StoredBases::read(&root).unwrap_err().to_string();
-        assert!(error.contains("its format is 2"), "{error}");
+        assert!(
+            error.contains("it has format 2, which a newer Assemblr wrote"),
+            "{error}"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -760,5 +760,20 @@ mod tests {
         assert_eq!(key.as_str(), "web/config/app.json");
         let (directory, amended) = split(&key).unwrap();
         assert_eq!((directory, amended.as_str()), ("web", "config/app.json"));
+    }
+
+    #[test]
+    fn every_promised_record_format_is_read() {
+        // Samples never change (ADR 0041): a reader that stops reading one
+        // fails here.
+        let base = parse_record(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/formats/amendment-bases-1.json"
+        )))
+        .unwrap();
+        assert_eq!(
+            base.as_str(),
+            "sha256-v1:a99644a1499ac608b28d21d8d31ab7376202fa4074e1a681fb5f896e0ac2bc63"
+        );
     }
 }

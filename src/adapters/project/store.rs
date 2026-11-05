@@ -806,3 +806,38 @@ impl fmt::Display for StoreError {
 }
 
 impl std::error::Error for StoreError {}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "fixtures are valid by construction")]
+
+    use super::{Journal, JournalEntry};
+
+    fn read(sample: &[u8]) -> Journal {
+        Journal::parse(sample).unwrap_or_else(|_| panic!("a promised journal format is read"))
+    }
+
+    #[test]
+    fn every_promised_journal_format_is_read() {
+        // Samples never change (ADR 0041): a reader that stops reading one
+        // fails here.
+        let one = read(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/formats/journal-1.json"
+        )));
+        assert!(matches!(one.files[0].1, JournalEntry::Create { .. }));
+        let two = read(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/formats/journal-2.json"
+        )));
+        assert_eq!(two.directories.len(), 1);
+        assert!(two.pending.unwrap().declaration.is_none());
+        let three = read(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/formats/journal-3.json"
+        )));
+        assert!(matches!(three.files[0].1, JournalEntry::Modify { .. }));
+        assert!(matches!(three.files[1].1, JournalEntry::Remove { .. }));
+        assert!(three.pending.unwrap().declaration.is_some());
+    }
+}

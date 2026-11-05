@@ -329,4 +329,21 @@ mod tests {
         assert!(BaseIdentity::parse(&format!("sha256-v1:{}", "A".repeat(64))).is_none());
         assert!(BlobId::parse(&"0".repeat(63)).is_none());
     }
+
+    #[test]
+    fn the_promised_listing_format_is_read_and_its_identity_never_changes() {
+        // The sample never changes (ADR 0041): every lock and catalog store
+        // records identities computed this way, so the listing must read back
+        // and hash to the same identity in every later version.
+        let listing = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/formats/base-listing-v1.txt"
+        ));
+        let snapshot = Snapshot::parse_listing(listing).unwrap();
+        assert_eq!(snapshot.listing(), listing);
+        assert_eq!(
+            snapshot.identity().as_str(),
+            "sha256-v1:a99644a1499ac608b28d21d8d31ab7376202fa4074e1a681fb5f896e0ac2bc63"
+        );
+    }
 }

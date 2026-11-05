@@ -23,6 +23,7 @@ These fields make up the accepted conceptual vocabulary:
 | `$schema` | Points editors at the manifest JSON Schema, where applicable. | [Editor support](#editor-support--approved) |
 | `name` | The unit identity, `@owner/unit-name`. | [units.md](units.md#identity--approved) |
 | `version` | The unit's exact SemVer version. Required, except in a catalog, where it is not allowed: the unit has the catalog's. | [units.md](units.md#versioning--approved) |
+| `assemblr` | The oldest version of Assemblr that reads the unit, which Assemblr computes and `unit build` writes. Not allowed in a catalog: `catalog.jsonc` holds it. | [compatibility.md](compatibility.md#the-oldest-assemblr-that-reads-a-unit) |
 | `description` | A human-readable description. **Required.** | |
 | `dependencies` | Owner-qualified identities with SemVer ranges. | [dependencies.md](dependencies.md) |
 | `placeholders` | The placeholders the unit's files hold for the consumer to replace, and the tokens that only look like placeholders. | [placeholders.md](placeholders.md#declaration--approved) |

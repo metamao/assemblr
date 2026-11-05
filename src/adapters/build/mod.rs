@@ -49,9 +49,11 @@ pub use update::{
     Updated, WriteError as UpdateWriteError, update_unit,
 };
 
+use super::compatibility;
 use super::git::{GitError, GitRepository, InvalidVersion, MANIFEST_LIMIT, ReadSrcError};
 use super::lockfile::{self, LockfileError, PublishedLockfileError};
 use super::manifest::{ReadManifestError, read_manifest};
+use super::project;
 use super::registry::{Registry, StorageError};
 use crate::domain::{
     AmendmentBaseError, AvailableVersions, BaseIntegrityError, CompositionError, ContributionError,
@@ -277,6 +279,18 @@ fn publish_validated(
     let new_lock = (lockfile != LockfileOutcome::Unchanged).then_some(&lock);
     let published = output::publish(root, root, &files, new_lock, &opened.guard)
         .map_err(BuildFailure::Publish)?;
+    // After the build, so that a build that fails changes nothing the
+    // author wrote; the next build sets it if this one could not.
+    let declared = declare_required(
+        &root.join(MANIFEST),
+        text,
+        &root.join(amend::MANIFEST_NEW),
+        |edited, version| {
+            let expected =
+                read_manifest(text).map(|read| read.with_assemblr(Some(version.clone())));
+            expected.is_ok() && read_manifest(edited).ok() == expected.ok()
+        },
+    );
     Ok(Built {
         unit: manifest.name().clone(),
         version: manifest.version().clone(),
@@ -290,6 +304,7 @@ fn publish_validated(
         unresolved: validated.unresolved,
         leftover: published.leftover,
         rebased: Vec::new(),
+        declared,
     })
 }
 
@@ -1393,9 +1408,19 @@ pub struct Built {
     leftover: Option<(PathBuf, io::Error)>,
     /// In a catalog, the copies rebased onto their bases now first.
     rebased: Vec<RebasedCopy>,
+    /// What the build did to the `assemblr` field, when it had to set it.
+    declared: Option<Declared>,
 }
 
 impl Built {
+    /// The `assemblr` field the build set, or could not set, in
+    /// `manifest.jsonc` or `catalog.jsonc`: `None` when it already held the
+    /// version a build writes. In a catalog, the first unit built carries
+    /// it.
+    pub fn declared(&self) -> Option<&Declared> {
+        self.declared.as_ref()
+    }
+
     /// In a catalog, the copies under `amendments/` that the build rebased
     /// first, because the file below them changed since their stored base.
     pub fn rebased(&self) -> &[RebasedCopy] {
@@ -1463,6 +1488,86 @@ impl Built {
             .as_ref()
             .map(|(path, error)| (path.as_path(), error))
     }
+}
+
+/// The `assemblr` field a build set, after writing the build, in the
+/// unit's `manifest.jsonc` or the catalog's `catalog.jsonc`: the oldest
+/// version of Assemblr that reads the unit, which `unit publish` requires
+/// the commit to hold (see `docs/adr/0041-format-compatibility.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Declared {
+    /// The file now holds the version.
+    Set {
+        /// The file.
+        file: PathBuf,
+        /// The version.
+        version: Version,
+    },
+    /// The file could not be edited or written, and is as it was; the
+    /// build itself is written.
+    Failed {
+        /// The file.
+        file: PathBuf,
+        /// The version it should hold.
+        version: Version,
+        /// Why it could not be set.
+        reason: String,
+    },
+}
+
+/// Sets the `assemblr` field of `file`, whose text is `text`, to the
+/// version a build writes, through the new file `staged`. `None` when it
+/// already holds it. `reads_back` says whether an edited text reads as the
+/// file with the version set, so that a misplaced edit never replaces it.
+/// A failure, including a change to `file` since `text` was read, leaves
+/// `file` as it was.
+pub(super) fn declare_required(
+    file: &Path,
+    text: &str,
+    staged: &Path,
+    reads_back: impl FnOnce(&str, &Version) -> bool,
+) -> Option<Declared> {
+    let version = compatibility::required();
+    let failed = |reason: String| Declared::Failed {
+        file: file.to_owned(),
+        version: version.clone(),
+        reason,
+    };
+    let edited = match compatibility::declare(text, &version) {
+        Ok(None) => return None,
+        Ok(Some(edited)) if reads_back(&edited, &version) => edited,
+        Ok(Some(_)) => return Some(failed("the edited file does not read back".to_owned())),
+        Err(reason) => return Some(failed(reason)),
+    };
+    // The build does not lock authoring files, so an edit saved while it
+    // ran must not be overwritten with the text read before.
+    if read_working_text(file.to_owned()).ok().as_deref() != Some(text) {
+        return Some(failed(
+            "it changed while the build ran; run `assemblr unit build` again".to_owned(),
+        ));
+    }
+    if let Err(error) = project::write_new(staged, edited.as_bytes()) {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            return Some(failed(format!(
+                "{} exists, left by an interrupted command; delete it and run `assemblr unit \
+                 build` again",
+                staged.display()
+            )));
+        }
+        let _ = fs::remove_file(staged);
+        return Some(failed(format!(
+            "could not write {}: {error}",
+            staged.display()
+        )));
+    }
+    if let Err(error) = fs::rename(staged, file) {
+        let _ = fs::remove_file(staged);
+        return Some(failed(format!("could not replace it: {error}")));
+    }
+    Some(Declared::Set {
+        file: file.to_owned(),
+        version,
+    })
 }
 
 /// What a build did to the lockfile.
@@ -2139,3 +2244,85 @@ impl fmt::Display for ManifestFileError {
 }
 
 impl std::error::Error for ManifestFileError {}
+
+#[cfg(test)]
+mod declare_tests {
+    #![allow(clippy::unwrap_used, reason = "fixtures are valid by construction")]
+
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::{Declared, declare_required};
+
+    const TEXT: &str = "{\n  \"name\": \"@acme/web\",\n  \"version\": \"1.0.0\"\n}\n";
+
+    /// A directory holding a `manifest.jsonc` with [`TEXT`].
+    fn scratch(test: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let dir = std::env::temp_dir()
+            .join(format!("assemblr-declare-{}", std::process::id()))
+            .join(test);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("manifest.jsonc");
+        fs::write(&file, TEXT).unwrap();
+        let staged = dir.join(".staged");
+        (dir, file, staged)
+    }
+
+    fn reason(declared: Option<Declared>) -> String {
+        match declared {
+            Some(Declared::Failed { reason, .. }) => reason,
+            other => panic!("expected a failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_field_is_written_through_the_staging_file() {
+        let (_dir, file, staged) = scratch("written");
+        let declared = declare_required(&file, TEXT, &staged, |_, _| true);
+        assert!(
+            matches!(declared, Some(Declared::Set { .. })),
+            "{declared:?}"
+        );
+        assert!(fs::read_to_string(&file).unwrap().contains("\"assemblr\""));
+        assert!(!staged.exists());
+        // Declared already: nothing to do.
+        let text = fs::read_to_string(&file).unwrap();
+        assert_eq!(declare_required(&file, &text, &staged, |_, _| true), None);
+    }
+
+    #[test]
+    fn an_edit_saved_during_the_build_is_kept() {
+        let (_dir, file, staged) = scratch("changed");
+        let saved = TEXT.replace("1.0.0", "1.1.0");
+        fs::write(&file, &saved).unwrap();
+        let reason = reason(declare_required(&file, TEXT, &staged, |_, _| true));
+        assert!(reason.contains("changed while the build ran"), "{reason}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), saved);
+        assert!(!staged.exists());
+    }
+
+    #[test]
+    fn a_leftover_staging_file_is_named_and_kept() {
+        let (_dir, file, staged) = scratch("leftover");
+        fs::write(&staged, "left").unwrap();
+        let reason = reason(declare_required(&file, TEXT, &staged, |_, _| true));
+        assert!(
+            reason.contains("interrupted command; delete it"),
+            "{reason}"
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), TEXT);
+        assert_eq!(fs::read_to_string(&staged).unwrap(), "left");
+    }
+
+    #[test]
+    fn an_edit_that_does_not_read_back_is_not_written() {
+        let (_dir, file, staged) = scratch("unreadable");
+        let reason = reason(declare_required(&file, TEXT, &staged, |_, _| false));
+        assert!(reason.contains("does not read back"), "{reason}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), TEXT);
+        assert!(!staged.exists());
+    }
+}

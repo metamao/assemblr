@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 
 use std::collections::BTreeSet;
 
+use super::compatibility;
 use super::git::{CATALOG, Discovered, GitError, UNITS, discover_repository, init_repository};
 use super::manifest::{
     InCatalog, ReadManifestError, read_catalog, read_catalog_manifest, read_manifest,
@@ -404,9 +405,11 @@ fn manifest_text(identity: &UnitIdentity, description: &Description, in_catalog:
              \"description\": {description_text}\n}}\n"
         );
     }
+    let assemblr = compatibility::required();
     let text = format!(
         "{{\n  \"$schema\": \"{MANIFEST_SCHEMA_REFERENCE}\",\n  \"name\": {name},\n  \"version\": \
-         \"{FIRST_VERSION}\",\n  \"description\": {description_text}\n}}\n",
+         \"{FIRST_VERSION}\",\n  \"assemblr\": \"{assemblr}\",\n  \"description\": \
+         {description_text}\n}}\n",
     );
     debug_assert!(
         read_manifest(&text).is_ok_and(|manifest| {
@@ -415,6 +418,7 @@ fn manifest_text(identity: &UnitIdentity, description: &Description, in_catalog:
                     == &Version::parse(FIRST_VERSION)
                         .unwrap_or_else(|_| unreachable!("{FIRST_VERSION} is a SemVer version"))
                 && manifest.description() == description
+                && manifest.assemblr() == Some(&assemblr)
         }),
         "the scaffold's manifest must read back as written"
     );

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+use super::compatibility;
 use super::git::{GitRepository, ReadFileError};
 use crate::domain::{
     BaseIdentity, LockedUnit, ObjectId, Provenance, ReconciliationState, RelativePath,
@@ -188,11 +189,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Lockfile, String> {
     let root = object(&value, "the lockfile", &["format", "units", "project"])?;
     match root.get("format").and_then(Value::as_u64) {
         Some(FORMAT) => {}
-        Some(other) => {
-            return Err(format!(
-                "it has format {other}, which this version of Assemblr does not read"
-            ));
-        }
+        Some(other) => return Err(compatibility::unknown_format("it", other, FORMAT)),
         None => return Err("it has no format number".to_owned()),
     }
     let mut units = BTreeMap::new();
@@ -233,8 +230,10 @@ fn parse_state(value: &Value) -> Result<ReconciliationState, String> {
     match state.get("format").and_then(Value::as_u64) {
         Some(PROJECT_FORMAT) => {}
         Some(other) => {
-            return Err(format!(
-                "`project` has format {other}, which this version of Assemblr does not read"
+            return Err(compatibility::unknown_format(
+                "`project`",
+                other,
+                PROJECT_FORMAT,
             ));
         }
         None => return Err("`project` has no format number".to_owned()),
@@ -450,5 +449,25 @@ mod tests {
             assert!(error.contains(reason), "{text}: {error}");
         }
         assert!(parse(unit("").as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn every_promised_lockfile_format_is_read() {
+        // Samples never change (ADR 0041): a reader that stops reading one
+        // fails here.
+        let unit = parse(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/formats/lockfile-1.json"
+        )))
+        .unwrap();
+        assert_eq!(unit.lock.units().len(), 1);
+        assert!(unit.project.is_none());
+        let project = parse(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/formats/lockfile-1-project.json"
+        )))
+        .unwrap();
+        assert_eq!(project.lock, unit.lock);
+        assert_eq!(project.project.unwrap().managed().len(), 2);
     }
 }

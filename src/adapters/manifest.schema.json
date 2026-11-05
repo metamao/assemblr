@@ -18,6 +18,10 @@
       "$ref": "#/definitions/version",
       "description": "The unit's exact SemVer version, required outside a catalog. Publication tags it as `v<version>`. A unit in a catalog has none: it is published at the catalog's version."
     },
+    "assemblr": {
+      "$ref": "#/definitions/version",
+      "description": "The oldest version of Assemblr that reads this unit. `assemblr unit build` writes it and `assemblr unit publish` requires it; an older Assemblr skips the version and says to upgrade. A unit in a catalog has none: `catalog.jsonc` holds it."
+    },
     "description": {
       "$ref": "#/definitions/text",
       "description": "A human-readable description of the unit."

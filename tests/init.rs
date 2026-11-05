@@ -117,7 +117,8 @@ fn init_creates_the_scaffold_and_a_repository_in_a_new_directory() {
     assert_eq!(
         read(&unit.join("manifest.jsonc")),
         "{\n  \"$schema\": \"./manifest.schema.json\",\n  \"name\": \"@acme/app\",\n  \
-         \"version\": \"0.1.0\",\n  \"description\": \"The @acme/app unit.\"\n}\n"
+         \"version\": \"0.1.0\",\n  \"assemblr\": \"0.1.0-alpha.1\",\n  \"description\": \
+         \"The @acme/app unit.\"\n}\n"
     );
     assert_eq!(read(&unit.join(".gitignore")), "/build/\n");
     let schema: Value = serde_json::from_str(&read(&unit.join("manifest.schema.json"))).unwrap();

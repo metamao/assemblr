@@ -18,5 +18,5 @@ Units:
 - Ask the user before `assemblr unit publish`.
 
 Always:
-- Never edit `.assemblr/` or the lockfiles by hand; `assemblr status` reports what they record.
+- Never edit `.assemblr/` or the lockfiles by hand; `assemblr status` reports what they record. Nor the `assemblr` field of manifest.jsonc or catalog.jsonc: `assemblr unit build` writes the oldest Assemblr that reads the unit there, and you commit it; set it by hand only when the build warns that it could not.
 - `assemblr <command> --help` explains each command.

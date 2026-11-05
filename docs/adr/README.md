@@ -42,8 +42,8 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0023](0023-cross-version-amendments.md) | Amendments across provider versions: deriving against the base, applying to the version resolved, and rebasing in `unit update` | Accepted, point 4 amended by #70, point 5 by #92, point 7 replaced by 0032, point 6 superseded by 0036 |
 | [0024](0024-consumer-update.md) | `assemblr update`: resolving with a reduced lock, the lock as a record of the resolution, and one reconciliation | Accepted |
 | [0025](0025-parameter-mappings-and-examples.md) | Parameter mappings and examples: option values as a union, values decided from dependents to dependencies, and development values | Superseded by 0036 |
-| [0026](0026-private-alpha-distribution.md) | Private alpha distribution: prebuilt binaries as draft GitHub Releases | Accepted |
-| [0027](0027-journal-format-compatibility.md) | Journal formats: a number for every change, and readers that refuse what they do not know | Accepted, consumer journal at format 3 since #101 |
+| [0026](0026-private-alpha-distribution.md) | Private alpha distribution: prebuilt binaries as draft GitHub Releases | Accepted, compatibility from the first beta set by 0041 |
+| [0027](0027-journal-format-compatibility.md) | Journal formats: a number for every change, and readers that refuse what they do not know | Accepted, consumer journal at format 3 since #101, rules extended to every format by 0041 |
 | [0028](0028-isolated-validation.md) | Isolated validation: shared test fixtures, a sandbox for manual runs, and a reference scenario | Accepted |
 | [0029](0029-remote-sources.md) | Remote unit sources: bare copies, what is fetched, the fetch environment, and accepted transports | Accepted, point 3 amended by 0037 |
 | [0030](0030-catalog-index.md) | Catalog index: `registry-index.json`, embedded manifests, and all-or-nothing refresh | Superseded by 0038 |
@@ -57,3 +57,4 @@ belong in [`docs/domain/`](../domain/), not here.
 | [0038](0038-remove-registry-catalogs.md) | Remove the `registry.jsonc` catalogs: no catalog commands, no catalog index, and registry index format 4 | Accepted |
 | [0039](0039-catalog-repositories.md) | Catalog repositories: a unit inside a commit, one lockfile without the siblings, and joint resolution | Accepted, point 2 revised by the owner (root tree) |
 | [0040](0040-stored-amendment-bases.md) | Stored amendment bases in a catalog: the consumer store, a base for every amendment, and the update's rebase | Accepted |
+| [0041](0041-format-compatibility.md) | Format compatibility: one set of rules for every format, a declared minimum Assemblr, and samples that never change | Accepted |

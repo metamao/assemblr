@@ -1,0 +1,17 @@
+{
+  "format": 1,
+  "manifest": {
+    "before": "{}",
+    "after": "{ }"
+  },
+  "lockfile": {
+    "before": "{}",
+    "after": "{ }"
+  },
+  "copies": {
+    "package.json": {
+      "before": "{}",
+      "after": "{ }"
+    }
+  }
+}

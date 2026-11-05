@@ -430,8 +430,9 @@ text, with these members:
   `null` when the composition cannot be planned;
 - `problems`: the warnings, as strings.
 
-The format carries no version number yet, as for the other `--json`
-outputs.
+Fields may be added, and existing fields keep their name, type, and
+meaning, as for the other `--json` outputs (see
+[compatibility.md](compatibility.md#machine-readable-output--approved)).
 
 ## Explicit and transitive dependencies — Approved
 

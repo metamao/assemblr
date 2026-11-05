@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value, json};
 
 use super::reference::{is_local_reference, is_remote, remote_reference};
+use crate::adapters::compatibility;
 use crate::domain::{
     ObjectId, Provenance, RegisteredUnit, RegistryIndex, SourceReference, UnitIdentity, Version,
 };
@@ -148,11 +149,7 @@ fn parse(bytes: &[u8]) -> Result<RegistryIndex, String> {
     let remote_allowed = match format {
         Some(2..=FORMAT) => true,
         Some(1) => false,
-        Some(other) => {
-            return Err(format!(
-                "it has format {other}, which this version of Assemblr does not read"
-            ));
-        }
+        Some(other) => return Err(compatibility::unknown_format("it", other, FORMAT)),
         None => return Err("it has no format number".to_owned()),
     };
     let mut units = BTreeMap::new();
@@ -437,5 +434,39 @@ mod tests {
             let error = parse(json.as_bytes()).unwrap_err();
             assert!(error.contains(expected), "{json}: {error}");
         }
+    }
+
+    #[test]
+    fn every_promised_index_format_is_read_and_written_as_the_newest() {
+        // Samples never change (ADR 0041): a reader that stops reading one
+        // fails here.
+        for sample in [
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/formats/registry-index-1.json"
+            ))
+            .as_slice(),
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/formats/registry-index-2.json"
+            )),
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/formats/registry-index-3.json"
+            )),
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/formats/registry-index-4.json"
+            )),
+        ] {
+            let index = parse(sample).unwrap();
+            assert_eq!(serialize(&index)["format"], 4);
+        }
+        let newest = parse(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/formats/registry-index-4.json"
+        )))
+        .unwrap();
+        assert_eq!(newest.units().len(), 1);
     }
 }

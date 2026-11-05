@@ -12,8 +12,8 @@ use std::process::ExitCode;
 
 use assemblr::adapters::{
     AddFailure, AddProblem, AmendFailure, AmendProblem, AmendState, BuildFailure, BuildProblem,
-    Built, CheckFailure, CheckProblem, DeclarationChange, FileOutcome, GitOutcome, IndexOutcome,
-    InitFailure, Initialized, Location, LockfileOutcome, ManifestFileError, Pending,
+    Built, CheckFailure, CheckProblem, DeclarationChange, Declared, FileOutcome, GitOutcome,
+    IndexOutcome, InitFailure, Initialized, Location, LockfileOutcome, ManifestFileError, Pending,
     PublishFailure, PublishProblem, PublishState, Published, PublishedProblem, RecoveryError,
     Registry, TagProblem, UpdateFailure, UpdateProblem, UpdateState, Updated, add_dependency,
     amend_unit, build_catalog, build_unit, check_catalog, check_unit, init_unit, locate_unit,
@@ -843,6 +843,33 @@ fn build() -> ExitCode {
 /// catalog's top level.
 fn report_built(built: &Built, at_catalog: bool) {
     report_lockfile(built);
+    match built.declared() {
+        None => {}
+        Some(Declared::Set { file, version }) => {
+            let name = file_name(file);
+            // A unit's copy of the schema predates the field when it was
+            // written by an earlier `unit init`.
+            let schema = if name == "manifest.jsonc" {
+                "; if your editor flags the field, run `assemblr unit init` to refresh \
+                 manifest.schema.json"
+            } else {
+                ""
+            };
+            eprintln!(
+                "note: set `assemblr` to {version} in {name}, the oldest Assemblr that reads \
+                 it; commit the file with the build's other changes{schema}"
+            );
+        }
+        Some(Declared::Failed {
+            file,
+            version,
+            reason,
+        }) => eprintln!(
+            "warning: could not set `assemblr` to {version} in {}: {reason}; set it by hand, \
+             since `assemblr unit publish` requires it",
+            file_name(file)
+        ),
+    }
     for copy in built.rebased() {
         eprintln!(
             "note: rebased units/{}/amendments/{} onto the change in src/{} of {}, as the \
@@ -1138,6 +1165,10 @@ fn publish_diagnosis(failure: &PublishFailure, root: &Path) -> Diagnosis {
     };
     let advice = problems.iter().find_map(|problem| match problem {
         PublishProblem::Check(problem) => check_advice(problem, root, "publish"),
+        PublishProblem::Assemblr { file, .. } => Some(format!(
+            "run `assemblr unit build`, which sets it, commit {file}, and run `assemblr unit \
+             publish` again"
+        )),
         PublishProblem::NoCommit | PublishProblem::Uncommitted { .. } => Some(
             "commit the unit, build/ excepted, and run `assemblr unit publish` again".to_owned(),
         ),
@@ -1178,6 +1209,14 @@ fn publish_diagnosis(failure: &PublishFailure, root: &Path) -> Diagnosis {
         ),
     });
     Diagnosis::note("no tag was created and nothing was changed").advise_if(advice)
+}
+
+/// The last component of `path`, as the author knows the file.
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 /// Reports on stderr how the lockfile changed.

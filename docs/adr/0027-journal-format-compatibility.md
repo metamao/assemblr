@@ -59,6 +59,7 @@ is where this must stop (#73, from the second decision-log review).
 - **Version the lockfile and the store the same way here.** They are not
   recovery state, and the release ADR (0026) already says persisted formats
   may change between alpha builds. Left for when a format change needs it.
+  *Amended (ADR 0041):* these rules now apply to every format.
 
 ## Consequences
 

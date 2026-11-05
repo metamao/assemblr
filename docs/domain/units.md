@@ -140,7 +140,9 @@ assemblr-lock.json    the catalog's one lockfile
 
 - `catalog.jsonc` holds `name`, an `@owner/name` identity that names the
   catalog, and `version`, the exact SemVer version of every unit in it.
-  `$schema` is allowed for editor support. A catalog has no
+  `$schema` is allowed for editor support, and `assemblr`, which
+  `unit build` writes, names the oldest Assemblr that reads its units (see
+  [compatibility.md](compatibility.md#the-oldest-assemblr-that-reads-a-unit)). A catalog has no
   `manifest.jsonc` at its root: a repository is a catalog or one unit.
 - Every entry of `units/` is a directory, and every directory is a unit,
   in the sorted order of their names. A catalog has at least one.

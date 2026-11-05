@@ -1,0 +1,15 @@
+// A unit manifest as alpha releases wrote it: no `assemblr` field.
+{
+  "$schema": "./manifest.schema.json",
+  "name": "@acme/web",
+  "version": "1.2.0",
+  "description": "A web application.",
+  "dependencies": { "@acme/node": "^1.0" },
+  "placeholders": {
+    "replace": { "__APP_TITLE__": "The application's visible name." },
+    "ignore": ["__DEV__"],
+  },
+  "amendments": {
+    "package.json": { "unit": "@acme/node", "base": "1.0.0" },
+  },
+}

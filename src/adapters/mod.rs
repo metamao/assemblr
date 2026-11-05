@@ -6,6 +6,7 @@
 //! `docs/adr/0001-architecture.md`).
 
 mod build;
+mod compatibility;
 mod git;
 mod init;
 mod jsonc;
@@ -23,7 +24,7 @@ mod skill;
 pub use build::{
     AddFailure, AddProblem, AmendFailure, AmendProblem, AmendState, Amended, BaseStoreError,
     BuildFailure, BuildLockError, BuildProblem, Built, Carried, CheckFailure, CheckProblem,
-    Checked, CrossVersionReason, DependencyAdded, FileState, IndexOutcome, Location,
+    Checked, CrossVersionReason, Declared, DependencyAdded, FileState, IndexOutcome, Location,
     LockfileOutcome, ManifestFileError, Match, OutputProblem, Pending, PendingFile, PublishError,
     PublishFailure, PublishProblem, PublishState, Published, PublishedProblem, RebaseWriteError,
     RebasedCopy, Recovered, RecoveryError, UnresolvedFile, UpdateFailure, UpdateProblem,
