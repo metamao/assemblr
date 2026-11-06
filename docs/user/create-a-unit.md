@@ -62,4 +62,5 @@ your own.
 
 To publish several units together, see
 [Keep several units in one repository](catalogs.md). To let others use your
-unit, see [Share your units](share.md).
+unit, see [Share your units](share.md). For tips on formatters and the
+files Assemblr writes, see [Tips](use.md#tips).

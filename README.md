@@ -127,7 +127,7 @@ changes, so commit both with the project.
 | [`docs/domain/open-contracts.md`](docs/domain/open-contracts.md) | Product questions that are not decided yet |
 | [`docs/adr/`](docs/adr/README.md) | Architectural decision records |
 | [`AGENTS.md`](AGENTS.md) | How Assemblr is engineered: rules for contributors and coding agents |
-| [`docs/user-facing-copy.md`](docs/user-facing-copy.md) | How Assemblr's help, messages, and README are written |
+| [`docs/user-facing-copy.md`](docs/user-facing-copy.md) | How Assemblr's help, messages, README, and user guides are written |
 
 ## Development
 

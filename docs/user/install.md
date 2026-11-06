@@ -67,10 +67,11 @@ affected. To also forget the registered units, delete the registry directory:
 ## From source
 
 Use this when you want the latest development version, or when no release
-is published yet. You need access to this private repository.
+is published yet. You need access to the private repository
+`metamao/assemblr`.
 
 1. Install Rust with [rustup](https://rustup.rs/). The build uses the Rust
-   version pinned in this repository, and rustup downloads it for you.
+   version pinned in the repository, and rustup downloads it for you.
 2. Clone the repository and install the binary:
 
    ```sh
