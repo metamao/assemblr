@@ -10,9 +10,9 @@ Each release on [GitHub Releases](https://github.com/metamao/assemblr/releases)
 carries prebuilt binaries for Linux x64 (WSL2 included) and Windows x64. If
 no release is published yet, [build from source](#from-source).
 
-You need the [GitHub CLI](https://cli.github.com/), signed in with
-`gh auth login` to an account with access. Replace `v0.1.0-alpha.1` with the
-release you want.
+Replace `v0.1.0-alpha.1` with the release you want. The commands download
+the archive and `SHA256SUMS`, check the archive against it, and install the
+binary for your user.
 
 <details>
 <summary><b>Linux and WSL2</b></summary>
@@ -20,8 +20,9 @@ release you want.
 ```sh
 tag=v0.1.0-alpha.1
 dir=$(mktemp -d) && cd "$dir"
-gh release download "$tag" --repo metamao/assemblr \
-  --pattern 'assemblr-*-x86_64-unknown-linux-musl.tar.gz' --pattern SHA256SUMS
+url=https://github.com/metamao/assemblr/releases/download/$tag
+curl -fsSLO "$url/assemblr-${tag#v}-x86_64-unknown-linux-musl.tar.gz"
+curl -fsSLO "$url/SHA256SUMS"
 sha256sum --ignore-missing --check SHA256SUMS        # must print "...: OK"
 tar -xzf assemblr-*.tar.gz
 install -D -m 755 assemblr-*/assemblr ~/.local/bin/assemblr
@@ -37,10 +38,11 @@ assemblr --version                                    # ~/.local/bin must be on 
 $tag = "v0.1.0-alpha.1"
 $dir = New-Item -ItemType Directory (Join-Path $env:TEMP "assemblr-$tag") -Force
 Set-Location $dir
-gh release download $tag --repo metamao/assemblr --clobber `
-  --pattern 'assemblr-*-x86_64-pc-windows-msvc.zip' --pattern SHA256SUMS
-$zip = Get-Item assemblr-*.zip
-$want = (Select-String -Path SHA256SUMS -Pattern ([regex]::Escape($zip.Name))).Line.Split(" ")[0]
+$url = "https://github.com/metamao/assemblr/releases/download/$tag"
+$zip = "assemblr-$($tag.Substring(1))-x86_64-pc-windows-msvc.zip"
+Invoke-WebRequest "$url/$zip" -OutFile $zip -UseBasicParsing
+Invoke-WebRequest "$url/SHA256SUMS" -OutFile SHA256SUMS -UseBasicParsing
+$want = (Select-String -Path SHA256SUMS -Pattern ([regex]::Escape($zip))).Line.Split(" ")[0]
 if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() -ne $want) { throw "checksum mismatch" }
 Expand-Archive $zip -DestinationPath . -Force
 $bin = Join-Path $env:LOCALAPPDATA "Programs\assemblr"
@@ -67,8 +69,7 @@ affected. To also forget the registered units, delete the registry directory:
 ## From source
 
 Use this when you want the latest development version, or when no release
-is published yet. You need access to the private repository
-`metamao/assemblr`.
+is published yet.
 
 1. Install Rust with [rustup](https://rustup.rs/). The build uses the Rust
    version pinned in the repository, and rustup downloads it for you.

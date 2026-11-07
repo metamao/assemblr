@@ -18,6 +18,10 @@ or self-update is required (#68, D-25).
    developer fallback.** Binaries are attached to GitHub Releases of the
    private repository. Downloading uses `gh release download`, which reuses
    `gh auth`; Assemblr stores no credentials and has no network code.
+   *Amended (2026-11-07):* the repository is public, so the documented
+   install downloads the release assets over HTTPS with `curl` or
+   `Invoke-WebRequest` and needs neither `gh` nor an account. Releases are
+   still the draft prereleases of point 4.
 2. **Targets.** `x86_64-pc-windows-msvc` and `x86_64-unknown-linux-musl`. The
    Linux binary is static, so it does not depend on the glibc of the build
    runner and runs on any x64 Linux, WSL2 included. The code has no C
@@ -64,7 +68,9 @@ or self-update is required (#68, D-25).
 - The binaries are unsigned. Windows SmartScreen may warn on a browser
   download; files fetched with `gh` carry no mark of the web, so it normally
   does not. The checksum file proves integrity against the release, not
-  authenticity.
+  authenticity. *Amended (2026-11-07):* the documented install no longer
+  uses `gh`; whether files that `Invoke-WebRequest` saves carry the mark of
+  the web is not verified.
 - Only the two targets exist. macOS and arm64 need a new matrix entry.
 - A release is reproducible from its tag: `--locked`, the pinned toolchain,
   and the commit are all fixed.

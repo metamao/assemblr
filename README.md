@@ -20,7 +20,7 @@ When a unit publishes a new version, `assemblr update` brings the change in
 and keeps the edits you made yourself. A project template is copied once and
 then maintained alone. A unit keeps improving every project that uses it.
 
-> **Status: private alpha.** The full workflow works today: create, share,
+> **Status: alpha.** The full workflow works today: create, share,
 > compose, and update. File formats may still change between alpha releases.
 
 ## Why Assemblr

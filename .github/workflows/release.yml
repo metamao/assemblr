@@ -1,4 +1,4 @@
-# Private alpha releases (docs/adr/0026). A release is prepared only by
+# Alpha releases (docs/adr/0026). A release is prepared only by
 # starting this workflow by hand: it validates, builds and packages the
 # binaries, and creates a *draft* prerelease. The owner publishes the draft,
 # which creates the tag at the validated commit. To save Actions minutes, pull
@@ -162,7 +162,7 @@ jobs:
             --draft --prerelease \
             --target "$GITHUB_SHA" \
             --title "Assemblr $TAG" \
-            --notes "Private alpha, built from commit $GITHUB_SHA. Install and upgrade: https://github.com/$GITHUB_REPOSITORY/blob/$TAG/docs/user/install.md"
+            --notes "Alpha, built from commit $GITHUB_SHA. Install and upgrade: https://github.com/$GITHUB_REPOSITORY/blob/$TAG/docs/user/install.md"
           # The tag is created only when the draft is published, at the commit
           # stored here: the one this run built, however far main has moved.
           pinned=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)
