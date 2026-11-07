@@ -421,6 +421,8 @@ Every command explains itself with `--help`, including examples.
 | [`docs/adr/`](docs/adr/README.md) | Architectural decision records |
 | [`AGENTS.md`](AGENTS.md) | How Assemblr is engineered: rules for contributors and coding agents |
 | [`docs/user-facing-copy.md`](docs/user-facing-copy.md) | How Assemblr's help, messages, and README are written |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to report a bug or propose a change |
+| [`SECURITY.md`](SECURITY.md) | How to report a vulnerability |
 
 ## Development
 
@@ -435,3 +437,13 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
 cargo build --all-targets
 ```
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT), at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in Assemblr by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.
