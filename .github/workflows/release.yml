@@ -162,7 +162,7 @@ jobs:
             --draft --prerelease \
             --target "$GITHUB_SHA" \
             --title "Assemblr $TAG" \
-            --notes "Private alpha, built from commit $GITHUB_SHA. Install and upgrade: see the README (Installation)."
+            --notes "Private alpha, built from commit $GITHUB_SHA. Install and upgrade: https://github.com/$GITHUB_REPOSITORY/blob/$TAG/docs/user/install.md"
           # The tag is created only when the draft is published, at the commit
           # stored here: the one this run built, however far main has moved.
           pinned=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)

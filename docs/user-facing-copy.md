@@ -1,8 +1,9 @@
 # User-facing copy
 
 How Assemblr writes what its users read: `--help`, errors, notes, hints,
-success output, the README, and the agent guide. The goal is text that a busy
-person or an agent can read once and act on. [AGENTS.md §6](../AGENTS.md#6-errors-and-diagnostics)
+success output, the README, the user guides in `docs/user/`, and the agent
+guide. The goal is text that a busy person or an agent can read once and act
+on. [AGENTS.md §6](../AGENTS.md#6-errors-and-diagnostics)
 defines what a diagnostic must contain; this file defines how it reads.
 
 ## Rules
@@ -32,9 +33,12 @@ defines what a diagnostic must contain; this file defines how it reads.
    show. `--help` adds at most three sentences and two or three examples.
    Each flag gets one sentence. Placeholders are uniform: `<UNIT>`, with the
    example `@acme/web`.
-7. **Make the README a guide, not a specification.** What Assemblr is, how
-   to install it, a first use for consumers and for authors, the key
-   concepts, and links. Development comes last.
+7. **Write the README and the user guides as guides, not specifications.**
+   The README says what Assemblr is, shows it at work, explains the key
+   concepts, and links to the guides; development comes last. Each guide in
+   `docs/user/` covers one task, such as installing or creating a unit, and
+   starts with a `#` title. Guides link to each other by file name, such as
+   `use.md`.
 8. **Use US English, the Oxford comma, and backticks** for commands, code,
    and paths.
 9. **Text is not a contract.** Agents should rely on `--json` and exit codes.

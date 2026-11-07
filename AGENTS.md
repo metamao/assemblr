@@ -215,13 +215,18 @@ output, and subprocess output as **untrusted**.
   user can do about it. Report every relevant conflict, not just the first,
   when that is practical.
 - **User-facing text follows [`docs/user-facing-copy.md`](docs/user-facing-copy.md)**:
-  `--help`, errors, notes, hints, success output, the README, and the agent
-  guide.
+  `--help`, errors, notes, hints, success output, the README, the user
+  guides, and the agent guide.
 - **The agent guide follows the CLI.** `assemblr guide` prints
   [`src/cli/guide.md`](src/cli/guide.md). A change to a command, a flag, or a
   workflow the guide describes updates the guide in the same change. A unit
   test checks that every command it names exists, but not that it still
   describes the best way to work; the agent bench (§8) measures that.
+- **The user guides follow the CLI too.** [`docs/user/`](docs/user/) holds
+  one guide per task, and each release tag carries them for the project's
+  website. A change to a command, a flag, or a workflow a guide describes
+  updates that guide in the same change, so a release never ships a guide
+  that describes another version.
 - **Never panic on user-controlled or external data.** `unwrap`/`expect` are
   linted outside tests. A panic is acceptable only for a genuine internal
   invariant violation, with a message explaining the invariant.
