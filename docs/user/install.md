@@ -89,7 +89,7 @@ is published yet.
    ```
 
    It prints the version and the commit it was built from, such as
-   `assemblr 0.1.0-alpha.1 (e17c7acc88f2)`. If the command is not found, add
+   `assemblr 0.1.0-alpha.2 (e17c7acc88f2)`. If the command is not found, add
    `~/.cargo/bin` (or `%USERPROFILE%\.cargo\bin` on Windows) to your `PATH`.
 
 To upgrade, run `git pull` in the clone and repeat step 2.
