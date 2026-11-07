@@ -4,6 +4,7 @@ version = "0.1.0-alpha.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Compose and maintain opinionated, reusable software units"
+license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
