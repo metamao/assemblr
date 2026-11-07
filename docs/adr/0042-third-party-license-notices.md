@@ -18,13 +18,20 @@ in the release workflow instead of keeping a file in the repository.
 1. **A `licenses` job in `release.yml` generates `THIRD-PARTY-LICENSES.txt`**
    with [cargo-about](https://github.com/EmbarkStudios/cargo-about), installed
    at a pinned version with `--locked`. It reads `Cargo.lock`, so the notices
-   list exactly the crates the release builds, for both targets.
+   cover every crate linked into either target's binary. They can also list
+   a few crates that are not linked, such as procedural macros, which does
+   no harm.
 2. **The configuration lives in `.github/release/`.** `about.toml` lists the
    accepted licenses and the two targets, and leaves out build and dev
    dependencies and Assemblr itself. `about.hbs` renders plain text: each
    license with its text, the crates under it, and each crate's crates.io
    page as the place for its source. A dependency under any other license
    fails the job, and with it the release, until someone reviews it.
+   cargo-about falls back to the generic text of a license, without its
+   copyright line, when it does not recognise a crate's license file, as
+   with `windows-sys` and `windows-link`. `about.toml` points it at those
+   files with `clarify` entries, and the job fails when the output still
+   holds a template placeholder such as `<year>`.
 3. **Every archive holds** the binary, `LICENSE-MIT`, `LICENSE-APACHE`, and
    `THIRD-PARTY-LICENSES.txt`. The smoke test fails when one is missing.
 
@@ -36,13 +43,17 @@ in the release workflow instead of keeping a file in the repository.
 - *`cargo-bundle-licenses` or a hand-written script.* cargo-about is
   maintained by Embark Studios, reads the license files from each crate's
   source, and refuses licenses it is not told to accept, which a script
-  would have to reimplement.
+  would have to reimplement. Its fallback to template text is caught by the
+  placeholder check above.
 
 ## Consequences
 
 - A release takes about two minutes more, to build cargo-about.
 - A new dependency under a license that is not accepted stops the release
   until `about.toml` accepts it, which is the moment to check it.
+- A dependency update that changes the license file of `windows-sys` or
+  `windows-link`, or a new crate whose file cargo-about does not recognise,
+  also stops the release, until its `clarify` entry is added or updated.
 - `v0.1.0-alpha.1` stays without the notices; published releases are not
   changed.
 - The tool is not a dependency of Assemblr. It runs only in the release
