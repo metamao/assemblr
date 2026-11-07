@@ -36,7 +36,8 @@ or self-update is required (#68, D-25).
 4. **One hand-started workflow, `release.yml`.** It validates (fmt, clippy,
    tests on Linux and Windows) before packaging, builds with `--locked`,
    packages `assemblr-<version>-<target>.tar.gz` (Linux) or `.zip` (Windows)
-   holding one directory with the binary, smoke-tests each archive outside the
+   holding one directory with the binary (*amended by ADR 0042:* and the
+   license files), smoke-tests each archive outside the
    checkout, and creates a **draft prerelease** with `SHA256SUMS`, targeting
    the commit that was built (`github.sha`, which every job checks out, so
    a later push to `main` cannot change it). The workflow refuses a tag that

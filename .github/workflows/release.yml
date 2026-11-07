@@ -39,9 +39,40 @@ jobs:
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked --all-targets --all-features
 
+  # The binaries link their dependencies statically, so each archive carries
+  # their license notices (docs/adr/0042).
+  licenses:
+    name: Third-party licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - run: rustup toolchain install
+      # Pinned, so the notices come from the same tool on every run.
+      - run: cargo install cargo-about --version 0.9.3 --locked --features cli
+      # Fails on a license that .github/release/about.toml does not accept.
+      - run: >-
+          cargo about generate --locked --fail
+          -c .github/release/about.toml .github/release/about.hbs
+          -o THIRD-PARTY-LICENSES.txt
+      # cargo-about falls back to a generic template, without the copyright
+      # line, when it does not recognise a crate's license file.
+      - name: Check that every license names its copyright holder
+        run: |
+          if grep -nE '<year>|<copyright holders>|<owner>' THIRD-PARTY-LICENSES.txt; then
+            echo "::error::a license is a template without its copyright line; add a clarify entry to .github/release/about.toml"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v5
+        with:
+          name: third-party-licenses
+          path: THIRD-PARTY-LICENSES.txt
+          if-no-files-found: error
+
   package:
     name: Package (${{ matrix.target }})
-    needs: validate
+    needs: [validate, licenses]
     strategy:
       fail-fast: false
       matrix:
@@ -82,6 +113,11 @@ jobs:
             exit 1
           fi
 
+      - uses: actions/download-artifact@v5
+        with:
+          name: third-party-licenses
+          path: licenses
+
       - name: Build
         env:
           ASSEMBLR_COMMIT: ${{ github.sha }}
@@ -94,6 +130,7 @@ jobs:
         run: |
           mkdir -p "dist/$NAME"
           cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" "dist/$NAME/"
+          cp LICENSE-MIT LICENSE-APACHE licenses/THIRD-PARTY-LICENSES.txt "dist/$NAME/"
           cd dist
           if [ "${{ runner.os }}" = Windows ]; then
             archive="$NAME.zip"
@@ -119,6 +156,9 @@ jobs:
             tar -xzf "$ARCHIVE"
           fi
           bin=$(echo "$PWD"/assemblr-*/${{ matrix.exe }})
+          for file in LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.txt; do
+            test -s "$(dirname "$bin")/$file" || { echo "::error::the archive has no $file"; exit 1; }
+          done
           out=$("$bin" --version)
           echo "$out"
           case "$out" in
@@ -148,6 +188,8 @@ jobs:
       - uses: actions/download-artifact@v5
         with:
           path: dist
+          # Only the archives; the license notices are inside each one.
+          pattern: assemblr-*
           merge-multiple: true
       - name: Checksums
         working-directory: dist

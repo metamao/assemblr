@@ -1,0 +1,19 @@
+Third-party licenses for Assemblr
+=================================
+
+The Assemblr binary includes Rust crates from the list below, which may also
+name a few crates that are not part of it. Each license is followed by the
+crates used under it and the place where each crate's source code is
+available.
+
+{{#each licenses}}
+--------------------------------------------------------------------------------
+{{{name}}} ({{{id}}})
+
+Used by:
+{{#each used_by}}
+- {{{crate.name}}} {{{crate.version}}}: https://crates.io/crates/{{{crate.name}}}/{{{crate.version}}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

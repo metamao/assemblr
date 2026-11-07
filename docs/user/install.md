@@ -10,7 +10,7 @@ Each release on [GitHub Releases](https://github.com/metamao/assemblr/releases)
 carries prebuilt binaries for Linux x64 (WSL2 included) and Windows x64. If
 no release is published yet, [build from source](#from-source).
 
-Replace `v0.1.0-alpha.1` with the release you want. The commands download
+Replace `v0.1.0-alpha.2` with the release you want. The commands download
 the archive and `SHA256SUMS`, check the archive against it, and install the
 binary for your user.
 
@@ -18,7 +18,7 @@ binary for your user.
 <summary><b>Linux and WSL2</b></summary>
 
 ```sh
-tag=v0.1.0-alpha.1
+tag=v0.1.0-alpha.2
 dir=$(mktemp -d) && cd "$dir"
 url=https://github.com/metamao/assemblr/releases/download/$tag
 curl -fsSLO "$url/assemblr-${tag#v}-x86_64-unknown-linux-musl.tar.gz"
@@ -35,7 +35,7 @@ assemblr --version                                    # ~/.local/bin must be on 
 <summary><b>Windows (PowerShell)</b></summary>
 
 ```powershell
-$tag = "v0.1.0-alpha.1"
+$tag = "v0.1.0-alpha.2"
 $dir = New-Item -ItemType Directory (Join-Path $env:TEMP "assemblr-$tag") -Force
 Set-Location $dir
 $ProgressPreference = "SilentlyContinue"    # the progress bar slows downloads a lot
@@ -89,7 +89,7 @@ is published yet.
    ```
 
    It prints the version and the commit it was built from, such as
-   `assemblr 0.1.0-alpha.1 (e17c7acc88f2)`. If the command is not found, add
+   `assemblr 0.1.0-alpha.2 (e17c7acc88f2)`. If the command is not found, add
    `~/.cargo/bin` (or `%USERPROFILE%\.cargo\bin` on Windows) to your `PATH`.
 
 To upgrade, run `git pull` in the clone and repeat step 2.
