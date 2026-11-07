@@ -21,7 +21,8 @@ or self-update is required (#68, D-25).
    *Amended (2026-11-07):* the repository is public, so the documented
    install downloads the release assets over HTTPS with `curl` or
    `Invoke-WebRequest` and needs neither `gh` nor an account. Releases are
-   still the draft prereleases of point 4.
+   still created as draft prereleases (point 4), and the commands work once
+   the owner publishes one.
 2. **Targets.** `x86_64-pc-windows-msvc` and `x86_64-unknown-linux-musl`. The
    Linux binary is static, so it does not depend on the glibc of the build
    runner and runs on any x64 Linux, WSL2 included. The code has no C

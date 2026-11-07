@@ -38,6 +38,7 @@ assemblr --version                                    # ~/.local/bin must be on 
 $tag = "v0.1.0-alpha.1"
 $dir = New-Item -ItemType Directory (Join-Path $env:TEMP "assemblr-$tag") -Force
 Set-Location $dir
+$ProgressPreference = "SilentlyContinue"    # the progress bar slows downloads a lot
 $url = "https://github.com/metamao/assemblr/releases/download/$tag"
 $zip = "assemblr-$($tag.Substring(1))-x86_64-pc-windows-msvc.zip"
 Invoke-WebRequest "$url/$zip" -OutFile $zip -UseBasicParsing
