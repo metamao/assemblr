@@ -105,8 +105,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # An existing tag would win over the commit the draft targets.
-          if [ "${{ github.event_name }}" = workflow_dispatch ] && gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/${{ inputs.tag }}" > /dev/null 2>&1; then
+          # An existing tag would win over the commit the draft targets. Only
+          # main creates a draft, so a branch run may check a released version.
+          if [ "${{ github.event_name }}" = workflow_dispatch ] && [ "${{ github.ref }}" = refs/heads/main ] && gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/${{ inputs.tag }}" > /dev/null 2>&1; then
             echo "::error::the tag ${{ inputs.tag }} already exists"
             exit 1
           fi
