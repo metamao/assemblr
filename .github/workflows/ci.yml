@@ -1,8 +1,8 @@
 name: CI
 
-# Pull requests run the Linux checks only. Windows and the MSRV run after the
-# merge to main, or by hand on any branch (workflow_dispatch). Changes that
-# touch only documentation skip CI.
+# Pull requests run the Linux checks only. Windows, macOS, and the MSRV run
+# after the merge to main, or by hand on any branch (workflow_dispatch).
+# Changes that touch only documentation skip CI.
 on:
   push:
     branches: [main]
@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "windows-latest"]') }}
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "windows-latest", "macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
