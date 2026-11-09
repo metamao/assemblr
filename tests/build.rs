@@ -544,7 +544,13 @@ fn paths_that_differ_only_in_unicode_normalization_collide() {
     app.write("src/cafe\u{301}.md", "decomposed");
     let stderr = stderr(&fails(fixture.build(&app)));
     assert!(stderr.contains("path collision"), "{stderr}");
-    assert!(stderr.contains("Unicode normalization"), "{stderr}");
+    // Git on macOS precomposes the names it reads from the file system
+    // (`core.precomposeunicode`, which `git init` sets there), so both
+    // files are `café.md` in its precomposed form: the same path, not two
+    // forms of it.
+    if !cfg!(target_os = "macos") {
+        assert!(stderr.contains("Unicode normalization"), "{stderr}");
+    }
 }
 
 #[test]
