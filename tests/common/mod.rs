@@ -38,7 +38,16 @@ pub(crate) const NULL_DEVICE: &str = "/dev/null";
 fn root() -> PathBuf {
     let mut hasher = DefaultHasher::new();
     env!("CARGO_MANIFEST_DIR").hash(&mut hasher);
-    std::env::temp_dir().join(format!("assemblr-tests-{:016x}", hasher.finish()))
+    // The temporary directory can be reached through a symbolic link, as on
+    // macOS, where it is under `/var`, a link to `/private/var`. A command
+    // reads its working directory with links resolved, so a path given with
+    // the link would name the same repository differently (ADR 0007).
+    // Windows would resolve to a `\\?\` path, which Git does not accept.
+    #[cfg(unix)]
+    let temp = std::env::temp_dir().canonicalize().unwrap();
+    #[cfg(not(unix))]
+    let temp = std::env::temp_dir();
+    temp.join(format!("assemblr-tests-{:016x}", hasher.finish()))
 }
 
 /// An empty directory for the test `test` of this test crate, outside the
