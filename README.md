@@ -110,7 +110,7 @@ changes, so commit both with the project.
 
 | Guide | What it covers |
 | --- | --- |
-| [Install Assemblr](docs/user/install.md) | Prebuilt binaries for Linux, WSL2, and Windows, or a build from source |
+| [Install Assemblr](docs/user/install.md) | Install scripts or prebuilt binaries for Linux, WSL2, macOS, and Windows, or a build from source |
 | [Use units in a project](docs/user/use.md) | Register units, create a project, add units, and stay up to date |
 | [Create a unit](docs/user/create-a-unit.md) | Write, build, check, and publish a unit |
 | [Keep several units in one repository](docs/user/catalogs.md) | Publish units together as a catalog |

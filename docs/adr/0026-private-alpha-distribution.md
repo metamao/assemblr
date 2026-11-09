@@ -26,7 +26,8 @@ or self-update is required (#68, D-25).
 2. **Targets.** `x86_64-pc-windows-msvc` and `x86_64-unknown-linux-musl`. The
    Linux binary is static, so it does not depend on the glibc of the build
    runner and runs on any x64 Linux, WSL2 included. The code has no C
-   dependencies, so musl costs nothing.
+   dependencies, so musl costs nothing. *Amended by ADR 0043:*
+   `aarch64-apple-darwin` is a third target.
 3. **Versions are SemVer prereleases** (`0.1.0-alpha.1`), tags are
    `v<version>`, and the workflow refuses a tag that differs from
    `Cargo.toml`. `assemblr --version` prints `assemblr <version> (<commit>)`;
@@ -34,7 +35,7 @@ or self-update is required (#68, D-25).
    build to the exact commit) or from `git rev-parse`, and omits it when
    neither exists.
 4. **One hand-started workflow, `release.yml`.** It validates (fmt, clippy,
-   tests on Linux and Windows) before packaging, builds with `--locked`,
+   tests on Linux and Windows; *amended by ADR 0043:* and macOS) before packaging, builds with `--locked`,
    packages `assemblr-<version>-<target>.tar.gz` (Linux) or `.zip` (Windows)
    holding one directory with the binary (*amended by ADR 0042:* and the
    license files), smoke-tests each archive outside the
@@ -49,7 +50,8 @@ or self-update is required (#68, D-25).
    release step. Pull requests do not start it automatically, to save
    Actions minutes.
 5. **Install, upgrade, and removal are documented commands**, not scripts: an
-   upgrade replaces the binary. User state (the registry in the platform's
+   upgrade replaces the binary. *Amended by ADR 0043:* `install.sh` and
+   `install.ps1` run the same steps. User state (the registry in the platform's
    local data directory, and every consumer project) is never part of the
    installation, so an upgrade cannot touch it.
 

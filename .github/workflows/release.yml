@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -84,6 +84,10 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             exe: assemblr.exe
+          # Apple Silicon only; Intel Macs build from source (docs/adr/0043).
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            exe: assemblr
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -101,8 +105,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # An existing tag would win over the commit the draft targets.
-          if [ "${{ github.event_name }}" = workflow_dispatch ] && gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/${{ inputs.tag }}" > /dev/null 2>&1; then
+          # An existing tag would win over the commit the draft targets. Only
+          # main creates a draft, so a branch run may check a released version.
+          if [ "${{ github.event_name }}" = workflow_dispatch ] && [ "${{ github.ref }}" = refs/heads/main ] && gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/${{ inputs.tag }}" > /dev/null 2>&1; then
             echo "::error::the tag ${{ inputs.tag }} already exists"
             exit 1
           fi
@@ -169,6 +174,49 @@ jobs:
           mkdir project && cd project
           "$bin" init
           test -f assemblr.jsonc
+
+      # Install the archive with install.sh or install.ps1, as a user would,
+      # from a local copy of the release instead of GitHub (docs/adr/0043).
+      - name: Smoke test the install script
+        if: runner.os != 'Windows'
+        env:
+          ARCHIVE: ${{ github.workspace }}/dist/${{ steps.package.outputs.archive }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          release="$RUNNER_TEMP/releases/v$VERSION"
+          mkdir -p "$release"
+          cp "$ARCHIVE" "$release/"
+          (cd "$release" && shasum -a 256 assemblr-* > SHA256SUMS)
+          ASSEMBLR_DOWNLOAD_URL="file://$RUNNER_TEMP/releases" \
+            ASSEMBLR_INSTALL_DIR="$RUNNER_TEMP/bin" \
+            sh install.sh
+          out=$("$RUNNER_TEMP/bin/assemblr" --version)
+          case "$out" in
+            "assemblr $VERSION (${GITHUB_SHA:0:12})") ;;
+            *) echo "::error::install.sh installed an unexpected version: $out"; exit 1 ;;
+          esac
+
+      - name: Smoke test the install script
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ARCHIVE: ${{ github.workspace }}/dist/${{ steps.package.outputs.archive }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $releases = Join-Path $env:RUNNER_TEMP releases
+          $release = New-Item -ItemType Directory (Join-Path $releases "v$env:VERSION") -Force
+          Copy-Item $env:ARCHIVE $release
+          $hash = (Get-FileHash $env:ARCHIVE -Algorithm SHA256).Hash.ToLower()
+          Set-Content (Join-Path $release SHA256SUMS) "$hash  $(Split-Path $env:ARCHIVE -Leaf)"
+          $env:ASSEMBLR_DOWNLOAD_URL = ([Uri] $releases).AbsoluteUri
+          $env:ASSEMBLR_INSTALL_DIR = Join-Path $env:RUNNER_TEMP bin
+          # Windows PowerShell, which `irm | iex` runs in by default.
+          powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Raw install.ps1 | Invoke-Expression"
+          if ($LASTEXITCODE) { throw "install.ps1 failed" }
+          $out = & (Join-Path $env:ASSEMBLR_INSTALL_DIR assemblr.exe) --version
+          if ($out -ne "assemblr $env:VERSION ($($env:GITHUB_SHA.Substring(0, 12)))") {
+            throw "install.ps1 installed an unexpected version: $out"
+          }
 
       - uses: actions/upload-artifact@v5
         with:
