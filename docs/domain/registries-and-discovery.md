@@ -189,7 +189,7 @@ reference:
   `/var` are symbolic links into `/private`. Two such references to one
   directory are ambiguous, and neither is taken. Stored references are never
   rewritten, and source conflicts are still decided by exact comparison
-  (owner decision on #PR).
+  (owner decision on #149).
 - Portability: a local reference is meaningful only on the machine and in the
   directory layout where it was registered. Moving or renaming the repository
   makes the source unreadable until it is removed and registered again.
