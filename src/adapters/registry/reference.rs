@@ -4,13 +4,16 @@
 //! normalized lexically, without consulting the file system, so symbolic
 //! links are kept as given. A remote reference is kept exactly as given,
 //! once its transport is known to be one Assemblr fetches with. Either is
-//! compared exactly afterwards (see ADR 0007 and ADR 0029).
+//! compared exactly afterwards (see ADR 0007 and ADR 0029), except where
+//! `unit publish` looks for its own registration ([`registered_reference`]).
 
+use std::collections::BTreeSet;
 use std::fmt;
+use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use crate::domain::SourceReference;
+use crate::domain::{RegisteredUnit, RegistryIndex, SourceReference};
 
 /// The reference of the repository `given`: a remote reference as
 /// [`remote_reference`] accepts it, or the reference of a local path, as
@@ -89,6 +92,45 @@ pub fn local_reference(path: &Path) -> Result<SourceReference, ReferenceError> {
         .to_str()
         .map(SourceReference::new)
         .ok_or(ReferenceError::NotUtf8(normalized))
+}
+
+/// The reference `index` registers the local repository at `root` by: the
+/// reference of `root` itself when that is registered, and otherwise the one
+/// registered local source that is the same directory, reached through a
+/// symbolic link or spelled in another letter case, as
+/// `registries-and-discovery.md` allows for `unit publish` only.
+/// When neither is registered, the reference of `root`.
+///
+/// It lets `unit publish` recognize its own registration whichever path
+/// the working directory reports. Stored references are still compared
+/// exactly everywhere else, source conflicts included.
+pub(crate) fn registered_reference(
+    index: &RegistryIndex,
+    root: &Path,
+) -> Result<SourceReference, ReferenceError> {
+    let reference = local_reference(root)?;
+    if !index.identities_of(&reference).is_empty() {
+        return Ok(reference);
+    }
+    let Ok(directory) = fs::canonicalize(root) else {
+        return Ok(reference);
+    };
+    let same: BTreeSet<&SourceReference> = index
+        .units()
+        .values()
+        .map(RegisteredUnit::source)
+        .filter(|source| is_local_reference(source.as_str()))
+        .filter(|source| {
+            fs::canonicalize(source.as_str()).is_ok_and(|resolved| resolved == directory)
+        })
+        .collect();
+    let mut same = same.into_iter();
+    match (same.next(), same.next()) {
+        (Some(only), None) => Ok(only.clone()),
+        // Two registered references to one directory cannot both be meant;
+        // neither is chosen.
+        _ => Ok(reference),
+    }
 }
 
 /// Whether a reference names a remote repository, the way Git reads it: a
@@ -358,5 +400,70 @@ mod tests {
         }
         // SSH names the account to log in as, which is not a secret.
         assert!(remote_reference("ssh://git@github.com/acme/node.git").is_ok());
+    }
+
+    /// The reference each of `paths` is registered by, one identity each.
+    #[cfg(unix)]
+    fn registered(paths: &[(&str, &Path)]) -> crate::domain::RegistryIndex {
+        use std::collections::BTreeMap;
+
+        use crate::domain::{RegisteredUnit, RegistryIndex, UnitIdentity};
+
+        RegistryIndex::from_units(
+            paths
+                .iter()
+                .map(|(identity, path)| {
+                    (
+                        UnitIdentity::parse(identity).unwrap(),
+                        RegisteredUnit::new(local_reference(path).unwrap(), BTreeMap::new()),
+                    )
+                })
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_registration_is_found_through_symbolic_links_only_when_unambiguous() {
+        use std::os::unix::fs::symlink;
+
+        use super::registered_reference;
+
+        let dir = std::env::temp_dir().join(format!(
+            "assemblr-registered-reference-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let unit = dir.join("unit");
+        std::fs::create_dir_all(&unit).unwrap();
+        let (one, two) = (dir.join("one"), dir.join("two"));
+        symlink(&unit, &one).unwrap();
+        symlink(&unit, &two).unwrap();
+        let reference = |path: &Path| local_reference(path).unwrap();
+
+        // Through a link, the registered reference is found.
+        let index = registered(&[("@acme/unit", &one)]);
+        assert_eq!(
+            registered_reference(&index, &unit).unwrap(),
+            reference(&one)
+        );
+        // An exact registration wins over one through a link.
+        let index = registered(&[("@acme/a", &one), ("@acme/b", &unit)]);
+        assert_eq!(
+            registered_reference(&index, &unit).unwrap(),
+            reference(&unit)
+        );
+        // Two links to the directory: neither is chosen.
+        let index = registered(&[("@acme/a", &one), ("@acme/b", &two)]);
+        assert_eq!(
+            registered_reference(&index, &unit).unwrap(),
+            reference(&unit)
+        );
+        // Nothing registered: the directory's own reference.
+        let index = registered(&[]);
+        assert_eq!(registered_reference(&index, &one).unwrap(), reference(&one));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

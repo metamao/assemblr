@@ -23,6 +23,7 @@ use std::sync::Arc;
 pub(crate) use self::observe as observe_tags;
 pub use info::{Found, InfoFailure, Search, UnitInfo};
 use reference::is_remote_reference;
+pub(crate) use reference::registered_reference;
 pub use reference::{ReferenceError, local_reference, source_reference};
 use sha2::{Digest, Sha256};
 pub use store::StorageError;

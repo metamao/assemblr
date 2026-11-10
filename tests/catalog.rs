@@ -249,6 +249,31 @@ fn a_registered_catalog_indexes_each_new_version_and_its_new_units() {
     assert!(list.contains("1.1.0"), "{list}");
 }
 
+/// Registered through a symbolic link and published from the directory it
+/// names, as on macOS, where `/tmp` and `/var` are links into `/private`.
+#[cfg(unix)]
+#[test]
+fn a_catalog_registered_through_a_symbolic_link_is_indexed_on_publish() {
+    let fixture = Fixture::new("registered-symlink");
+    let catalog = fixture.three_units();
+    succeeds(fixture.run(&catalog, &["unit", "build"]));
+    git(&catalog, &["add", "-A"]);
+    git(&catalog, &["commit", "-q", "-m", "1.0.0"]);
+    let link = fixture.dir.join("linked");
+    std::os::unix::fs::symlink(&catalog, &link).unwrap();
+    succeeds(fixture.run(&fixture.dir, &["registry", "add", link.to_str().unwrap()]));
+
+    let output = succeeds(fixture.run(&catalog, &["unit", "publish"]));
+    assert!(
+        stdout(&output).contains("Indexed it in the local registry."),
+        "{}",
+        stdout(&output)
+    );
+    let list = stdout(&succeeds(fixture.run(&fixture.dir, &["registry", "list"])));
+    assert!(list.contains(link.to_str().unwrap()), "{list}");
+    assert!(list.contains("1.0.0"), "{list}");
+}
+
 #[test]
 fn building_the_catalog_twice_changes_nothing() {
     let fixture = Fixture::new("deterministic");

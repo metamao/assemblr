@@ -180,6 +180,16 @@ reference:
   or in a different letter case on a case-insensitive file system, are
   different references, and if they declare the same identity they are a
   [source conflict](#source-conflicts--approved).
+- One exception, for `unit publish` only: when no registered reference is
+  exactly the publishing repository's, the one registered local reference
+  that names the same directory, through a symbolic link or in another letter
+  case, is taken as its registration, and that stored reference is indexed.
+  The working directory a process reports can differ from the path the
+  repository was registered by, for example on macOS, where `/tmp` and
+  `/var` are symbolic links into `/private`. Two such references to one
+  directory are ambiguous, and neither is taken. Stored references are never
+  rewritten, and source conflicts are still decided by exact comparison
+  (owner decision on #149).
 - Portability: a local reference is meaningful only on the machine and in the
   directory layout where it was registered. Moving or renaming the repository
   makes the source unreadable until it is removed and registered again.
