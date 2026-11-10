@@ -29,7 +29,7 @@ irm https://raw.githubusercontent.com/metamao/assemblr/v0.1.0-alpha.3/install.ps
 To read a script before running it, open
 [`install.sh`](https://github.com/metamao/assemblr/blob/v0.1.0-alpha.3/install.sh)
 or [`install.ps1`](https://github.com/metamao/assemblr/blob/v0.1.0-alpha.3/install.ps1).
-Set `ASSEMBLR_VERSION` to install another release, such as `0.1.0-alpha.3`,
+Set `ASSEMBLR_VERSION` to install another release, such as `0.1.0-alpha.2`,
 and `ASSEMBLR_INSTALL_DIR` to install somewhere else.
 
 ## Prebuilt binaries
@@ -48,7 +48,7 @@ binary for your user.
 <summary><b>Linux and WSL2</b></summary>
 
 ```sh
-tag=v0.1.0-alpha.2
+tag=v0.1.0-alpha.3
 dir=$(mktemp -d) && cd "$dir"
 url=https://github.com/metamao/assemblr/releases/download/$tag
 curl -fsSLO "$url/assemblr-${tag#v}-x86_64-unknown-linux-musl.tar.gz"
@@ -83,7 +83,7 @@ assemblr --version                                    # ~/.local/bin must be on 
 <summary><b>Windows (PowerShell)</b></summary>
 
 ```powershell
-$tag = "v0.1.0-alpha.2"
+$tag = "v0.1.0-alpha.3"
 $dir = New-Item -ItemType Directory (Join-Path $env:TEMP "assemblr-$tag") -Force
 Set-Location $dir
 $ProgressPreference = "SilentlyContinue"    # the progress bar slows downloads a lot
@@ -141,7 +141,7 @@ is published yet.
    ```
 
    It prints the version and the commit it was built from, such as
-   `assemblr 0.1.0-alpha.2 (e17c7acc88f2)`. If the command is not found, add
+   `assemblr 0.1.0-alpha.3 (e17c7acc88f2)`. If the command is not found, add
    `~/.cargo/bin` (or `%USERPROFILE%\.cargo\bin` on Windows) to your `PATH`.
 
 To upgrade, run `git pull` in the clone and repeat step 2.

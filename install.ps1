@@ -22,7 +22,7 @@
     $ProgressPreference = "SilentlyContinue"    # the progress bar slows downloads a lot
 
     # The release this script belongs to. A test keeps it equal to Cargo.toml.
-    $defaultVersion = "0.1.0-alpha.2"
+    $defaultVersion = "0.1.0-alpha.3"
     $releases = "https://github.com/metamao/assemblr/releases/download"
     $fromSource = "https://github.com/metamao/assemblr/blob/main/docs/user/install.md#from-source"
     $target = "x86_64-pc-windows-msvc"
