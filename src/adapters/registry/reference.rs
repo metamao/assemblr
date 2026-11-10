@@ -247,7 +247,7 @@ mod tests {
 
     use super::{
         ReferenceError, is_local_reference, is_remote, local_reference, normalize,
-        registered_reference, remote_reference, source_reference,
+        remote_reference, source_reference,
     };
 
     #[test]
@@ -427,6 +427,8 @@ mod tests {
     #[test]
     fn a_registration_is_found_through_symbolic_links_only_when_unambiguous() {
         use std::os::unix::fs::symlink;
+
+        use super::registered_reference;
 
         let dir = std::env::temp_dir().join(format!(
             "assemblr-registered-reference-{}",
