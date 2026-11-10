@@ -808,6 +808,56 @@ fn a_unit_registered_from_another_clone_publishes_without_an_index_update() {
     assert_eq!(app.tags(), ["v0.1.0"]);
 }
 
+/// Registered through a symbolic link and published from the directory it
+/// names, as on macOS, where `/tmp` and `/var` are links into `/private`:
+/// the working directory the process reports is the resolved path, yet the
+/// repository is the registered one.
+#[cfg(unix)]
+#[test]
+fn a_unit_registered_through_a_symbolic_link_is_indexed_on_publish() {
+    let fixture = Fixture::new("publish-symlink");
+    let (_node, app) = app_on_node(&fixture, "^1");
+    built_and_committed(&fixture, &app, "first");
+    let link = fixture.dir.join("linked");
+    std::os::unix::fs::symlink(&app.path, &link).unwrap();
+    let registered = link.to_str().unwrap();
+    succeeds(fixture.assemblr(&fixture.dir, &["registry", "add", registered]));
+
+    let output = succeeds(fixture.publish(&app));
+    assert!(
+        stdout(&output).contains("Indexed it in the local registry"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(fixture.versions("@acme/app"), ["0.1.0"]);
+    // The registration keeps the reference it was given.
+    let list = fixture.list();
+    let sources: Vec<&str> = list["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|unit| unit["identity"] == "@acme/app")
+        .map(|unit| unit["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(sources, [registered]);
+
+    // A new identity is refused through the link too, before any tag.
+    app.write(
+        "manifest.jsonc",
+        &manifest("@acme/renamed", "0.2.0", &[("@acme/node", "^1")], ""),
+    );
+    built_and_committed(&fixture, &app, "rename");
+    let err = stderr(&fails(fixture.publish(&app)));
+    assert!(
+        err.contains(&format!(
+            "the registry registers {registered} as @acme/app, not as the identity the \
+             manifest declares"
+        )),
+        "{err}"
+    );
+    assert_eq!(app.tags(), ["v0.1.0"]);
+}
+
 #[test]
 fn publish_refuses_a_tag_the_registry_would_not_index() {
     let fixture = Fixture::new("publish-rehearsal");

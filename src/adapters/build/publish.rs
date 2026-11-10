@@ -35,8 +35,8 @@ use crate::adapters::git::{
 };
 use crate::adapters::lockfile::{self, PublishedLockfileError};
 use crate::adapters::registry::{
-    Indexed, ReferenceError, Registry, RegistryFailure, TagProblem, local_reference,
-    observe_tags as observe,
+    Indexed, ReferenceError, Registry, RegistryFailure, TagProblem, observe_tags as observe,
+    registered_reference,
 };
 use crate::domain::{
     Excluded, ObjectId, ObservedTag, ObservedVersion, Provenance, RegistryError, SourceReference,
@@ -211,7 +211,7 @@ pub fn publish_unit(root: &Path, registry: &Registry) -> Result<Published, Publi
     // The registry. When it registers this repository, the new tag must be
     // one it will index; that is checked now, so that a tag is never
     // created that the registry then rejects.
-    let registration = match local_reference(root) {
+    let registration = match registered_reference(&index, root) {
         Ok(source) => match index.identities_of(&source).as_slice() {
             [registered] if **registered == identity => Registration::Here { source },
             [registered, ..] => {
@@ -507,7 +507,7 @@ fn publish_catalog(root: &Path, registry: &Registry) -> Result<Published, Publis
         .iter()
         .map(|unit| unit.manifest().name().clone())
         .collect();
-    let registration = match local_reference(root) {
+    let registration = match registered_reference(&index, root) {
         Ok(source) if !index.identities_of(&source).is_empty() => Registration::Here { source },
         Ok(_) => match units.iter().find_map(|unit| index.units().get(unit)) {
             Some(unit) => Registration::Elsewhere {

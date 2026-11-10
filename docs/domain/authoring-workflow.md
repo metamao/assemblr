@@ -844,6 +844,9 @@ registered sources are not read. When the identity is registered from
 another reference, or not registered at all, the result says so and that the
 version is not discoverable until that source is synchronized or the
 repository is registered; nothing is registered, and this is not a failure.
+This repository's reference is the one registered for its directory, even
+through a symbolic link or in another letter case (see
+[registries-and-discovery.md](registries-and-discovery.md#local-repository-references--approved)).
 When the index update fails after the tag was created, the command reports
 the partial outcome, exits non-zero, and says that the tag stands and that
 `registry sync` indexes the version.
