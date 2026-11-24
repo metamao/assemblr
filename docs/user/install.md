@@ -6,7 +6,7 @@ private repositories and stores none of its own.
 
 ## Install script
 
-Each script installs release `v0.1.0-alpha.3`. It downloads the release's
+Each script installs release `v0.1.0-alpha.4`. It downloads the release's
 archive and `SHA256SUMS`, checks the archive against them, and installs the
 binary for your user.
 
@@ -15,7 +15,7 @@ On Linux x64 (WSL2 included) and macOS on Apple Silicon, this installs to
 `~/.local/bin` is not on it.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/metamao/assemblr/v0.1.0-alpha.3/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/metamao/assemblr/v0.1.0-alpha.4/install.sh | sh
 ```
 
 On Windows x64, in PowerShell, this installs to
@@ -23,13 +23,13 @@ On Windows x64, in PowerShell, this installs to
 prints the command that adds the directory.
 
 ```powershell
-irm https://raw.githubusercontent.com/metamao/assemblr/v0.1.0-alpha.3/install.ps1 | iex
+irm https://raw.githubusercontent.com/metamao/assemblr/v0.1.0-alpha.4/install.ps1 | iex
 ```
 
 To read a script before running it, open
-[`install.sh`](https://github.com/metamao/assemblr/blob/v0.1.0-alpha.3/install.sh)
-or [`install.ps1`](https://github.com/metamao/assemblr/blob/v0.1.0-alpha.3/install.ps1).
-Set `ASSEMBLR_VERSION` to install another release, such as `0.1.0-alpha.2`,
+[`install.sh`](https://github.com/metamao/assemblr/blob/v0.1.0-alpha.4/install.sh)
+or [`install.ps1`](https://github.com/metamao/assemblr/blob/v0.1.0-alpha.4/install.ps1).
+Set `ASSEMBLR_VERSION` to install another release, such as `0.1.0-alpha.3`,
 and `ASSEMBLR_INSTALL_DIR` to install somewhere else.
 
 ## Prebuilt binaries
@@ -48,7 +48,7 @@ binary for your user.
 <summary><b>Linux and WSL2</b></summary>
 
 ```sh
-tag=v0.1.0-alpha.3
+tag=v0.1.0-alpha.4
 dir=$(mktemp -d) && cd "$dir"
 url=https://github.com/metamao/assemblr/releases/download/$tag
 curl -fsSLO "$url/assemblr-${tag#v}-x86_64-unknown-linux-musl.tar.gz"
@@ -65,7 +65,7 @@ assemblr --version                                    # ~/.local/bin must be on 
 <summary><b>macOS (Apple Silicon)</b></summary>
 
 ```sh
-tag=v0.1.0-alpha.3
+tag=v0.1.0-alpha.4
 dir=$(mktemp -d) && cd "$dir"
 url=https://github.com/metamao/assemblr/releases/download/$tag
 curl -fsSLO "$url/assemblr-${tag#v}-aarch64-apple-darwin.tar.gz"
@@ -83,7 +83,7 @@ assemblr --version                                    # ~/.local/bin must be on 
 <summary><b>Windows (PowerShell)</b></summary>
 
 ```powershell
-$tag = "v0.1.0-alpha.3"
+$tag = "v0.1.0-alpha.4"
 $dir = New-Item -ItemType Directory (Join-Path $env:TEMP "assemblr-$tag") -Force
 Set-Location $dir
 $ProgressPreference = "SilentlyContinue"    # the progress bar slows downloads a lot
@@ -141,7 +141,7 @@ is published yet.
    ```
 
    It prints the version and the commit it was built from, such as
-   `assemblr 0.1.0-alpha.3 (e17c7acc88f2)`. If the command is not found, add
+   `assemblr 0.1.0-alpha.4 (e17c7acc88f2)`. If the command is not found, add
    `~/.cargo/bin` (or `%USERPROFILE%\.cargo\bin` on Windows) to your `PATH`.
 
 To upgrade, run `git pull` in the clone and repeat step 2.

@@ -18,7 +18,7 @@
 set -eu
 
 # The release this script belongs to. A test keeps it equal to Cargo.toml.
-default_version=0.1.0-alpha.3
+default_version=0.1.0-alpha.4
 releases=https://github.com/metamao/assemblr/releases/download
 from_source=https://github.com/metamao/assemblr/blob/main/docs/user/install.md#from-source
 
