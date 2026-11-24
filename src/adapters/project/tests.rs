@@ -1039,8 +1039,11 @@ fn a_damaged_pack_is_refused_by_name() {
     let root = project("damaged-pack");
     let store = Store::new(&root);
     let snapshot = write_base(&store, &[("a.txt", b"original\n")], &[]);
+    // Joined one component at a time, so the path is spelled as the store
+    // spells it on every platform.
     let pack = root
-        .join(".assemblr/packs")
+        .join(".assemblr")
+        .join("packs")
         .join(snapshot.identity().digits());
     let good = fs::read(&pack).unwrap();
     let edited = String::from_utf8(good.clone())
