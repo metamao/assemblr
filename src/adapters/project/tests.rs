@@ -263,7 +263,7 @@ fn a_failure_before_the_journal_leaves_the_project_untouched() {
         assert!(
             matches!(&failure, ComposeFailure::Write { step, .. } if std::mem::discriminant(step) == std::mem::discriminant(&written))
         );
-        assert!(exists(&root, ".assemblr/objects"));
+        assert!(exists(&root, ".assemblr/packs"));
         assert!(!exists(&root, ".assemblr/journal.json"));
         assert!(!exists(&root, "README.md"));
         assert!(!exists(&root, "bin"));
@@ -290,8 +290,8 @@ fn a_first_composition_interrupted_among_its_files_or_at_the_lock_is_reverted() 
         assert!(!exists(&root, "README.md"), "{name}");
         assert!(!exists(&root, "bin"), "{name}");
         assert!(!exists(&root, ".assemblr/journal.json"), "{name}");
-        // The store, content-addressed, stays.
-        assert!(exists(&root, ".assemblr/objects"), "{name}");
+        // The store, whose pack is harmless, stays.
+        assert!(exists(&root, ".assemblr/packs"), "{name}");
     }
 }
 
@@ -938,64 +938,219 @@ fn abort_and_continue_leave_an_interrupted_composition_to_compose() {
     assert!(exists(&root, ".assemblr/journal.json"));
 }
 
-#[test]
-fn discarding_a_base_keeps_every_object_another_base_names_and_the_kept_base() {
-    let root = project("discard-base");
-    let store = Store::new(&root);
-    let snapshot = |files: &[(&str, &[u8])]| {
-        Snapshot::new(
-            files
-                .iter()
-                .map(|(name, bytes)| (path(name), SnapshotFile::new(bytes, false)))
-                .collect(),
-        )
-    };
-    let write = |snapshot: &Snapshot, files: &[(&str, &[u8])]| {
-        let paths: Vec<(RelativePath, &[u8])> = files
+/// A snapshot of `files`, none executable.
+fn snapshot_of(files: &[(&str, &[u8])]) -> Snapshot {
+    Snapshot::new(
+        files
             .iter()
-            .map(|(name, bytes)| (path(name), *bytes))
-            .collect();
-        let refs: Vec<(&RelativePath, &[u8])> =
-            paths.iter().map(|(path, bytes)| (path, *bytes)).collect();
-        store.write_base(snapshot, &refs).unwrap();
+            .map(|(name, bytes)| (path(name), SnapshotFile::new(bytes, false)))
+            .collect(),
+    )
+}
+
+/// Writes the base of `files` to `store`, storing every file's bytes but
+/// those of `unbased`.
+fn write_base(store: &Store, files: &[(&str, &[u8])], unbased: &[&str]) -> Snapshot {
+    let snapshot = snapshot_of(files);
+    let paths: Vec<(RelativePath, &[u8])> = files
+        .iter()
+        .filter(|(name, _)| !unbased.contains(name))
+        .map(|(name, bytes)| (path(name), *bytes))
+        .collect();
+    let refs: Vec<(&RelativePath, &[u8])> =
+        paths.iter().map(|(path, bytes)| (path, *bytes)).collect();
+    store.write_base(&snapshot, &refs).unwrap();
+    snapshot
+}
+
+/// The names in `dir`, sorted.
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_base_is_stored_as_one_pack_that_verifies_and_serves_its_blobs() {
+    let root = project("one-pack");
+    let store = Store::new(&root);
+    let files: [(&str, &[u8]); 3] = [
+        ("a.txt", b"one\n"),
+        ("b/c.bin", b"\x00\xff\n\r\n"),
+        (".env", b"SECRET=1\n"),
+    ];
+    let snapshot = write_base(&store, &files, &[".env"]);
+
+    assert_eq!(
+        names(&root.join(".assemblr")),
+        [".gitattributes", ".gitignore", "packs"]
+    );
+    assert_eq!(
+        names(&root.join(".assemblr/packs")),
+        [snapshot.identity().digits()]
+    );
+    assert_eq!(
+        text(&root, ".assemblr/.gitattributes"),
+        "* -text -diff linguist-generated\n"
+    );
+
+    let unbased = BTreeSet::from([path(".env")]);
+    let verified = Store::new(&root)
+        .verify_base(&snapshot.identity(), &unbased)
+        .unwrap();
+    assert_eq!(verified, snapshot);
+    let reader = Store::new(&root);
+    reader.verify_base(&snapshot.identity(), &unbased).unwrap();
+    let blob = snapshot.files().get(&path("b/c.bin")).unwrap().blob();
+    assert_eq!(reader.read_blob(blob).unwrap(), b"\x00\xff\n\r\n");
+
+    // A file the pack does not hold is not unbased for this lock.
+    let failure = Store::new(&root)
+        .verify_base(&snapshot.identity(), &BTreeSet::new())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        failure.contains("it does not hold the content of .env"),
+        "{failure}"
+    );
+
+    // Writing the same base again leaves the pack as it is.
+    let before = fs::read(
+        root.join(".assemblr/packs")
+            .join(snapshot.identity().digits()),
+    )
+    .unwrap();
+    write_base(&store, &files, &[".env"]);
+    assert_eq!(
+        fs::read(
+            root.join(".assemblr/packs")
+                .join(snapshot.identity().digits())
+        )
+        .unwrap(),
+        before
+    );
+}
+
+#[test]
+fn a_damaged_pack_is_refused_by_name() {
+    let root = project("damaged-pack");
+    let store = Store::new(&root);
+    let snapshot = write_base(&store, &[("a.txt", b"original\n")], &[]);
+    let pack = root
+        .join(".assemblr/packs")
+        .join(snapshot.identity().digits());
+    let good = fs::read(&pack).unwrap();
+    let edited = String::from_utf8(good.clone())
+        .unwrap()
+        .replace("original\n", "tampered\n");
+    for (case, bytes) in [
+        ("content", edited.into_bytes()),
+        ("cut short", good[..good.len() - 3].to_vec()),
+        ("header", [b"assemblr-pack-v9\n", &good[17..]].concat()),
+        ("trailing", [&good[..], b"x"].concat()),
+    ] {
+        fs::write(&pack, &bytes).unwrap();
+        let failure = Store::new(&root)
+            .verify_base(&snapshot.identity(), &BTreeSet::new())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            failure.contains(&*pack.to_string_lossy()) && failure.contains("does not verify"),
+            "{case}: {failure}"
+        );
+    }
+    fs::remove_file(&pack).unwrap();
+    let failure = Store::new(&root)
+        .verify_base(&snapshot.identity(), &BTreeSet::new())
+        .unwrap_err()
+        .to_string();
+    assert!(failure.contains("does not exist"), "{failure}");
+}
+
+#[test]
+fn only_the_bases_in_use_are_kept() {
+    let root = project("keep-only");
+    let store = Store::new(&root);
+    let old = write_base(&store, &[("a", b"old")], &[]);
+    let locked = write_base(&store, &[("a", b"shared"), ("b", b"locked")], &[]);
+    let pending = write_base(&store, &[("a", b"shared"), ("c", b"pending")], &[]);
+
+    // A composition waiting for the consumer keeps both.
+    store.keep_only(&[&locked.identity(), &pending.identity()]);
+    let mut kept = vec![
+        locked.identity().digits().to_owned(),
+        pending.identity().digits().to_owned(),
+    ];
+    kept.sort();
+    assert_eq!(names(&root.join(".assemblr/packs")), kept);
+
+    store.keep_only(&[&locked.identity()]);
+    assert_eq!(
+        names(&root.join(".assemblr/packs")),
+        [locked.identity().digits()]
+    );
+    let verify = |snapshot: &Snapshot| {
+        Store::new(&root)
+            .verify_base(&snapshot.identity(), &BTreeSet::new())
+            .is_ok()
     };
-    // An old base, the lock's base, and an aborted one sharing objects with
-    // both.
-    let old_files: [(&str, &[u8]); 1] = [("a", b"old")];
-    let locked_files: [(&str, &[u8]); 2] = [("a", b"shared"), ("b", b"locked")];
-    let aborted_files: [(&str, &[u8]); 3] =
-        [("a", b"shared"), ("b", b"old"), ("c", b"only aborted")];
-    let (old, locked, aborted) = (
-        snapshot(&old_files),
-        snapshot(&locked_files),
-        snapshot(&aborted_files),
-    );
-    write(&old, &old_files);
-    write(&locked, &locked_files);
-    write(&aborted, &aborted_files);
+    assert!(verify(&locked));
+    assert!(!verify(&old));
+    assert!(!verify(&pending));
 
-    // The lock's base is never discarded.
-    store.discard_base(&locked.identity(), Some(&locked.identity()));
-    assert!(
-        store
-            .verify_base(&locked.identity(), &BTreeSet::new())
-            .is_ok()
+    // Nothing in use: the store keeps only its own files.
+    store.keep_only(&[]);
+    assert_eq!(
+        names(&root.join(".assemblr")),
+        [".gitattributes", ".gitignore"]
     );
+}
 
-    store.discard_base(&aborted.identity(), Some(&locked.identity()));
-    assert!(store.verify_base(&old.identity(), &BTreeSet::new()).is_ok());
+#[test]
+fn the_layout_of_earlier_alphas_is_refused_by_name() {
+    let root = project("earlier-layout");
+    let state = root.join(".assemblr");
+    let earlier = snapshot_of(&[("a.txt", b"one\n")]);
+    // The layout alpha versions wrote before the pack: the listing under
+    // `bases/`, each blob under `objects/`.
+    fs::create_dir_all(state.join("bases")).unwrap();
+    fs::write(
+        state.join("bases").join(earlier.identity().digits()),
+        earlier.listing(),
+    )
+    .unwrap();
+    let failure = Store::new(&root)
+        .verify_base(&earlier.identity(), &BTreeSet::new())
+        .unwrap_err()
+        .to_string();
     assert!(
-        store
-            .verify_base(&locked.identity(), &BTreeSet::new())
-            .is_ok()
+        failure.contains("stores its bases as an earlier alpha of Assemblr did"),
+        "{failure}"
     );
-    assert!(
-        store
-            .verify_base(&aborted.identity(), &BTreeSet::new())
-            .is_err()
+    // Without it, a missing pack is a missing base.
+    fs::remove_dir_all(state.join("bases")).unwrap();
+    let failure = Store::new(&root)
+        .verify_base(&earlier.identity(), &BTreeSet::new())
+        .unwrap_err()
+        .to_string();
+    assert!(failure.contains("does not exist"), "{failure}");
+}
+
+#[test]
+fn edited_attributes_are_restored_and_reported() {
+    let root = project("edited-attributes");
+    fs::create_dir_all(root.join(".assemblr")).unwrap();
+    fs::write(root.join(".assemblr/.gitattributes"), "* text=auto\n").unwrap();
+    let store = Store::new(&root);
+    write_base(&store, &[("a", b"a")], &[]);
+    assert_eq!(store.restored(), [".gitattributes"]);
+    assert_eq!(
+        text(&root, ".assemblr/.gitattributes"),
+        "* -text -diff linguist-generated\n"
     );
-    let only = SnapshotFile::new(b"only aborted", false);
-    assert!(store.read_blob(only.blob()).is_err());
 }
 
 #[test]

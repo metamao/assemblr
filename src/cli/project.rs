@@ -752,6 +752,12 @@ pub(super) fn problem_advice(problem: &ComposeProblem, root: &Path) -> Option<St
              `assemblr compose` to compose the project"
                 .to_owned(),
         ),
+        ComposeProblem::Base(StoreError::EarlierLayout(_)) => Some(
+            "this version stores the base as one pack; to move the project to it, remove \
+             .assemblr/ and assemblr-lock.json and run `assemblr compose`, which leaves every \
+             file you changed since the last composition marked as a conflict to resolve"
+                .to_owned(),
+        ),
         ComposeProblem::Base(StoreError::Missing(_)) => Some(
             "restore .assemblr/ from version control; a project cannot be reconciled without its \
              stored base"

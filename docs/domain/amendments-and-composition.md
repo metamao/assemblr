@@ -121,12 +121,15 @@ Details:
   version as a sibling's base is an error, and so is `"catalog"` for a unit
   of another repository or outside a catalog.
 - **Provisional (D-58):** the catalog stores one listing of every base, by
-  `<unit directory>/<amended path>`, under `.assemblr/bases/`, with each
-  base's bytes under `.assemblr/objects/`, and
+  `<unit directory>/<amended path>`, and
   `.assemblr/amendment-bases.json` names the listing by its identity.
   `.assemblr/` is tracked with the catalog. The base of an amendment the
   catalog no longer declares is removed by the next build that writes the
-  store.
+  store. The listing and the bases' bytes are one pack under
+  `.assemblr/packs/`, the layout of a consumer project's store, and only
+  the pack the record names is kept (decided by the owner on 2026-11-24,
+  [ADR 0044](../adr/0044-packed-store.md)). The layout of earlier alphas is
+  refused by name, not read.
 - **Provisional (D-59):** every amendment of a unit in a catalog has a
   stored base, of a sibling's file or of a file of another repository, since
   a sibling's copy below can be part of either. `unit amend` works in a

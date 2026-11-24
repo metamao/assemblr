@@ -2,15 +2,21 @@
 //! reconciliation base and the journal of a composition being applied
 //! (see `docs/adr/0016-consumer-compose.md`).
 //!
-//! The base is stored content-addressed so that it travels with the
-//! project in version control without clutter: each file's bytes once under
-//! `objects/`, by their SHA-256, and the canonical listing of a base under
-//! `bases/`, by the base's identity. Nothing in the store depends on the
-//! file system's modes or on a checkout's line-ending rules: modes are in
-//! the listing, and the directory's own `.gitattributes` marks everything
-//! binary, so that Git never converts the stored bytes. Verification reads
-//! the listing and every blob back and compares them with the identities
-//! the lock records.
+//! The base is stored as one pack, a single file named by the base's
+//! identity under `packs/`, holding the canonical listing and the bytes of
+//! every stored file once, so that it travels with the project in version
+//! control as one file instead of one per composed file (ADR 0044). Only
+//! the packs of the bases in use are kept: once the lock records a base,
+//! every other pack goes. Nothing in the store depends on the file
+//! system's modes or on a checkout's line-ending rules: modes are in the
+//! listing, and the directory's own `.gitattributes` marks everything
+//! binary and generated, so that Git never converts the stored bytes and
+//! diffs leave them out. Verification reads the listing and every blob back
+//! and compares them with the identities the lock records.
+//!
+//! Alpha versions before the pack stored each file's bytes under
+//! `objects/` and each listing under `bases/`. That layout is not read: it
+//! is recognized, and refused with a diagnostic of its own.
 //!
 //! The journal lists what a composition is about to do to each file:
 //! create it, replace it, or remove it, with the identities of the planned
@@ -27,7 +33,7 @@
 //! state, which the directory's own `.gitignore` keeps out of version
 //! control: the consumer's edits never enter the tracked store.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -41,8 +47,10 @@ use crate::domain::{BaseIdentity, BlobId, ListingError, RelativePath, Snapshot};
 pub(crate) const STATE_DIR: &str = ".assemblr";
 /// The attributes file that keeps Git from converting stored bytes.
 const ATTRIBUTES: &str = ".gitattributes";
-/// What it says.
-const ATTRIBUTES_TEXT: &str = "* -text\n";
+/// What it says: no line-ending conversion, no textual diff, and a
+/// generated file for hosting services such as GitHub, which collapse it in
+/// a pull request.
+const ATTRIBUTES_TEXT: &str = "* -text -diff linguist-generated\n";
 /// The ignore file that keeps the transient state out of version control.
 const IGNORE: &str = ".gitignore";
 /// What it says.
@@ -50,10 +58,12 @@ const IGNORE_TEXT: &str = "/journal.json\n/journal.json.new\n/previous/\n";
 /// The previous content of the files a composition replaces or removes,
 /// by content identity, until it completes.
 const PREVIOUS: &str = "previous";
-/// The blobs, by content identity.
-const OBJECTS: &str = "objects";
-/// The listings, by base identity.
-const BASES: &str = "bases";
+/// The packs, by base identity.
+const PACKS: &str = "packs";
+/// The first line of a pack, which names its format.
+const PACK_HEADER: &str = "assemblr-pack-v1\n";
+/// The directories of the layout alpha versions wrote before the pack.
+const EARLIER: [&str; 2] = ["objects", "bases"];
 /// The journal of a composition being applied.
 const JOURNAL: &str = "journal.json";
 /// Where the journal is written before it is put in place.
@@ -88,6 +98,9 @@ pub(crate) struct Store {
     /// The store's own files that writing the base restored, because
     /// they had been edited.
     restored: std::cell::RefCell<Vec<&'static str>>,
+    /// The blobs of the packs [`verify_base`](Self::verify_base) verified,
+    /// which [`read_blob`](Self::read_blob) serves.
+    verified: std::cell::RefCell<BTreeMap<BlobId, Vec<u8>>>,
 }
 
 impl Store {
@@ -95,6 +108,7 @@ impl Store {
         Self {
             dir: root.join(STATE_DIR),
             restored: std::cell::RefCell::new(Vec::new()),
+            verified: std::cell::RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -106,29 +120,22 @@ impl Store {
     }
 
     /// The store's directories as `git check-ignore` must see them, with a
-    /// trailing slash, since a rule such as `.assemblr/objects/` matches
+    /// trailing slash, since a rule such as `.assemblr/packs/` matches
     /// the directory only when it is named as one.
-    pub(super) fn directories(&self) -> [String; 3] {
-        [
-            format!("{STATE_DIR}/"),
-            format!("{STATE_DIR}/{OBJECTS}/"),
-            format!("{STATE_DIR}/{BASES}/"),
-        ]
+    pub(super) fn directories(&self) -> [String; 2] {
+        [format!("{STATE_DIR}/"), format!("{STATE_DIR}/{PACKS}/")]
     }
 
-    fn blob_path(&self, blob: &BlobId) -> PathBuf {
-        let (prefix, rest) = blob.as_str().split_at(2);
-        self.dir.join(OBJECTS).join(prefix).join(rest)
+    fn pack_path(&self, base: &BaseIdentity) -> PathBuf {
+        self.dir.join(PACKS).join(base.digits())
     }
 
-    fn listing_path(&self, base: &BaseIdentity) -> PathBuf {
-        self.dir.join(BASES).join(base.digits())
-    }
-
-    /// Writes `snapshot`'s listing and the blobs of `files`, the bytes of
-    /// each path to store, creating the directory and its attributes when
-    /// they do not exist. A blob or listing already stored is left as it
-    /// is when its bytes are the expected ones, and is an error otherwise.
+    /// Writes `snapshot`'s pack, with its listing and the blobs of `files`,
+    /// the bytes of each path to store, creating the directory and its
+    /// attributes when they do not exist. A pack already stored with other
+    /// bytes, which a composition with other unbased files leaves, is
+    /// replaced: it is named after a base the lock does not record, since a
+    /// composition the lock records writes nothing.
     pub(crate) fn write_base(
         &self,
         snapshot: &Snapshot,
@@ -138,11 +145,7 @@ impl Store {
             path: path.to_owned(),
             error,
         };
-        for dir in [
-            self.dir.clone(),
-            self.dir.join(OBJECTS),
-            self.dir.join(BASES),
-        ] {
+        for dir in [self.dir.clone(), self.dir.join(PACKS)] {
             match fs::symlink_metadata(&dir) {
                 Ok(metadata) if metadata.is_dir() => {}
                 Ok(_) => return Err(StoreError::NotADirectory(dir)),
@@ -176,126 +179,103 @@ impl Store {
                 Ok(_) => return Err(StoreError::NotADirectory(path)),
             }
         }
+        let mut blobs = BTreeMap::new();
         for (path, bytes) in files {
-            let Some(file) = snapshot.files().get(*path) else {
-                continue;
-            };
-            let blob = self.blob_path(file.blob());
-            if let Some(parent) = blob.parent() {
-                match fs::symlink_metadata(parent) {
-                    Ok(metadata) if metadata.is_dir() => {}
-                    Ok(_) => return Err(StoreError::NotADirectory(parent.to_owned())),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        fs::create_dir(parent).map_err(|error| io(parent, error))?;
-                    }
-                    Err(error) => return Err(io(parent, error)),
-                }
+            if let Some(file) = snapshot.files().get(*path) {
+                blobs.insert(file.blob().clone(), *bytes);
             }
-            self.write_object(&blob, bytes)?;
         }
-        let listing = self.listing_path(&snapshot.identity());
-        self.write_object(&listing, snapshot.listing().as_bytes())
-    }
-
-    /// Writes a content-addressed file, or checks an existing one.
-    fn write_object(&self, path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
-        let io = |error: io::Error| StoreError::Io {
-            path: path.to_owned(),
-            error,
-        };
-        match fs::symlink_metadata(path) {
+        let pack = encode_pack(&snapshot.listing(), &blobs);
+        let path = self.pack_path(&snapshot.identity());
+        match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.is_file() => {
-                let existing = fs::read(path).map_err(io)?;
-                if existing == bytes {
-                    Ok(())
-                } else {
-                    Err(StoreError::Corrupt {
-                        path: path.to_owned(),
-                        detail: "its bytes are not the content it is named after".to_owned(),
-                    })
+                let existing = fs::read(&path).map_err(|error| io(&path, error))?;
+                if existing == pack {
+                    return Ok(());
                 }
+                fs::remove_file(&path).map_err(|error| io(&path, error))?;
             }
-            Ok(_) => Err(StoreError::Corrupt {
-                path: path.to_owned(),
-                detail: "it is not a regular file".to_owned(),
-            }),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                write_new(path, bytes).map_err(io)
+            Ok(_) => {
+                return Err(StoreError::Corrupt {
+                    path,
+                    detail: "it is not a regular file".to_owned(),
+                });
             }
-            Err(error) => Err(io(error)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io(&path, error)),
         }
+        write_new(&path, &pack).map_err(|error| io(&path, error))
     }
 
     /// Reads the base `identity` back and verifies it: the listing's bytes
     /// hash to the identity, and every blob of a path not in `unbased` is
-    /// stored with the bytes its identity names.
+    /// stored with the bytes its identity names, in the base's pack.
     pub(crate) fn verify_base(
         &self,
         identity: &BaseIdentity,
         unbased: &BTreeSet<RelativePath>,
     ) -> Result<Snapshot, StoreError> {
-        let listing_path = self.listing_path(identity);
-        let text = read_bounded(&listing_path, TEXT_LIMIT).map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound => StoreError::Missing(listing_path.clone()),
-            _ => StoreError::Io {
-                path: listing_path.clone(),
-                error,
-            },
-        })?;
-        let text = String::from_utf8(text).map_err(|_| StoreError::Corrupt {
-            path: listing_path.clone(),
-            detail: "it is not UTF-8 text".to_owned(),
-        })?;
-        if !identity.verifies(&text) {
-            return Err(StoreError::Corrupt {
-                path: listing_path,
-                detail: "its bytes do not hash to the identity the lockfile records".to_owned(),
-            });
-        }
-        let snapshot = Snapshot::parse_listing(&text).map_err(|error| StoreError::Listing {
-            path: listing_path.clone(),
-            error,
-        })?;
-        for (path, file) in snapshot.files() {
-            if unbased.contains(path) {
-                continue;
+        let pack_path = self.pack_path(identity);
+        let bytes = match read_bounded(&pack_path, u64::MAX) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if EARLIER
+                    .iter()
+                    .any(|dir| fs::symlink_metadata(self.dir.join(dir)).is_ok())
+                {
+                    return Err(StoreError::EarlierLayout(self.dir.clone()));
+                }
+                return Err(StoreError::Missing(pack_path));
             }
-            let blob_path = self.blob_path(file.blob());
-            let bytes = read_bounded(&blob_path, u64::MAX).map_err(|error| match error.kind() {
-                io::ErrorKind::NotFound => StoreError::Missing(blob_path.clone()),
-                _ => StoreError::Io {
-                    path: blob_path.clone(),
+            Err(error) => {
+                return Err(StoreError::Io {
+                    path: pack_path,
                     error,
-                },
-            })?;
-            if BlobId::of(&bytes) != *file.blob() {
-                return Err(StoreError::Corrupt {
-                    path: blob_path,
-                    detail: format!("its bytes are not the content of {path} the listing names"),
                 });
             }
+        };
+        let corrupt = |detail: String| StoreError::Corrupt {
+            path: pack_path.clone(),
+            detail,
+        };
+        let (listing, blobs) = decode_pack(&bytes).map_err(corrupt)?;
+        if !identity.verifies(listing) {
+            return Err(corrupt(
+                "its listing does not hash to the identity the lockfile records".to_owned(),
+            ));
         }
+        let snapshot = Snapshot::parse_listing(listing).map_err(|error| StoreError::Listing {
+            path: pack_path.clone(),
+            error,
+        })?;
+        let named: BTreeSet<&BlobId> = snapshot.files().values().map(|file| file.blob()).collect();
+        if let Some(blob) = blobs.keys().find(|blob| !named.contains(blob)) {
+            return Err(corrupt(format!(
+                "it holds the content {}, which its listing does not name",
+                blob.as_str()
+            )));
+        }
+        for (path, file) in snapshot.files() {
+            if !unbased.contains(path) && !blobs.contains_key(file.blob()) {
+                return Err(corrupt(format!("it does not hold the content of {path}")));
+            }
+        }
+        self.verified.borrow_mut().extend(
+            blobs
+                .into_iter()
+                .map(|(blob, bytes)| (blob, bytes.to_vec())),
+        );
         Ok(snapshot)
     }
 
-    /// The stored bytes of `blob`.
+    /// The stored bytes of `blob`, from a pack
+    /// [`verify_base`](Self::verify_base) verified.
     pub(crate) fn read_blob(&self, blob: &BlobId) -> Result<Vec<u8>, StoreError> {
-        let path = self.blob_path(blob);
-        let bytes = read_bounded(&path, u64::MAX).map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound => StoreError::Missing(path.clone()),
-            _ => StoreError::Io {
-                path: path.clone(),
-                error,
-            },
-        })?;
-        if BlobId::of(&bytes) == *blob {
-            Ok(bytes)
-        } else {
-            Err(StoreError::Corrupt {
-                path,
-                detail: "its bytes are not the content it is named after".to_owned(),
-            })
-        }
+        self.verified
+            .borrow()
+            .get(blob)
+            .cloned()
+            .ok_or_else(|| StoreError::Missing(self.dir.join(PACKS)))
     }
 
     fn previous_path(&self, blob: &BlobId) -> PathBuf {
@@ -379,57 +359,25 @@ impl Store {
         Ok(())
     }
 
-    /// Removes the listing of `base` and the objects no other stored
-    /// listing names, once nothing records `base`: an aborted composition's.
-    /// The listing of `keep`, the lock's base, is never removed. When a
-    /// listing cannot be read, no object is removed, since it may name
-    /// them. This is cleanup of content nothing refers to, so a failure
-    /// leaves files that are harmless, as an interrupted removal would, and
-    /// is not reported.
-    pub(crate) fn discard_base(&self, base: &BaseIdentity, keep: Option<&BaseIdentity>) {
-        if keep == Some(base) {
-            return;
-        }
-        let listing = self.listing_path(base);
-        let Some(discarded) = self.read_listing(&listing) else {
-            return;
-        };
-        let Ok(entries) = fs::read_dir(self.dir.join(BASES)) else {
-            return;
-        };
-        let mut named = BTreeSet::new();
-        for entry in entries {
-            let Ok(entry) = entry else {
-                return;
-            };
-            let path = entry.path();
-            if path == listing {
-                continue;
-            }
-            let Some(other) = self.read_listing(&path) else {
-                return;
-            };
-            named.extend(other.files().values().map(|file| file.blob().clone()));
-        }
-        for file in discarded.files().values() {
-            if named.contains(file.blob()) {
-                continue;
-            }
-            let blob = self.blob_path(file.blob());
-            let _ = fs::remove_file(&blob);
-            // A prefix directory left empty goes too; one that still holds
-            // objects is not removed.
-            if let Some(parent) = blob.parent() {
-                let _ = fs::remove_dir(parent);
+    /// Removes the pack of every stored base but `keep`, the bases in use.
+    /// Only the bases in use are kept, since an earlier one is recorded
+    /// nowhere but in version control's history, which keeps it.
+    /// This is cleanup of content nothing refers to, so a failure leaves
+    /// files that are harmless, as an interrupted removal would, and is not
+    /// reported.
+    pub(crate) fn keep_only(&self, keep: &[&BaseIdentity]) {
+        let packs = self.dir.join(PACKS);
+        if let Ok(entries) = fs::read_dir(&packs) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let kept = keep.iter().any(|base| name.to_str() == Some(base.digits()));
+                if !kept && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                    let _ = fs::remove_file(entry.path());
+                }
             }
         }
-        let _ = fs::remove_file(&listing);
-    }
-
-    /// The listing stored at `path`, or `None` when it cannot be read.
-    fn read_listing(&self, path: &Path) -> Option<Snapshot> {
-        let bytes = read_bounded(path, TEXT_LIMIT).ok()?;
-        Snapshot::parse_listing(&String::from_utf8(bytes).ok()?).ok()
+        // An empty directory is not tracked; one left empty goes.
+        let _ = fs::remove_dir(&packs);
     }
 
     /// Removes the journal and the previous content it refers to: the
@@ -708,6 +656,93 @@ fn known_members(value: &Value, what: &str, members: &[&str]) -> Result<(), Jour
     }
 }
 
+/// A pack's bytes: the header, the listing, and each blob once, in the
+/// order of their identities, each part after a line that names it and
+/// gives its length, so that any bytes can be stored. The bytes depend on
+/// the listing and the blobs only. They are not compressed: Git compresses
+/// them, and stores a pack that changed little as a delta of the one
+/// before, which compressed bytes would prevent.
+fn encode_pack(listing: &str, blobs: &BTreeMap<BlobId, &[u8]>) -> Vec<u8> {
+    let size: usize = blobs.values().map(|bytes| bytes.len() + 96).sum();
+    let mut pack = Vec::with_capacity(PACK_HEADER.len() + listing.len() + 32 + size);
+    pack.extend_from_slice(PACK_HEADER.as_bytes());
+    pack.extend_from_slice(format!("listing {}\n", listing.len()).as_bytes());
+    pack.extend_from_slice(listing.as_bytes());
+    for (blob, bytes) in blobs {
+        pack.extend_from_slice(format!("blob {} {}\n", blob.as_str(), bytes.len()).as_bytes());
+        pack.extend_from_slice(bytes);
+    }
+    pack
+}
+
+/// Reads a pack back: its listing, and its blobs, each verified against
+/// its identity. Anything but what [`encode_pack`] writes is refused.
+fn decode_pack(pack: &[u8]) -> Result<(&str, BTreeMap<BlobId, &[u8]>), String> {
+    let rest = pack
+        .strip_prefix(PACK_HEADER.as_bytes())
+        .ok_or_else(|| "it is not a pack this version of Assemblr reads".to_owned())?;
+    let (line, rest) = pack_line(rest)?;
+    let length = line
+        .strip_prefix("listing ")
+        .and_then(pack_length)
+        .ok_or_else(|| "it does not start with its listing".to_owned())?;
+    let (listing, mut rest) = pack_take(rest, length)?;
+    let listing =
+        std::str::from_utf8(listing).map_err(|_| "its listing is not UTF-8 text".to_owned())?;
+    let mut blobs: BTreeMap<BlobId, &[u8]> = BTreeMap::new();
+    while !rest.is_empty() {
+        let (line, after) = pack_line(rest)?;
+        let (blob, length) = line
+            .strip_prefix("blob ")
+            .and_then(|line| line.split_once(' '))
+            .and_then(|(blob, length)| Some((BlobId::parse(blob)?, pack_length(length)?)))
+            .ok_or_else(|| format!("{line:?} does not introduce a content"))?;
+        if blobs.keys().next_back().is_some_and(|last| *last >= blob) {
+            return Err(format!(
+                "the content {} is out of order or repeated",
+                blob.as_str()
+            ));
+        }
+        let (bytes, after) = pack_take(after, length)?;
+        if BlobId::of(bytes) != blob {
+            return Err(format!(
+                "the bytes it holds as {} are not that content",
+                blob.as_str()
+            ));
+        }
+        blobs.insert(blob, bytes);
+        rest = after;
+    }
+    Ok((listing, blobs))
+}
+
+/// The line at the start of `bytes`, without its line end, and what
+/// follows it. A part's line is short, so a longer one is damage.
+fn pack_line(bytes: &[u8]) -> Result<(&str, &[u8]), String> {
+    let end = bytes
+        .iter()
+        .take(256)
+        .position(|&byte| byte == b'\n')
+        .ok_or_else(|| "it is cut short or damaged".to_owned())?;
+    let (line, rest) = bytes.split_at(end);
+    let line = std::str::from_utf8(line).map_err(|_| "a part's line is not text".to_owned())?;
+    Ok((line, rest.get(1..).unwrap_or_default()))
+}
+
+/// The first `length` bytes of `bytes`, and what follows them.
+fn pack_take(bytes: &[u8], length: usize) -> Result<(&[u8], &[u8]), String> {
+    if bytes.len() < length {
+        return Err("it is cut short".to_owned());
+    }
+    Ok(bytes.split_at(length))
+}
+
+/// A length as a pack writes it: decimal digits, without leading zeros.
+fn pack_length(text: &str) -> Option<usize> {
+    let length: usize = text.parse().ok()?;
+    (length.to_string() == text).then_some(length)
+}
+
 /// Creates `path` new with `bytes`, flushed.
 pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
@@ -753,6 +788,9 @@ pub enum StoreError {
     NotADirectory(PathBuf),
     /// A stored file the lock refers to does not exist.
     Missing(PathBuf),
+    /// The store, this directory, holds the layout alpha versions wrote
+    /// before the pack, which this version does not read.
+    EarlierLayout(PathBuf),
     /// A stored file is not what its name says.
     Corrupt {
         /// The file.
@@ -793,6 +831,12 @@ impl fmt::Display for StoreError {
                 "{} does not verify: {detail}; the stored reconciliation base cannot be trusted",
                 path.display()
             ),
+            Self::EarlierLayout(path) => write!(
+                f,
+                "{} stores its bases as an earlier alpha of Assemblr did, one file per content, \
+                 which this version does not read",
+                path.display()
+            ),
             Self::Journal { path, detail } => write!(
                 f,
                 "{} cannot be read: {detail}; the composition it records is left as it is",
@@ -811,7 +855,10 @@ impl std::error::Error for StoreError {}
 mod tests {
     #![allow(clippy::unwrap_used, reason = "fixtures are valid by construction")]
 
-    use super::{Journal, JournalEntry};
+    use std::collections::BTreeMap;
+
+    use super::{Journal, JournalEntry, decode_pack, encode_pack};
+    use crate::domain::{BaseIdentity, BlobId, Snapshot};
 
     fn read(sample: &[u8]) -> Journal {
         Journal::parse(sample).unwrap_or_else(|_| panic!("a promised journal format is read"))
@@ -839,5 +886,67 @@ mod tests {
         assert!(matches!(three.files[0].1, JournalEntry::Modify { .. }));
         assert!(matches!(three.files[1].1, JournalEntry::Remove { .. }));
         assert!(three.pending.unwrap().declaration.is_some());
+    }
+
+    #[test]
+    fn the_promised_pack_format_is_read_and_written_the_same_way() {
+        // The sample never changes (ADR 0041): a pack this version writes is
+        // byte for byte the one an earlier version wrote for the same base,
+        // so committed packs do not churn, and every later version reads it.
+        let sample = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/formats/pack-1"));
+        let (listing, blobs) =
+            decode_pack(sample).unwrap_or_else(|detail| panic!("the sample reads: {detail}"));
+        let identity = BaseIdentity::parse(
+            "sha256-v1:d74e67f01654c3108fbae0969bf36da2f73ce4425e199eefdcd6c505dbc5db11",
+        )
+        .unwrap();
+        assert!(identity.verifies(listing));
+        let snapshot = Snapshot::parse_listing(listing).unwrap();
+        assert_eq!(snapshot.files().len(), 2);
+        assert_eq!(blobs.len(), 2);
+        let owned: BTreeMap<BlobId, &[u8]> = blobs.into_iter().collect();
+        assert_eq!(encode_pack(listing, &owned), sample);
+    }
+
+    #[test]
+    fn a_pack_with_anything_but_what_is_written_is_refused() {
+        let blob = |bytes: &[u8]| (BlobId::of(bytes), bytes.to_vec());
+        let (one, two) = (blob(b"one"), blob(b"two"));
+        let (first, second) = if one.0 < two.0 {
+            (one, two)
+        } else {
+            (two, one)
+        };
+        let part = |(id, bytes): &(BlobId, Vec<u8>)| {
+            [
+                format!("blob {} {}\n", id.as_str(), bytes.len()).into_bytes(),
+                bytes.clone(),
+            ]
+            .concat()
+        };
+        let head = b"assemblr-pack-v1\nlisting 3\nabc".to_vec();
+        assert!(decode_pack(&[head.clone(), part(&first), part(&second)].concat()).is_ok());
+        for (case, pack) in [
+            (
+                "out of order",
+                [head.clone(), part(&second), part(&first)].concat(),
+            ),
+            (
+                "repeated",
+                [head.clone(), part(&first), part(&first)].concat(),
+            ),
+            (
+                "leading zero",
+                b"assemblr-pack-v1\nlisting 03\nabc".to_vec(),
+            ),
+            ("no listing", b"assemblr-pack-v1\n".to_vec()),
+            ("long length", b"assemblr-pack-v1\nlisting 99\nabc".to_vec()),
+            (
+                "unknown part",
+                [head.clone(), b"tree x 1\nx".to_vec()].concat(),
+            ),
+        ] {
+            assert!(decode_pack(&pack).is_err(), "{case}");
+        }
     }
 }

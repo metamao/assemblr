@@ -360,6 +360,8 @@ pub(super) fn continue_with(
             error,
         });
     }
+    // The lock records this composition's base now: the previous one goes.
+    store.keep_only(&[&journal.base]);
     Ok(Continued {
         base: journal.base,
         files: pending.files.clone(),
@@ -395,10 +397,9 @@ pub fn abort_compose(root: &Path) -> Result<ComposeRecovery, ComposeFailure> {
     };
     let recovery = recover(root, &store, &journal, &guard, &resolving)
         .map_err(|error| rejected(ComposeProblem::Store(error)))?;
-    // The aborted composition's base is recorded nowhere now. Its listing
-    // and the objects only it names would stay in the tracked store as
-    // untracked files; the lock's base, and every object another stored
-    // base names, are kept.
+    // The aborted composition's base is recorded nowhere now, and would
+    // stay in the tracked store as an untracked file; only the lock's base
+    // is kept.
     if !matches!(recovery, ComposeRecovery::Completed) {
         let locked = match lockfile::read_lockfile(root) {
             Ok(Some((
@@ -410,7 +411,7 @@ pub fn abort_compose(root: &Path) -> Result<ComposeRecovery, ComposeFailure> {
             ))) => Some(state.base().clone()),
             _ => None,
         };
-        store.discard_base(&journal.base, locked.as_ref());
+        store.keep_only(&locked.iter().collect::<Vec<_>>());
     }
     Ok(recovery)
 }

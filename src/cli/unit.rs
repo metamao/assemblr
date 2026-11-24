@@ -11,13 +11,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use assemblr::adapters::{
-    AddFailure, AddProblem, AmendFailure, AmendProblem, AmendState, BuildFailure, BuildProblem,
-    Built, CheckFailure, CheckProblem, DeclarationChange, Declared, FileOutcome, GitOutcome,
-    IndexOutcome, InitFailure, Initialized, Location, LockfileOutcome, ManifestFileError, Pending,
-    PublishFailure, PublishProblem, PublishState, Published, PublishedProblem, RecoveryError,
-    Registry, TagProblem, UpdateFailure, UpdateProblem, UpdateState, Updated, add_dependency,
-    amend_unit, build_catalog, build_unit, check_catalog, check_unit, init_unit, locate_unit,
-    publish_unit, update_unit,
+    AddFailure, AddProblem, AmendFailure, AmendProblem, AmendState, BaseStoreError, BuildFailure,
+    BuildProblem, Built, CheckFailure, CheckProblem, DeclarationChange, Declared, FileOutcome,
+    GitOutcome, IndexOutcome, InitFailure, Initialized, Location, LockfileOutcome,
+    ManifestFileError, Pending, PublishFailure, PublishProblem, PublishState, Published,
+    PublishedProblem, RecoveryError, Registry, StoreError, TagProblem, UpdateFailure,
+    UpdateProblem, UpdateState, Updated, add_dependency, amend_unit, build_catalog, build_unit,
+    check_catalog, check_unit, init_unit, locate_unit, publish_unit, update_unit,
 };
 use assemblr::domain::{
     ContributionError, Excluded, IntegrityChange, LockChange, LockError, PlaceholderError,
@@ -1398,6 +1398,11 @@ fn advice(problem: &BuildProblem, root: &Path) -> Option<String> {
              amendments/{path} away, remove its declaration from manifest.jsonc, run \
              `assemblr unit amend {path}`, and make your changes again in the new copy"
         ),
+        BuildProblem::BaseStore(BaseStoreError::Store(StoreError::EarlierLayout(_))) => {
+            "this version stores the bases as one pack; to move the catalog to it, remove \
+             .assemblr/ and build again, which names each copy to take again"
+                .to_owned()
+        }
         BuildProblem::BaseStore(_) => "restore .assemblr/ from version control; it is \
              Assemblr's record of what each copy was taken from"
             .to_owned(),
