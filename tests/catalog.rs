@@ -615,13 +615,17 @@ fn a_corrupt_or_missing_store_fails_explicitly_and_changes_nothing() {
     let fixture = Fixture::new("sibling-corrupt");
     let catalog = fixture.amending();
     write(&catalog, "units/a/src/a.txt", "one, by a\ntwo\nthree\n");
-    let objects = catalog.join(".assemblr/objects");
-    let blob = files(&objects)
+    let packs = catalog.join(".assemblr/packs");
+    let pack = files(&packs)
         .into_iter()
-        .map(|path| objects.join(path))
+        .map(|path| packs.join(path))
         .next()
         .unwrap();
-    fs::write(&blob, "tampered\n").unwrap();
+    // The last byte belongs to the content of a stored base.
+    let mut bytes = fs::read(&pack).unwrap();
+    let last = bytes.last_mut().unwrap();
+    *last = last.wrapping_add(1);
+    fs::write(&pack, bytes).unwrap();
     let before = state(&catalog);
     let err = build_error(&fixture, &catalog);
     assert!(err.contains("does not verify"), "{err}");

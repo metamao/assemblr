@@ -1505,7 +1505,8 @@ struct DeclarationWrite<'a> {
 /// Writes `application` into the project at `root`: the store first,
 /// content-addressed, so a leftover is harmless; then the previous content
 /// of the files that change, then the journal; then the directories and
-/// the file changes; then the lock; then the journal's removal. Returns
+/// the file changes; then the lock; then the journal's removal and that of
+/// every stored base but the new one. Returns
 /// the store's own files that had to be restored. A failure before the
 /// journal leaves the project untouched; after it, the journal records the
 /// composition for [`recover`].
@@ -1668,6 +1669,8 @@ fn apply(
     if let Err(error) = finished {
         return Err(write_failed(WriteStep::Finish, error));
     }
+    // The lock records the new base now: every other stored base goes.
+    store.keep_only(&[&snapshot.identity()]);
     Ok(store.restored())
 }
 
@@ -1726,6 +1729,7 @@ fn recover(
         if *state.base() == journal.base {
             let _ = fs::remove_file(root.join(LOCK_STAGING));
             store.finish()?;
+            store.keep_only(&[&journal.base]);
             return Ok(ComposeRecovery::Completed);
         }
     }

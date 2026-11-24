@@ -5,10 +5,10 @@
 //! The units of a catalog change together, so an amendment of a sibling's
 //! file has no earlier published version to take its base from. The base
 //! of every amendment of a unit in a catalog is therefore stored in the
-//! catalog, under `.assemblr/` at its top level, in the content-addressed
-//! format of a consumer project's store: each base's bytes once under
-//! `objects/`, and one listing for the whole catalog under `bases/`, whose
-//! paths are `<unit directory>/<amended path>`. `amendment-bases.json`
+//! catalog, under `.assemblr/` at its top level, in the format of a
+//! consumer project's store: one pack for the whole catalog under
+//! `packs/`, whose listing's paths are `<unit directory>/<amended path>`
+//! (ADR 0044). `amendment-bases.json`
 //! names the listing by its identity, which every read verifies, with
 //! every blob it names (**Provisional (D-58)**).
 
@@ -94,11 +94,10 @@ impl StoredBases {
     }
 
     /// Stores `bases` in place of these, in the catalog whose top level is
-    /// `root`: their blobs and listing, then the record, through a new file
-    /// and a rename, then the old listing is removed with the blobs only it
-    /// names. Writing the same bases again writes nothing. A failure before
-    /// the record is replaced leaves these bases in effect, with unused
-    /// blobs at most.
+    /// `root`: their pack, then the record, through a new file and a rename,
+    /// then every other stored base is removed. Writing the same bases
+    /// again writes nothing. A failure before the record is replaced leaves
+    /// these bases in effect, with an unused pack at most.
     pub(super) fn replace(
         &self,
         root: &Path,
@@ -116,14 +115,14 @@ impl StoredBases {
         }
         let store = Store::new(root);
         let path = record_path(root);
-        // No base left: the record goes, and the listing with it.
+        // No base left: the record goes, and the stored bases with it.
         if bases.is_empty() {
-            if let Some(previous) = &self.identity {
+            if self.identity.is_some() {
                 fs::remove_file(&path).map_err(|error| BaseStoreError::Io {
                     path: path.clone(),
                     error,
                 })?;
-                store.discard_base(previous, None);
+                store.keep_only(&[]);
             }
             return Ok(());
         }
@@ -153,9 +152,7 @@ impl StoredBases {
                     error,
                 }
             })?;
-        if let Some(previous) = &self.identity {
-            store.discard_base(previous, Some(&identity));
-        }
+        store.keep_only(&[&identity]);
         Ok(())
     }
 }
@@ -711,9 +708,9 @@ mod tests {
         read.replace(&root, &second).unwrap();
         let read = StoredBases::read(&root).unwrap();
         assert_eq!(read.get("b", &path("a.txt")), Some(&b"two\n"[..]));
-        // The first listing and its blob are gone.
-        let listings = fs::read_dir(root.join(".assemblr/bases")).unwrap().count();
-        assert_eq!(listings, 1);
+        // The first pack is gone.
+        let packs = fs::read_dir(root.join(".assemblr/packs")).unwrap().count();
+        assert_eq!(packs, 1);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -722,20 +719,14 @@ mod tests {
         let root = temp("corrupt");
         let bases = BTreeMap::from([(path("b/a.txt"), b"one\n".to_vec())]);
         StoredBases::default().replace(&root, &bases).unwrap();
-        let objects = root.join(".assemblr/objects");
-        let prefix = fs::read_dir(&objects)
+        let blob = fs::read_dir(root.join(".assemblr/packs"))
             .unwrap()
             .next()
             .unwrap()
             .unwrap()
             .path();
-        let blob = fs::read_dir(&prefix)
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        fs::write(&blob, b"tampered\n").unwrap();
+        let pack = String::from_utf8(fs::read(&blob).unwrap()).unwrap();
+        fs::write(&blob, pack.replace("one\n", "two\n")).unwrap();
         let error = StoredBases::read(&root).unwrap_err().to_string();
         assert!(error.contains("does not verify"), "{error}");
         fs::remove_file(&blob).unwrap();

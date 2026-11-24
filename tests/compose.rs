@@ -114,6 +114,52 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap()
 }
 
+/// The pack of `base` in the project's store: its listing, and the bytes
+/// of every content it holds.
+fn pack(project: &Path, base: &str) -> (String, Vec<Vec<u8>>) {
+    let path = project
+        .join(".assemblr/packs")
+        .join(&base["sha256-v1:".len()..]);
+    let bytes = fs::read(path).unwrap();
+    let rest = bytes
+        .strip_prefix(b"assemblr-pack-v1\n".as_slice())
+        .unwrap();
+    let (line, rest) = pack_line(rest);
+    let length: usize = line.strip_prefix("listing ").unwrap().parse().unwrap();
+    let (listing, mut rest) = rest.split_at(length);
+    let mut blobs = Vec::new();
+    while !rest.is_empty() {
+        let (line, after) = pack_line(rest);
+        let length: usize = line.rsplit(' ').next().unwrap().parse().unwrap();
+        let (blob, after) = after.split_at(length);
+        blobs.push(blob.to_vec());
+        rest = after;
+    }
+    (String::from_utf8(listing.to_vec()).unwrap(), blobs)
+}
+
+fn pack_line(bytes: &[u8]) -> (&str, &[u8]) {
+    let end = bytes.iter().position(|&byte| byte == b'\n').unwrap();
+    (
+        std::str::from_utf8(&bytes[..end]).unwrap(),
+        &bytes[end + 1..],
+    )
+}
+
+/// The contents the project's store holds for the base its lock records,
+/// which is the only one stored.
+fn stored(project: &Path) -> Vec<Vec<u8>> {
+    let packs = fs::read_dir(project.join(".assemblr/packs"))
+        .unwrap()
+        .count();
+    assert_eq!(packs, 1, "only the base in use is stored");
+    let base = lockfile(project)["project"]["base"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    pack(project, &base).1
+}
+
 /// Every file under `dir`, by `/`-separated path, with its bytes, `.git`
 /// excepted.
 fn tree(dir: &Path) -> Vec<(String, Vec<u8>)> {
@@ -360,8 +406,11 @@ fn the_first_compose_materializes_the_files_the_lock_and_the_base() {
     // The base: a listing named by the identity, one blob per file, and the
     // attributes that keep Git from converting any of it.
     let state = project.join(".assemblr");
-    assert_eq!(read(&state.join(".gitattributes")), "* -text\n");
-    let listing = read(&state.join("bases").join(&base["sha256-v1:".len()..]));
+    assert_eq!(
+        read(&state.join(".gitattributes")),
+        "* -text -diff linguist-generated\n"
+    );
+    let (listing, blobs) = pack(&project, &base);
     assert!(
         listing.starts_with("assemblr-base-v1\n100644 "),
         "{listing}"
@@ -375,9 +424,9 @@ fn the_first_compose_materializes_the_files_the_lock_and_the_base() {
             .any(|line| line.starts_with("100755 ") && line.ends_with(" bin/run")),
         "{listing}"
     );
-    let blobs: Vec<_> = tree(&state.join("objects"));
     assert_eq!(blobs.len(), 4);
-    assert!(blobs.iter().any(|(_, bytes)| bytes == b"node\n"));
+    assert!(blobs.iter().any(|bytes| bytes == b"node\n"));
+    assert_eq!(stored(&project).len(), 4);
     assert!(!state.join("journal.json").exists());
 
     // A second compose changes nothing.
@@ -687,10 +736,10 @@ fn a_changed_declaration_is_reconciled_three_way_and_a_bad_base_is_detected() {
         lock["project"]["managed"],
         serde_json::json!(["README.md", "bin/run", "config/app.json", "web.txt"])
     );
-    // The new base is stored beside the old one, which stays.
-    let bases = project.join(".assemblr").join("bases");
-    assert!(bases.join(&first_base["sha256-v1:".len()..]).exists());
-    assert!(bases.join(&second_base["sha256-v1:".len()..]).exists());
+    // The new base replaces the old one, which version control keeps.
+    let packs = project.join(".assemblr").join("packs");
+    assert!(!packs.join(&first_base["sha256-v1:".len()..]).exists());
+    assert!(packs.join(&second_base["sha256-v1:".len()..]).exists());
     assert!(!project.join(".assemblr").join("journal.json").exists());
     assert!(!project.join(".assemblr").join("previous").exists());
     assert_eq!(
@@ -751,30 +800,36 @@ fn a_changed_declaration_is_reconciled_three_way_and_a_bad_base_is_detected() {
     assert_eq!(tree(&project), before);
     declare(&project, &[("@acme/node", "^1")]);
 
-    // A tampered blob, a tampered listing, and a missing store each fail
-    // verification by name, before anything else.
-    let objects = project.join(".assemblr").join("objects");
+    // A tampered content, a tampered listing, and a missing store each
+    // fail verification by name, before anything else.
+    let pack_path = packs.join(&first_base["sha256-v1:".len()..]);
+    let original = fs::read(&pack_path).unwrap();
     let readme_blob = assemblr::domain::BlobId::of(b"node\n").to_string();
-    let blob_path = objects.join(&readme_blob[..2]).join(&readme_blob[2..]);
-    let original = fs::read(&blob_path).unwrap();
-    fs::write(&blob_path, b"tampered").unwrap();
+    let tampered = String::from_utf8(original.clone()).unwrap().replace(
+        &format!("blob {readme_blob} 5\nnode\n"),
+        &format!("blob {readme_blob} 5\nnodE\n"),
+    );
+    fs::write(&pack_path, tampered).unwrap();
     let err = stderr(&fails(fixture.compose(&project)));
     assert!(
-        err.contains("does not verify: its bytes are not the content of"),
+        err.contains(&format!(
+            "does not verify: the bytes it holds as {readme_blob} are not that content"
+        )),
         "{err}"
     );
     assert!(
         err.contains("restore .assemblr/ from version control"),
         "{err}"
     );
-    fs::write(&blob_path, original).unwrap();
+    fs::write(&pack_path, &original).unwrap();
     succeeds(fixture.compose(&project));
-    let listing = bases.join(&first_base["sha256-v1:".len()..]);
-    let text = fs::read(&listing).unwrap();
-    fs::write(&listing, [text, b"x".to_vec()].concat()).unwrap();
+    let text = String::from_utf8(original).unwrap();
+    let tampered = text.replacen(" README.md\n", " README.mD\n", 1);
+    assert_ne!(tampered, text);
+    fs::write(&pack_path, tampered).unwrap();
     let err = stderr(&fails(fixture.compose(&project)));
     assert!(
-        err.contains("its bytes do not hash to the identity the lockfile records"),
+        err.contains("its listing does not hash to the identity the lockfile records"),
         "{err}"
     );
     fs::remove_dir_all(project.join(".assemblr")).unwrap();
@@ -934,7 +989,7 @@ fn unbased_files_are_compared_by_identity_and_the_ignore_rules_are_read_again() 
     git(&project, &["init", "-q"]);
     fs::write(project.join(".gitignore"), ".env\n").unwrap();
     succeeds(fixture.compose(&project));
-    let blobs = || tree(&project.join(".assemblr").join("objects")).len();
+    let blobs = || stored(&project).len();
     assert_eq!(blobs(), 1);
 
     // The consumer edits the ignored file; a new version changes the other
@@ -995,7 +1050,8 @@ fn unbased_files_are_compared_by_identity_and_the_ignore_rules_are_read_again() 
         lockfile(&project)["project"]["unbased"],
         serde_json::json!([])
     );
-    assert_eq!(blobs(), 3);
+    // The base in use stores both files now: `.env` and `app.txt`.
+    assert_eq!(blobs(), 2);
 
     // Ignoring a file later keeps its new content out of the store.
     fs::write(project.join(".gitignore"), "app.txt\n").unwrap();
@@ -1013,7 +1069,8 @@ fn unbased_files_are_compared_by_identity_and_the_ignore_rules_are_read_again() 
         lockfile(&project)["project"]["unbased"],
         serde_json::json!(["app.txt"])
     );
-    assert_eq!(blobs(), 3);
+    // Only `.env` is stored; the ignored `app.txt` is not.
+    assert_eq!(blobs(), 1);
 }
 
 #[test]
@@ -1123,9 +1180,9 @@ fn ignored_delivered_files_get_no_stored_base_and_a_warning() {
         stderr(&output)
     );
     assert_eq!(read(&project.join(".env")), "SECRET=1\n");
-    let blobs = tree(&project.join(".assemblr").join("objects"));
+    let blobs = stored(&project);
     assert_eq!(blobs.len(), 1);
-    assert_eq!(blobs[0].1, b"app\n");
+    assert_eq!(blobs[0], b"app\n");
     assert_eq!(
         lockfile(&project)["project"]["unbased"],
         serde_json::json!([".env"])
@@ -1145,12 +1202,12 @@ fn ignored_delivered_files_get_no_stored_base_and_a_warning() {
         "{}",
         stderr(&output)
     );
-    let objects = fixture.project("objects", &[("@acme/env", "^1")]);
-    git(&objects, &["init", "-q"]);
-    fs::write(objects.join(".gitignore"), ".assemblr/objects/\n").unwrap();
-    let output = succeeds(fixture.compose(&objects));
+    let packs = fixture.project("packs", &[("@acme/env", "^1")]);
+    git(&packs, &["init", "-q"]);
+    fs::write(packs.join(".gitignore"), ".assemblr/packs/\n").unwrap();
+    let output = succeeds(fixture.compose(&packs));
     assert!(
-        stderr(&output).contains(".assemblr/objects/ is ignored by the project's version control"),
+        stderr(&output).contains(".assemblr/packs/ is ignored by the project's version control"),
         "{}",
         stderr(&output)
     );
@@ -1166,11 +1223,14 @@ fn ignored_delivered_files_get_no_stored_base_and_a_warning() {
         "{}",
         stderr(&output)
     );
-    assert_eq!(read(&edited.join(".assemblr/.gitattributes")), "* -text\n");
+    assert_eq!(
+        read(&edited.join(".assemblr/.gitattributes")),
+        "* -text -diff linguist-generated\n"
+    );
     let plain = fixture.project("plain", &[("@acme/env", "^1")]);
     let output = succeeds(fixture.compose(&plain));
     assert!(!stderr(&output).contains("warning"), "{}", stderr(&output));
-    assert_eq!(tree(&plain.join(".assemblr").join("objects")).len(), 2);
+    assert_eq!(stored(&plain).len(), 2);
 }
 
 #[test]
@@ -1286,7 +1346,7 @@ fn a_file_only_the_consumer_s_own_rules_ignore_is_refused_not_stored_or_left_out
         "{}",
         stderr(&output)
     );
-    assert_eq!(tree(&project.join(".assemblr").join("objects")).len(), 1);
+    assert_eq!(stored(&project).len(), 1);
 
     // A project that re-includes the file settles it the other way, over
     // the machine's rule: it is stored.
@@ -1295,7 +1355,7 @@ fn a_file_only_the_consumer_s_own_rules_ignore_is_refused_not_stored_or_left_out
     fs::write(kept.join(".gitignore"), "!a.secret\n").unwrap();
     succeeds(compose_with(&fixture, &kept, &global));
     assert_eq!(lockfile(&kept)["project"]["unbased"], serde_json::json!([]));
-    assert_eq!(tree(&kept.join(".assemblr").join("objects")).len(), 2);
+    assert_eq!(stored(&kept).len(), 2);
 }
 
 #[test]
@@ -3289,7 +3349,7 @@ fn status_does_not_call_a_project_with_a_missing_base_up_to_date() {
     registry(&fixture);
     let project = fixture.project("shop", &[("@acme/node", "^1")]);
     succeeds(fixture.compose(&project));
-    fs::remove_dir_all(project.join(".assemblr/objects")).unwrap();
+    fs::remove_dir_all(project.join(".assemblr/packs")).unwrap();
 
     let output = succeeds(status(&fixture, &project, &[]));
     let out = stdout(&output);
@@ -3344,4 +3404,50 @@ fn the_agents_md_init_wrote_gives_way_to_a_unit_s_and_an_edited_one_does_not() {
     let agents = read(&project.join("AGENTS.md"));
     assert!(agents.contains("<<<<<<< current"), "{agents}");
     assert!(agents.contains("Our own rule."), "{agents}");
+}
+
+/// A project an alpha before the pack composed stores its base as one file
+/// per content under `objects/` and its listing under `bases/`. That layout
+/// is refused by name, with the way to move the project, and nothing is
+/// written.
+#[test]
+fn a_project_stored_in_the_layout_of_earlier_alphas_is_refused_with_a_way_out() {
+    let fixture = Fixture::new("earlier-layout");
+    registry(&fixture);
+    let project = fixture.project("shop", &[("@acme/node", "^1")]);
+    succeeds(fixture.compose(&project));
+    let base = lockfile(&project)["project"]["base"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Rewrite the store as an earlier alpha wrote it.
+    let state = project.join(".assemblr");
+    let (listing, blobs) = pack(&project, &base);
+    fs::remove_dir_all(state.join("packs")).unwrap();
+    fs::create_dir_all(state.join("bases")).unwrap();
+    fs::write(
+        state.join("bases").join(&base["sha256-v1:".len()..]),
+        listing,
+    )
+    .unwrap();
+    for bytes in &blobs {
+        let blob = assemblr::domain::BlobId::of(bytes).to_string();
+        let dir = state.join("objects").join(&blob[..2]);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(&blob[2..]), bytes).unwrap();
+    }
+
+    declare(&project, &[("@acme/web", "^1")]);
+    let before = tree(&project);
+    let err = stderr(&fails(fixture.compose(&project)));
+    assert!(
+        err.contains("stores its bases as an earlier alpha of Assemblr did"),
+        "{err}"
+    );
+    assert!(
+        err.contains("remove .assemblr/ and assemblr-lock.json and run `assemblr compose`"),
+        "{err}"
+    );
+    assert_eq!(tree(&project), before);
 }

@@ -900,9 +900,9 @@ now (a conflicted file the composition created is removed), and
 holds now too (**Provisional (D-44)**), since an edit to it while the
 composition waited is given up with the resolution; the summary says the
 declaration was restored only when it was. A file the composition changed
-without conflict and the consumer edited since is kept and named. The aborted composition's base is removed from the store with
-the objects only it names, so the store is as it was too; every object the
-lock's base or another stored base names is kept (#72).
+without conflict and the consumer edited since is kept and named. The
+aborted composition's base is removed from the store, so the store is as
+it was too; the lock's base is kept (#72).
 Like `--continue`, it refuses when the journal is an interrupted
 composition's rather than a waiting one: the next `compose` completes or
 reverts that.
@@ -958,14 +958,28 @@ by the first `compose`:
   distinguishable. It depends on the files' bytes, modes, and paths only,
   never on the consumer's Git configuration, operating system, or checkout.
 - **The base is stored in the project**, under `.assemblr/`, as tracked,
-  content-addressed state: each file's bytes once under `objects/`, named
-  by their SHA-256, and each base's listing under `bases/`, named by its
-  identity's digits. Modes live in the listing, not in the file system, and
-  `.assemblr/.gitattributes` marks everything there binary (`* -text`), so
-  that a checkout cannot convert line endings or drop bits. The store is
-  written before the project's files, is never garbage-collected, and is
-  verified, listing and blobs, against the lock before any later
-  composition uses it.
+  content-addressed state: one **pack** per base under `packs/`, named by
+  its identity's digits, holding the base's listing and each stored file's
+  bytes once (decided by the owner on 2026-11-24,
+  [ADR 0044](../adr/0044-packed-store.md)). Modes live in the listing, not
+  in the file system, and `.assemblr/.gitattributes` marks everything there
+  binary, without a textual diff, and generated
+  (`* -text -diff linguist-generated`), so that a checkout cannot convert
+  line endings or drop bits and a review does not show the stored bytes.
+  The store is written before the project's files, and is verified,
+  listing and blobs, against the lock before any later composition uses
+  it.
+- **Only the bases in use are kept** (decided by the owner on 2026-11-24):
+  once the lock records a new base, every other pack is removed; version
+  control's history keeps the earlier ones. A composition waiting for the
+  consumer keeps its own base beside the lock's until it completes or is
+  aborted.
+- A store an earlier alpha wrote, each file's bytes under `objects/` and
+  each listing under `bases/`, is not read (decided by the owner on
+  2026-11-24; no promise covers alpha formats). It is refused by name, and
+  nothing is written; removing `.assemblr/` and `assemblr-lock.json` and
+  composing again moves the project, with every file the consumer changed
+  since the last composition left marked as a conflict.
 - **Recovery.** The stored base is authoritative; a base that is missing or
   does not verify is an explicit failure, never replaced by regeneration
   or by the project's current content. Regeneration from the locked inputs
@@ -973,10 +987,10 @@ by the first `compose`:
 
 Open:
 
-- Regeneration of a missing base from the lock as a verified fallback, and
-  how long bases are kept. **OC-8.**
+- Regeneration of a missing base from the lock as a verified fallback.
+  **OC-8.**
 - The pending-resolution state for conflicts that are not between text,
-  and for removal of the objects a given-up composition leaves in the store.
+  and for removal of the base a given-up composition leaves in the store.
   **OC-37.** The journal and the recovery of an interrupted composition are
   described in [composition details](#composition-details--provisional-d-10-to-d-12),
   [reconciliation details](#reconciliation-details--provisional-d-13-to-d-15), and

@@ -296,9 +296,14 @@ How the status of a statement affects implementation:
   and verified before use, and a missing or unverifiable base is an explicit
   failure (see [the lockfile and the stored
   base](consumer-projects.md#the-lockfile-and-the-stored-base--approved)).
+  Decided by the owner on 2026-11-24 for the stores of consumer projects
+  and catalogs: each base is one pack under `.assemblr/packs/`, marked as
+  generated and without a textual diff, and only the bases in use are kept,
+  version control's history keeping the earlier ones
+  ([ADR 0044](../adr/0044-packed-store.md)).
 - **Open detail:** Regeneration of a missing base from the locked inputs as a
-  verified fallback; retention of historical bases; the formats and locations
-  of other caches and snapshots.
+  verified fallback; retention of historical snapshots in the registry; the
+  formats and locations of other caches and snapshots.
 - **Origin:** Owner
 - **Context:** [integrity](registries-and-discovery.md#integrity-and-snapshots--approved),
   [lock](consumer-projects.md#lock-and-reconciliation-state--approved)
